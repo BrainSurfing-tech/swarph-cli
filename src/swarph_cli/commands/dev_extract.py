@@ -11,12 +11,16 @@ The extract JOINS two halves, each with its own as-of pin:
   for visible repos — no rels/depends-on/blast-radius/arrow/import lines.
   STALE when older than the last repo.merged for a repo.
   A local ref is not evidence when it cannot be trusted (card #1436):
-  origin fetch fails, origin is not the index slug or the branch tracks
-  fork/main, or the last fetch is older than ``FETCH_TRUST_BOUND_HOURS``.
-  Those read ``not fresh`` and name the commit the report described and
-  the ref compared. swarph-cli defines no canonical-remote map; the
-  codegraph index ``repos.slug`` is the identity already stored, and an
-  empty slug says the canonical remote is not defined.
+  ``git fetch origin main`` fails, origin is not the index slug, or the
+  branch tracks a remote other than that slug. Slug compare is
+  case-insensitive. A missing FETCH_HEAD is not itself stale — the fetch
+  runs, including under ``--print-only``, and writes FETCH_HEAD and the
+  origin main ref (15s, one repo at a time). A recorded fetch older than
+  ``FETCH_TRUST_BOUND_HOURS`` is not evidence. ``fresh`` requires that
+  same commit on the compared ref. The line names the commit the report
+  described and the ref compared. swarph-cli defines no canonical-remote
+  map; the codegraph index ``repos.slug`` is the identity already stored,
+  and an empty slug says the canonical remote is not defined.
 
 Posting uses the board path when ``--card`` is given WITHOUT
 ``--print-only``; otherwise prints and posts nothing. Nothing is deployed.
@@ -490,20 +494,6 @@ def read_structurizr(path: str, repos: list) -> dict:
     }
 
 
-def last_merged_at(repo_path: str | None) -> str | None:
-    """origin/main HEAD commit time as the repo.merged proxy (None on failure)."""
-    if not repo_path:
-        return None
-    try:
-        out = subprocess.run(
-            ["git", "log", "-1", "--format=%cI", "origin/main"],
-            cwd=repo_path, capture_output=True, text=True, timeout=5,
-            encoding="utf-8", errors="replace")
-        return (out.stdout or "").strip() or None
-    except Exception:
-        return None
-
-
 def _one_line(text: str, limit: int = 180) -> str:
     line = " ".join((text or "").split())
     return line[:limit]
@@ -530,6 +520,37 @@ def owner_repo(url: str) -> str | None:
     if len(parts) < 2:
         return None
     return f"{parts[-2]}/{parts[-1]}"
+
+
+def _same_slug(owner: str | None, slug: str) -> bool:
+    """Index slug vs remote owner/repo. Case-insensitive (PROVEN vs proven)."""
+    return owner is not None and owner.casefold() == slug.casefold()
+
+
+def _strip_userinfo(url: str) -> str:
+    """Drop ``user:password@`` before an origin URL is printed."""
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(url)
+    if not parts.scheme or (parts.username is None and parts.password is None):
+        return url
+    host = parts.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{host}:{parts.port}" if parts.port else host
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+def _same_commit(report_sha, ref_sha) -> bool:
+    """True only when both shas name one commit (full or unique prefix)."""
+    if not isinstance(report_sha, str) or not isinstance(ref_sha, str):
+        return False
+    a, b = report_sha.strip().lower(), ref_sha.strip().lower()
+    if not _SHA_RE.fullmatch(a) or not _SHA_RE.fullmatch(b):
+        return False
+    if a == b:
+        return True
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    return long_.startswith(short)
 
 
 def _git(repo: str, args: list, timeout: int = 10):
@@ -563,7 +584,12 @@ def _ref_snapshot(repo_path: str) -> dict:
 
 
 def _remote_untrusted(repo_path: str, canonical_slug: str | None) -> str | None:
-    """Fork origin, branch tracking fork/main, or no canonical slug."""
+    """Origin or the upstream's remote is not the canonical slug.
+
+    The upstream check reads that remote's URL and compares owner/repo.
+    It does not match the literal ``fork/main``. ``upstream/main`` and
+    ``fork/dev`` are not fresh when those remotes are not canonical.
+    """
     slug = (canonical_slug or "").strip()
     if not slug:
         return ("canonical remote is not defined "
@@ -572,29 +598,35 @@ def _remote_untrusted(repo_path: str, canonical_slug: str | None) -> str | None:
     if not url:
         return (f"origin is not the canonical remote {slug} "
                 "(origin URL unreadable)")
-    owner = owner_repo(url)
-    if owner is None or owner.casefold() != slug.casefold():
-        return f"origin {url} is not the canonical remote {slug}"
+    if not _same_slug(owner_repo(url), slug):
+        return f"origin {_strip_userinfo(url)} is not the canonical remote {slug}"
     upstream = _git_out(
         repo_path, ["rev-parse", "--abbrev-ref", "@{upstream}"])
-    if upstream:
-        short = upstream[len("refs/remotes/"):] if upstream.startswith(
-            "refs/remotes/") else upstream
-        if short == "fork/main":
-            return f"branch tracks {short}"
+    if not upstream:
+        return None
+    short = upstream[len("refs/remotes/"):] if upstream.startswith(
+        "refs/remotes/") else upstream
+    remote_name = short.split("/", 1)[0]
+    remote_url = (_git_out(repo_path, ["remote", "get-url", remote_name])
+                  if remote_name else None)
+    if not remote_url or not _same_slug(owner_repo(remote_url), slug):
+        return f"branch tracks {short}"
     return None
 
 
 def _fetch_age_untrusted(repo_path: str, now: float) -> str | None:
-    """Recorded fetch missing or older than ``FETCH_TRUST_BOUND_HOURS``."""
+    """Recorded fetch older than ``FETCH_TRUST_BOUND_HOURS``.
+
+    A missing FETCH_HEAD is not stale. A fresh clone or worktree falls
+    through so the fetch below can record one.
+    """
     bound = f"{FETCH_TRUST_BOUND_HOURS}h"
     rel = _git_out(repo_path, ["rev-parse", "--git-path", "FETCH_HEAD"])
     path = None
     if rel:
         path = rel if os.path.isabs(rel) else os.path.join(repo_path, rel)
     if not path or not os.path.isfile(path):
-        return (f"last fetch is missing (no FETCH_HEAD), "
-                f"which is older than the {bound} bound")
+        return None
     mtime = os.path.getmtime(path)
     if now - mtime > FETCH_TRUST_BOUND_HOURS * 3600:
         import datetime as _dt
@@ -605,15 +637,22 @@ def _fetch_age_untrusted(repo_path: str, now: float) -> str | None:
 
 
 def _fetch_untrusted(repo_path: str) -> str | None:
-    """``git fetch origin`` failed, so a remote merge is invisible."""
-    proc = _git(repo_path, ["fetch", "--quiet", "--no-tags", "origin"],
+    """``git fetch origin main`` failed, so a remote merge is invisible.
+
+    The refspec is ``origin main``, as merge_watch fetches it, so an
+    unrelated branch conflict does not fail a healthy main. This writes
+    FETCH_HEAD and the origin main ref in the checkout, including under
+    ``--print-only``. One repo at a time, 15s.
+    """
+    proc = _git(repo_path, ["fetch", "--quiet", "--no-tags", "origin", "main"],
                 timeout=15)
     if proc is not None and proc.returncode == 0:
         return None
     if proc is None:
-        detail = "git fetch origin failed"
+        detail = "git fetch origin main failed"
     else:
-        detail = _one_line(proc.stderr or proc.stdout or "") or "git fetch origin failed"
+        detail = (_one_line(proc.stderr or proc.stdout or "")
+                  or "git fetch origin main failed")
     return f"fetch failed: {detail}"
 
 
@@ -623,8 +662,10 @@ def read_ref_trust(repo_path: str | None,
     """Whether local origin/main may be compared to the federation build.
 
     Untrusted results still name the local ref. A trusted result is a
-    canonical origin, not tracking fork/main, fetched inside the bound,
-    whose fetch succeeded just now.
+    canonical origin whose upstream remote is that same owner/repo,
+    fetched inside the bound, whose ``git fetch origin main`` succeeded
+    just now. The ref is read again after the fetch, including when the
+    fetch fails.
     """
     moment = time.time() if now is None else now
     base = {
@@ -637,24 +678,26 @@ def read_ref_trust(repo_path: str | None,
     snap = _ref_snapshot(repo_path)
     base["ref_sha"] = snap["sha"]
     base["merged_at"] = snap["merged_at"]
-    # Remote check (card #1436): fork origin, or the branch tracks fork/main.
+    # Remote check (card #1436): origin, or the upstream's remote, is not canonical.
     remote_reason = _remote_untrusted(repo_path, canonical_slug)
     if remote_reason:
         base["reason"] = remote_reason
         return base
-    # Age check (card #1436): the recorded fetch is older than the bound.
+    # Age check (card #1436): a recorded fetch older than the bound.
+    # Missing FETCH_HEAD falls through to the fetch.
     age_reason = _fetch_age_untrusted(repo_path, moment)
     if age_reason:
         base["reason"] = age_reason
         return base
-    # Fetch check (card #1436): a remote merge is invisible when fetch fails.
+    # Fetch ``origin main``. Re-read the ref after the attempt, success or
+    # failure, so the compared sha is not the pre-fetch commit.
     fetch_reason = _fetch_untrusted(repo_path)
-    if fetch_reason:
-        base["reason"] = fetch_reason
-        return base
     snap = _ref_snapshot(repo_path)
     base["ref_sha"] = snap["sha"]
     base["merged_at"] = snap["merged_at"]
+    if fetch_reason:
+        base["reason"] = fetch_reason
+        return base
     if not snap["merged_at"]:
         base["reason"] = "origin/main has no commit time after fetch"
         return base
@@ -802,6 +845,10 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
         else:
             pin["merged_at"] = merged_override(path)
         pins[repo] = pin
+    # repo_commits names every stamped repo, including withheld ones.
+    # Do not return that map past the pin loop (card #1436).
+    if isinstance(fed, dict):
+        fed.pop("repo_commits", None)
     fed_build = (_stamp_time(fed.get("generated"))
                  if fed.get("status") == "ok" else None)
     return {
@@ -1006,6 +1053,11 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
                         f"{names}")
         else:
             stale = is_stale_fed_build(fb, merged)
+            report_sha = p.get("report_sha")
+            ref_sha = None
+            if isinstance(trust, dict):
+                report_sha = trust.get("report_sha") or report_sha
+                ref_sha = trust.get("ref_sha")
             if stale is None:
                 tail.append(f"- {repo}: freshness unavailable "
                             "(unparseable federation-build or repo.merged time)"
@@ -1014,6 +1066,12 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
                 tail.append(f"- {repo}: STALE (federation build {fb} older than "
                             f"last repo.merged {merged}; merge-time is an "
                             f"origin/main-HEAD proxy){names}")
+            elif isinstance(trust, dict) and not _same_commit(report_sha, ref_sha):
+                # Same commit, and only that, reads fresh. A commit dated
+                # before the report and pushed after it is not fresh.
+                tail.append(f"- {repo}: not fresh "
+                            "(report commit differs from the ref commit)"
+                            f"{names}")
             else:
                 tail.append(f"- {repo}: fresh (federation build {fb} >= "
                             f"last repo.merged {merged}){names}")
