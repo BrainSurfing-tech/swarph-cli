@@ -36,14 +36,16 @@ swarph v{version}
 
 Usage:
   swarph "your prompt here" [--provider gemini] [--model gemini-2.5-flash]
+  swarph chat [--provider deepseek] [--model deepseek-v4-flash] [--system PROMPT]
   swarph import <path-to-source-session> [--report-only] [--target-session NAME]
 
 Examples:
   swarph "explain Hawkes process briefly"
   swarph "list 5 tickers" --json
+  swarph chat --provider claude
   swarph import ~/.claude/projects/.../X.jsonl --report-only
 
-Status: Phase 2 one-shot + Phase 2.5 import ready. REPL (Phase 5),
+Status: Phase 2 one-shot + Phase 2.5 import + Phase 5 REPL ready.
 --ask <peer> (Phase 3), onboard/ratify (Phase 5.5), daemon (Phase 5.7)
 ship in subsequent releases.
 
@@ -55,7 +57,8 @@ Spec: https://github.com/darw007d/hedge-fund-mcp/blob/main/research/swarph_cli/P
 _VERB_HANDLERS: dict[str, str] = {
     # verb keyword: dotted-path to handler function (lazy-imported)
     "import": "swarph_cli.commands.import_session.run_import",
-    # Future: "chat", "daemon", "onboard", "ratify", "list-peers", etc.
+    "chat": "swarph_cli.commands.chat.run_chat",
+    # Future: "daemon", "onboard", "ratify", "list-peers", etc.
 }
 
 
