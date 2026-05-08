@@ -1,20 +1,20 @@
-"""``swarph`` entry-point — Phase 2 one-shot mode.
+"""``swarph`` entry-point — Phase 2 one-shot + Phase 2.5 import.
 
-v0.0.1 was the scaffold (banner-only). v0.1.0 ships the falsifiability
-gate from PLAN.md §13 Phase 2:
+v0.0.1 was the scaffold (banner-only). v0.1.0 shipped the Phase 2
+one-shot falsifiability gate. v0.2.0 adds the Phase 2.5 ``import``
+verb per PLAN.md §17.6 forward-reorder.
 
-    swarph "explain Hawkes process briefly" --provider gemini --model flash
+Verb dispatch shape: if the first arg matches a known verb keyword
+(currently ``import``), the rest of argv is passed to that verb's
+handler. Otherwise argv is treated as the one-shot path (positional
+prompt + flags). Phase 3+ adds ``--ask``, ``list-peers``,
+``list-adapters``; Phase 5 adds ``chat`` REPL; Phase 5.5 adds
+``onboard``/``ratify``; Phase 5.7 adds ``daemon``.
 
-Subsequent phases extend the CLI:
-- Phase 3:    --ask <peer> mesh-aware one-shot via MeshClient
-- Phase 5:    interactive REPL (``swarph chat``)
-- Phase 5.5:  ``swarph onboard`` + ``swarph ratify``
-- Phase 5.7:  ``swarph daemon`` foreground drain
-- Phase 2.5:  ``swarph import --report-only`` per PLAN.md §17.6 reorder
-
-For now the entry-point handles ONE shape: positional prompt argument
-+ provider/model flags + JSON-mode toggle. argparse subparsers will
-land in Phase 3 when more verbs need their own surface.
+Disambiguation note: a literal one-shot prompt that starts with the
+word "import" (e.g. ``swarph "import this report"``) collides with
+the verb. Workaround: rephrase (``swarph "please import this
+report"``) — the collision is rare and the verb takes precedence.
 """
 
 from __future__ import annotations
@@ -36,18 +36,27 @@ swarph v{version}
 
 Usage:
   swarph "your prompt here" [--provider gemini] [--model gemini-2.5-flash]
+  swarph import <path-to-source-session> [--report-only] [--target-session NAME]
 
 Examples:
   swarph "explain Hawkes process briefly"
   swarph "list 5 tickers" --json
-  swarph "summarise" --provider gemini --model gemini-2.5-pro
+  swarph import ~/.claude/projects/.../X.jsonl --report-only
 
-Status: Phase 2 one-shot mode. REPL (Phase 5), --ask <peer>
-(Phase 3), onboard/ratify (Phase 5.5), daemon (Phase 5.7) and
-import (Phase 2.5) ship in subsequent releases.
+Status: Phase 2 one-shot + Phase 2.5 import ready. REPL (Phase 5),
+--ask <peer> (Phase 3), onboard/ratify (Phase 5.5), daemon (Phase 5.7)
+ship in subsequent releases.
 
 Spec: https://github.com/darw007d/hedge-fund-mcp/blob/main/research/swarph_cli/PLAN.md
 """
+
+# Known verb keywords that route to their own handler. Order matters
+# only for disambiguation against one-shot prompts (rare).
+_VERB_HANDLERS: dict[str, str] = {
+    # verb keyword: dotted-path to handler function (lazy-imported)
+    "import": "swarph_cli.commands.import_session.run_import",
+    # Future: "chat", "daemon", "onboard", "ratify", "list-peers", etc.
+}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -209,7 +218,32 @@ async def _run_one_shot(args: argparse.Namespace) -> int:
     return 0 if resp.error_class is None else 1
 
 
+def _dispatch_verb(verb: str, verb_argv: list[str]) -> int:
+    """Lazy-import the verb's handler and run it.
+
+    Lazy import keeps the one-shot path's import surface minimal —
+    callers who never use ``swarph import`` don't pay the parser
+    package's import cost.
+    """
+    handler_path = _VERB_HANDLERS[verb]
+    module_path, func_name = handler_path.rsplit(".", 1)
+    import importlib
+
+    mod = importlib.import_module(module_path)
+    handler = getattr(mod, func_name)
+    return handler(verb_argv)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # Verb dispatch — first positional arg may be a known verb keyword.
+    # If so, route the rest to that verb's handler. Otherwise fall
+    # through to the one-shot path.
+    if argv and argv[0] in _VERB_HANDLERS:
+        return _dispatch_verb(argv[0], argv[1:])
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
