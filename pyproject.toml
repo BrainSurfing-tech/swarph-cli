@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.3.0"
-description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. v0.3.0 ships the Phase 5 `swarph chat` REPL on top of Phase 2 one-shot + Phase 2.5 import (PLAN.md §13)."
+version = "0.4.0"
+description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. v0.4.0 ships Phase 5.5 `swarph onboard` + `swarph ratify` on top of Phase 2 one-shot + Phase 2.5 import + Phase 5 REPL (PLAN.md §13 / §15)."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
