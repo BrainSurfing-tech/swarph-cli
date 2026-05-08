@@ -17,7 +17,42 @@ This is one of three repos in the v0.3.x architecture:
 
 ## Status
 
-**v0.1.0 — Phase 2 one-shot mode.** The `swarph "prompt"` binary works end-to-end against `--provider gemini` per PLAN.md §13 falsifiability gate. Subsequent phases extend the CLI surface (REPL, `--ask <peer>`, onboard/ratify, daemon, import).
+**v0.2.0 — Phase 2 one-shot + Phase 2.5 import.** Two verbs ship:
+
+1. `swarph "prompt"` — Phase 2 one-shot mode (against `--provider gemini`)
+2. `swarph import <path>` — Phase 2.5 session import (Claude JSONL → swarph-native, with `--report-only` for honest pre-commit inspection)
+
+Subsequent phases extend the CLI surface (REPL, `--ask <peer>`, onboard/ratify, daemon, additional source formats).
+
+### `swarph import`
+
+Per PLAN.md §17, session import is the **knowledge half of onboarding** — gives a memory-carrying peer (or human migrating CLIs) the substantive context they're bringing into the swarph, paired with §15's contract half (handshake DM acknowledging the four invariants).
+
+```bash
+# Inspect what would be imported (lossy → honest framing)
+$ swarph import ~/.claude/projects/.../X.jsonl --report-only
+
+# Commit — writes ~/.swarph/sessions/<session-id>.jsonl
+$ swarph import ~/.claude/projects/.../X.jsonl
+
+# Refuse-with-error if target exists (protects continuation turns)
+$ swarph import same-source.jsonl
+swarph import: target /home/.../X.jsonl already exists (...)
+To proceed:
+  --force                  overwrite (destroys continuation turns)
+  --target-session NAME    write to a different file
+```
+
+**What ports cleanly:** plain user/assistant/system text, role tags, conversation order.
+
+**What's lossy** (counted in report, kept as visible text where possible):
+- `thinking` blocks (Anthropic-specific reasoning trace)
+- `tool_use` blocks (call shape doesn't port across providers)
+- `tool_result` blocks (companion drop with `tool_use`)
+
+**What's dropped:** attachments (would need re-upload), provider-side KV cache, conversation IDs, `cache_control` annotations.
+
+Honest framing per PLAN.md §17.3: **teleport is "import + continue", not "freeze and resume"** — the first turn after import on a new provider pays cold-cache cost. Phase 5+ adds `--continue` for live REPL integration.
 
 ```bash
 $ swarph "say pong" --provider gemini
