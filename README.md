@@ -17,13 +17,45 @@ This is one of three repos in the v0.3.x architecture:
 
 ## Status
 
-**v0.3.0 — Phase 2 one-shot + Phase 2.5 import + Phase 5 REPL.** Three verbs ship:
+**v0.4.0 — Phase 2 one-shot + Phase 2.5 import + Phase 5 REPL + Phase 5.5 onboard/ratify.** Five verbs ship:
 
 1. `swarph "prompt"` — Phase 2 one-shot mode (any of five providers)
 2. `swarph chat` — Phase 5 interactive REPL with multi-turn history + slash commands
 3. `swarph import <path>` — Phase 2.5 session import (Claude JSONL → swarph-native, with `--report-only` for honest pre-commit inspection)
+4. `swarph onboard <peer-name>` — **NEW** Phase 5.5 mechanics-phase onboarding (PLAN.md §15.4)
+5. `swarph ratify <peer-name>` — **NEW** Phase 5.5 witness ratification (PLAN.md §15.4a)
 
-Subsequent phases extend the CLI surface (`--ask <peer>`, onboard/ratify, daemon, additional source formats).
+Subsequent phases extend the CLI surface (`--ask <peer>`, daemon).
+
+### `swarph onboard` + `swarph ratify` (Phase 5.5)
+
+Per PLAN.md §15, onboarding splits into a **mechanics phase** (`swarph onboard`) that automates the boring parts (registry POST, scaffolding, token resolution) and a **manual contract phase** (the new peer composes the handshake DM in their own words). A witness peer judges the handshake and runs `swarph ratify <peer>` to flip `ratified=true`, gating `task_claim` server-side.
+
+```bash
+# New peer self-onboards
+$ swarph onboard razorpeter
+[1/6] validate_node_name('razorpeter')          ok
+[2/6] prepare peer-registry row                 ok
+[3/6] resolve MESH_GATEWAY_TOKEN                ok
+[4/6] POST .../peers/register                   ok (registered_unratified=true)
+[5/6] verify_subscription_setup()               ok
+[6/6] scaffold ~/swarph_state/razorpeter/       ok
+
+[manual] handshake template at /tmp/razorpeter-handshake.md
+  Edit each section in your own words, then send to your witness peer.
+
+# After peer composes + sends handshake, witness ratifies
+$ SWARPH_WITNESS=lab-ovh swarph ratify razorpeter \
+    --reason "handshake covers all four invariants in own words"
+[1/6] validate_node_name('razorpeter')          ok
+[2/6] verify witness 'lab-ovh' is ratified      ok
+[3/6] verify 'razorpeter' is registered_unratified  ok
+[4/6] PATCH .../peers/razorpeter                ok
+[5/6] verify peer_ratifications audit row       ok (id=N reason='...')
+[6/6] invalidate local TTL cache                ok
+```
+
+Server-side gating (mesh-gateway PR A): unratified peers can read inbox + send DMs (so the handshake itself works) but `task_claim` returns 403. Witness must itself be ratified — no self-ratification, no unratified-witnesses-ratifying-others. Audit log (`peer_ratifications`) is append-only.
 
 ### `swarph chat`
 
@@ -126,9 +158,9 @@ Pong!
 | **0** | Scaffold — entry-point + status banner |
 | **2** (v0.1.0) | One-shot mode: `swarph "hello" --provider gemini` |
 | **2.5** (v0.2.0) | `swarph import` — Claude JSONL → swarph-native session format |
-| **5** (v0.3.0 — this release) | **`swarph chat` interactive REPL** — multi-turn against any of five adapters + slash commands (`/help`, `/clear`, `/system`, `/provider`, `/model`, `/history`, `/cost`, `/quit`) |
+| **5** (v0.3.0) | `swarph chat` interactive REPL — multi-turn against any of five adapters + slash commands |
+| **5.5** (v0.4.0 — this release) | **`swarph onboard <peer-name>` + `swarph ratify <peer-name>`** — six mechanics steps + handshake template + witness flip (PLAN.md §15) |
 | **3** | `--ask <peer>` mesh-aware one-shot via MeshClient |
-| **5.5** | `swarph onboard <peer-name>` + `swarph ratify <peer-name>` (PLAN.md §15) |
 | **5.6** | `swarph daemon` foreground drain loop + REPL drain coroutine + `/inbox`, `/reply` (PLAN.md §16) |
 | **6** | (already done) PyPI publish |
 
