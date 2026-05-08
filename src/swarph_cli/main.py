@@ -40,6 +40,7 @@ Usage:
   swarph import <path-to-source-session> [--report-only] [--target-session NAME]
   swarph onboard <peer-name> [--gateway URL]
   swarph ratify <peer-name> [--reason "<text>"] [--witness-name <self>]
+  swarph daemon [--state-dir DIR] [--self NAME] [--poll-seconds N]
 
 Examples:
   swarph "explain Hawkes process briefly"
@@ -50,8 +51,9 @@ Examples:
   swarph ratify new-peer-name --reason "handshake covers four invariants"
 
 Status: Phase 2 one-shot + Phase 2.5 import + Phase 5 REPL +
-Phase 5.5 onboard/ratify ready. --ask <peer> (Phase 3), daemon
-(Phase 5.6) ship in subsequent releases.
+Phase 5.5 onboard/ratify + Phase 5.6 daemon ready.
+--ask <peer> (Phase 3), REPL drain coroutine + /inbox /reply
+slash commands (Phase 5.6b) ship in subsequent releases.
 
 Spec: https://github.com/darw007d/hedge-fund-mcp/blob/main/research/swarph_cli/PLAN.md
 """
@@ -64,7 +66,8 @@ _VERB_HANDLERS: dict[str, str] = {
     "chat": "swarph_cli.commands.chat.run_chat",
     "onboard": "swarph_cli.commands.onboard.run_onboard",
     "ratify": "swarph_cli.commands.ratify.run_ratify",
-    # Future: "daemon", "list-peers", "list-adapters", etc.
+    "daemon": "swarph_cli.commands.daemon.run_daemon",
+    # Future: "list-peers", "list-adapters", etc.
 }
 
 

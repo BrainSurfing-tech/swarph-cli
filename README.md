@@ -17,15 +17,38 @@ This is one of three repos in the v0.3.x architecture:
 
 ## Status
 
-**v0.4.0 — Phase 2 one-shot + Phase 2.5 import + Phase 5 REPL + Phase 5.5 onboard/ratify.** Five verbs ship:
+**v0.5.0 — Phase 2 one-shot + Phase 2.5 import + Phase 5 REPL + Phase 5.5 onboard/ratify + Phase 5.6 daemon.** Six verbs ship:
 
 1. `swarph "prompt"` — Phase 2 one-shot mode (any of five providers)
 2. `swarph chat` — Phase 5 interactive REPL with multi-turn history + slash commands
 3. `swarph import <path>` — Phase 2.5 session import (Claude JSONL → swarph-native, with `--report-only` for honest pre-commit inspection)
-4. `swarph onboard <peer-name>` — **NEW** Phase 5.5 mechanics-phase onboarding (PLAN.md §15.4)
-5. `swarph ratify <peer-name>` — **NEW** Phase 5.5 witness ratification (PLAN.md §15.4a)
+4. `swarph onboard <peer-name>` — Phase 5.5 mechanics-phase onboarding (PLAN.md §15.4)
+5. `swarph ratify <peer-name>` — Phase 5.5 witness ratification (PLAN.md §15.4a)
+6. `swarph daemon` — **NEW** Phase 5.6 foreground inbox drain loop (PLAN.md §16); structurally retires the orphaned-tail-F class
 
-Subsequent phases extend the CLI surface (`--ask <peer>`, daemon).
+Subsequent phases extend the CLI surface (`--ask <peer>`, REPL drain coroutine + `/inbox` + `/reply` slash commands in 5.6b).
+
+### `swarph daemon` (Phase 5.6)
+
+Replaces the 4-layer `tail -F | grep | Monitor | systemd | cron poll` stack with one foreground process. Liveness check collapses to:
+
+```bash
+ps aux | grep '[s]warph daemon'   # zero output = monitoring is down
+```
+
+```bash
+$ swarph daemon --state-dir ~/swarph_state/lab-ovh --self lab-ovh
+[swarph-daemon] starting: self=lab-ovh gateway=http://localhost:8788 poll=30s ...
+[2026-05-08T21:00:30Z] id=728 from=droplet kind=answer → 'Drop review on Phase 5.5 PRs A+B...'
+[2026-05-08T21:01:10Z] id=729 from=droplet kind=fyi → 'Both Phase 5.5 PRs merged...'
+^C
+[swarph-daemon] signal 2 received — draining + flushing cursor
+[swarph-daemon] shutdown: iterations=12 dms_seen=2 cursor.last_msg_id=729
+```
+
+Loud-on-down (PLAN §16.5): never silently exits. Cursor writes are atomic (write-and-rename — corrupted mid-flush leaves the previous cursor intact). Backoff: 60s after 5 consecutive empty polls; 300s after 5 min of consecutive 5xx. SIGINT/SIGTERM trigger clean drain + flush.
+
+`--auto-act` flag is documented for v0.5.1+ when handler registration via `@swarph.on_dm(...)` lands; v0.5.0 ships surface-only mode (DMs printed + JSONL-logged to `inbox.log`, no automatic replies).
 
 ### `swarph onboard` + `swarph ratify` (Phase 5.5)
 
@@ -159,9 +182,10 @@ Pong!
 | **2** (v0.1.0) | One-shot mode: `swarph "hello" --provider gemini` |
 | **2.5** (v0.2.0) | `swarph import` — Claude JSONL → swarph-native session format |
 | **5** (v0.3.0) | `swarph chat` interactive REPL — multi-turn against any of five adapters + slash commands |
-| **5.5** (v0.4.0 — this release) | **`swarph onboard <peer-name>` + `swarph ratify <peer-name>`** — six mechanics steps + handshake template + witness flip (PLAN.md §15) |
+| **5.5** (v0.4.0) | `swarph onboard` + `swarph ratify` — six mechanics steps + handshake template + witness flip (PLAN.md §15) |
+| **5.6** (v0.5.0 — this release) | **`swarph daemon`** — foreground inbox drain loop with atomic cursor writes; retires the orphaned-tail-F class (PLAN.md §16) |
+| **5.6b** | REPL drain coroutine + `/inbox`/`/reply` slash commands + `@swarph.on_dm()` handler registration (mesh + cli) |
 | **3** | `--ask <peer>` mesh-aware one-shot via MeshClient |
-| **5.6** | `swarph daemon` foreground drain loop + REPL drain coroutine + `/inbox`, `/reply` (PLAN.md §16) |
 | **6** | (already done) PyPI publish |
 
 ## Why split CLI from substrate
