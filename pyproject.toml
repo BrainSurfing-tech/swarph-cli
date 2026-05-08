@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swarph-cli"
+version = "0.0.1"
+description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. Thin client over swarph-mesh."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Pierre Samson" },
+    { name = "Claude Opus" },
+]
+keywords = ["swarph", "llm", "cli", "mesh", "gemini", "claude", "deepseek"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "swarph-mesh>=0.0.1",
+    "swarph-shared>=0.2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/darw007d/swarph-cli"
+Source = "https://github.com/darw007d/swarph-cli"
+Substrate = "https://github.com/darw007d/swarph-mesh"
+Spec = "https://github.com/darw007d/hedge-fund-mcp/blob/main/research/swarph_cli/PLAN.md"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+swarph = "swarph_cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
