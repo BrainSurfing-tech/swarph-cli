@@ -17,12 +17,52 @@ This is one of three repos in the v0.3.x architecture:
 
 ## Status
 
-**v0.2.0 — Phase 2 one-shot + Phase 2.5 import.** Two verbs ship:
+**v0.3.0 — Phase 2 one-shot + Phase 2.5 import + Phase 5 REPL.** Three verbs ship:
 
-1. `swarph "prompt"` — Phase 2 one-shot mode (against `--provider gemini`)
-2. `swarph import <path>` — Phase 2.5 session import (Claude JSONL → swarph-native, with `--report-only` for honest pre-commit inspection)
+1. `swarph "prompt"` — Phase 2 one-shot mode (any of five providers)
+2. `swarph chat` — Phase 5 interactive REPL with multi-turn history + slash commands
+3. `swarph import <path>` — Phase 2.5 session import (Claude JSONL → swarph-native, with `--report-only` for honest pre-commit inspection)
 
-Subsequent phases extend the CLI surface (REPL, `--ask <peer>`, onboard/ratify, daemon, additional source formats).
+Subsequent phases extend the CLI surface (`--ask <peer>`, onboard/ratify, daemon, additional source formats).
+
+### `swarph chat`
+
+Interactive REPL against any of the five swarph-mesh adapters (`gemini` / `deepseek` / `claude` / `openai` / `grok`). Multi-turn conversation history accumulates in-memory; cumulative session cost + token totals tracked.
+
+```bash
+$ swarph chat --provider claude
+swarph chat — Phase 5 REPL
+provider=claude model=(adapter default) caller=cli.repl.ubuntu
+
+Type a message and press Enter to send. Slash commands:
+  /help  /clear  /system  /provider  /model  /history  /cost  /quit
+Ctrl-D to exit.
+
+> hello
+Hi! How can I help...
+# 8+12t  $0  0.34s
+
+> /provider gemini
+[switched to provider=gemini; model reset to adapter default; history cleared]
+
+> /cost
+[turns=1  in=8  out=12  cost=$0]
+
+> /quit
+[swarph-chat] bye.
+```
+
+**Slash commands:**
+- `/help` — print available commands
+- `/quit`, `/exit` (or Ctrl-D) — exit
+- `/clear`, `/reset` — clear history (keeps system prompt)
+- `/system [prompt]` — set or clear system prompt
+- `/provider <name>` — switch provider (resets history)
+- `/model <name>` — switch model
+- `/history` — print running message list
+- `/cost` — cumulative session cost + tokens
+
+**Out of scope until Phase 5.6** (`swarph daemon`): inbox drain coroutine, `/inbox` and `/reply` slash commands. Streaming output ships alongside the cross-adapter `stream()` work in v0.5+ of swarph-mesh.
 
 ### `swarph import`
 
@@ -83,13 +123,14 @@ Pong!
 
 | Phase | What lands |
 |---|---|
-| **0** (this) | Scaffold — entry-point + status banner |
-| **2** | One-shot mode: `swarph "hello" --provider gemini` |
+| **0** | Scaffold — entry-point + status banner |
+| **2** (v0.1.0) | One-shot mode: `swarph "hello" --provider gemini` |
+| **2.5** (v0.2.0) | `swarph import` — Claude JSONL → swarph-native session format |
+| **5** (v0.3.0 — this release) | **`swarph chat` interactive REPL** — multi-turn against any of five adapters + slash commands (`/help`, `/clear`, `/system`, `/provider`, `/model`, `/history`, `/cost`, `/quit`) |
 | **3** | `--ask <peer>` mesh-aware one-shot via MeshClient |
-| **5** | Interactive REPL — `/inbox`, `/reply`, `/dm`, `/watch` |
 | **5.5** | `swarph onboard <peer-name>` + `swarph ratify <peer-name>` (PLAN.md §15) |
-| **5.7** | `swarph daemon` foreground drain loop + `swarph chat` REPL with drain coroutine (PLAN.md §16) |
-| **6** | PyPI publish |
+| **5.6** | `swarph daemon` foreground drain loop + REPL drain coroutine + `/inbox`, `/reply` (PLAN.md §16) |
+| **6** | (already done) PyPI publish |
 
 ## Why split CLI from substrate
 
