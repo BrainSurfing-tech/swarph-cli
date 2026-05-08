@@ -17,7 +17,28 @@ This is one of three repos in the v0.3.x architecture:
 
 ## Status
 
-**v0.0.1 — SCAFFOLD.** The binary prints a status banner and exits 0. Real one-shot + REPL modes ship in subsequent phases.
+**v0.1.0 — Phase 2 one-shot mode.** The `swarph "prompt"` binary works end-to-end against `--provider gemini` per PLAN.md §13 falsifiability gate. Subsequent phases extend the CLI surface (REPL, `--ask <peer>`, onboard/ratify, daemon, import).
+
+```bash
+$ swarph "say pong" --provider gemini
+Pong!
+# 3+26t  $0.0000  0.73s  caller=cli.oneshot.ubuntu  provider=gemini
+```
+
+### `--json` mode semantics
+
+`--json` is a **harness trigger**, not a strict-validation gate. When set, swarph routes the response through the swarph-mesh JSON harness:
+
+- A permissive `{"type": "object"}` schema is synthesised when `--schema` is absent (Phase 5+ adds Pydantic validation).
+- The harness retries once with `[USER]`-turn feedback on parse failure.
+- **Malformed-JSON exits with code 1** + raw text on stdout for caller recovery. Useful for shell scripts:
+  ```bash
+  if swarph "give me a trade" --json; then
+    # parsed dict was on stdout
+    ...
+  fi
+  ```
+- Pretty-printed parsed dict on stdout when parse succeeds; `error_class=malformed_json` shows up in the stderr attribution footer when it doesn't.
 
 ## Spec
 
