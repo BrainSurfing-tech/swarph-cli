@@ -101,7 +101,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--json",
         action="store_true",
-        help="Parse response as JSON (uses the swarph-mesh JSON harness).",
+        help="Parse response as JSON (TRIGGER for the swarph-mesh JSON "
+        "harness — not strict-validation; a permissive {'type': 'object'} "
+        "schema is synthesised when --schema is absent). Malformed-JSON "
+        "responses cause exit code 1 with raw text on stdout for caller "
+        "recovery — useful for shell scripts gating on "
+        "`if swarph 'x' --json; then ...`. Full Pydantic validation lands "
+        "in Phase 5+.",
     )
     p.add_argument(
         "--schema",
@@ -181,6 +187,13 @@ async def _run_one_shot(args: argparse.Namespace) -> int:
         print(resp.text)
 
     if not args.quiet:
+        # ``$0`` displays the subscription-path / free-tier case
+        # (adapter returns exactly 0.0); ``$0.0000`` displays a
+        # tiny-but-real API cost. Future adapters that introduce
+        # float drift around zero (e.g., 1e-12 due to multiplier
+        # rounding) would flip the display spuriously to
+        # ``$0.0000`` — audit + tighten the threshold if that bites
+        # (drop PR #1 review observation #2, DM #681).
         cost_str = f"${resp.cost_usd:.4f}" if resp.cost_usd > 0 else "$0"
         attribution = (
             f"# {resp.input_tokens}+{resp.output_tokens}t  "
