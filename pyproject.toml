@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. Phase 2 one-shot mode shipped (PLAN.md §13)."
 readme = "README.md"
 license = { text = "MIT" }
