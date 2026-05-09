@@ -81,6 +81,8 @@ Useful flags:
 
 cell.yaml schema is **frozen at `schema_version: "v1"`**. v0.7 migrates the parser to `swarph-shared` as a symbol-relocation only — v0.6 cell.yaml files keep working unchanged. Breaking changes require a `schema_version: "v2"` bump and parallel-supported-version window per `swarph-mesh` DEPRECATIONS discipline.
 
+**Known limitations (v0.6).** Single-instance-per-role only. Re-running `swarph spawn <role>` reuses the persisted UUID (R5 fix), so sibling-spawn (alpha + beta co-existing on the same peer-id) requires v0.7's `--new-instance` flag. Manual sibling spawning via `tmux` + explicit `--session-id` pinning still works unchanged; v0.6 does not regress that path, it just doesn't yet expose a CLI shape for it.
+
 ### `swarph daemon` (Phase 5.6)
 
 Replaces the 4-layer `tail -F | grep | Monitor | systemd | cron poll` stack with one foreground process. Liveness check collapses to:
