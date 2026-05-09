@@ -32,11 +32,18 @@ from swarph_cli.caller import default_caller
 
 
 _BANNER = """\
-swarph v{version}
+      ╭───╮
+      │ ◉ │
+   ╭──┴───┴──╮
+   │  swarph │  v{version}
+   ╰──┬───┬──╯       spawn │ chat │ daemon
+      │ ◉ │
+      ╰───╯
 
 Usage:
   swarph "your prompt here" [--provider gemini] [--model gemini-2.5-flash]
   swarph chat [--provider deepseek] [--model deepseek-v4-flash] [--system PROMPT]
+  swarph spawn <role-or-path> [--onboarding PATH] [--dry-run]
   swarph import <path-to-source-session> [--report-only] [--target-session NAME]
   swarph onboard <peer-name> [--gateway URL]
   swarph ratify <peer-name> [--reason "<text>"] [--witness-name <self>]
@@ -46,12 +53,14 @@ Examples:
   swarph "explain Hawkes process briefly"
   swarph "list 5 tickers" --json
   swarph chat --provider claude
+  swarph spawn lab                                   # ~/.config/swarph/cells/lab.yaml
+  swarph spawn ./cell.yaml --dry-run
   swarph import ~/.claude/projects/.../X.jsonl --report-only
   swarph onboard new-peer-name
   swarph ratify new-peer-name --reason "handshake covers four invariants"
 
 Status: Phase 2 one-shot + Phase 2.5 import + Phase 5 REPL +
-Phase 5.5 onboard/ratify + Phase 5.6 daemon ready.
+Phase 5.5 onboard/ratify + Phase 5.6 daemon + Phase 7 spawn ready.
 --ask <peer> (Phase 3), REPL drain coroutine + /inbox /reply
 slash commands (Phase 5.6b) ship in subsequent releases.
 
@@ -67,6 +76,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "onboard": "swarph_cli.commands.onboard.run_onboard",
     "ratify": "swarph_cli.commands.ratify.run_ratify",
     "daemon": "swarph_cli.commands.daemon.run_daemon",
+    "spawn": "swarph_cli.commands.spawn.run_spawn",
     # Future: "list-peers", "list-adapters", etc.
 }
 
