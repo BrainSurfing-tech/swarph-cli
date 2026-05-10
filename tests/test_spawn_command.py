@@ -226,6 +226,63 @@ def test_run_spawn_auto_discovers_cwd_cell_yaml(
     assert "lab-test" in captured.err
 
 
+def test_run_spawn_new_instance_mints_fresh_without_persisting(
+    isolated_xdg, fake_cell_yaml, capsys
+):
+    """v0.7 PR-A — `swarph spawn --new-instance` mints UUID fresh + does
+    NOT write sidecar. Subsequent default spawn still gets a different
+    (or no) UUID from sidecar (since sidecar was never written)."""
+    from swarph_cli.cell import session_state_path
+
+    rc = run_spawn(argv=[str(fake_cell_yaml), "--dry-run", "--print-id", "--new-instance"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    sibling_uuid = captured.out.splitlines()[0]
+    import uuid as _uuid
+    _uuid.UUID(sibling_uuid)
+
+    # Sidecar must NOT exist after --new-instance
+    sidecar = session_state_path("lab-test")
+    assert not sidecar.exists(), "sidecar wrote despite --new-instance"
+
+    # Default spawn (no --new-instance) THEN mints a different UUID
+    rc2 = run_spawn(argv=[str(fake_cell_yaml), "--dry-run", "--print-id"])
+    out2 = capsys.readouterr().out.splitlines()[0]
+    _uuid.UUID(out2)
+    assert out2 != sibling_uuid  # different sessions
+    assert sidecar.exists()  # default path persists
+
+
+def test_run_spawn_new_instance_warns_when_cell_yaml_pins_session_id(
+    isolated_xdg, fake_cell_yaml, capsys
+):
+    """v0.7 PR-A — pinned cell.yaml session_id wins over --new-instance;
+    surface the conflict as a stderr warning."""
+    fixed = "550e8400-e29b-41d4-a716-446655440000"
+    payload = yaml.safe_load(fake_cell_yaml.read_text())
+    payload["session_id"] = fixed
+    fake_cell_yaml.write_text(yaml.safe_dump(payload))
+
+    rc = run_spawn(argv=[str(fake_cell_yaml), "--dry-run", "--print-id", "--new-instance"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out.splitlines()[0] == fixed  # pinned UUID wins
+    assert "--new-instance ignored" in captured.err
+    assert "cell.yaml pins session_id" in captured.err
+
+
+def test_run_spawn_new_instance_dry_run_label(
+    isolated_xdg, fake_cell_yaml, capsys
+):
+    """v0.7 PR-A — dry-run output flags 'sibling' state distinctly from
+    the default 'minted+persisted' / 'reused' labels."""
+    rc = run_spawn(argv=[str(fake_cell_yaml), "--dry-run", "--new-instance"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "sibling" in captured.err
+    assert "sidecar untouched" in captured.err
+
+
 def test_run_spawn_dry_run_redacts_starter_prompt_in_command(
     isolated_xdg, fake_cell_yaml, capsys
 ):
