@@ -17,16 +17,71 @@ This is one of three repos in the v0.3.x architecture:
 
 ## Status
 
-**v0.5.0 — Phase 2 one-shot + Phase 2.5 import + Phase 5 REPL + Phase 5.5 onboard/ratify + Phase 5.6 daemon.** Six verbs ship:
+**v0.6.0 — Phase 7 spawn ships.** Seven verbs total:
 
 1. `swarph "prompt"` — Phase 2 one-shot mode (any of five providers)
 2. `swarph chat` — Phase 5 interactive REPL with multi-turn history + slash commands
-3. `swarph import <path>` — Phase 2.5 session import (Claude JSONL → swarph-native, with `--report-only` for honest pre-commit inspection)
-4. `swarph onboard <peer-name>` — Phase 5.5 mechanics-phase onboarding (PLAN.md §15.4)
-5. `swarph ratify <peer-name>` — Phase 5.5 witness ratification (PLAN.md §15.4a)
-6. `swarph daemon` — **NEW** Phase 5.6 foreground inbox drain loop (PLAN.md §16); structurally retires the orphaned-tail-F class
+3. `swarph spawn <role>` — **NEW** Phase 7 long-lived `claude` session as a named mesh cell (`--name`/`--session-id`/`--append-system-prompt` pinning per substrate-doc R7 §11.1.7 4-layer R2 stack)
+4. `swarph import <path>` — Phase 2.5 session import (Claude JSONL → swarph-native)
+5. `swarph onboard <peer-name>` — Phase 5.5 mechanics-phase onboarding (PLAN.md §15.4)
+6. `swarph ratify <peer-name>` — Phase 5.5 witness ratification (PLAN.md §15.4a)
+7. `swarph daemon` — Phase 5.6 foreground inbox drain (PLAN.md §16)
 
-Subsequent phases extend the CLI surface (`--ask <peer>`, REPL drain coroutine + `/inbox` + `/reply` slash commands in 5.6b).
+Subsequent phases extend the CLI surface (`--ask <peer>`, REPL drain coroutine + `/inbox` + `/reply` slash commands in 5.6b; non-Claude `spawn` providers + S-G `mesh-gateway://` URL form in v0.7).
+
+### `swarph spawn` (Phase 7 — v0.6.0)
+
+Operator-tooling layer of substrate-doc R7 §11.1.7 4-layer R2 mechanism stack. Wraps `claude` with the three R5/R7 disambiguation flags:
+
+* `--name <role>` — display name for `/resume` picker
+* `--session-id <uuid>` — pinned UUID, persisted to `$XDG_STATE_HOME/swarph/sessions/<role>.session-id` so re-spawns reuse the same session (the R5 fix at the operator-tooling layer)
+* `--append-system-prompt <text>` — starter prompt injected without manual paste (the R2 fix at the operator-tooling layer)
+
+```bash
+# 1. Author a cell.yaml (one-time per role)
+$ cat ~/.config/swarph/cells/lab.yaml
+schema_version: v1
+name: lab-ovh
+role: lab
+cwd: /home/ubuntu
+starter_prompt_path: ~/.claude/session_start_reminder.txt
+provider: claude
+
+# 2. Summon the cell (long-lived claude session, exec-replaced)
+$ swarph spawn lab
+      ╭───╮
+      │ ◉ │
+   ╭──┴───┴──╮
+   │  swarph │  v0.6.0
+   ╰──┬───┬──╯       spawn │ chat │ daemon
+      │ ◉ │
+      ╰───╯
+[claude session takes over the terminal — same flags as `claude --name lab --session-id <uuid> --append-system-prompt <starter>`]
+
+# 3. Resume the same cell after exit — same UUID, same session
+$ swarph spawn lab     # picker shows ONE entry: "lab" (R5 disambiguation)
+```
+
+Resolution order for `swarph spawn <role-or-path>`:
+
+1. `--onboarding <path-or-url>` (alias: `--cell`) — explicit override
+2. Positional ending in `.yaml`/`.yml` or containing a path separator — literal path
+3. Plain role name — `$XDG_CONFIG_HOME/swarph/cells/<role>.yaml` (default `~/.config/swarph/cells/`)
+4. No positional given — auto-discover `./cell.yaml` in current directory
+
+Useful flags:
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Print resolved `claude` command + cell summary; do not exec |
+| `--no-starter` | Skip starter-prompt injection even if cell.yaml sets one |
+| `--print-id` | Print resolved session-id to stdout (capture for shell scripts) |
+| `--no-banner` | Suppress the swarph banner on stderr |
+| `-- <claude-args>` | Pass remaining args through to claude unchanged |
+
+cell.yaml schema is **frozen at `schema_version: "v1"`**. v0.7 migrates the parser to `swarph-shared` as a symbol-relocation only — v0.6 cell.yaml files keep working unchanged. Breaking changes require a `schema_version: "v2"` bump and parallel-supported-version window per `swarph-mesh` DEPRECATIONS discipline.
+
+**Known limitations (v0.6).** Single-instance-per-role only. Re-running `swarph spawn <role>` reuses the persisted UUID (R5 fix), so sibling-spawn (alpha + beta co-existing on the same peer-id) requires v0.7's `--new-instance` flag. Manual sibling spawning via `tmux` + explicit `--session-id` pinning still works unchanged; v0.6 does not regress that path, it just doesn't yet expose a CLI shape for it.
 
 ### `swarph daemon` (Phase 5.6)
 

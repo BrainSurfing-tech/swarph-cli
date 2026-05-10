@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.5.0"
-description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. v0.5.0 ships Phase 5.6 `swarph daemon` (foreground inbox drain — retires the orphaned-tail-F class) on top of Phase 2 one-shot + Phase 2.5 import + Phase 5 REPL + Phase 5.5 onboard/ratify (PLAN.md §13 / §16)."
+version = "0.6.0"
+description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. v0.6.0 ships Phase 7 `swarph spawn <role>` (operator-tooling layer of substrate-doc R7 §11.1.7 4-layer R2 mechanism stack — pins claude --name/--session-id/--append-system-prompt for sibling-cell session-resume disambiguation) on top of Phase 5.6 daemon + Phase 5.5 onboard/ratify + Phase 5 REPL + Phase 2.5 import + Phase 2 one-shot."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -33,6 +33,10 @@ dependencies = [
     # OpenAI + Grok availability in /provider switch.
     "swarph-mesh>=0.5.0",
     "swarph-shared>=0.2.0",
+    # Phase 7 spawn — cell.yaml parser. PyYAML 6.x is the standard.
+    # Migrates to swarph-shared in v0.7+ per cell.yaml format-home
+    # decision (substrate-doc R7 §11.1.7.4).
+    "PyYAML>=6.0",
 ]
 
 [project.urls]
