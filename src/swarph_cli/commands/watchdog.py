@@ -36,6 +36,21 @@ throttle-detection + auto-respawn. Primitive (1) mesh-DM queue is
 already shipping and provides the queued-context that fresh siblings
 inherit on respawn.
 
+**Per-slot cron coverage at v0.7** (beta iter-1 #1029): each
+``swarph watchdog --check --cell <role>`` invocation is single-cell
+scope. With v0.7 PR-B auto-suffix in play, sibling slots
+(``<role>-2``, ``<role>-3``, etc.) need their own cron entries:
+
+  */5 * * * * swarph watchdog --check --cell drop-on-meta-edge
+  */5 * * * * swarph watchdog --check --cell drop-on-meta-edge-2
+
+v0.8+ multi-cell watchdog will walk sidecars matching
+``<base_role>{,-N}.session-id`` and check each per-invocation, reducing
+operator-cron surface to one entry per base-role. Tracked in v0.8+
+candidate queue alongside ``--respawn-after-time``, per-cell-yaml
+threshold tuning, mesh-down detection, and ``swarph cleanup-sessions``
+(beta #987).
+
 Substrate-doc R7 §11.1.7 lineage: this is operator-tooling sub-layer,
 not a substrate primitive. The substrate primitive that would
 *prevent* the stranding (S-G spawn-context endpoint with liveness
