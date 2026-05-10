@@ -79,6 +79,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "spawn": "swarph_cli.commands.spawn.run_spawn",
     "install-hook": "swarph_cli.commands.install_hook.run_install_hook",
     "hook-output": "swarph_cli.commands.hook_output.run_hook_output",
+    "watchdog": "swarph_cli.commands.watchdog.run_watchdog",
     # Future: "list-peers", "list-adapters", etc.
 }
 
