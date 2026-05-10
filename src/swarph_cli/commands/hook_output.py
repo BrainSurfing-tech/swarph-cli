@@ -37,6 +37,7 @@ from swarph_cli.cell import (
     cells_dir,
     discover_cell_in_cwd,
     load_cell,
+    read_starter_prompt,
 )
 
 
@@ -104,7 +105,7 @@ def run_hook_output(argv: list[str] | None = None) -> int:
         return _emit_no_op()
 
     try:
-        starter = cell.starter_prompt_text()
+        starter = read_starter_prompt(cell)
     except CellError:
         # starter_prompt_path set but unreadable — emit no-op.
         return _emit_no_op()

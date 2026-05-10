@@ -1,125 +1,72 @@
-"""``cell.yaml`` loader — Phase 7 spawn config (v0.6.0).
+"""``swarph_cli.cell`` — file I/O + sidecar + slot allocation (v0.7 PR-D step 2).
 
-A *cell* is the unit of mesh participation: one peer-name, one role,
-one working directory, one persistent session-id. The cell.yaml file
-declaratively describes how to summon (spawn or resume) that cell as
-a long-lived `claude` session.
+After substrate-doc R7 §11.1.5 (O5) cell.yaml universal-genome relocation,
+the data shapes + schema validation live in ``swarph-shared`` (v0.3.0+).
+This module is the swarph-cli operator-tooling layer that consumes the
+shared schema + adds:
 
-Per substrate-doc R7 §11.1.5 (O5) the long-term home for the
-universal-genome cell.yaml format is ``swarph-shared``. v0.6 ships
-the parser inside ``swarph-cli`` to validate the schema in production
-use; v0.7+ migrates to ``swarph-shared`` once the schema has stabilised.
+* **File discovery**: ``cells_dir()``, ``discover_cell_in_cwd()``,
+  ``resolve_cell_path()``, ``is_mesh_gateway_url()``
+* **File I/O**: ``load_cell()`` (YAML read → ``parse_cell_dict()``),
+  ``_atomic_write_text()``
+* **Sidecar persistence**: ``session_state_path()``,
+  ``load_or_create_session_id()``
+* **Slot allocation** (substrate-doc R7 §11.1.7 operator-tooling layer
+  per beta #892 B1): ``next_free_slot_role()``,
+  ``base_role_from_slot_role()``
 
-Per substrate-doc R7 §11.1.7 the spawn wrapper sits at the
-operator-tooling layer of the 4-layer R2 mechanism stack — it
-consumes substrate primitives (S-A spawn-registration body, S-G
-spawn-context endpoint when those land) but is NOT itself a substrate
-primitive. v0.6 reads the local cell.yaml file only; v0.7 will add
-the optional S-G HTTP polling fallback.
+Symbol-relocation only — the v0.6 + v0.7-pre-PR-D + v0.7-post-PR-D-step-2
+APIs are byte-for-byte identical at the swarph_cli.cell import level.
+v0.6 cell.yaml files keep working unchanged in v0.7+ per drop-mother
+review #890 (C2) schema-stability commitment.
 
-v0.6 schema (``schema_version: "v1"`` — minimal viable):
+Re-export shim for backward-compat — historical imports still work:
 
-    schema_version: v1            # optional, defaults to v1
-    name: lab-ovh                 # required — mesh peer name
-    role: lab                     # required — claude --name display value
-    cwd: /home/ubuntu             # required — working directory for spawn
-    session_id: 550e8400-...      # optional — pinned UUID; persisted state used otherwise
-    starter_prompt_path: ~/.foo   # optional — fed as ``claude --append-system-prompt``
-    provider: claude              # optional — claude-only in v0.6 (errors otherwise)
-    identity:                     # optional — alpha #891 (D1) reserved shape
-      lineage:
-        parent_peer_id: drop      # optional — null for top-level cells
-        spawn_manifest_signature: # optional — null in v0.6, validated in v2 cryptographic-lineage tier
+    from swarph_cli.cell import Cell, CellError, parse_cell_dict
 
-Fields not declared above are kept verbatim under ``cell.extra`` for
-forward-compat; v0.7 may attach meaning to ``mesh:``, ``capabilities:``,
-``memory_mirror:`` etc.
+is equivalent to (and recommended going forward):
 
-**Schema-stability commitment** (per drop-mother review #890 (C2) +
-``feedback_swarph_paper_rev_bar``): v0.6 schema is FROZEN at
-``schema_version: "v1"``. The v0.7 migration to ``swarph-shared`` is a
-SYMBOL-RELOCATION ONLY — no field renames, no field removals, no type
-changes. Any v0.7+ additions must be additive-optional. v0.6 cell.yaml
-files keep working unchanged in v0.7+. Breaking changes require a
-``schema_version: "v2"`` bump and parallel-supported-version window per
-``swarph-mesh`` DEPRECATIONS discipline.
+    from swarph_shared.cell import Cell, CellError, parse_cell_dict
+
+Internal swarph-cli code uses the swarph-shared imports directly to
+avoid two-hop indirection. External consumers of swarph-cli's cell
+module continue to work unchanged.
 """
 
 from __future__ import annotations
 
 import os
-import re
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
+# Re-export data shapes + schema validation from swarph-shared 0.3.0+
+# (substrate-doc R7 §11.1.5 (O5) cell.yaml-format-home RESOLVED).
+from swarph_shared.cell import (
+    Cell,
+    CellError,
+    Lineage,
+    PEER_NAME_RE,
+    SCHEMA_VERSION_V1,
+    VALID_PROVIDERS,
+    VALID_SCHEMA_VERSIONS,
+    parse_cell_dict,
+    validate_uuid_str,
+)
 
-# Conservative peer-name pattern, mirrors swarph_shared.peer_registry
-# discipline — kebab/snake-case, no spaces, no leading hyphen.
-_PEER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
-_VALID_PROVIDERS_V0_6 = {"claude"}
-
-
-class CellError(ValueError):
-    """Raised on cell.yaml validation or lookup failure."""
-
-
-SCHEMA_VERSION_V1 = "v1"
-_VALID_SCHEMA_VERSIONS = {SCHEMA_VERSION_V1}
-
-
-@dataclass
-class Lineage:
-    """Optional lineage block — alpha #891 (D1) reserved shape.
-
-    v0.6 accepts presence + parses; semantic validation (signature
-    verification) graduates with the v2 cryptographic-lineage tier
-    per substrate-doc R6 §11.1.2 candidate primitive S-B.
-    """
-
-    parent_peer_id: Optional[str] = None
-    spawn_manifest_signature: Optional[str] = None
-
-
-@dataclass
-class Cell:
-    """Parsed cell.yaml — v0.6 schema (``schema_version: "v1"``)."""
-
-    name: str
-    role: str
-    cwd: Path
-    schema_version: str = SCHEMA_VERSION_V1
-    session_id: Optional[str] = None
-    starter_prompt_path: Optional[Path] = None
-    provider: str = "claude"
-    lineage: Optional[Lineage] = None
-    source_path: Optional[Path] = None
-    extra: dict[str, Any] = field(default_factory=dict)
-
-    def starter_prompt_text(self) -> Optional[str]:
-        """Return contents of starter_prompt_path or None.
-
-        Raises CellError if the path is set but unreadable so spawn
-        fails loudly rather than silently dropping the role-priming.
-        """
-        if self.starter_prompt_path is None:
-            return None
-        try:
-            return self.starter_prompt_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise CellError(
-                f"cell.yaml: starter_prompt_path "
-                f"'{self.starter_prompt_path}' is not readable: {exc}"
-            ) from exc
+# Backward-compat aliases for v0.6 + v0.7-pre-PR-D-step-2 imports
+# (a few internal swarph-cli call sites used the leading-underscore shape).
+_PEER_NAME_RE = PEER_NAME_RE
+_VALID_SCHEMA_VERSIONS = VALID_SCHEMA_VERSIONS
+_VALID_PROVIDERS_V0_6 = VALID_PROVIDERS  # historical name for the v0.6 frozenset
+_validate_uuid = validate_uuid_str  # historical helper name
 
 
 def _config_root() -> Path:
     """Return the active config root for cell lookups.
 
     Honours ``$XDG_CONFIG_HOME`` per the XDG Base Directory spec; falls
-    back to ``~/.config/`` otherwise. The trailing ``swarph/cells/``
-    segment is appended by callers, so this returns the parent.
+    back to ``~/.config/`` otherwise.
     """
     xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
     if xdg:
@@ -167,28 +114,13 @@ def next_free_slot_role(base_role: str) -> str:
     * Slot 3 (second sibling): ``<base_role>-3``
 
     Returns the synthesised role string for the next free slot.
-    The first sibling spawn (when slot 1 is occupied) returns
-    ``<base_role>-2`` — slot 1 is reserved for the cell.yaml-named
-    role exactly so sibling-N=1 confusion doesn't arise.
 
-    The base role MUST already be occupied (sidecar exists) before
-    calling this; the caller is responsible for that check, since
-    ``--new-instance`` on an unoccupied base role is a degenerate
-    case (commander wants a sibling but has no original — should
-    spawn the original first via default ``swarph spawn <role>``).
-
-    Hard cap at slot 99 to avoid runaway loops; if 99 is full the
-    operator has bigger problems than auto-suffix policy can solve.
+    Hard cap at slot 99 to avoid runaway loops.
 
     Slot-reuse on unclean exit (beta iter-1 #987): a sibling instance
     that dies without removing its sidecar leaves the slot
-    sidecar-occupied even though no live session resumes from it.
-    Auto-suffix walks past it on next spawn. Eventually all 99 slots
-    can fill with dead sessions → CellError. Operator workaround at
-    v0.7: ``rm $XDG_STATE_HOME/swarph/sessions/<role>-N.session-id``
-    to free a stale slot. v0.8+ may ship a ``swarph cleanup-sessions``
-    subcommand that prunes sidecars whose UUIDs don't appear in
-    ``claude --list-sessions`` output (or equivalent liveness check).
+    sidecar-occupied. Operator workaround at v0.7: ``rm`` the stale
+    sidecar. v0.8+ may ship ``swarph cleanup-sessions``.
     """
     for n in range(2, 100):
         candidate = f"{base_role}-{n}"
@@ -234,7 +166,6 @@ def resolve_cell_path(spec: str) -> Path:
       2. spec contains a path separator → treated as a literal path
       3. ``./cell.yaml`` exists in current cwd AND spec equals current cwd's
          basename OR equals a special token ``.`` → use ``./cell.yaml``
-         (alpha #891 D3)
       4. ``<cells_dir>/<spec>.yaml`` exists → use it
       5. v0.7 PR-B sibling-resume — strip trailing ``-N`` suffix from spec
          and try ``<cells_dir>/<base-role>.yaml`` (lets ``swarph spawn
@@ -243,10 +174,6 @@ def resolve_cell_path(spec: str) -> Path:
          takes precedence (step 4) over slot-stripped fallback (step 5).
       6. otherwise → return ``<cells_dir>/<spec>.yaml`` (will fail on load
          with a 'not found' error)
-
-    Mesh-gateway URL inputs (``mesh-gateway://peers/<peer-id>/spawn-context``)
-    are caught by ``is_mesh_gateway_url`` BEFORE this function and return
-    NotImplementedError — the S-G substrate primitive lands in v0.7+.
     """
     if spec == ".":
         return Path.cwd() / "cell.yaml"
@@ -268,29 +195,42 @@ def resolve_cell_path(spec: str) -> Path:
 
 
 def discover_cell_in_cwd() -> Optional[Path]:
-    """Return ``./cell.yaml`` if it exists in the current cwd, else None.
-
-    Implements alpha #891 (D3) auto-discovery for the no-positional case.
-    """
+    """Return ``./cell.yaml`` if it exists in the current cwd, else None."""
     candidate = Path.cwd() / "cell.yaml"
     return candidate if candidate.is_file() else None
 
 
-def _validate_uuid(value: str) -> str:
-    """Validate-and-normalise a UUID string; raise CellError otherwise.
+def read_starter_prompt(cell: Cell) -> Optional[str]:
+    """Return the starter-prompt text for ``cell``, or None.
 
-    ``claude --session-id`` rejects non-UUIDs at the harness layer;
-    catching it here gives a substrate-shaped error path instead of a
-    bare claude-cli traceback.
+    Free function rather than ``Cell.starter_prompt_text()`` method —
+    swarph-shared Cell is intentionally pure-stdlib + no I/O, so the
+    file-read lives at the swarph-cli operator-tooling layer. Callers
+    that previously did ``cell.starter_prompt_text()`` now do
+    ``read_starter_prompt(cell)``.
+
+    Raises CellError if starter_prompt_path is set but unreadable, so
+    spawn fails loudly rather than silently dropping role-priming.
     """
+    if cell.starter_prompt_path is None:
+        return None
     try:
-        return str(uuid.UUID(value))
-    except (ValueError, AttributeError, TypeError) as exc:
-        raise CellError(f"cell.yaml: session_id is not a valid UUID: {value!r}") from exc
+        return cell.starter_prompt_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CellError(
+            f"cell.yaml: starter_prompt_path "
+            f"'{cell.starter_prompt_path}' is not readable: {exc}"
+        ) from exc
 
 
 def load_cell(path: Path) -> Cell:
-    """Parse + validate a cell.yaml file. Raises CellError on any failure."""
+    """Parse + validate a cell.yaml file. Raises CellError on any failure.
+
+    Reads YAML from disk, then delegates to ``swarph_shared.cell.parse_cell_dict``
+    for the actual schema validation. Sets ``cell.source_path`` to the
+    file path (a swarph-cli-specific provenance bit; swarph-shared
+    leaves it None since it doesn't know about the file).
+    """
     import yaml  # local import — keeps `swarph --version` PyYAML-free
 
     if not path.exists():
@@ -301,101 +241,15 @@ def load_cell(path: Path) -> Cell:
     except yaml.YAMLError as exc:
         raise CellError(f"cell.yaml is not valid YAML ({path}): {exc}") from exc
 
-    if not isinstance(raw, dict):
-        raise CellError(
-            f"cell.yaml top-level must be a mapping ({path}); got {type(raw).__name__}"
-        )
-
-    schema_version = raw.pop("schema_version", SCHEMA_VERSION_V1)
-    name = raw.pop("name", None)
-    role = raw.pop("role", None)
-    cwd_raw = raw.pop("cwd", None)
-    session_id = raw.pop("session_id", None)
-    starter_prompt_raw = raw.pop("starter_prompt_path", None)
-    provider = raw.pop("provider", "claude")
-    identity = raw.pop("identity", None)
-
-    if schema_version not in _VALID_SCHEMA_VERSIONS:
-        raise CellError(
-            f"cell.yaml: schema_version {schema_version!r} is not supported "
-            f"by this swarph-cli build. Supported: {sorted(_VALID_SCHEMA_VERSIONS)}."
-        )
-
-    if not isinstance(name, str) or not _PEER_NAME_RE.match(name):
-        raise CellError(
-            f"cell.yaml: 'name' must be a kebab/snake-case peer name "
-            f"matching {_PEER_NAME_RE.pattern}; got {name!r}"
-        )
-    if not isinstance(role, str) or not role.strip():
-        raise CellError("cell.yaml: 'role' is required and must be a non-empty string")
-    if not isinstance(cwd_raw, str) or not cwd_raw.strip():
-        raise CellError("cell.yaml: 'cwd' is required and must be a non-empty string")
-
-    cwd = Path(cwd_raw).expanduser()
-    if not cwd.is_absolute():
-        # Resolve relative to cell.yaml's parent dir for ergonomic
-        # author-from-anywhere config files.
-        cwd = (path.parent / cwd).resolve()
-    if not cwd.is_dir():
-        raise CellError(f"cell.yaml: 'cwd' is not a directory: {cwd}")
-
-    if session_id is not None:
-        if not isinstance(session_id, str):
-            raise CellError(
-                f"cell.yaml: 'session_id' must be a string UUID, got "
-                f"{type(session_id).__name__}"
-            )
-        session_id = _validate_uuid(session_id)
-
-    starter_path: Optional[Path] = None
-    if starter_prompt_raw is not None:
-        if not isinstance(starter_prompt_raw, str) or not starter_prompt_raw.strip():
-            raise CellError(
-                "cell.yaml: 'starter_prompt_path' must be a non-empty string"
-            )
-        starter_path = Path(starter_prompt_raw).expanduser()
-        if not starter_path.is_absolute():
-            starter_path = (path.parent / starter_path).resolve()
-
-    if provider not in _VALID_PROVIDERS_V0_6:
-        raise CellError(
-            f"cell.yaml: provider {provider!r} is not supported in v0.6 "
-            f"(valid: {sorted(_VALID_PROVIDERS_V0_6)}). "
-            "Non-Claude provider spawn is queued for v0.7+."
-        )
-
-    lineage_obj: Optional[Lineage] = None
-    if identity is not None:
-        if not isinstance(identity, dict):
-            raise CellError(
-                f"cell.yaml: 'identity' must be a mapping; got "
-                f"{type(identity).__name__}"
-            )
-        lineage_raw = identity.get("lineage")
-        if lineage_raw is not None:
-            if not isinstance(lineage_raw, dict):
-                raise CellError(
-                    "cell.yaml: 'identity.lineage' must be a mapping"
-                )
-            lineage_obj = Lineage(
-                parent_peer_id=lineage_raw.get("parent_peer_id"),
-                spawn_manifest_signature=lineage_raw.get(
-                    "spawn_manifest_signature"
-                ),
-            )
-
-    return Cell(
-        name=name,
-        role=role.strip(),
-        cwd=cwd,
-        schema_version=schema_version,
-        session_id=session_id,
-        starter_prompt_path=starter_path,
-        provider=provider,
-        lineage=lineage_obj,
-        source_path=path,
-        extra=raw,  # whatever's left — preserved for forward-compat
-    )
+    cell = parse_cell_dict(raw, source=str(path), base_dir=path.parent)
+    # File-I/O wrapper concern: post-validate cwd reachability + tag source
+    # path. swarph-shared parse_cell_dict intentionally doesn't touch the
+    # filesystem (kernel-tier discipline); the live cwd.is_dir() check is
+    # the swarph-cli operator-tooling concern.
+    if not cell.cwd.is_dir():
+        raise CellError(f"cell.yaml: 'cwd' is not a directory: {cell.cwd}")
+    cell.source_path = path
+    return cell
 
 
 def load_or_create_session_id(
@@ -405,52 +259,19 @@ def load_or_create_session_id(
 ) -> tuple[str, bool, str]:
     """Resolve the session-id for a spawn invocation.
 
-    Returns ``(session_id, was_generated, effective_role)`` where:
-      * ``session_id`` — UUID to pass to ``claude --session-id``
-      * ``was_generated`` — True if a fresh UUID was minted on this
-        call
-      * ``effective_role`` — the role string to pass to ``claude
-        --name`` AND the slot key for sidecar persistence. Will
-        equal ``role`` for the default re-resume path; will be a
-        ``<role>-<N>`` slot-suffixed string for v0.7 PR-B
-        sibling-spawn case (auto-suffix policy in
-        ``next_free_slot_role``).
+    Returns ``(session_id, was_generated, effective_role)``.
 
     Resolution order:
-      1. cell.session_id (cell.yaml-pinned) — never generated, never
-         affected by ``new_instance`` (a pinned UUID is operator
-         intent and overrides everything). effective_role = role.
-      2. ``new_instance=True`` AND base sidecar already exists —
-         v0.7 PR-B auto-suffix: find next free ``<role>-N`` slot,
-         mint fresh UUID, persist to slot-N sidecar. Caller can
-         resume this sibling later via ``swarph spawn <role>-N``.
-      3. ``new_instance=True`` AND base sidecar does NOT exist —
-         degenerate case (commander wants sibling but has no
-         original); treat as default-spawn path with a stderr
-         warning at the CLI layer (warns in spawn.py).
-      4. session_state_path(role) (last-generated for this role) —
-         the default re-resume path that the R5 fix is built on.
-         effective_role = role.
-      5. mint new uuid4 + persist to session_state_path(role).
-         effective_role = role.
+      1. cell.session_id (cell.yaml-pinned) — never generated
+      2. ``new_instance=True`` AND base sidecar exists — auto-suffix slot
+      3. ``new_instance=True`` AND no base sidecar — fall through (degenerate)
+      4. session_state_path(role) reused — default re-resume path
+      5. mint new uuid4 + persist
 
-    Backward-compat: this function's signature changed from v0.6
-    (``(role, cell)`` returning ``(sid, gen)``) to v0.7 (added
-    ``new_instance`` arg + ``effective_role`` in return tuple).
-    Callers must unpack the 3-tuple now; the 2-tuple shape is no
-    longer returned even on the default re-resume path.
-
-    Caller-side discipline (mother iter-1 #986): the
-    ``effective_role`` value is the authoritative source for the
-    ``claude --name`` display value AND the sidecar persistence
-    key — NOT ``cell.role`` (which stays the BASE role for shared
-    cell-context: cwd, starter prompt, lineage, provider). Using
-    ``cell.role`` for /resume picker disambiguation in a
-    sibling-spawn context would collapse all sibling slots back
-    to the base name, defeating the auto-suffix primitive. The
-    rename separates physical-cell-identity (cell.role) from
-    spawn-instance-identity (effective_role); v0.7+ consumers
-    must thread effective_role consistently.
+    Caller-side discipline (mother iter-1 #986): the ``effective_role``
+    value is the authoritative source for ``claude --name`` AND
+    sidecar persistence — NOT ``cell.role`` (which stays the BASE role
+    for shared cell-context: cwd, starter prompt, lineage, provider).
     """
     if cell.session_id:
         return cell.session_id, False, role
@@ -458,23 +279,19 @@ def load_or_create_session_id(
     if new_instance:
         base_state = session_state_path(role)
         if base_state.exists():
-            # v0.7 PR-B sibling-spawn case — auto-suffix
             sibling_role = next_free_slot_role(role)
             sibling_state = session_state_path(sibling_role)
             new_id = str(uuid.uuid4())
             sibling_state.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write_text(sibling_state, new_id + "\n")
             return new_id, True, sibling_role
-        # Degenerate case — no base session to be a sibling of.
-        # Fall through to default-spawn path (treats as the original);
-        # CLI layer (spawn.py) prints a stderr note about this edge case.
 
     state_file = session_state_path(role)
     if state_file.exists():
         existing = state_file.read_text(encoding="utf-8").strip()
         if existing:
             try:
-                return _validate_uuid(existing), False, role
+                return validate_uuid_str(existing), False, role
             except CellError:
                 # Corrupted state — fall through and regenerate.
                 pass
@@ -506,9 +323,38 @@ def _atomic_write_text(target: Path, content: str) -> None:
             os.fsync(fp.fileno())
         os.replace(tmp_path, target)
     except Exception:
-        # Best-effort cleanup of the tempfile on any error path.
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
         raise
+
+
+__all__ = [
+    # Re-exports from swarph_shared.cell (v0.3.0+)
+    "Cell",
+    "CellError",
+    "Lineage",
+    "PEER_NAME_RE",
+    "SCHEMA_VERSION_V1",
+    "VALID_PROVIDERS",
+    "VALID_SCHEMA_VERSIONS",
+    "parse_cell_dict",
+    "validate_uuid_str",
+    # swarph-cli-local file I/O + sidecar + slot allocation
+    "cells_dir",
+    "session_state_path",
+    "next_free_slot_role",
+    "base_role_from_slot_role",
+    "is_mesh_gateway_url",
+    "resolve_cell_path",
+    "discover_cell_in_cwd",
+    "read_starter_prompt",
+    "load_cell",
+    "load_or_create_session_id",
+    # Backward-compat aliases
+    "_PEER_NAME_RE",
+    "_VALID_SCHEMA_VERSIONS",
+    "_VALID_PROVIDERS_V0_6",
+    "_validate_uuid",
+]

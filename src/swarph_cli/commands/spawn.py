@@ -37,6 +37,7 @@ from swarph_cli.cell import (
     is_mesh_gateway_url,
     load_cell,
     load_or_create_session_id,
+    read_starter_prompt,
     resolve_cell_path,
 )
 
@@ -210,7 +211,7 @@ def _build_claude_argv(
     argv: list[str] = ["claude", "--name", name_value, "--session-id", session_id]
 
     if not no_starter:
-        starter = cell.starter_prompt_text()
+        starter = read_starter_prompt(cell)
         if starter:
             argv.extend(["--append-system-prompt", starter])
 

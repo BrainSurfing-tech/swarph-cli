@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.7.0a4"
-description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. v0.7.0a4 (development) adds `swarph watchdog` for stranded-session detection + recovery (drop-mother #1021 + beta #1019 design — last-task-notification PRIMARY + pgrep FALLBACK + AND-gate; A1 tmux send-keys wake → A2 swarph-spawn respawn). v0.7.0 final ships when swarph-shared cell.yaml relocation (PR-D) also lands."
+version = "0.7.0"
+description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. v0.7.0 ships Phase 7 substrate-doc R7 §11.1.7 operator-tooling layer in 5 increments: PR-A `--new-instance` flag (sibling-spawn case) + PR-B auto-suffix on collision (sibling-slot persistence) + PR-C SessionStart hook (closes bare-claude operator-paste gap) + watchdog (stranded-session recovery) + PR-D swarph-shared cell.yaml relocation (cell-yaml schema graduates to swarph-shared 0.3.0 kernel-tier; substrate-doc R7 §11.1.5 (O5) RESOLVED)."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -32,10 +32,15 @@ dependencies = [
     # Phase 5 REPL exercises all five adapters; bumped to 0.5.0 for
     # OpenAI + Grok availability in /provider switch.
     "swarph-mesh>=0.5.0",
-    "swarph-shared>=0.2.0",
+    # v0.7 PR-D step 2: swarph-shared 0.3.0 adds the cell module
+    # (universal cell.yaml schema; substrate-doc R7 §11.1.5 (O5)
+    # cell.yaml-format-home RESOLVED). swarph-cli's cell.py now
+    # re-exports data shapes from swarph_shared.cell + keeps file
+    # I/O + sidecar + slot allocation locally.
+    "swarph-shared>=0.3.0",
     # Phase 7 spawn — cell.yaml parser. PyYAML 6.x is the standard.
-    # Migrates to swarph-shared in v0.7+ per cell.yaml format-home
-    # decision (substrate-doc R7 §11.1.7.4).
+    # Stays a swarph-cli dep since file I/O is operator-tooling-layer
+    # concern; swarph-shared cell module is pure-stdlib.
     "PyYAML>=6.0",
 ]
 
