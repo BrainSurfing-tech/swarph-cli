@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.7.0a2"
-description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. v0.7.0a2 (development) adds auto-suffix on sibling-collision (beta #892 B1) on top of PR-A `--new-instance` flag (B2). Sibling instances now persist at <role>-N.session-id slots and resume via `swarph spawn <role>-N`. v0.7.0 final ships when SessionStart hook + swarph-shared relocation also land."
+version = "0.7.0a3"
+description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. v0.7.0a3 (development) adds `swarph install-hook` + `swarph hook-output` for SessionStart memory-injection (substrate-doc R7 §11.1.7.1 #1) — closes the bare-claude operator-paste gap PR-A/PR-B left open. v0.7.0 final ships when swarph-shared cell.yaml relocation (PR-D) also lands."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"

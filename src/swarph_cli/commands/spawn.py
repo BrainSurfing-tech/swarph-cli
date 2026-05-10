@@ -388,6 +388,13 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
         return 1
 
+    # v0.7 PR-C — set SWARPH_SPAWN=1 env so a SessionStart hook
+    # installed via `swarph install-hook` knows the prompt was
+    # already injected via --append-system-prompt and skips
+    # double-injection. The env propagates through execv since we
+    # don't use execve with a custom env.
+    os.environ["SWARPH_SPAWN"] = "1"
+
     # exec-replace so the spawned claude session owns stdio +
     # signals cleanly. argv[0] is preserved as 'claude' for ps-grep.
     try:

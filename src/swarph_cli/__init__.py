@@ -16,6 +16,6 @@ The architecture splits CLI from substrate so:
 
 from __future__ import annotations
 
-__version__ = "0.7.0a2"
+__version__ = "0.7.0a3"
 
 __all__ = ["__version__"]
