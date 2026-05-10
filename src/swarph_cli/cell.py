@@ -429,6 +429,18 @@ def load_or_create_session_id(
     ``new_instance`` arg + ``effective_role`` in return tuple).
     Callers must unpack the 3-tuple now; the 2-tuple shape is no
     longer returned even on the default re-resume path.
+
+    Caller-side discipline (mother iter-1 #986): the
+    ``effective_role`` value is the authoritative source for the
+    ``claude --name`` display value AND the sidecar persistence
+    key — NOT ``cell.role`` (which stays the BASE role for shared
+    cell-context: cwd, starter prompt, lineage, provider). Using
+    ``cell.role`` for /resume picker disambiguation in a
+    sibling-spawn context would collapse all sibling slots back
+    to the base name, defeating the auto-suffix primitive. The
+    rename separates physical-cell-identity (cell.role) from
+    spawn-instance-identity (effective_role); v0.7+ consumers
+    must thread effective_role consistently.
     """
     if cell.session_id:
         return cell.session_id, False, role
