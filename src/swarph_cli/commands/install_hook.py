@@ -278,4 +278,36 @@ def run_install_hook(argv: Optional[list[str]] = None) -> int:
             "override for explicit cell selection (drop-mother #996).\n",
             file=sys.stderr,
         )
+        print(
+            "Scope tradeoffs (beta #997 O3):\n"
+            "  --scope user (default)   System-wide hook fires for every\n"
+            "                           `claude` invocation regardless of cwd.\n"
+            "                           Cell selection driven by cwd discovery.\n"
+            "  --scope project          Per-project .claude/settings.json hook.\n"
+            "                           Defensive when sibling-daughter projects\n"
+            "                           have cell.yaml at project root + you want\n"
+            "                           the hook scoped to that project only.\n",
+            file=sys.stderr,
+        )
+        print(
+            "Hook failure-mode invariant (beta #997 O2):\n"
+            "  If `swarph hook-output` crashes (uninstalled / ImportError /\n"
+            "  unhandled exception), Claude Code's hook framework logs the\n"
+            "  failure but DOES NOT block session startup. Worst case = no\n"
+            "  starter context auto-injected; session still starts. To\n"
+            "  diagnose: check the Claude Code session log OR run\n"
+            "  `swarph hook-output` manually with the same stdin Claude\n"
+            "  Code would send.\n",
+            file=sys.stderr,
+        )
+        print(
+            "Sandbox-write note (beta #997 O1):\n"
+            "  If `swarph install-hook` is called from INSIDE a Claude Code\n"
+            "  session (sandboxed), the settings.json write may be blocked\n"
+            "  by the harness sandbox per `feedback_settings_json_via_skill`.\n"
+            "  Workaround: run `swarph install-hook` from a bare shell\n"
+            "  (outside any Claude Code session) once during onboarding.\n"
+            "  Subsequent --dry-run / --uninstall calls work either way.\n",
+            file=sys.stderr,
+        )
     return 0
