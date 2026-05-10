@@ -179,6 +179,16 @@ def next_free_slot_role(base_role: str) -> str:
 
     Hard cap at slot 99 to avoid runaway loops; if 99 is full the
     operator has bigger problems than auto-suffix policy can solve.
+
+    Slot-reuse on unclean exit (beta iter-1 #987): a sibling instance
+    that dies without removing its sidecar leaves the slot
+    sidecar-occupied even though no live session resumes from it.
+    Auto-suffix walks past it on next spawn. Eventually all 99 slots
+    can fill with dead sessions → CellError. Operator workaround at
+    v0.7: ``rm $XDG_STATE_HOME/swarph/sessions/<role>-N.session-id``
+    to free a stale slot. v0.8+ may ship a ``swarph cleanup-sessions``
+    subcommand that prunes sidecars whose UUIDs don't appear in
+    ``claude --list-sessions`` output (or equivalent liveness check).
     """
     for n in range(2, 100):
         candidate = f"{base_role}-{n}"
