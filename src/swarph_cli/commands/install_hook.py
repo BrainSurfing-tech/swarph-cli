@@ -268,4 +268,14 @@ def run_install_hook(argv: Optional[list[str]] = None) -> int:
             "and emits the starter prompt as session context.",
             file=sys.stderr,
         )
+        print(
+            "\nDiscovery order at hook fire time:\n"
+            "  1. ./cell.yaml in current working directory\n"
+            "  2. $XDG_CONFIG_HOME/swarph/cells/<basename(cwd)>.yaml\n"
+            "If your cwd is /root then the fallback name resolves to "
+            "'root.yaml' — author cell.yaml at cwd OR rename per the\n"
+            "basename rule. v0.8+ may add a `SWARPH_CELL` env var "
+            "override for explicit cell selection (drop-mother #996).\n",
+            file=sys.stderr,
+        )
     return 0
