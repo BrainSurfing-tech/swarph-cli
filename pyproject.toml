@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.7.0a1"
-description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. v0.7.0a1 (development) adds `--new-instance` flag to `swarph spawn` for sibling-spawn case (beta #892 B2 — mints fresh UUID without touching sidecar so re-resume of original session still works). v0.7.0 final ships when auto-suffix (B1) + SessionStart hook + swarph-shared relocation also land."
+version = "0.7.0a2"
+description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. v0.7.0a2 (development) adds auto-suffix on sibling-collision (beta #892 B1) on top of PR-A `--new-instance` flag (B2). Sibling instances now persist at <role>-N.session-id slots and resume via `swarph spawn <role>-N`. v0.7.0 final ships when SessionStart hook + swarph-shared relocation also land."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"

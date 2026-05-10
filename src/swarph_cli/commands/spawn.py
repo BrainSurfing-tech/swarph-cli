@@ -124,14 +124,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--new-instance",
         action="store_true",
-        help="Mint a fresh UUID for this spawn instead of reading the "
-        "sidecar. Use for sibling-spawn (e.g., a second alpha+beta "
-        "drop-on-meta-edge instance on the same host). The sidecar is "
-        "NOT touched, so re-resume of the original session still works "
-        "without this flag. The new instance has no persistent home — "
-        "capture its UUID via --print-id and pass --session-id "
-        "<uuid> on subsequent invocations to resume it. v0.7+ feature "
-        "per beta #892 B2.",
+        help="Mint a fresh UUID for this spawn AND auto-allocate the "
+        "next free <role>-N slot for sibling persistence (v0.7 PR-B). "
+        "Use for sibling-spawn (e.g., a second alpha+beta drop-on-meta-edge "
+        "instance on the same host). The base sidecar is NOT touched, so "
+        "re-resume of the original session still works without this flag. "
+        "The sibling persists at <role>-N.session-id and is resumable via "
+        "`swarph spawn <role>-N` later. claude --name uses <role>-N for "
+        "/resume picker disambiguation. Auto-suffix policy via "
+        "next_free_slot_role() (slots 2-99). Per beta #892 B2 + B1.",
     )
     p.add_argument(
         "--no-banner",
@@ -149,7 +150,17 @@ def _split_passthrough(argv: list[str]) -> tuple[list[str], list[str]]:
     return argv[:idx], argv[idx + 1:]
 
 
-def _resolve_cell(args: argparse.Namespace) -> Cell:
+def _resolve_cell(args: argparse.Namespace) -> tuple[Cell, Optional[str]]:
+    """Resolve cell.yaml + return (cell, requested_role).
+
+    ``requested_role`` is the bare role name the user typed (or None
+    if the user gave a literal path / used --onboarding / relied on
+    cwd auto-discovery). Lets v0.7 PR-B distinguish ``swarph spawn
+    lab-test`` from ``swarph spawn lab-test-2`` even when both
+    resolve to the same cell.yaml — the former operates on slot 1,
+    the latter on slot 2.
+    """
+    requested_role: Optional[str] = None
     explicit = args.onboarding or args.cell
     if explicit:
         if is_mesh_gateway_url(explicit):
@@ -167,6 +178,15 @@ def _resolve_cell(args: argparse.Namespace) -> Cell:
                 "cell.yaml path for v0.6."
             )
         path = resolve_cell_path(args.role_or_path)
+        # Track the role iff the user gave a bare role string (not a
+        # literal path or `.` cwd token) — that's what slot-role
+        # disambiguation cares about.
+        if (
+            args.role_or_path != "."
+            and not args.role_or_path.endswith((".yaml", ".yml"))
+            and "/" not in args.role_or_path
+        ):
+            requested_role = args.role_or_path
     else:
         discovered = discover_cell_in_cwd()
         if discovered is None:
@@ -176,7 +196,7 @@ def _resolve_cell(args: argparse.Namespace) -> Cell:
                 "./cell.yaml"
             )
         path = discovered
-    return load_cell(path)
+    return load_cell(path), requested_role
 
 
 def _build_claude_argv(
@@ -184,8 +204,10 @@ def _build_claude_argv(
     session_id: str,
     no_starter: bool,
     passthrough: list[str],
+    effective_role: Optional[str] = None,
 ) -> list[str]:
-    argv: list[str] = ["claude", "--name", cell.role, "--session-id", session_id]
+    name_value = effective_role if effective_role is not None else cell.role
+    argv: list[str] = ["claude", "--name", name_value, "--session-id", session_id]
 
     if not no_starter:
         starter = cell.starter_prompt_text()
@@ -207,9 +229,15 @@ def _print_dry_run(
     was_generated: bool,
     argv: list[str],
     new_instance: bool = False,
+    effective_role: Optional[str] = None,
 ) -> None:
-    if was_generated and new_instance:
-        sid_label = "minted (sibling, sidecar untouched)"
+    is_sibling = (
+        new_instance
+        and effective_role is not None
+        and effective_role != cell.role
+    )
+    if is_sibling:
+        sid_label = f"minted (sibling slot {effective_role!r}, persisted)"
     elif was_generated:
         sid_label = "minted+persisted"
     else:
@@ -277,14 +305,22 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         _print_banner()
 
     try:
-        cell = _resolve_cell(args)
+        cell, requested_role = _resolve_cell(args)
     except (CellError, NotImplementedError) as exc:
         print(f"swarph spawn: {exc}", file=sys.stderr)
         return 1
 
+    # When user typed a slot-role (e.g. `swarph spawn drop-on-meta-edge-2`)
+    # the cell.yaml resolved to the BASE file (drop-on-meta-edge.yaml) so
+    # cell.role = "drop-on-meta-edge". But the operator wants slot 2's
+    # sidecar + display name. Use the user's typed role for the sidecar
+    # lookup; cell.role stays the base role for cell-context (cwd, starter
+    # prompt, lineage, provider).
+    sidecar_role = requested_role if requested_role else cell.role
+
     try:
-        session_id, was_generated = load_or_create_session_id(
-            cell.role, cell, new_instance=args.new_instance
+        session_id, was_generated, effective_role = load_or_create_session_id(
+            sidecar_role, cell, new_instance=args.new_instance
         )
     except CellError as exc:
         print(f"swarph spawn: {exc}", file=sys.stderr)
@@ -302,9 +338,24 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr,
         )
 
+    if args.new_instance and effective_role == sidecar_role and not cell.session_id:
+        # Degenerate case — --new-instance fired but no base sidecar
+        # existed, so we minted into the BASE slot (treating as the
+        # original). Surface this as a stderr note so the operator
+        # understands the v0.7 PR-B auto-suffix didn't kick in.
+        print(
+            "swarph spawn: --new-instance fired on a role with no "
+            f"existing sidecar — minted as the FIRST instance of "
+            f"{cell.role!r} (base slot), not as a sibling. Spawn the "
+            "original first via `swarph spawn <role>` (no --new-instance), "
+            "then re-run with --new-instance to mint a true sibling.",
+            file=sys.stderr,
+        )
+
     try:
         claude_argv = _build_claude_argv(
-            cell, session_id, args.no_starter, passthrough
+            cell, session_id, args.no_starter, passthrough,
+            effective_role=effective_role,
         )
     except CellError as exc:
         print(f"swarph spawn: {exc}", file=sys.stderr)
@@ -317,6 +368,7 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         _print_dry_run(
             cell, session_id, was_generated, claude_argv,
             new_instance=args.new_instance,
+            effective_role=effective_role,
         )
         return 0
 

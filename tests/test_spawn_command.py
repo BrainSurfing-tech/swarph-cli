@@ -226,31 +226,57 @@ def test_run_spawn_auto_discovers_cwd_cell_yaml(
     assert "lab-test" in captured.err
 
 
-def test_run_spawn_new_instance_mints_fresh_without_persisting(
+def test_run_spawn_new_instance_no_base_falls_through(
     isolated_xdg, fake_cell_yaml, capsys
 ):
-    """v0.7 PR-A — `swarph spawn --new-instance` mints UUID fresh + does
-    NOT write sidecar. Subsequent default spawn still gets a different
-    (or no) UUID from sidecar (since sidecar was never written)."""
+    """v0.7 PR-B — `--new-instance` with NO base sidecar lands in the
+    base slot (degenerate-case fallthrough) AND surfaces a stderr note
+    explaining the operator should spawn the original first."""
     from swarph_cli.cell import session_state_path
 
     rc = run_spawn(argv=[str(fake_cell_yaml), "--dry-run", "--print-id", "--new-instance"])
     captured = capsys.readouterr()
     assert rc == 0
+
+    # Sidecar IS written to base slot (degenerate case fallthrough)
+    base_sidecar = session_state_path("lab-test")
+    assert base_sidecar.exists()
+    # Sibling slot NOT written (no sibling created)
+    sibling_sidecar = session_state_path("lab-test-2")
+    assert not sibling_sidecar.exists()
+    # Stderr surfaces the degenerate-case note
+    assert "no existing sidecar" in captured.err
+    assert "FIRST instance" in captured.err
+
+
+def test_run_spawn_new_instance_with_base_mints_sibling_slot(
+    isolated_xdg, fake_cell_yaml, capsys
+):
+    """v0.7 PR-B — `--new-instance` with base sidecar present allocates
+    slot 2 AND persists. Sibling resumable via `swarph spawn <role>-2`."""
+    from swarph_cli.cell import session_state_path
+
+    # First spawn establishes base slot
+    run_spawn(argv=[str(fake_cell_yaml), "--dry-run", "--print-id"])
+    base_uuid = capsys.readouterr().out.splitlines()[0]
+
+    # Second spawn with --new-instance allocates slot 2
+    rc = run_spawn(argv=[str(fake_cell_yaml), "--dry-run", "--print-id", "--new-instance"])
+    captured = capsys.readouterr()
+    assert rc == 0
     sibling_uuid = captured.out.splitlines()[0]
-    import uuid as _uuid
-    _uuid.UUID(sibling_uuid)
+    assert sibling_uuid != base_uuid
 
-    # Sidecar must NOT exist after --new-instance
-    sidecar = session_state_path("lab-test")
-    assert not sidecar.exists(), "sidecar wrote despite --new-instance"
+    base_sidecar = session_state_path("lab-test")
+    sibling_sidecar = session_state_path("lab-test-2")
+    assert base_sidecar.read_text().strip() == base_uuid
+    assert sibling_sidecar.read_text().strip() == sibling_uuid
 
-    # Default spawn (no --new-instance) THEN mints a different UUID
-    rc2 = run_spawn(argv=[str(fake_cell_yaml), "--dry-run", "--print-id"])
-    out2 = capsys.readouterr().out.splitlines()[0]
-    _uuid.UUID(out2)
-    assert out2 != sibling_uuid  # different sessions
-    assert sidecar.exists()  # default path persists
+    # Dry-run output shows the sibling slot label
+    assert "lab-test-2" in captured.err
+    assert "sibling slot" in captured.err
+    # claude --name uses slot-suffixed role
+    assert "claude --name lab-test-2" in captured.out
 
 
 def test_run_spawn_new_instance_warns_when_cell_yaml_pins_session_id(
@@ -271,16 +297,30 @@ def test_run_spawn_new_instance_warns_when_cell_yaml_pins_session_id(
     assert "cell.yaml pins session_id" in captured.err
 
 
-def test_run_spawn_new_instance_dry_run_label(
+def test_run_spawn_resume_sibling_via_slot_role(
     isolated_xdg, fake_cell_yaml, capsys
 ):
-    """v0.7 PR-A — dry-run output flags 'sibling' state distinctly from
-    the default 'minted+persisted' / 'reused' labels."""
-    rc = run_spawn(argv=[str(fake_cell_yaml), "--dry-run", "--new-instance"])
+    """v0.7 PR-B — `swarph spawn <role>-2` resumes the sibling created
+    via prior `--new-instance`, using base cell.yaml for cell-context."""
+    from swarph_cli.cell import cells_dir
+    # Place cell.yaml under XDG cells dir so role-name resolution works
+    base_yaml = cells_dir() / "lab-test.yaml"
+    base_yaml.parent.mkdir(parents=True, exist_ok=True)
+    base_yaml.write_text(fake_cell_yaml.read_text())
+
+    # 1) Spawn base
+    run_spawn(argv=["lab-test", "--dry-run", "--print-id"])
+    base_uuid = capsys.readouterr().out.splitlines()[0]
+    # 2) Spawn sibling slot 2
+    run_spawn(argv=["lab-test", "--dry-run", "--print-id", "--new-instance"])
+    sibling_uuid = capsys.readouterr().out.splitlines()[0]
+    # 3) Resume sibling via slot-role
+    rc = run_spawn(argv=["lab-test-2", "--dry-run", "--print-id"])
     captured = capsys.readouterr()
     assert rc == 0
-    assert "sibling" in captured.err
-    assert "sidecar untouched" in captured.err
+    resumed_uuid = captured.out.splitlines()[0]
+    assert resumed_uuid == sibling_uuid  # same UUID; sidecar resume worked
+    assert "claude --name lab-test-2" in captured.out  # display uses slot-role
 
 
 def test_run_spawn_dry_run_redacts_starter_prompt_in_command(
