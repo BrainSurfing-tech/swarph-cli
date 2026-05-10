@@ -291,3 +291,62 @@ def test_load_or_create_session_id_atomic_no_tempfile_left_behind(
     assert siblings == [sidecar], (
         f"expected only {sidecar.name}; found {[p.name for p in siblings]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# v0.7 PR-A — `--new-instance` flag (beta #892 B2)
+# ---------------------------------------------------------------------------
+
+
+def test_new_instance_mints_fresh_uuid_without_touching_sidecar(
+    isolated_xdg, cell_yaml_factory
+):
+    """v0.7 PR-A — sibling-spawn case mints fresh UUID + leaves sidecar
+    untouched so re-resume of the original session still works."""
+    cell = load_cell(cell_yaml_factory())
+    # First call without new_instance — establishes sidecar
+    sid_orig, gen_orig = load_or_create_session_id("lab", cell, new_instance=False)
+    assert gen_orig is True
+    sidecar = session_state_path("lab")
+    sidecar_content_after_first = sidecar.read_text()
+
+    # Sibling call — fresh UUID, sidecar untouched
+    sid_sibling, gen_sibling = load_or_create_session_id(
+        "lab", cell, new_instance=True
+    )
+    assert gen_sibling is True
+    assert sid_sibling != sid_orig  # genuine fresh UUID
+    uuid.UUID(sid_sibling)
+    assert sidecar.read_text() == sidecar_content_after_first  # untouched
+
+    # Third call without new_instance — recovers the ORIGINAL UUID via sidecar
+    sid_resume, gen_resume = load_or_create_session_id("lab", cell, new_instance=False)
+    assert gen_resume is False
+    assert sid_resume == sid_orig  # sibling-spawn didn't break re-resume of original
+
+
+def test_new_instance_respects_pinned_session_id_in_cell_yaml(
+    isolated_xdg, cell_yaml_factory
+):
+    """v0.7 PR-A — cell.yaml-pinned session_id is operator intent and
+    overrides --new-instance. Pinned UUID returned + was_generated=False
+    + sidecar untouched. The CLI surfaces the conflict as a stderr
+    warning (tested in spawn-command tests)."""
+    fixed = "550e8400-e29b-41d4-a716-446655440000"
+    cell = load_cell(cell_yaml_factory(session_id=fixed))
+    sid, generated = load_or_create_session_id("lab", cell, new_instance=True)
+    assert sid == fixed
+    assert generated is False
+    assert not session_state_path("lab").exists()
+
+
+def test_new_instance_default_false_preserves_v0_6_behavior(
+    isolated_xdg, cell_yaml_factory
+):
+    """v0.7 PR-A — default new_instance=False keeps v0.6 sidecar-resume
+    behavior intact. Regression guard."""
+    cell = load_cell(cell_yaml_factory())
+    sid1, _ = load_or_create_session_id("lab", cell)  # default param
+    sid2, gen2 = load_or_create_session_id("lab", cell)
+    assert sid1 == sid2  # v0.6 R5 invariant — same UUID on re-spawn
+    assert gen2 is False
