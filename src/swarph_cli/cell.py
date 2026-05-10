@@ -146,8 +146,66 @@ def session_state_path(role: str) -> Path:
     stays purely declarative and is safe to commit to git. Roles
     re-spawned with the same role name resume the same session via
     this state file.
+
+    v0.7 PR-B (beta #892 B1) extends this to per-slot sidecars for
+    sibling instances: ``<role>.session-id`` is slot 1; ``<role>-2``,
+    ``<role>-3`` etc. are siblings minted via ``--new-instance``.
+    See ``next_free_slot_role()`` for the slot allocation policy.
     """
     return _state_root() / "swarph" / "sessions" / f"{role}.session-id"
+
+
+def next_free_slot_role(base_role: str) -> str:
+    """Find the next free `<base_role>-N` slot for a sibling spawn.
+
+    v0.7 PR-B (beta #892 B1). Auto-suffix policy: siblings beyond
+    the first slot append ``-2``, ``-3``, ``-4`` etc. The naming
+    suffix matches the slot index, so:
+
+    * Slot 1 (the original): ``<base_role>``
+    * Slot 2 (first sibling): ``<base_role>-2``
+    * Slot 3 (second sibling): ``<base_role>-3``
+
+    Returns the synthesised role string for the next free slot.
+    The first sibling spawn (when slot 1 is occupied) returns
+    ``<base_role>-2`` — slot 1 is reserved for the cell.yaml-named
+    role exactly so sibling-N=1 confusion doesn't arise.
+
+    The base role MUST already be occupied (sidecar exists) before
+    calling this; the caller is responsible for that check, since
+    ``--new-instance`` on an unoccupied base role is a degenerate
+    case (commander wants a sibling but has no original — should
+    spawn the original first via default ``swarph spawn <role>``).
+
+    Hard cap at slot 99 to avoid runaway loops; if 99 is full the
+    operator has bigger problems than auto-suffix policy can solve.
+    """
+    for n in range(2, 100):
+        candidate = f"{base_role}-{n}"
+        if not session_state_path(candidate).exists():
+            return candidate
+    raise CellError(
+        f"next_free_slot_role: 99 sibling slots already occupied for "
+        f"base role {base_role!r}. Manual cleanup needed at "
+        f"{_state_root() / 'swarph' / 'sessions'}/."
+    )
+
+
+def base_role_from_slot_role(role: str) -> str:
+    """Strip a trailing ``-N`` slot suffix from a role string.
+
+    v0.7 PR-B. Lets ``swarph spawn <base-role>-2`` resolve back to
+    the cell.yaml at ``<base-role>.yaml`` for shared cell-context
+    (same cwd, starter-prompt, lineage, etc.) while the sidecar
+    + display name use the slot-suffixed role.
+
+    Returns ``role`` unchanged if no trailing ``-<N>`` suffix is
+    present (preserves v0.6 behavior for non-sibling spawns).
+    """
+    parts = role.rsplit("-", 1)
+    if len(parts) == 2 and parts[1].isdigit() and 2 <= int(parts[1]) <= 99:
+        return parts[0]
+    return role
 
 
 _MESH_GATEWAY_URL_PREFIX = "mesh-gateway://"
@@ -167,7 +225,14 @@ def resolve_cell_path(spec: str) -> Path:
       3. ``./cell.yaml`` exists in current cwd AND spec equals current cwd's
          basename OR equals a special token ``.`` → use ``./cell.yaml``
          (alpha #891 D3)
-      4. otherwise → ``<cells_dir>/<spec>.yaml``
+      4. ``<cells_dir>/<spec>.yaml`` exists → use it
+      5. v0.7 PR-B sibling-resume — strip trailing ``-N`` suffix from spec
+         and try ``<cells_dir>/<base-role>.yaml`` (lets ``swarph spawn
+         drop-on-meta-edge-2`` resolve back to base cell.yaml so siblings
+         share cell-context). Honors operator-intent: explicit base file
+         takes precedence (step 4) over slot-stripped fallback (step 5).
+      6. otherwise → return ``<cells_dir>/<spec>.yaml`` (will fail on load
+         with a 'not found' error)
 
     Mesh-gateway URL inputs (``mesh-gateway://peers/<peer-id>/spawn-context``)
     are caught by ``is_mesh_gateway_url`` BEFORE this function and return
@@ -177,7 +242,19 @@ def resolve_cell_path(spec: str) -> Path:
         return Path.cwd() / "cell.yaml"
     if spec.endswith((".yaml", ".yml")) or os.sep in spec:
         return Path(spec).expanduser()
-    return cells_dir() / f"{spec}.yaml"
+
+    direct = cells_dir() / f"{spec}.yaml"
+    if direct.is_file():
+        return direct
+
+    # v0.7 PR-B sibling-resume fallback
+    base = base_role_from_slot_role(spec)
+    if base != spec:
+        base_path = cells_dir() / f"{base}.yaml"
+        if base_path.is_file():
+            return base_path
+
+    return direct  # not found; let load_cell raise with a clear error
 
 
 def discover_cell_in_cwd() -> Optional[Path]:
@@ -315,39 +392,67 @@ def load_or_create_session_id(
     role: str,
     cell: Cell,
     new_instance: bool = False,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, str]:
     """Resolve the session-id for a spawn invocation.
 
-    Returns ``(session_id, was_generated)`` where ``was_generated``
-    indicates whether a fresh UUID was minted on this call.
+    Returns ``(session_id, was_generated, effective_role)`` where:
+      * ``session_id`` — UUID to pass to ``claude --session-id``
+      * ``was_generated`` — True if a fresh UUID was minted on this
+        call
+      * ``effective_role`` — the role string to pass to ``claude
+        --name`` AND the slot key for sidecar persistence. Will
+        equal ``role`` for the default re-resume path; will be a
+        ``<role>-<N>`` slot-suffixed string for v0.7 PR-B
+        sibling-spawn case (auto-suffix policy in
+        ``next_free_slot_role``).
 
     Resolution order:
       1. cell.session_id (cell.yaml-pinned) — never generated, never
          affected by ``new_instance`` (a pinned UUID is operator
-         intent and overrides everything)
-      2. ``new_instance=True`` — mint a fresh UUID; do NOT touch the
-         sidecar (sibling-spawn case per beta #892 B2; v0.7+ feature)
-      3. session_state_path(role) (last-generated for this role) —
-         the default re-resume path that the R5 fix is built on
-      4. mint new uuid4 + persist to session_state_path(role)
+         intent and overrides everything). effective_role = role.
+      2. ``new_instance=True`` AND base sidecar already exists —
+         v0.7 PR-B auto-suffix: find next free ``<role>-N`` slot,
+         mint fresh UUID, persist to slot-N sidecar. Caller can
+         resume this sibling later via ``swarph spawn <role>-N``.
+      3. ``new_instance=True`` AND base sidecar does NOT exist —
+         degenerate case (commander wants sibling but has no
+         original); treat as default-spawn path with a stderr
+         warning at the CLI layer (warns in spawn.py).
+      4. session_state_path(role) (last-generated for this role) —
+         the default re-resume path that the R5 fix is built on.
+         effective_role = role.
+      5. mint new uuid4 + persist to session_state_path(role).
+         effective_role = role.
+
+    Backward-compat: this function's signature changed from v0.6
+    (``(role, cell)`` returning ``(sid, gen)``) to v0.7 (added
+    ``new_instance`` arg + ``effective_role`` in return tuple).
+    Callers must unpack the 3-tuple now; the 2-tuple shape is no
+    longer returned even on the default re-resume path.
     """
     if cell.session_id:
-        return cell.session_id, False
+        return cell.session_id, False, role
 
     if new_instance:
-        # Sibling-spawn case — mint fresh, leave sidecar untouched
-        # so re-resume of the original session still works without
-        # this flag. The new sibling has no persistent home in v0.7;
-        # operator carries the UUID via --print-id capture or
-        # explicit --session-id flag on subsequent invocations.
-        return str(uuid.uuid4()), True
+        base_state = session_state_path(role)
+        if base_state.exists():
+            # v0.7 PR-B sibling-spawn case — auto-suffix
+            sibling_role = next_free_slot_role(role)
+            sibling_state = session_state_path(sibling_role)
+            new_id = str(uuid.uuid4())
+            sibling_state.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(sibling_state, new_id + "\n")
+            return new_id, True, sibling_role
+        # Degenerate case — no base session to be a sibling of.
+        # Fall through to default-spawn path (treats as the original);
+        # CLI layer (spawn.py) prints a stderr note about this edge case.
 
     state_file = session_state_path(role)
     if state_file.exists():
         existing = state_file.read_text(encoding="utf-8").strip()
         if existing:
             try:
-                return _validate_uuid(existing), False
+                return _validate_uuid(existing), False, role
             except CellError:
                 # Corrupted state — fall through and regenerate.
                 pass
@@ -355,7 +460,7 @@ def load_or_create_session_id(
     new_id = str(uuid.uuid4())
     state_file.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(state_file, new_id + "\n")
-    return new_id, True
+    return new_id, True, role
 
 
 def _atomic_write_text(target: Path, content: str) -> None:
