@@ -311,20 +311,36 @@ def load_cell(path: Path) -> Cell:
     )
 
 
-def load_or_create_session_id(role: str, cell: Cell) -> tuple[str, bool]:
+def load_or_create_session_id(
+    role: str,
+    cell: Cell,
+    new_instance: bool = False,
+) -> tuple[str, bool]:
     """Resolve the session-id for a spawn invocation.
 
     Returns ``(session_id, was_generated)`` where ``was_generated``
-    indicates whether a fresh UUID was minted (and persisted) on this
-    call.
+    indicates whether a fresh UUID was minted on this call.
 
     Resolution order:
-      1. cell.session_id (cell.yaml-pinned) — never generated
-      2. session_state_path(role) (last-generated for this role)
-      3. mint new uuid4 + persist to session_state_path(role)
+      1. cell.session_id (cell.yaml-pinned) — never generated, never
+         affected by ``new_instance`` (a pinned UUID is operator
+         intent and overrides everything)
+      2. ``new_instance=True`` — mint a fresh UUID; do NOT touch the
+         sidecar (sibling-spawn case per beta #892 B2; v0.7+ feature)
+      3. session_state_path(role) (last-generated for this role) —
+         the default re-resume path that the R5 fix is built on
+      4. mint new uuid4 + persist to session_state_path(role)
     """
     if cell.session_id:
         return cell.session_id, False
+
+    if new_instance:
+        # Sibling-spawn case — mint fresh, leave sidecar untouched
+        # so re-resume of the original session still works without
+        # this flag. The new sibling has no persistent home in v0.7;
+        # operator carries the UUID via --print-id capture or
+        # explicit --session-id flag on subsequent invocations.
+        return str(uuid.uuid4()), True
 
     state_file = session_state_path(role)
     if state_file.exists():

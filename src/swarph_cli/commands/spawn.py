@@ -122,6 +122,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print resolved session-id to stdout before exec.",
     )
     p.add_argument(
+        "--new-instance",
+        action="store_true",
+        help="Mint a fresh UUID for this spawn instead of reading the "
+        "sidecar. Use for sibling-spawn (e.g., a second alpha+beta "
+        "drop-on-meta-edge instance on the same host). The sidecar is "
+        "NOT touched, so re-resume of the original session still works "
+        "without this flag. The new instance has no persistent home — "
+        "capture its UUID via --print-id and pass --session-id "
+        "<uuid> on subsequent invocations to resume it. v0.7+ feature "
+        "per beta #892 B2.",
+    )
+    p.add_argument(
         "--no-banner",
         action="store_true",
         help="Suppress the swarph startup banner on stderr.",
@@ -189,7 +201,19 @@ def _print_banner() -> None:
     sys.stderr.flush()
 
 
-def _print_dry_run(cell: Cell, session_id: str, was_generated: bool, argv: list[str]) -> None:
+def _print_dry_run(
+    cell: Cell,
+    session_id: str,
+    was_generated: bool,
+    argv: list[str],
+    new_instance: bool = False,
+) -> None:
+    if was_generated and new_instance:
+        sid_label = "minted (sibling, sidecar untouched)"
+    elif was_generated:
+        sid_label = "minted+persisted"
+    else:
+        sid_label = "reused"
     print(f"# swarph spawn dry-run", file=sys.stderr)
     print(f"#   cell:        {cell.source_path}", file=sys.stderr)
     print(f"#   schema:      {cell.schema_version}", file=sys.stderr)
@@ -197,8 +221,7 @@ def _print_dry_run(cell: Cell, session_id: str, was_generated: bool, argv: list[
     print(f"#   role:        {cell.role}", file=sys.stderr)
     print(f"#   cwd:         {cell.cwd}", file=sys.stderr)
     print(
-        f"#   session_id:  {session_id} "
-        f"({'minted+persisted' if was_generated else 'reused'})",
+        f"#   session_id:  {session_id} ({sid_label})",
         file=sys.stderr,
     )
     print(
@@ -260,10 +283,24 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         return 1
 
     try:
-        session_id, was_generated = load_or_create_session_id(cell.role, cell)
+        session_id, was_generated = load_or_create_session_id(
+            cell.role, cell, new_instance=args.new_instance
+        )
     except CellError as exc:
         print(f"swarph spawn: {exc}", file=sys.stderr)
         return 1
+
+    if args.new_instance and cell.session_id:
+        # Pinned cell.yaml session_id wins over --new-instance; surface
+        # the conflict on stderr so the operator knows the flag was a
+        # no-op for this cell.
+        print(
+            "swarph spawn: --new-instance ignored — cell.yaml pins "
+            "session_id explicitly. Remove the pinned UUID from cell.yaml "
+            "OR pass --session-id <new-uuid> on the claude command line "
+            "via `-- --session-id <uuid>` passthrough to override.",
+            file=sys.stderr,
+        )
 
     try:
         claude_argv = _build_claude_argv(
@@ -277,7 +314,10 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         print(session_id)
 
     if args.dry_run:
-        _print_dry_run(cell, session_id, was_generated, claude_argv)
+        _print_dry_run(
+            cell, session_id, was_generated, claude_argv,
+            new_instance=args.new_instance,
+        )
         return 0
 
     claude_bin = shutil.which("claude")
