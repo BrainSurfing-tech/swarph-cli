@@ -149,7 +149,8 @@ def test_load_cell_starter_prompt_path_resolved_relative_to_cell(
     path = cell_yaml_factory(starter_prompt_path="starter.md")
     cell = load_cell(path)
     assert cell.starter_prompt_path == starter
-    assert "AI-to-AI" in (cell.starter_prompt_text() or "")
+    from swarph_cli.cell import read_starter_prompt
+    assert "AI-to-AI" in (read_starter_prompt(cell) or "")
 
 
 def test_load_cell_unknown_keys_preserved_in_extra(cell_yaml_factory):
@@ -209,7 +210,7 @@ def test_load_cell_invalid_session_id_rejected(cell_yaml_factory):
 
 def test_load_cell_non_claude_provider_rejected_in_v0_6(cell_yaml_factory):
     path = cell_yaml_factory(provider="gemini")
-    with pytest.raises(CellError, match="v0.7"):
+    with pytest.raises(CellError, match="v0.8"):
         load_cell(path)
 
 
@@ -224,8 +225,9 @@ def test_load_cell_starter_prompt_unreadable_raises_when_accessed(
 ):
     path = cell_yaml_factory(starter_prompt_path="/nope/missing.md")
     cell = load_cell(path)
+    from swarph_cli.cell import read_starter_prompt
     with pytest.raises(CellError, match="not readable"):
-        cell.starter_prompt_text()
+        read_starter_prompt(cell)
 
 
 # ---------------------------------------------------------------------------
