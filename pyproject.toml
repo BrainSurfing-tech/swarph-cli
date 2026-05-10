@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.7.0a3"
-description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. v0.7.0a3 (development) adds `swarph install-hook` + `swarph hook-output` for SessionStart memory-injection (substrate-doc R7 §11.1.7.1 #1) — closes the bare-claude operator-paste gap PR-A/PR-B left open. v0.7.0 final ships when swarph-shared cell.yaml relocation (PR-D) also lands."
+version = "0.7.0a4"
+description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. v0.7.0a4 (development) adds `swarph watchdog` for stranded-session detection + recovery (drop-mother #1021 + beta #1019 design — last-task-notification PRIMARY + pgrep FALLBACK + AND-gate; A1 tmux send-keys wake → A2 swarph-spawn respawn). v0.7.0 final ships when swarph-shared cell.yaml relocation (PR-D) also lands."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
