@@ -271,6 +271,13 @@ def _a1_marker_path(log_path: Path, role: str) -> Path:
     repeat A1 fires within the same stale window — fix for the spam incident
     where cron fired A1 every 5min for 65min into an active session's tmux
     input buffer (commander #1092 + droplet #1087).
+
+    Keyed on ``role`` alone today. When the F4 follow-up (cell.yaml-pinned
+    cursor_path + tmux_session per mother+beta #1064/#1065) lands and the
+    sibling-instance pattern (alpha+beta drop-on-meta-edge per
+    project_drop_mitosis_to_meta_edge) ships at scale, two siblings sharing
+    the same base ``role`` would clobber each other's markers. Re-key on
+    ``(role, tmux_session)`` once F4 lands — flagged by mother in #1103.
     """
     return log_path.parent / f"a1-fired-{role}.marker"
 
