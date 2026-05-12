@@ -228,27 +228,154 @@ def test_stale_cursor_alive_tmux_missing_fires_a2(
 
 
 # ---------------------------------------------------------------------------
-# Detection error — gateway unreachable → assume unread (still try A1)
+# F2 — fail-closed on unread=None
 # ---------------------------------------------------------------------------
 
 
-def test_gateway_unreachable_does_not_block_a1(
+def test_gateway_unread_unknown_returns_noop(
     isolated_state, stale_cursor, monkeypatch, capsys
 ):
-    """If gateway is down, return None for unread — watchdog still tries A1
-    (assume unread; gateway-down ≠ session-dead)."""
+    """F2 fix (commander #1092 / droplet #1089) — if gateway returns None
+    for unread count, fail CLOSED rather than firing A1.
+
+    Old behavior fired A1 on None ("gateway down ≠ session dead"); production
+    surfaced the case where gateway is fine but the count is still None
+    (parser mismatch, transient error), and A1 spammed the tmux buffer
+    13 times across 65min. New contract: 'respect peer-time when uncertain' —
+    trade false-negative (occasional missed wake on real strands) for
+    elimination of the false-positive spam class.
+    """
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=None), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
+         patch("swarph_cli.commands.watchdog._tmux_send_keys") as send_mock:
         rc = run_watchdog(argv=[
             "--check", "--cell", "lab",
             "--cursor", str(stale_cursor),
             "--threshold", "60",
         ])
-    # unread=None passes the `if unread == 0` short-circuit and goes to A1
-    assert rc == 1
-    send_mock.assert_called_once()
+    assert rc == 0
+    send_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# F1 — same-stale-window A1 suppression
+# ---------------------------------------------------------------------------
+
+
+def test_a1_fires_at_most_once_per_stale_window(
+    isolated_state, stale_cursor, monkeypatch
+):
+    """F1 fix — repeated checks within the same stale window (cursor mtime
+    unchanged) fire A1 only on the first invocation; subsequent checks
+    noop with reason 'noop_a1_already_fired_this_window'.
+
+    Production incident (commander #1092): cron at */5 fired A1 13 times
+    across 65min into an actively-working session's tmux buffer because
+    cursor only updates at turn-end, not mid-bash. After F1, watchdog
+    fires AT MOST ONCE per stale window; re-arms on cursor advance.
+    """
+    log_path = isolated_state / "wd.log"
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
+        # First invocation — A1 fires
+        rc1 = run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(stale_cursor),
+            "--threshold", "60",
+            "--log", str(log_path),
+        ])
+        # Second invocation, no cursor change — A1 must NOT fire again
+        rc2 = run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(stale_cursor),
+            "--threshold", "60",
+            "--log", str(log_path),
+        ])
+        # Third invocation — still suppressed
+        rc3 = run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(stale_cursor),
+            "--threshold", "60",
+            "--log", str(log_path),
+        ])
+    assert rc1 == 1
+    assert rc2 == 0
+    assert rc3 == 0
+    assert send_mock.call_count == 1  # NOT 3 — suppressed on rc2 and rc3
+    # Second log entry should record the suppression reason explicitly
+    lines = [ln for ln in log_path.read_text().splitlines() if ln.strip()]
+    parsed_second = json.loads(lines[1])
+    assert parsed_second["details"]["decision"] == "noop_a1_already_fired_this_window"
+
+
+def test_a1_rearms_after_cursor_advance(
+    isolated_state, stale_cursor, monkeypatch
+):
+    """F1 fix — after the suppressed window, if cursor advances (session
+    recovered, even briefly), the marker no longer matches and subsequent
+    stale windows fire A1 again. Ensures we don't permanently mute A1 on
+    a peer that recovered then re-stranded."""
+    import os as _os
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=2), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
+        # First A1 fires
+        run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(stale_cursor),
+            "--threshold", "60",
+        ])
+        # Simulate cursor advancing 5min — but still stale (8min > 60s threshold)
+        new_mtime = time.time() - 480
+        _os.utime(stale_cursor, (new_mtime, new_mtime))
+        # Second invocation — A1 must fire again (cursor advanced ⇒ new window)
+        run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(stale_cursor),
+            "--threshold", "60",
+        ])
+    assert send_mock.call_count == 2
+
+
+def test_a2_escalation_clears_a1_marker(
+    isolated_state, stale_cursor, monkeypatch
+):
+    """F1 fix — A2 respawn path clears the marker so the post-respawn
+    session starts with a clean slate (otherwise a recovered+re-stranded
+    session would inherit a stale marker matching the OLD cursor_mtime,
+    which is theoretically possible since marker stores cursor_mtime not
+    epoch-now). Defensive cleanup."""
+    log_path = isolated_state / "wd.log"
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=5), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True):
+        # First fire — record marker
+        run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(stale_cursor),
+            "--threshold", "60",
+            "--log", str(log_path),
+        ])
+    marker = log_path.parent / "a1-fired-lab.marker"
+    assert marker.exists()
+
+    # Now force A2 path (process dead) and confirm marker is gone
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=False), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=5), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=False), \
+         patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True):
+        run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(stale_cursor),
+            "--threshold", "60",
+            "--log", str(log_path),
+        ])
+    assert not marker.exists()
 
 
 # ---------------------------------------------------------------------------
