@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.7.0"
+version = "0.7.1"
 description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration. v0.7.0 ships Phase 7 substrate-doc R7 §11.1.7 operator-tooling layer in 5 increments: PR-A `--new-instance` flag (sibling-spawn case) + PR-B auto-suffix on collision (sibling-slot persistence) + PR-C SessionStart hook (closes bare-claude operator-paste gap) + watchdog (stranded-session recovery) + PR-D swarph-shared cell.yaml relocation (cell-yaml schema graduates to swarph-shared 0.3.0 kernel-tier; substrate-doc R7 §11.1.5 (O5) RESOLVED)."
 readme = "README.md"
 license = { text = "MIT" }

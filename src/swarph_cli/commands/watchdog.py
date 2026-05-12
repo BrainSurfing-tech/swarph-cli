@@ -263,6 +263,47 @@ def _spawn_via_swarph(role: str, tmux_session: str) -> bool:
         return False
 
 
+def _a1_marker_path(log_path: Path, role: str) -> Path:
+    """Marker file recording the cursor_mtime at which A1 was last fired.
+
+    Co-located with the watchdog log so it inherits the same XDG_STATE_HOME
+    discipline. Cleared on cursor-advance OR A2 escalation. Used to suppress
+    repeat A1 fires within the same stale window — fix for the spam incident
+    where cron fired A1 every 5min for 65min into an active session's tmux
+    input buffer (commander #1092 + droplet #1087).
+    """
+    return log_path.parent / f"a1-fired-{role}.marker"
+
+
+def _a1_already_fired_at(marker: Path, cursor_mtime: int) -> bool:
+    """Returns True if a previous A1 was fired with this exact cursor_mtime.
+
+    Same cursor_mtime ⇒ no cursor advance since last fire ⇒ we're still in
+    the same stale window ⇒ another A1 would spam. Suppresses the fire.
+    """
+    try:
+        return int(marker.read_text().strip()) == cursor_mtime
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+
+
+def _record_a1_fired(marker: Path, cursor_mtime: int) -> None:
+    """Best-effort marker write; failures are logged elsewhere but never block."""
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(cursor_mtime))
+    except OSError:
+        pass
+
+
+def _clear_a1_marker(marker: Path) -> None:
+    """Idempotent marker removal. Called on A2 escalation paths."""
+    try:
+        marker.unlink()
+    except (FileNotFoundError, OSError):
+        pass
+
+
 def _log_event(log_path: Path, event: str, details: dict, verbose: bool = False) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
@@ -323,13 +364,19 @@ def run_check(args: argparse.Namespace) -> int:
     unread = _gateway_unread_count(gateway, peer, token)
     diag["unread_count"] = unread
 
-    # Decision matrix:
-    # cursor_stale + process_alive + unread > 0  → A1 (alive but throttled, prompt may unblock)
+    # Decision matrix (post commander #1092 + droplet #1087 + #1089 hardening):
     # cursor_stale + not process_alive            → A2 (dead, respawn regardless of unread)
+    # cursor_stale + process_alive + unread > 0   → A1 (alive but throttled, prompt may unblock)
     # cursor_stale + process_alive + unread = 0   → noop (no DMs to drain anyway)
-    # cursor_stale + unread = None                → A1 (assume unread; gateway down ≠ session dead)
+    # cursor_stale + process_alive + unread None  → noop (F2 fail-closed: can't verify work, don't poke)
+    # cursor_stale + a1_marker matches cursor_mtime → noop (F1 same-window suppression)
+
+    marker = _a1_marker_path(log_path, role)
+    diag["a1_marker"] = str(marker)
 
     if not process_alive:
+        # A2 escalation — clear the A1 marker so the next A1 (after respawn) fires.
+        _clear_a1_marker(marker)
         diag["decision"] = "a2_respawn_process_dead"
         if args.no_respawn:
             diag["dry_run_skip"] = True
@@ -340,17 +387,27 @@ def run_check(args: argparse.Namespace) -> int:
         _log_event(log_path, "a2_respawn", diag, verbose)
         return 2 if spawn_ok else 4
 
-    # Process is alive but cursor is stale — A1 escalation
+    # Process is alive but cursor is stale.
+    # F2 — fail-closed when unread can't be verified. Trade false-negative for
+    # false-positive ("respect peer-time when uncertain" per droplet #1089).
+    # Production incident shape (commander #1092): gateway returned None for
+    # unread; old code fell through to A1, spamming the tmux buffer for 65min.
+    if unread is None:
+        diag["decision"] = "noop_unread_unknown"
+        _log_event(log_path, "noop", diag, verbose)
+        return 0
+
     if unread == 0:
         diag["decision"] = "noop_no_unread"
         _log_event(log_path, "noop", diag, verbose)
         return 0
 
-    diag["decision"] = "a1_send_keys"
     if not _tmux_session_exists(tmux_session):
         # Process alive somewhere but tmux session gone — partial state.
         # Treat as A2 case: respawn fresh sibling.
+        _clear_a1_marker(marker)
         diag["tmux_missing"] = True
+        diag["decision"] = "a2_respawn_tmux_missing"
         if args.no_respawn:
             _log_event(log_path, "a2_dry_run", diag, verbose)
             return 2
@@ -359,12 +416,26 @@ def run_check(args: argparse.Namespace) -> int:
         _log_event(log_path, "a2_respawn", diag, verbose)
         return 2 if spawn_ok else 4
 
+    # F1 — same-stale-window suppression. If A1 already fired at this exact
+    # cursor_mtime, further A1s would only stack wake-prompts in the tmux
+    # input buffer (commander #1092: 13 fires across 65min on a session that
+    # was actively working but cursor only updates at turn-end). Fire AT MOST
+    # ONCE per stale window; re-arm only when cursor advances (recovery) or
+    # A2 escalates (respawn clears the marker above).
+    if _a1_already_fired_at(marker, cursor_mtime):
+        diag["decision"] = "noop_a1_already_fired_this_window"
+        _log_event(log_path, "noop", diag, verbose)
+        return 0
+
+    diag["decision"] = "a1_send_keys"
     wake_text = (
         f"watchdog wake — cursor stale {cursor_age}s, "
         f"unread={unread}; please drain inbox"
     )
     sent = _tmux_send_keys(tmux_session, wake_text)
     diag["send_keys_ok"] = sent
+    if sent:
+        _record_a1_fired(marker, cursor_mtime)
     _log_event(log_path, "a1_send_keys", diag, verbose)
     return 1 if sent else 4
 
