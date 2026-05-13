@@ -79,6 +79,11 @@ _DEFAULT_THRESHOLD_SEC = 1800  # 30 minutes
 _DEFAULT_A1_RETRIES = 3
 _DEFAULT_A1_BACKOFF_SEC = 60
 _DEFAULT_GATEWAY_URL = "http://localhost:8788"
+# F3 — tmux pane_activity gate threshold. If pane has activity within this
+# many seconds, suppress A1 (session is working, not stalled). 600s (10min)
+# is comfortably above legitimate-pause noise + comfortably below the
+# 30min cursor-staleness threshold, so the two gates compose cleanly.
+_DEFAULT_PANE_ACTIVITY_THRESHOLD_SEC = 600
 
 _USAGE = """\
 Usage:
@@ -137,16 +142,103 @@ def _stat_mtime(path: Path) -> Optional[int]:
         return None
 
 
-def _resolve_cursor_path(role: str, explicit: Optional[str]) -> Path:
-    """Resolve cursor file path with documented fallback chain."""
+def _resolve_cursor_path(
+    role: str,
+    explicit: Optional[str],
+    cell_yaml_value: Optional[str] = None,
+) -> Path:
+    """Resolve cursor file path with documented fallback chain.
+
+    Precedence (F4 — mother #1057/#1060 + beta #1061/#1065):
+      1. Explicit ``--cursor`` CLI arg (highest)
+      2. ``cell.yaml`` extra.cursor_path when --cell present
+      3. ``$TMPDIR/<role>-cursor.json``
+      4. ``/tmp/lab-claude-cursor.json`` (legacy lab-orchestrator default)
+
+    F4 closes the host-prefix-variant + sibling-instance-variant gap
+    class — cell.yaml carries the canonical cursor path per-cell, watchdog
+    auto-resolves when --cell is provided. Eliminates the silent-default-
+    to-lab-prefix failure mode that gave droplet 23hr of cursor-unreadable
+    errors before catch.
+    """
     if explicit:
         return Path(explicit).expanduser()
+    if cell_yaml_value:
+        return Path(cell_yaml_value).expanduser()
     tmpdir = os.environ.get("TMPDIR", "/tmp")
     primary = Path(tmpdir) / f"{role}-cursor.json"
     if primary.exists():
         return primary
     # lab-orchestrator's documented cursor path per session_start_reminder.txt
     return Path("/tmp/lab-claude-cursor.json")
+
+
+def _resolve_tmux_session(
+    role: str,
+    explicit: Optional[str],
+    cell_yaml_value: Optional[str] = None,
+) -> str:
+    """Resolve tmux session name with documented fallback chain.
+
+    Precedence (F4 sibling to cursor_path):
+      1. Explicit ``--tmux-session`` CLI arg
+      2. ``cell.yaml`` extra.tmux_session when --cell present
+      3. Role itself (convention default)
+
+    Mother's sibling-instance variant (#1061): when slot-N siblings spawn,
+    each slot needs its own tmux session name; the cell.yaml that pins the
+    slot SHOULD also pin the tmux_session to keep the watchdog's reads
+    consistent with the spawn's writes.
+    """
+    if explicit:
+        return explicit
+    if cell_yaml_value:
+        return cell_yaml_value
+    return role
+
+
+def _read_cell_yaml_pins(role: str) -> tuple[Optional[str], Optional[str]]:
+    """Best-effort read of cell.yaml extra.cursor_path + extra.tmux_session.
+
+    Tries the cwd-local ``./cell.yaml`` first (matches hook_output discovery),
+    falls back to ``<cells_dir>/<role>.yaml``. Returns (None, None) on any
+    failure — F4 is additive non-breaking, malformed cell.yaml falls through
+    to the legacy convention defaults.
+
+    NOTE: ``cursor_path`` / ``tmux_session`` live in ``Cell.extra`` (forward-
+    compat catch-all per swarph-shared v0.3) in v0.7.2. swarph-shared 0.4
+    will graduate them to first-class typed fields on ``Cell``; this reader
+    will continue to work because graduate-to-typed-field preserves the
+    extra-dict reading path (per swarph-shared's documented forward-compat
+    discipline).
+    """
+    from swarph_cli.cell import (
+        cells_dir,
+        discover_cell_in_cwd,
+        load_cell,
+        CellError,
+    )
+
+    cell_path = discover_cell_in_cwd()
+    if cell_path is None:
+        candidate = cells_dir() / f"{role}.yaml"
+        if candidate.is_file():
+            cell_path = candidate
+    if cell_path is None:
+        return None, None
+
+    try:
+        cell = load_cell(cell_path)
+    except (CellError, OSError):
+        return None, None
+
+    extra = cell.extra or {}
+    cursor_path = extra.get("cursor_path")
+    tmux_session = extra.get("tmux_session")
+    return (
+        str(cursor_path) if cursor_path else None,
+        str(tmux_session) if tmux_session else None,
+    )
 
 
 def _resolve_log_path(explicit: Optional[str]) -> Path:
@@ -228,6 +320,39 @@ def _tmux_send_keys(name: str, text: str) -> bool:
         return False
 
 
+def _pane_activity_age_sec(name: str) -> Optional[int]:
+    """Age in seconds since the tmux pane's last activity event.
+
+    Reads tmux's `#{pane_activity}` format variable, which returns a unix
+    epoch timestamp of the most recent activity in the active pane of the
+    target session. Returns None if tmux is missing, the session doesn't
+    exist, or tmux's output isn't parseable as an integer epoch.
+
+    Used by F3 (mother #1087 / drop-on-meta-edge proposal) as a third
+    AND-gate input to distinguish (a) session genuinely stalled from (b)
+    session actively working in a long bash block. cursor-mtime alone
+    measures "time since last turn-end" not "time since last activity";
+    pane_activity covers the mid-turn-active case.
+
+    Returns None on detection error so the caller can fall through to
+    the legacy AND-gate behavior — F3 is a strengthening of the gate,
+    not a replacement of it.
+    """
+    try:
+        result = subprocess.run(
+            ["tmux", "display", "-p", "-t", name, "#{pane_activity}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        out = result.stdout.strip()
+        if not out:
+            return None
+        return max(0, _now() - int(out))
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return None
+
+
 def _tmux_kill_session(name: str) -> bool:
     try:
         result = subprocess.run(
@@ -263,7 +388,7 @@ def _spawn_via_swarph(role: str, tmux_session: str) -> bool:
         return False
 
 
-def _a1_marker_path(log_path: Path, role: str) -> Path:
+def _a1_marker_path(log_path: Path, role: str, tmux_session: Optional[str] = None) -> Path:
     """Marker file recording the cursor_mtime at which A1 was last fired.
 
     Co-located with the watchdog log so it inherits the same XDG_STATE_HOME
@@ -272,14 +397,27 @@ def _a1_marker_path(log_path: Path, role: str) -> Path:
     where cron fired A1 every 5min for 65min into an active session's tmux
     input buffer (commander #1092 + droplet #1087).
 
-    Keyed on ``role`` alone today. When the F4 follow-up (cell.yaml-pinned
-    cursor_path + tmux_session per mother+beta #1064/#1065) lands and the
-    sibling-instance pattern (alpha+beta drop-on-meta-edge per
-    project_drop_mitosis_to_meta_edge) ships at scale, two siblings sharing
-    the same base ``role`` would clobber each other's markers. Re-key on
-    ``(role, tmux_session)`` once F4 lands — flagged by mother in #1103.
+    Keyed on ``(role, tmux_session)`` post-F4 so sibling-instance patterns
+    (alpha+beta drop-on-meta-edge per project_drop_mitosis_to_meta_edge)
+    don't clobber each other's markers — mother's flag from #1103 closed in
+    v0.7.2. tmux_session is sanitized to alphanumeric + ``-_.`` for the
+    filename to avoid path-traversal or weird characters from cell.yaml-
+    pinned values.
+
+    NOTE (mother #1138 sanitization edge case): two siblings whose
+    ``tmux_session`` values differ ONLY in disallowed characters (e.g.,
+    ``cell:a`` vs ``cell:b`` — colons sanitized to ``_`` collapsing both
+    to ``cell_a`` / ``cell_b`` — fine in this example, but ``cell:a`` vs
+    ``cell$a`` would both collapse to ``cell_a``) would collide post-
+    sanitization. cell.yaml-pinned ``tmux_session`` values SHOULD differ
+    in alphanumeric content, not just punctuation. Cosmetic in practice
+    (operators don't choose session names that close), but worth knowing.
     """
-    return log_path.parent / f"a1-fired-{role}.marker"
+    safe_tmux = "".join(
+        c if (c.isalnum() or c in "-_.") else "_"
+        for c in (tmux_session or role)
+    )
+    return log_path.parent / f"a1-fired-{role}-{safe_tmux}.marker"
 
 
 def _a1_already_fired_at(marker: Path, cursor_mtime: int) -> bool:
@@ -331,10 +469,17 @@ def _log_event(log_path: Path, event: str, details: dict, verbose: bool = False)
 
 def run_check(args: argparse.Namespace) -> int:
     role = args.cell
-    cursor = _resolve_cursor_path(role, args.cursor)
+    # F4 — cell.yaml-pinned cursor_path + tmux_session (mother #1057/#1060
+    # + beta #1061/#1065). Reads cell.yaml `extra.cursor_path` /
+    # `extra.tmux_session` when --cell is provided; explicit CLI args still
+    # win. Best-effort: malformed cell.yaml falls through to legacy
+    # convention defaults (additive non-breaking).
+    cell_cursor, cell_tmux = _read_cell_yaml_pins(role)
+    cursor = _resolve_cursor_path(role, args.cursor, cell_cursor)
+    tmux_session = _resolve_tmux_session(role, args.tmux_session, cell_tmux)
     log_path = _resolve_log_path(args.log)
     threshold = args.threshold
-    tmux_session = args.tmux_session or role
+    pane_activity_threshold = args.pane_activity_threshold
     peer = args.peer or role
     gateway = args.gateway
     token = os.environ.get("MESH_GATEWAY_TOKEN")
@@ -346,6 +491,9 @@ def run_check(args: argparse.Namespace) -> int:
         "threshold_sec": threshold,
         "tmux_session": tmux_session,
         "peer": peer,
+        "pane_activity_threshold_sec": pane_activity_threshold,
+        "cell_yaml_pinned_cursor": cell_cursor is not None,
+        "cell_yaml_pinned_tmux": cell_tmux is not None,
     }
 
     # PRIMARY signal: cursor file mtime
@@ -378,7 +526,7 @@ def run_check(args: argparse.Namespace) -> int:
     # cursor_stale + process_alive + unread None  → noop (F2 fail-closed: can't verify work, don't poke)
     # cursor_stale + a1_marker matches cursor_mtime → noop (F1 same-window suppression)
 
-    marker = _a1_marker_path(log_path, role)
+    marker = _a1_marker_path(log_path, role, tmux_session)
     diag["a1_marker"] = str(marker)
 
     if not process_alive:
@@ -434,6 +582,21 @@ def run_check(args: argparse.Namespace) -> int:
         _log_event(log_path, "noop", diag, verbose)
         return 0
 
+    # F3 — tmux pane_activity AND-gate (mother #1087). cursor-mtime measures
+    # "time since last turn-end" not "time since last activity"; mid-long-
+    # turn cursor is stale even though session is maximally alive. tmux's
+    # `#{pane_activity}` covers the mid-turn-active case. If the pane has
+    # had activity within `pane_activity_threshold_sec`, suppress A1 — the
+    # session is working, not stalled. Falls through to firing A1 when
+    # pane_activity is None (tmux missing / older tmux without the format)
+    # so F3 is a strengthening of the gate, not a hard dependency.
+    pane_age = _pane_activity_age_sec(tmux_session)
+    diag["pane_activity_age_sec"] = pane_age
+    if pane_age is not None and pane_age < pane_activity_threshold:
+        diag["decision"] = "noop_pane_activity_recent"
+        _log_event(log_path, "noop", diag, verbose)
+        return 0
+
     diag["decision"] = "a1_send_keys"
     wake_text = (
         f"watchdog wake — cursor stale {cursor_age}s, "
@@ -463,6 +626,14 @@ def run_watchdog(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--cell", default=os.environ.get("SWARPH_CELL", "lab"))
     p.add_argument("--cursor", default=None)
     p.add_argument("--threshold", type=int, default=_DEFAULT_THRESHOLD_SEC)
+    p.add_argument(
+        "--pane-activity-threshold",
+        type=int,
+        default=_DEFAULT_PANE_ACTIVITY_THRESHOLD_SEC,
+        help="F3 gate: suppress A1 if tmux pane had activity within this "
+             "many seconds (covers mid-long-turn working sessions where "
+             "cursor-mtime is stale but session is alive).",
+    )
     p.add_argument("--gateway", default=_DEFAULT_GATEWAY_URL)
     p.add_argument("--tmux-session", default=None)
     p.add_argument("--peer", default=None)
