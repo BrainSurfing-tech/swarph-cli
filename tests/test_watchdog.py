@@ -341,6 +341,135 @@ def test_a1_rearms_after_cursor_advance(
     assert send_mock.call_count == 2
 
 
+# ---------------------------------------------------------------------------
+# F3 — tmux pane_activity AND-gate (mother #1087)
+# ---------------------------------------------------------------------------
+
+
+def test_pane_activity_recent_suppresses_a1(
+    isolated_state, stale_cursor, monkeypatch
+):
+    """F3 — cursor stale + alive + unread > 0 but pane_activity recent →
+    suppress A1. Session is working in a long bash block; cursor only
+    updates at turn-end. Same incident class as commander #1092 65-min
+    spam, but caught upstream of F1 marker by checking pane_activity
+    BEFORE firing."""
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=30), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys") as send_mock:
+        rc = run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(stale_cursor),
+            "--threshold", "60",
+            "--pane-activity-threshold", "600",
+        ])
+    assert rc == 0
+    send_mock.assert_not_called()
+
+
+def test_pane_activity_old_falls_through_to_a1(
+    isolated_state, stale_cursor, monkeypatch
+):
+    """F3 — pane_activity OLDER than threshold means session has actually
+    been quiet; A1 still fires. Stop signal compatibility check."""
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=1200), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
+        rc = run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(stale_cursor),
+            "--threshold", "60",
+            "--pane-activity-threshold", "600",
+        ])
+    assert rc == 1
+    send_mock.assert_called_once()
+
+
+def test_pane_activity_unavailable_falls_through_to_a1(
+    isolated_state, stale_cursor, monkeypatch
+):
+    """F3 — detection error (tmux missing / older tmux without
+    #{pane_activity}) returns None; A1 still fires. F3 is a strengthening
+    of the gate, not a hard dependency."""
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
+        rc = run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(stale_cursor),
+            "--threshold", "60",
+        ])
+    assert rc == 1
+    send_mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# F4 — cell.yaml-pinned cursor_path + tmux_session (mother #1057/#1060 + beta #1061/#1065)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_cursor_path_cell_yaml_pin_beats_default(isolated_state):
+    """F4 — cell.yaml extra.cursor_path takes precedence over the
+    /tmp/lab-claude-cursor.json fallback when no explicit --cursor."""
+    from swarph_cli.commands.watchdog import _resolve_cursor_path
+    pinned = isolated_state / "custom-cursor.json"
+    assert _resolve_cursor_path("lab", None, str(pinned)) == pinned
+
+
+def test_resolve_cursor_path_explicit_beats_cell_yaml_pin(isolated_state):
+    """F4 — explicit --cursor still wins over cell.yaml pin."""
+    from swarph_cli.commands.watchdog import _resolve_cursor_path
+    explicit = isolated_state / "explicit-cursor.json"
+    pinned = isolated_state / "pinned-cursor.json"
+    assert _resolve_cursor_path("lab", str(explicit), str(pinned)) == explicit
+
+
+def test_resolve_tmux_session_cell_yaml_pin_beats_role(isolated_state):
+    """F4 — cell.yaml extra.tmux_session takes precedence over role
+    default when no explicit --tmux-session."""
+    from swarph_cli.commands.watchdog import _resolve_tmux_session
+    assert _resolve_tmux_session("drop-mother", None, "drop-mother-tmux") == "drop-mother-tmux"
+
+
+def test_resolve_tmux_session_explicit_beats_cell_yaml_pin(isolated_state):
+    """F4 — explicit --tmux-session still wins over cell.yaml pin."""
+    from swarph_cli.commands.watchdog import _resolve_tmux_session
+    assert _resolve_tmux_session("lab", "explicit-name", "pinned-name") == "explicit-name"
+
+
+def test_resolve_tmux_session_falls_back_to_role(isolated_state):
+    """F4 — no explicit + no cell.yaml pin → role itself."""
+    from swarph_cli.commands.watchdog import _resolve_tmux_session
+    assert _resolve_tmux_session("lab", None, None) == "lab"
+
+
+def test_a1_marker_path_keyed_on_role_and_tmux_session(isolated_state):
+    """F4 — marker filename includes both role + tmux_session to prevent
+    sibling-instance marker collisions (mother #1103 follow-up)."""
+    from swarph_cli.commands.watchdog import _a1_marker_path
+    log_path = isolated_state / "wd.log"
+    m1 = _a1_marker_path(log_path, "drop-on-meta-edge", "drop-on-meta-edge")
+    m2 = _a1_marker_path(log_path, "drop-on-meta-edge", "drop-on-meta-edge-2")
+    assert m1 != m2
+    assert m1.name == "a1-fired-drop-on-meta-edge-drop-on-meta-edge.marker"
+    assert m2.name == "a1-fired-drop-on-meta-edge-drop-on-meta-edge-2.marker"
+
+
+def test_a1_marker_path_sanitizes_tmux_session(isolated_state):
+    """F4 — tmux_session sanitized to alphanumeric+underscore so
+    cell.yaml-pinned values with weird chars don't break the filename."""
+    from swarph_cli.commands.watchdog import _a1_marker_path
+    log_path = isolated_state / "wd.log"
+    m = _a1_marker_path(log_path, "lab", "weird/name with spaces!")
+    assert ":" not in m.name and "/" not in m.name and " " not in m.name
+
+
 def test_a2_escalation_clears_a1_marker(
     isolated_state, stale_cursor, monkeypatch
 ):
@@ -361,7 +490,10 @@ def test_a2_escalation_clears_a1_marker(
             "--threshold", "60",
             "--log", str(log_path),
         ])
-    marker = log_path.parent / "a1-fired-lab.marker"
+    # F4 v0.7.2 marker keyed on (role, tmux_session) — tmux_session defaults
+    # to role when no --tmux-session arg + no cell.yaml pin, so filename is
+    # a1-fired-{role}-{role}.marker.
+    marker = log_path.parent / "a1-fired-lab-lab.marker"
     assert marker.exists()
 
     # Now force A2 path (process dead) and confirm marker is gone
