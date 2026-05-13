@@ -400,9 +400,18 @@ def _a1_marker_path(log_path: Path, role: str, tmux_session: Optional[str] = Non
     Keyed on ``(role, tmux_session)`` post-F4 so sibling-instance patterns
     (alpha+beta drop-on-meta-edge per project_drop_mitosis_to_meta_edge)
     don't clobber each other's markers — mother's flag from #1103 closed in
-    v0.7.2. tmux_session is sanitized to alphanumeric + underscore for the
+    v0.7.2. tmux_session is sanitized to alphanumeric + ``-_.`` for the
     filename to avoid path-traversal or weird characters from cell.yaml-
     pinned values.
+
+    NOTE (mother #1138 sanitization edge case): two siblings whose
+    ``tmux_session`` values differ ONLY in disallowed characters (e.g.,
+    ``cell:a`` vs ``cell:b`` — colons sanitized to ``_`` collapsing both
+    to ``cell_a`` / ``cell_b`` — fine in this example, but ``cell:a`` vs
+    ``cell$a`` would both collapse to ``cell_a``) would collide post-
+    sanitization. cell.yaml-pinned ``tmux_session`` values SHOULD differ
+    in alphanumeric content, not just punctuation. Cosmetic in practice
+    (operators don't choose session names that close), but worth knowing.
     """
     safe_tmux = "".join(
         c if (c.isalnum() or c in "-_.") else "_"
