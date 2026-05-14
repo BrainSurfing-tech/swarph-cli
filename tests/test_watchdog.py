@@ -562,3 +562,65 @@ def test_watchdog_log_appends_across_invocations(isolated_state, monkeypatch):
     parsed_second = json.loads(lines[1])
     assert parsed_first["details"]["decision"] == "healthy_cursor_fresh"
     assert parsed_second["details"]["decision"] == "noop_no_unread"
+
+
+# ---------------------------------------------------------------------------
+# --install-service (v0.7.3 — closes ev_6954f748 substrate-component-install)
+# ---------------------------------------------------------------------------
+
+
+def test_install_service_dry_run_writes_no_files(isolated_state, capsys):
+    """--dry-run prints what would be written without touching the filesystem."""
+    rc = run_watchdog(argv=["--install-service", "--cell", "droplet", "--dry-run"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    # Dry-run output goes to stderr
+    assert "DRY RUN" in captured.err
+    assert "cell=droplet" in captured.err
+    # All three target files surface in the preview
+    assert "/etc/systemd/system/swarph-watchdog.service" in captured.err
+    assert "/etc/systemd/system/swarph-watchdog.timer" in captured.err
+    assert "/etc/default/swarph-watchdog" in captured.err
+    # SWARPH_CELL was templated to the requested role
+    assert "SWARPH_CELL=droplet" in captured.err
+    # The bundled service file's identifying line shows up
+    assert "Swarph watchdog one-shot check" in captured.err
+
+
+def test_install_service_dry_run_default_cell_is_lab(isolated_state, capsys):
+    """Without --cell, the dry-run preview keeps SWARPH_CELL=lab default."""
+    rc = run_watchdog(argv=["--install-service", "--dry-run"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "SWARPH_CELL=lab" in captured.err
+
+
+def test_install_service_without_sudo_returns_4(isolated_state, capsys, monkeypatch):
+    """Non-root install (no --dry-run) refuses with helpful message + exit 4."""
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+    rc = run_watchdog(argv=["--install-service", "--cell", "droplet"])
+    assert rc == 4
+    captured = capsys.readouterr()
+    assert "requires root" in captured.err
+    assert "--dry-run" in captured.err  # hint surfaces
+
+
+def test_bundled_systemd_files_readable():
+    """Package-data manifest correctness — importlib.resources can read all
+    three bundled templates. Regression guard for pyproject package-data
+    declaration."""
+    from swarph_cli.commands.watchdog import _bundled_systemd_files
+
+    files = _bundled_systemd_files()
+    assert set(files.keys()) == {
+        "swarph-watchdog.service",
+        "swarph-watchdog.timer",
+        "swarph-watchdog.default",
+    }
+    # Service file has the expected Type=oneshot shape
+    assert "Type=oneshot" in files["swarph-watchdog.service"]
+    assert "ExecStart=/usr/local/bin/swarph watchdog --check" in files["swarph-watchdog.service"]
+    # Timer fires every 5 minutes
+    assert "OnUnitActiveSec=5min" in files["swarph-watchdog.timer"]
+    # Default file has the SWARPH_CELL=lab template line
+    assert "SWARPH_CELL=lab" in files["swarph-watchdog.default"]
