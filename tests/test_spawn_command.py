@@ -339,3 +339,92 @@ def test_run_spawn_dry_run_redacts_starter_prompt_in_command(
     assert rc == 0
     assert "redacted" not in captured.out  # the literal word from the prompt
     assert "starter prompt>" in captured.out  # the redaction marker
+
+
+# ---------------------------------------------------------------------------
+# v0.7.5 — _session_state_exists + --resume on existing session
+# ---------------------------------------------------------------------------
+#
+# Closes the bug surfaced 2026-05-14 post-reboot: claude --session-id <UUID>
+# rejects with "Session ID <UUID> is already in use" when on-disk session
+# state exists, even after host reboot (files persist; check is filesystem-
+# based not runtime-lock-based). Fix: detect existing state + switch from
+# --session-id (create-new semantic) to --resume (attach-existing semantic).
+
+
+def test_session_state_exists_false_for_fresh_uuid(tmp_path, monkeypatch):
+    """No filesystem state for the UUID = fresh; _build_claude_argv uses
+    --session-id (create-new semantic)."""
+    from swarph_cli.commands.spawn import _session_state_exists
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    fresh_uuid = "00000000-0000-0000-0000-000000000000"
+    assert _session_state_exists(fresh_uuid) is False
+
+
+def test_session_state_exists_true_when_file_history_present(tmp_path, monkeypatch):
+    """File-history dir alone is enough to flip detection (any one of the
+    three location signals triggers)."""
+    from swarph_cli.commands.spawn import _session_state_exists
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    uuid = "a30e406c-8bae-4ea2-8cb2-fb0dff35a6f0"
+    (tmp_path / ".claude" / "file-history" / uuid).mkdir(parents=True)
+    assert _session_state_exists(uuid) is True
+
+
+def test_session_state_exists_true_when_session_env_present(tmp_path, monkeypatch):
+    from swarph_cli.commands.spawn import _session_state_exists
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    uuid = "a30e406c-8bae-4ea2-8cb2-fb0dff35a6f0"
+    (tmp_path / ".claude" / "session-env").mkdir(parents=True)
+    (tmp_path / ".claude" / "session-env" / uuid).write_text("")
+    assert _session_state_exists(uuid) is True
+
+
+def test_session_state_exists_true_when_project_jsonl_present(tmp_path, monkeypatch):
+    """Projects path varies by project-hash; glob discovers any match."""
+    from swarph_cli.commands.spawn import _session_state_exists
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    uuid = "a30e406c-8bae-4ea2-8cb2-fb0dff35a6f0"
+    proj = tmp_path / ".claude" / "projects" / "-some-project-hash"
+    proj.mkdir(parents=True)
+    (proj / f"{uuid}.jsonl").write_text("{}\n")
+    assert _session_state_exists(uuid) is True
+
+
+def test_build_claude_argv_uses_session_id_when_fresh(fake_cell_yaml, tmp_path, monkeypatch):
+    """No prior session state → --session-id (create-new) verb."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    cell = load_cell(fake_cell_yaml)
+    argv = _build_claude_argv(
+        cell=cell,
+        session_id="00000000-0000-0000-0000-000000000000",
+        no_starter=True,
+        passthrough=[],
+    )
+    assert "--session-id" in argv
+    assert "--resume" not in argv
+
+
+def test_build_claude_argv_uses_resume_when_state_exists(fake_cell_yaml, tmp_path, monkeypatch):
+    """Prior session state exists → --resume (attach-existing) verb.
+
+    Closes the v0.7.4 spawn-after-reboot rejection class.
+    """
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    uuid = "a30e406c-8bae-4ea2-8cb2-fb0dff35a6f0"
+    (tmp_path / ".claude" / "file-history" / uuid).mkdir(parents=True)
+    cell = load_cell(fake_cell_yaml)
+    argv = _build_claude_argv(
+        cell=cell,
+        session_id=uuid,
+        no_starter=True,
+        passthrough=[],
+    )
+    assert "--resume" in argv
+    assert "--session-id" not in argv
+    # UUID still passed (just as --resume's value not --session-id's)
+    assert uuid in argv
