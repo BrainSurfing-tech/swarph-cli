@@ -66,6 +66,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -622,6 +623,35 @@ _SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
 _SYSTEMD_DEFAULT_DIR = Path("/etc/default")
 _SYSTEMD_UNIT_NAMES = ("swarph-watchdog.service", "swarph-watchdog.timer")
 _SYSTEMD_DEFAULT_NAME = "swarph-watchdog"  # /etc/default/swarph-watchdog
+# v0.7.3 bundled template's ExecStart placeholder — substituted at install time
+# by `_resolve_swarph_bin()` to the actual binary path on the install host.
+# Fixes the v0.7.3 hardcode that broke pipx-installed peers (binary at
+# ~/.local/bin/swarph not /usr/local/bin/swarph).
+_SWARPH_BIN_PLACEHOLDER = "/usr/local/bin/swarph"
+
+
+def _resolve_swarph_bin() -> str:
+    """Resolve the absolute path of the running swarph binary.
+
+    Resolution order:
+      1. ``sys.argv[0]`` if it's an absolute path — most reliable, equals
+         the path the user invoked
+      2. ``shutil.which(sys.argv[0])`` — bare-name invocation, look up in PATH
+      3. ``shutil.which("swarph")`` — generic PATH lookup as fallback
+      4. ``/usr/local/bin/swarph`` — last-resort default (matches v0.7.3
+         hardcode behavior; no regression if all three above fail)
+
+    ALWAYS returns an absolute path — systemd ExecStart requires absolute.
+    Relative inputs (e.g. ``venv/bin/swarph`` from editable installs) get
+    abspath'd against cwd. Never raises.
+    """
+    invoked = sys.argv[0] or "swarph"
+    if Path(invoked).is_absolute():
+        return invoked
+    resolved = shutil.which(invoked) or shutil.which("swarph")
+    if not resolved:
+        return _SWARPH_BIN_PLACEHOLDER
+    return os.path.abspath(resolved)
 
 
 def _bundled_systemd_files() -> dict[str, str]:
@@ -656,6 +686,18 @@ def run_install_service(args: argparse.Namespace) -> int:
     """
     files = _bundled_systemd_files()
 
+    # v0.7.4: substitute the bundled service template's ExecStart placeholder
+    # with the actual swarph binary path on this host. Fixes the v0.7.3 hardcode
+    # that broke pipx-installed peers (binary at ~/.local/bin/swarph not
+    # /usr/local/bin/swarph). Pipx is the recommended install path on droplet
+    # + lab, so the hardcode bit BOTH peers on first install attempt today.
+    swarph_bin = _resolve_swarph_bin()
+    service_content = files[_SYSTEMD_UNIT_NAMES[0]].replace(
+        f"ExecStart={_SWARPH_BIN_PLACEHOLDER}",
+        f"ExecStart={swarph_bin}",
+        1,
+    )
+
     # Template the default file with the requested role
     default_content = files["swarph-watchdog.default"].replace(
         "SWARPH_CELL=lab",
@@ -664,13 +706,13 @@ def run_install_service(args: argparse.Namespace) -> int:
     )
 
     targets = [
-        (_SYSTEMD_UNIT_DIR / _SYSTEMD_UNIT_NAMES[0], files[_SYSTEMD_UNIT_NAMES[0]]),
+        (_SYSTEMD_UNIT_DIR / _SYSTEMD_UNIT_NAMES[0], service_content),
         (_SYSTEMD_UNIT_DIR / _SYSTEMD_UNIT_NAMES[1], files[_SYSTEMD_UNIT_NAMES[1]]),
         (_SYSTEMD_DEFAULT_DIR / _SYSTEMD_DEFAULT_NAME, default_content),
     ]
 
     if args.dry_run:
-        print(f"# DRY RUN — cell={args.cell}", file=sys.stderr)
+        print(f"# DRY RUN — cell={args.cell} swarph_bin={swarph_bin}", file=sys.stderr)
         for path, content in targets:
             print(f"\n# would write {path}:", file=sys.stderr)
             print(content, file=sys.stderr)

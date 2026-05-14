@@ -624,3 +624,91 @@ def test_bundled_systemd_files_readable():
     assert "OnUnitActiveSec=5min" in files["swarph-watchdog.timer"]
     # Default file has the SWARPH_CELL=lab template line
     assert "SWARPH_CELL=lab" in files["swarph-watchdog.default"]
+
+
+# ---------------------------------------------------------------------------
+# v0.7.4 — _resolve_swarph_bin + ExecStart templating
+# ---------------------------------------------------------------------------
+#
+# v0.7.3 shipped a hardcoded ExecStart=/usr/local/bin/swarph that broke
+# pipx-installed peers (lab + drop both hit this on first install attempt
+# 2026-05-14). v0.7.4 resolves the path at install time via _resolve_swarph_bin
+# and substitutes into the bundled service template.
+
+
+def test_resolve_swarph_bin_absolute_argv0_wins(monkeypatch):
+    """If sys.argv[0] is absolute, it's the most reliable signal — use it."""
+    from swarph_cli.commands.watchdog import _resolve_swarph_bin
+
+    monkeypatch.setattr("sys.argv", ["/home/ubuntu/.local/bin/swarph", "watchdog"])
+    assert _resolve_swarph_bin() == "/home/ubuntu/.local/bin/swarph"
+
+
+def test_resolve_swarph_bin_bare_name_resolved_via_path(monkeypatch, tmp_path):
+    """Bare-name argv[0] resolves via PATH."""
+    from swarph_cli.commands.watchdog import _resolve_swarph_bin
+
+    fake_bin = tmp_path / "swarph"
+    fake_bin.write_text("#!/bin/sh\nexit 0\n")
+    fake_bin.chmod(0o755)
+    monkeypatch.setattr("sys.argv", ["swarph", "watchdog"])
+    monkeypatch.setattr("shutil.which", lambda name: str(fake_bin) if name == "swarph" else None)
+    assert _resolve_swarph_bin() == str(fake_bin)
+
+
+def test_resolve_swarph_bin_falls_back_to_placeholder_if_unresolvable(monkeypatch):
+    """All resolution paths fail → fall back to /usr/local/bin/swarph
+    (v0.7.3 hardcode behavior; no regression vs prior version)."""
+    from swarph_cli.commands.watchdog import _resolve_swarph_bin, _SWARPH_BIN_PLACEHOLDER
+
+    monkeypatch.setattr("sys.argv", ["swarph", "watchdog"])
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    assert _resolve_swarph_bin() == _SWARPH_BIN_PLACEHOLDER
+
+
+def test_install_service_dry_run_substitutes_swarph_bin(isolated_state, capsys, monkeypatch):
+    """Dry-run preview shows resolved swarph path in ExecStart, not hardcoded
+    /usr/local/bin/swarph (when the host actually has swarph elsewhere)."""
+    pipx_path = "/home/ubuntu/.local/bin/swarph"
+    monkeypatch.setattr("sys.argv", [pipx_path, "watchdog"])
+    rc = run_watchdog(argv=["--install-service", "--cell", "droplet", "--dry-run"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    # Header surfaces the resolved binary
+    assert f"swarph_bin={pipx_path}" in captured.err
+    # Service file's ExecStart now points at pipx path, NOT the placeholder
+    assert f"ExecStart={pipx_path} watchdog --check" in captured.err
+    # And the v0.7.3-hardcoded path no longer appears in the preview
+    assert "ExecStart=/usr/local/bin/swarph watchdog --check" not in captured.err
+
+
+def test_install_service_dry_run_preserves_default_path_when_absolute(isolated_state, capsys, monkeypatch):
+    """When sys.argv[0] IS /usr/local/bin/swarph (the v0.7.3 default path),
+    the substitution still happens but produces the same line — no diff vs
+    v0.7.3 for this case."""
+    monkeypatch.setattr("sys.argv", ["/usr/local/bin/swarph", "watchdog"])
+    rc = run_watchdog(argv=["--install-service", "--cell", "lab", "--dry-run"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "ExecStart=/usr/local/bin/swarph watchdog --check" in captured.err
+
+
+def test_resolve_swarph_bin_relative_with_slash_resolves_to_absolute(tmp_path, monkeypatch):
+    """Relative path with slash (e.g. editable install's venv/bin/swarph)
+    must be absolutized — systemd ExecStart needs absolute. Regression guard
+    for the abspath fix on top of v0.7.4 path-autodetect."""
+    from swarph_cli.commands.watchdog import _resolve_swarph_bin
+
+    fake = tmp_path / "swarph"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    # Simulate `./swarph` from cwd=tmp_path
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.argv", ["./swarph", "watchdog"])
+    # shutil.which('./swarph') returns the relative path as-is when the
+    # input contains a slash. _resolve_swarph_bin must abspath it.
+    resolved = _resolve_swarph_bin()
+    assert Path(resolved).is_absolute(), (
+        f"resolver returned non-absolute path: {resolved!r}"
+    )
+    assert resolved == str(fake)
