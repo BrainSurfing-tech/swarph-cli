@@ -27,6 +27,7 @@ import argparse
 import os
 import shutil
 import sys
+from pathlib import Path
 from typing import Optional
 
 from swarph_cli import __version__
@@ -200,6 +201,33 @@ def _resolve_cell(args: argparse.Namespace) -> tuple[Cell, Optional[str]]:
     return load_cell(path), requested_role
 
 
+def _session_state_exists(session_id: str) -> bool:
+    """True if Claude Code already has on-disk session state for this UUID.
+
+    Closes v0.7.4 spawn-bug surfaced 2026-05-14 post-reboot (DM #1255):
+    `claude --session-id <UUID>` rejects with "Session ID <UUID> is already
+    in use" when session-state files exist on disk, even after reboot
+    (files persist; the in-use check is filesystem-based not runtime-lock-
+    based). Switching to `claude --resume <UUID>` is the correct semantic
+    when the UUID's state already exists.
+
+    Probes the three filesystem locations Claude Code stores per-session
+    state in: ~/.claude/file-history/<UUID>, ~/.claude/session-env/<UUID>,
+    and ~/.claude/projects/<project-hash>/<UUID>.jsonl (the latter
+    discovered via glob since project-hash varies).
+    """
+    claude_dir = Path.home() / ".claude"
+    if (claude_dir / "file-history" / session_id).exists():
+        return True
+    if (claude_dir / "session-env" / session_id).exists():
+        return True
+    projects_dir = claude_dir / "projects"
+    if projects_dir.exists():
+        for _ in projects_dir.glob(f"*/{session_id}.jsonl"):
+            return True
+    return False
+
+
 def _build_claude_argv(
     cell: Cell,
     session_id: str,
@@ -208,7 +236,14 @@ def _build_claude_argv(
     effective_role: Optional[str] = None,
 ) -> list[str]:
     name_value = effective_role if effective_role is not None else cell.role
-    argv: list[str] = ["claude", "--name", name_value, "--session-id", session_id]
+    # v0.7.5: auto-detect existing session state and switch from --session-id
+    # (create-new-with-pinned-UUID semantic) to --resume (attach-to-existing
+    # semantic). Both pass the same UUID; the verb determines whether claude
+    # treats it as fresh-create vs resume-existing.
+    if _session_state_exists(session_id):
+        argv: list[str] = ["claude", "--name", name_value, "--resume", session_id]
+    else:
+        argv = ["claude", "--name", name_value, "--session-id", session_id]
 
     if not no_starter:
         starter = read_starter_prompt(cell)
