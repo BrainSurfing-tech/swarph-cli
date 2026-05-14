@@ -91,6 +91,7 @@ Usage:
                           [--gateway URL] [--tmux-session NAME]
                           [--peer NAME] [--no-respawn]
                           [--log PATH] [--verbose]
+  swarph watchdog --install-service [--cell ROLE] [--dry-run]
 
 Detects stranded Claude sessions (API throttle / harness death) and attempts
 recovery via tmux send-keys A1 wake-prompt, escalating to swarph spawn
@@ -98,6 +99,12 @@ respawn (A2) on persistent darkness.
 
 Designed for cron invocation:
   */5 * * * * swarph watchdog --check --cell lab >> ~/.local/log/swarph-watchdog.log 2>&1
+
+OR systemd timer (v0.7.3+, closes ev_6954f748 substrate-component-installation-gap):
+  sudo swarph watchdog --install-service [--cell <role>]
+  # → installs /etc/systemd/system/swarph-watchdog.{service,timer}
+  # → installs /etc/default/swarph-watchdog with SWARPH_CELL=<role>
+  # → daemon-reload + enable --now swarph-watchdog.timer
 
 Detection (mother #1021 AND-gate design):
   PRIMARY:  cursor file mtime — most-recent Claude action (drain script touches it)
@@ -123,11 +130,12 @@ Flags:
   --verbose            also write diagnostics to stderr
 
 Exit codes:
-  0  no action taken (session healthy or no unread DMs queued)
+  0  no action taken (session healthy or no unread DMs queued); install ok
   1  A1 fired (wake-prompt sent)
   2  A2 fired (full respawn triggered)
   3  detection error (cursor unreadable / gateway unreachable)
-  4  configuration error (invalid args, no cell.yaml resolved)
+  4  configuration error (invalid args, no cell.yaml resolved); install needs sudo
+  5  install error (file write failed / systemctl failed)
 """
 
 
@@ -610,6 +618,107 @@ def run_check(args: argparse.Namespace) -> int:
     return 1 if sent else 4
 
 
+_SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
+_SYSTEMD_DEFAULT_DIR = Path("/etc/default")
+_SYSTEMD_UNIT_NAMES = ("swarph-watchdog.service", "swarph-watchdog.timer")
+_SYSTEMD_DEFAULT_NAME = "swarph-watchdog"  # /etc/default/swarph-watchdog
+
+
+def _bundled_systemd_files() -> dict[str, str]:
+    """Return {filename: content} for the 3 bundled systemd templates.
+
+    Reads from the package's bundled `systemd/` data directory via
+    importlib.resources. Works regardless of install method (pipx, pip,
+    editable, wheel-from-PyPI).
+    """
+    try:
+        from importlib.resources import files as _files
+    except ImportError:  # pragma: no cover — Python <3.9 not supported anyway
+        from importlib_resources import files as _files  # type: ignore[no-redef]
+
+    pkg_root = _files("swarph_cli") / "systemd"
+    out: dict[str, str] = {}
+    for name in (*_SYSTEMD_UNIT_NAMES, "swarph-watchdog.default"):
+        out[name] = (pkg_root / name).read_text(encoding="utf-8")
+    return out
+
+
+def run_install_service(args: argparse.Namespace) -> int:
+    """Install systemd timer + service for periodic watchdog --check.
+
+    Idempotent: overwrites existing unit files (newer-version semantics).
+    Requires sudo for /etc/systemd/system writes unless --dry-run.
+
+    Exit codes:
+      0  success (or dry-run completed)
+      4  configuration error (non-root without --dry-run)
+      5  install error (file write failed / systemctl failed)
+    """
+    files = _bundled_systemd_files()
+
+    # Template the default file with the requested role
+    default_content = files["swarph-watchdog.default"].replace(
+        "SWARPH_CELL=lab",
+        f"SWARPH_CELL={args.cell}",
+        1,
+    )
+
+    targets = [
+        (_SYSTEMD_UNIT_DIR / _SYSTEMD_UNIT_NAMES[0], files[_SYSTEMD_UNIT_NAMES[0]]),
+        (_SYSTEMD_UNIT_DIR / _SYSTEMD_UNIT_NAMES[1], files[_SYSTEMD_UNIT_NAMES[1]]),
+        (_SYSTEMD_DEFAULT_DIR / _SYSTEMD_DEFAULT_NAME, default_content),
+    ]
+
+    if args.dry_run:
+        print(f"# DRY RUN — cell={args.cell}", file=sys.stderr)
+        for path, content in targets:
+            print(f"\n# would write {path}:", file=sys.stderr)
+            print(content, file=sys.stderr)
+        print(
+            "\n# would then run:\n"
+            "#   sudo systemctl daemon-reload\n"
+            "#   sudo systemctl enable --now swarph-watchdog.timer",
+            file=sys.stderr,
+        )
+        return 0
+
+    if os.geteuid() != 0:
+        print(
+            "ERROR: --install-service requires root. Re-run with sudo, or use "
+            "--dry-run to preview the install without writing.",
+            file=sys.stderr,
+        )
+        return 4
+
+    try:
+        for path, content in targets:
+            path.write_text(content, encoding="utf-8")
+            print(f"wrote {path}", file=sys.stderr)
+    except (OSError, PermissionError) as exc:
+        print(f"ERROR: failed to write unit files: {exc}", file=sys.stderr)
+        return 5
+
+    try:
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
+        subprocess.run(
+            ["systemctl", "enable", "--now", "swarph-watchdog.timer"],
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        print(f"ERROR: systemctl failed: {exc}", file=sys.stderr)
+        return 5
+
+    print(
+        f"\nswarph-watchdog.timer installed + enabled for cell={args.cell}.\n"
+        f"  status:  systemctl status swarph-watchdog.timer\n"
+        f"  logs:    journalctl -u swarph-watchdog.service -f\n"
+        f"           OR /var/log/swarph-watchdog.log\n"
+        f"  next:    systemctl list-timers swarph-watchdog.timer",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def run_watchdog(argv: Optional[list[str]] = None) -> int:
     if argv is None:
         argv = sys.argv[2:]  # skip "swarph watchdog"
@@ -622,6 +731,16 @@ def run_watchdog(argv: Optional[list[str]] = None) -> int:
     p.add_argument(
         "--check", action="store_true",
         help="One-shot check (cron-callable; exits with status code).",
+    )
+    p.add_argument(
+        "--install-service", action="store_true",
+        help="Install systemd timer + service for periodic --check invocation. "
+             "Requires sudo. Closes ev_6954f748 substrate-component-install gap.",
+    )
+    p.add_argument(
+        "--dry-run", action="store_true",
+        help="With --install-service: show what would be written without "
+             "writing. Useful for review or non-root preview.",
     )
     p.add_argument("--cell", default=os.environ.get("SWARPH_CELL", "lab"))
     p.add_argument("--cursor", default=None)
@@ -645,6 +764,9 @@ def run_watchdog(argv: Optional[list[str]] = None) -> int:
         args = p.parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 0)
+
+    if args.install_service:
+        return run_install_service(args)
 
     if not args.check:
         print(_USAGE, file=sys.stderr)

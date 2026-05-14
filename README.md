@@ -105,6 +105,46 @@ Loud-on-down (PLAN §16.5): never silently exits. Cursor writes are atomic (writ
 
 `--auto-act` flag is documented for v0.5.1+ when handler registration via `@swarph.on_dm(...)` lands; v0.5.0 ships surface-only mode (DMs printed + JSONL-logged to `inbox.log`, no automatic replies).
 
+### `swarph watchdog` (Phase 7 — v0.7 stranded-session detection, v0.7.3 systemd install)
+
+Detects stranded Claude sessions (API throttle / harness death) via cursor-mtime + tmux pgrep AND-gate, and recovers via A1 tmux send-keys wake-prompt → A2 `swarph spawn` respawn. Cell.yaml-pinned cursor + tmux session (F4) since v0.7.2.
+
+**One-shot mode (cron-callable, v0.7+):**
+```bash
+*/5 * * * * swarph watchdog --check --cell lab >> ~/.local/log/swarph-watchdog.log 2>&1
+```
+
+**Systemd timer install (v0.7.3+ — closes ev_6954f748 substrate-component-installation-gap):**
+
+```bash
+# Preview without writing (any user):
+swarph watchdog --install-service --cell droplet --dry-run
+
+# Install + enable (requires root for /etc/systemd/system writes):
+sudo swarph watchdog --install-service --cell droplet
+```
+
+This writes three files:
+
+| Path | Purpose |
+|------|---------|
+| `/etc/systemd/system/swarph-watchdog.service` | `Type=oneshot`, runs `swarph watchdog --check` |
+| `/etc/systemd/system/swarph-watchdog.timer` | Fires every 5 minutes (`OnUnitActiveSec=5min`) |
+| `/etc/default/swarph-watchdog` | Sets `SWARPH_CELL=<role>` for the service env |
+
+Then runs `systemctl daemon-reload && systemctl enable --now swarph-watchdog.timer`. Idempotent — re-running overwrites with current package version (newer-version semantics).
+
+Monitoring:
+
+```bash
+systemctl status swarph-watchdog.timer       # is it scheduled?
+systemctl list-timers swarph-watchdog.timer  # next fire?
+journalctl -u swarph-watchdog.service -f     # live log
+tail -f /var/log/swarph-watchdog.log         # append-log alternative
+```
+
+Why this matters: pre-v0.7.3, swarph-cli shipped the watchdog code but no install path. Lab ran it via cron (manual setup); droplet never installed it at all. A real production silence-window (drop's ~24min mute 2026-05-14 08:38→09:02 UTC after an Anthropic API error) made the install-gap visible. v0.7.3 closes it for any peer with one command.
+
 ### `swarph onboard` + `swarph ratify` (Phase 5.5)
 
 Per PLAN.md §15, onboarding splits into a **mechanics phase** (`swarph onboard`) that automates the boring parts (registry POST, scaffolding, token resolution) and a **manual contract phase** (the new peer composes the handshake DM in their own words). A witness peer judges the handshake and runs `swarph ratify <peer>` to flip `ratified=true`, gating `task_claim` server-side.

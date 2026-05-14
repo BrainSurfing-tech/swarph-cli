@@ -1,0 +1,9 @@
+# /etc/default/swarph-watchdog — environment for swarph-watchdog.service
+#
+# SWARPH_CELL sets the cell role for the watchdog. The watchdog reads
+# cell.yaml for this role to discover the cursor path + tmux session pin
+# (per F4 cell.yaml-pinning landed in v0.7.2).
+#
+# If unset, watchdog defaults to "lab" (per the --cell argparse default).
+# Override here per-vertex: droplet, gpu-wsl, razorpeter, etc.
+SWARPH_CELL=lab

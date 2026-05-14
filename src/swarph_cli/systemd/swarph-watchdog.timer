@@ -1,0 +1,13 @@
+[Unit]
+Description=Run swarph watchdog every 5 minutes (stranded-session recovery)
+Documentation=https://github.com/darw007d/swarph-cli
+Requires=swarph-watchdog.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=Swarph watchdog one-shot check (stranded-session recovery)
+Documentation=https://github.com/darw007d/swarph-cli
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/swarph-watchdog
+ExecStart=/usr/local/bin/swarph watchdog --check
+StandardOutput=append:/var/log/swarph-watchdog.log
+StandardError=append:/var/log/swarph-watchdog.log
+
+[Install]
+WantedBy=multi-user.target
