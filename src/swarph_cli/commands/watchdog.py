@@ -71,7 +71,9 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -85,12 +87,23 @@ _DEFAULT_GATEWAY_URL = "http://localhost:8788"
 # is comfortably above legitimate-pause noise + comfortably below the
 # 30min cursor-staleness threshold, so the two gates compose cleanly.
 _DEFAULT_PANE_ACTIVITY_THRESHOLD_SEC = 600
+# Phase 4 (v0.7.6) — peer-health-event poll defaults. The recovery
+# event we care about is `usage_limit_reset` (throttle cleared; session
+# may be sitting idle unaware of queued DMs). 600s window catches a
+# reset that fired up to 10min before this cron tick. 120s recovery
+# threshold gives the session a brief grace period to notice the reset
+# itself before we send-keys at it.
+_DEFAULT_PEER_HEALTH_WINDOW_SEC = 600
+_DEFAULT_PEER_HEALTH_RECOVERY_THRESHOLD_SEC = 120
+_RECOVERY_EVENT_TYPES = ("usage_limit_reset",)
 
 _USAGE = """\
 Usage:
   swarph watchdog --check [--cell ROLE] [--cursor PATH] [--threshold SEC]
                           [--gateway URL] [--tmux-session NAME]
                           [--peer NAME] [--no-respawn]
+                          [--peer-health-poll] [--peer-health-window-sec SEC]
+                          [--peer-health-recovery-threshold SEC]
                           [--log PATH] [--verbose]
   swarph watchdog --install-service [--cell ROLE] [--dry-run]
 
@@ -127,6 +140,18 @@ Flags:
   --tmux-session NAME  tmux session name; default = cell role
   --peer NAME          mesh peer name for unread-DM query; default = cell name
   --no-respawn         A1 only; don't escalate to A2 (dry-run mode)
+  --peer-health-poll                    Phase 4: also query /peer-health-events.
+                                        On recent usage_limit_reset event, treat
+                                        sessions as wake-candidates even before
+                                        the 30min cursor-staleness threshold.
+                                        Requires MESH_GATEWAY_TOKEN in env.
+  --peer-health-window-sec SEC          how far back to look for recovery
+                                        events; default 600 (10 min)
+  --peer-health-recovery-threshold SEC  min cursor staleness before a recovery
+                                        event promotes the session to wake-
+                                        candidate; default 120 (2 min). Avoids
+                                        poking a session that JUST got reset
+                                        and is already self-recovering.
   --log PATH           append diagnostic log; default $XDG_STATE_HOME/swarph/watchdog.log
   --verbose            also write diagnostics to stderr
 
@@ -279,6 +304,57 @@ def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Opti
         return len(data)
     if isinstance(data, dict) and isinstance(data.get("messages"), list):
         return len(data["messages"])
+    return None
+
+
+def _gateway_recent_recovery_event(
+    gateway: str,
+    peer: str,
+    window_sec: int,
+    token: Optional[str],
+) -> Optional[dict]:
+    """Phase 4 (v0.7.6) — query /peer-health-events for a recent recovery event.
+
+    Returns the most recent event whose ``event_type`` is in
+    ``_RECOVERY_EVENT_TYPES`` (currently just ``usage_limit_reset``) for
+    this peer within the last ``window_sec`` seconds. Returns None if no
+    such event exists OR if the query fails (treat absence + error as
+    "no override"; the regular cursor-staleness path still applies).
+
+    Why this matters: the lab + drop both hit ``usage_limit_reset`` from
+    Claude's quota system — the throttle clears, but the session has no
+    autonomous mechanism to notice. DMs queued during the throttle sit
+    unread until commander manually chimes the session, OR until the
+    30min cursor-staleness threshold trips A1. Phase 4 closes that gap
+    by lowering the threshold to ``--peer-health-recovery-threshold``
+    (default 2min) once the gateway sees the reset event.
+
+    Detection ≠ recovery distinction: the gateway already CAPTURES these
+    events (claude_session_event_logger.py + POST /peer-health-events).
+    What was missing was the wake-up mechanism — this function plus the
+    fall-through in run_check is the watchdog half of the loop.
+    """
+    since_dt = datetime.now(timezone.utc) - timedelta(seconds=window_sec)
+    since_iso = since_dt.isoformat()
+    query = urllib.parse.urlencode(
+        {"peer": peer, "since": since_iso, "limit": 50},
+    )
+    url = f"{gateway.rstrip('/')}/peer-health-events?{query}"
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError):
+        return None
+    events = data.get("events") if isinstance(data, dict) else None
+    if not isinstance(events, list):
+        return None
+    # Server sorts by time DESC, so the first match is the most recent.
+    for ev in events:
+        if isinstance(ev, dict) and ev.get("event_type") in _RECOVERY_EVENT_TYPES:
+            return ev
     return None
 
 
@@ -515,10 +591,41 @@ def run_check(args: argparse.Namespace) -> int:
     diag["cursor_age_sec"] = cursor_age
 
     if cursor_age <= threshold:
-        # Cursor recent — Claude has been active. No action.
-        diag["decision"] = "healthy_cursor_fresh"
-        _log_event(log_path, "noop", diag, verbose)
-        return 0
+        # Phase 4 (v0.7.6) — peer-health-event override. If the gateway
+        # observed a recent recovery event (usage_limit_reset) for this
+        # peer AND the cursor is at least somewhat stale, fall through
+        # to the A1 path so an idle-after-reset session gets nudged.
+        # When --peer-health-poll is OFF, behavior is identical to v0.7.5.
+        if args.peer_health_poll:
+            recovery_event = _gateway_recent_recovery_event(
+                gateway, peer, args.peer_health_window_sec, token,
+            )
+            diag["peer_health_poll"] = True
+            diag["recovery_event_seen"] = bool(recovery_event)
+            if recovery_event:
+                diag["recovery_event_type"] = recovery_event.get("event_type")
+                diag["recovery_event_time"] = recovery_event.get("time")
+            if recovery_event and cursor_age > args.peer_health_recovery_threshold:
+                # Promote to wake-candidate. Don't return — fall through
+                # below to the existing process_alive / unread / F1-F3
+                # gates, which still get a vote. This is a threshold
+                # override, not a gate bypass.
+                diag["phase4_override"] = "fall_through_to_a1"
+            else:
+                # Either no recovery event, OR cursor is fresh enough
+                # that the session is likely self-recovering. No action.
+                diag["decision"] = (
+                    "healthy_cursor_fresh_recovery_too_recent"
+                    if recovery_event
+                    else "healthy_cursor_fresh"
+                )
+                _log_event(log_path, "noop", diag, verbose)
+                return 0
+        else:
+            # Cursor recent — Claude has been active. No action.
+            diag["decision"] = "healthy_cursor_fresh"
+            _log_event(log_path, "noop", diag, verbose)
+            return 0
 
     # FALLBACK signal: pgrep claude (per mother #1021 AND-gate)
     process_alive = _process_alive(tmux_session)
@@ -799,6 +906,26 @@ def run_watchdog(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--tmux-session", default=None)
     p.add_argument("--peer", default=None)
     p.add_argument("--no-respawn", action="store_true")
+    p.add_argument(
+        "--peer-health-poll", action="store_true",
+        help="Phase 4 (v0.7.6): also query mesh-gateway /peer-health-events. "
+             "On recent usage_limit_reset event, treat sessions as wake-"
+             "candidates even before the 30min cursor-staleness threshold. "
+             "Requires MESH_GATEWAY_TOKEN in env. Default OFF (opt-in).",
+    )
+    p.add_argument(
+        "--peer-health-window-sec",
+        type=int,
+        default=_DEFAULT_PEER_HEALTH_WINDOW_SEC,
+        help="Phase 4: window for recovery-event lookup; default 600 (10 min).",
+    )
+    p.add_argument(
+        "--peer-health-recovery-threshold",
+        type=int,
+        default=_DEFAULT_PEER_HEALTH_RECOVERY_THRESHOLD_SEC,
+        help="Phase 4: min cursor staleness for recovery event to promote "
+             "session to wake-candidate; default 120 (2 min).",
+    )
     p.add_argument("--log", default=None)
     p.add_argument("--verbose", action="store_true")
 
