@@ -22,6 +22,13 @@ Idempotent: rerun safe. Detects existing hook entries pointing at
 Skip when SWARPH_SPAWN=1 env (set by ``swarph spawn``) — avoids
 double-injection when the spawn path already passed the prompt via
 ``--append-system-prompt``.
+
+NOTE (2026-05-17): IF this file grows to manage 3+ DISTINCT hook events
+(beyond SessionStart), revisit adopting a hook framework
+(claude-hooks / cchooks / similar). Solo eval 2026-05-17 deferred
+framework adoption because 1-hook surface didn't justify the
+750-LOC dependency. See lab memory ``project_deferred_decisions.md``
+for the full threshold conditions + revisit checklist.
 """
 
 from __future__ import annotations
