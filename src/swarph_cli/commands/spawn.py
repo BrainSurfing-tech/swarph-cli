@@ -482,6 +482,32 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         )
         return 127
 
+    # Windows-platform known-issues banner. Claude Code's TUI (Ink-based)
+    # has documented input/rendering bugs on Windows native consoles
+    # (conhost.exe in particular). Specific symptom commander hit
+    # 2026-05-17 on workstation-lc: pressing Enter inserts literal 'm'
+    # character instead of submitting. See docs/WINDOWS_KNOWN_ISSUES.md
+    # for the full hypothesis chain + workarounds (Windows Terminal vs
+    # conhost, WSL2 fallback, TERM env injection).
+    #
+    # Banner is suppressed by --no-banner OR when the operator has
+    # already acknowledged via SWARPH_WIN_ACK=1 in env (set once after
+    # reading the doc).
+    if (
+        sys.platform == "win32"
+        and not args.no_banner
+        and not os.environ.get("SWARPH_WIN_ACK")
+    ):
+        print(
+            "swarph spawn: WARNING — Windows shell detected. Claude Code's "
+            "TUI has documented input/rendering issues on Windows native "
+            "consoles (conhost.exe). Known symptom: Enter inserts literal "
+            "'m' character. See docs/WINDOWS_KNOWN_ISSUES.md for "
+            "workarounds (use Windows Terminal not conhost, or WSL2). "
+            "Set SWARPH_WIN_ACK=1 in env to suppress this warning.",
+            file=sys.stderr,
+        )
+
     try:
         os.chdir(cell.cwd)
     except OSError as exc:
