@@ -428,3 +428,108 @@ def test_build_claude_argv_uses_resume_when_state_exists(fake_cell_yaml, tmp_pat
     assert "--session-id" not in argv
     # UUID still passed (just as --resume's value not --session-id's)
     assert uuid in argv
+
+
+# ---------------------------------------------------------------------------
+# Phase 1B v0 — cell.yaml routing field (2026-05-19)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_routing_absent_allows(fake_cell_yaml):
+    """No `routing` field → default Anthropic, _validate_routing returns silently."""
+    from swarph_cli.commands.spawn import _validate_routing
+    cell = load_cell(fake_cell_yaml)
+    # fake_cell_yaml has no routing field → should pass
+    _validate_routing(cell)  # no exception = pass
+
+
+def test_validate_routing_explicit_anthropic_allows(tmp_path):
+    """`routing.native: anthropic` → allowed (explicit form)."""
+    from swarph_cli.commands.spawn import _validate_routing
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "lab-ovh",
+        "role": "lab-test",
+        "cwd": str(tmp_path),
+        "provider": "claude",
+        "routing": {"native": "anthropic"},
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+    _validate_routing(cell)  # no exception = pass
+
+
+def test_validate_routing_non_anthropic_rejects(tmp_path):
+    """`routing.native: openrouter` → rejected with v0 + v1 direction message."""
+    from swarph_cli.commands.spawn import _validate_routing
+    from swarph_cli.cell import CellError
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "lab-ovh",
+        "role": "lab-test",
+        "cwd": str(tmp_path),
+        "provider": "claude",
+        "routing": {"native": "openrouter"},
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+    with pytest.raises(CellError) as exc_info:
+        _validate_routing(cell)
+    err = str(exc_info.value)
+    assert "openrouter" in err
+    assert "v0" in err
+    assert "Phase 1B" in err
+    assert "anthropic" in err  # should point at the only valid value
+
+
+def test_validate_routing_non_dict_rejects(tmp_path):
+    """`routing: "anthropic"` (string instead of dict) → schema error."""
+    from swarph_cli.commands.spawn import _validate_routing
+    from swarph_cli.cell import CellError
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "lab-ovh",
+        "role": "lab-test",
+        "cwd": str(tmp_path),
+        "provider": "claude",
+        "routing": "anthropic",  # WRONG — should be dict
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+    with pytest.raises(CellError) as exc_info:
+        _validate_routing(cell)
+    assert "mapping" in str(exc_info.value)
+
+
+def test_validate_routing_omitted_native_allows(tmp_path):
+    """`routing: {}` (empty dict, no native key) → defaults to anthropic, allows."""
+    from swarph_cli.commands.spawn import _validate_routing
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "lab-ovh",
+        "role": "lab-test",
+        "cwd": str(tmp_path),
+        "provider": "claude",
+        "routing": {},
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+    _validate_routing(cell)  # default anthropic = allowed
+
+
+def test_run_spawn_rejects_non_anthropic_routing_in_dry_run(
+    fake_cell_yaml, isolated_xdg, capsys
+):
+    """End-to-end: `swarph spawn --dry-run` with non-anthropic routing → exit 1 + error message."""
+    payload = yaml.safe_load(fake_cell_yaml.read_text())
+    payload["routing"] = {"native": "gemini"}
+    fake_cell_yaml.write_text(yaml.safe_dump(payload))
+    rc = run_spawn(["--dry-run", str(fake_cell_yaml)])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "gemini" in captured.err
+    assert "Phase 1B" in captured.err

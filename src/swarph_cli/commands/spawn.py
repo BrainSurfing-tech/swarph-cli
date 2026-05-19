@@ -201,6 +201,61 @@ def _resolve_cell(args: argparse.Namespace) -> tuple[Cell, Optional[str]]:
     return load_cell(path), requested_role
 
 
+def _validate_routing(cell: Cell) -> None:
+    """Phase 1B v0 (2026-05-19) — read + validate ``cell.extra.routing``.
+
+    Phase 1B-primary architecture commits the cell-membrane framing:
+    Claude CLI is the membrane for Anthropic-side spawns; non-Anthropic
+    cells get a different membrane (currently NOT implemented).
+
+    cell.yaml ``routing`` field shape (v0):
+    ::
+        routing:
+          native: anthropic         # only valid value in v0
+
+    v0 accepts ``routing`` absent (= default anthropic) OR
+    ``routing.native: anthropic``. Any other value raises CellError
+    pointing at Phase 1B v1+ direction.
+
+    Forward-compat: reads via ``Cell.extra`` (same pattern as
+    cursor_path / tmux_session shipped in v0.7.2 before graduating to
+    typed fields in swarph-shared 0.4.x). When swarph-shared graduates
+    ``routing`` to a typed Cell field, this helper swaps to typed
+    access with no API surface change for cell.yaml authors.
+
+    See research/swarph_cli/CELL_MEMBRANE_PHASE_0_RFC.md §5 (Phase 1B)
+    for the architectural context. See lab memory
+    ``project_next_up.md`` for the commander 2026-05-19 decision that
+    Phase 1B is primary + path (c) Anthropic-only v0.
+    """
+    extra = cell.extra or {}
+    routing = extra.get("routing")
+    if routing is None:
+        return  # No routing field → default Anthropic, allow
+    if not isinstance(routing, dict):
+        raise CellError(
+            f"swarph spawn: cell.yaml `routing` must be a mapping, "
+            f"got {type(routing).__name__}. See "
+            f"research/swarph_cli/CELL_MEMBRANE_PHASE_0_RFC.md for the "
+            f"valid v0 schema."
+        )
+    native = routing.get("native", "anthropic")
+    if native == "anthropic":
+        return  # Explicit Anthropic OR default → allow
+    # Any other native value is a Phase 1B v1+ feature not yet built
+    raise CellError(
+        f"swarph spawn: cell.yaml `routing.native: {native!r}` is not "
+        f"supported in v0 of Phase 1B (Anthropic-only). Non-Anthropic "
+        f"routing (e.g. routing.native: openrouter) is Phase 1B v1+ "
+        f"scope, deferred per commander 2026-05-19 until a concrete "
+        f"non-Anthropic-cell use case emerges. For now, remove the "
+        f"`routing.native` field OR set it to 'anthropic' to use the "
+        f"existing Claude CLI spawn path. See "
+        f"research/swarph_cli/CELL_MEMBRANE_PHASE_0_RFC.md §5 for the "
+        f"architectural direction."
+    )
+
+
 def _session_state_exists(session_id: str) -> bool:
     """True if Claude Code already has on-disk session state for this UUID.
 
@@ -343,6 +398,15 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
     try:
         cell, requested_role = _resolve_cell(args)
     except (CellError, NotImplementedError) as exc:
+        print(f"swarph spawn: {exc}", file=sys.stderr)
+        return 1
+
+    # Phase 1B v0 (2026-05-19): validate cell.yaml routing field.
+    # In v0 only `routing.native: anthropic` (or absent) is accepted.
+    # Future non-Anthropic dispatch is Phase 1B v1+ scope.
+    try:
+        _validate_routing(cell)
+    except CellError as exc:
         print(f"swarph spawn: {exc}", file=sys.stderr)
         return 1
 
