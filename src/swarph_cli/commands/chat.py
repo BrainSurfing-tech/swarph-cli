@@ -143,22 +143,16 @@ def _read_line(prompt: str) -> str:
     input. Production uses stdlib ``input()`` — readline is auto-loaded
     at import-time on POSIX, giving line editing + history for free.
 
-    Windows portability: stdlib ``readline`` is POSIX-only, so on native
-    Windows it's absent and ``input()`` runs raw. In mintty/Git-Bash and
-    some non-conhost consoles that makes the Enter keypress echo a raw
-    carriage return as ``^M`` (CR = 0x0D = Ctrl-M) and breaks line editing.
-    ``pyreadline3`` provides the readline interface on Windows; we fall back
-    to it so native consoles get proper line discipline. The ``rstrip``
-    below also strips any stray ``\\r`` from the parsed value as a guard,
-    independent of the echo fix. (Cleanest of all: run swarph inside WSL,
-    which is POSIX and loads stdlib readline directly.)"""
+    NB: do NOT re-add a ``pyreadline3`` shim here. v0.7.8 tried that to fix
+    a Windows "Enter renders 'm'" report, but that symptom traced to Claude
+    Code's OWN TUI on native Windows (no hooks, recent version, fails at the
+    trust prompt — Anthropic-side), NOT this REPL. Bare ``input()`` is clean
+    on the Windows console; the ``rstrip`` is a harmless CR guard. v0.7.9
+    reverted the pyreadline3 dep + shim."""
     try:
         import readline  # noqa: F401 — side-effect-only on POSIX
     except ImportError:
-        try:
-            import pyreadline3  # noqa: F401 — Windows readline shim
-        except ImportError:
-            pass  # minimal build; raw input still works (rstrip guards CR)
+        pass  # Windows / minimal builds; raw input still works
     return input(prompt).rstrip("\r\n")
 
 
