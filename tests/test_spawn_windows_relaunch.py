@@ -20,10 +20,23 @@ CWD = Path("/home/ubuntu/lab")
 WT = "C:\\Windows\\wt.exe"
 
 
+class _FakeStdout:
+    """Minimal stand-in so tests can control sys.stdout.isatty() — the helper
+    only ever calls .isatty() on stdout (its prints go to stderr)."""
+
+    def __init__(self, tty):
+        self._tty = tty
+
+    def isatty(self):
+        return self._tty
+
+
 def _call(monkeypatch, *, platform="win32", wt_session=None, win_ack=None,
-          wt_path=WT, popen=None):
+          spawn_marker=None, force_wt=None, isatty=True, wt_path=WT, popen=None):
     monkeypatch.setattr(spawn.sys, "platform", platform)
-    for var, val in (("WT_SESSION", wt_session), ("SWARPH_WIN_ACK", win_ack)):
+    monkeypatch.setattr(spawn.sys, "stdout", _FakeStdout(isatty))
+    for var, val in (("WT_SESSION", wt_session), ("SWARPH_WIN_ACK", win_ack),
+                     ("SWARPH_SPAWN", spawn_marker), ("SWARPH_FORCE_WT", force_wt)):
         if val is None:
             monkeypatch.delenv(var, raising=False)
         else:
@@ -81,3 +94,36 @@ def test_popen_failure_falls_back_gracefully(monkeypatch):
     boom = MagicMock(side_effect=OSError("wt launch failed"))
     r, _ = _call(monkeypatch, popen=boom)
     assert r is False
+
+
+def test_non_interactive_stdout_skips_relaunch(monkeypatch):
+    # CI / piped / redirected: no human console to relaunch from. Must NOT spawn a
+    # detached WT window even on conhost+wt (workstation-lc's over-broad finding).
+    r, pop = _call(monkeypatch, isatty=False)
+    assert r is False
+    pop.assert_not_called()
+
+
+def test_already_spawned_skips_relaunch(monkeypatch):
+    # SWARPH_SPAWN set => we're inside a session we already spawned. Reliable
+    # loop-guard, independent of WT_SESSION (which proved unreliable on inheriting
+    # boxes) — a relaunched session can never re-relaunch.
+    r, pop = _call(monkeypatch, spawn_marker="1")
+    assert r is False
+    pop.assert_not_called()
+
+
+def test_force_wt_overrides_inherited_wt_session(monkeypatch):
+    # corporate boxes INHERIT WT_SESSION into child conhosts (commander hit this:
+    # had to clear WT_SESSION by hand). SWARPH_FORCE_WT=1 relaunches anyway.
+    r, pop = _call(monkeypatch, wt_session="inherited-guid", force_wt="1")
+    assert r is True
+    pop.assert_called_once()
+
+
+def test_force_wt_still_loop_guarded_by_spawn_marker(monkeypatch):
+    # a persistent SWARPH_FORCE_WT must NOT cause infinite re-relaunch: the
+    # SWARPH_SPAWN marker on the relaunched tree wins over the force flag.
+    r, pop = _call(monkeypatch, wt_session="g", force_wt="1", spawn_marker="1")
+    assert r is False
+    pop.assert_not_called()
