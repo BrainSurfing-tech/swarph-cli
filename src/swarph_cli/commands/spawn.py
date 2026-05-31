@@ -387,17 +387,28 @@ def _relaunch_in_windows_terminal(
 
     No-op (returns False) when:
       * not Windows;
-      * already inside Windows Terminal (``WT_SESSION`` set) — the TUI works there,
-        and this is also the natural loop-guard: a relaunched session can never
-        re-relaunch because WT sets ``WT_SESSION``;
-      * operator opted to stay in conhost (``SWARPH_WIN_ACK=1``);
+      * stdout is not an interactive TTY (CI / piped / redirected) — there is no
+        human console to relaunch from, and a detached WT window would be wrong;
+      * we are already inside a session WE spawned (``SWARPH_SPAWN`` set) — the
+        reliable loop-guard: a relaunched session can never re-relaunch, regardless
+        of how ``WT_SESSION`` behaves on this box;
+      * operator opted to stay put (``SWARPH_WIN_ACK=1``);
+      * already inside Windows Terminal (``WT_SESSION`` set) AND not force-requested
+        — the TUI works there. NOTE: some corporate setups INHERIT ``WT_SESSION``
+        into child ``conhost`` consoles, so this is a comfort heuristic, not ground
+        truth. Set ``SWARPH_FORCE_WT=1`` to relaunch anyway when you know you are on
+        a broken conhost that carries an inherited ``WT_SESSION``;
       * ``wt.exe`` is not installed (e.g. locked-down corporate box) — caller warns.
     """
     if sys.platform != "win32":
         return False
-    if os.environ.get("WT_SESSION"):
+    if not sys.stdout.isatty():
+        return False
+    if os.environ.get("SWARPH_SPAWN"):
         return False
     if os.environ.get("SWARPH_WIN_ACK"):
+        return False
+    if os.environ.get("WT_SESSION") and not os.environ.get("SWARPH_FORCE_WT"):
         return False
     wt = shutil.which("wt")
     if not wt:
