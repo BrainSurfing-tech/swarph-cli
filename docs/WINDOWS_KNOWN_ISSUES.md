@@ -112,8 +112,27 @@ other issues.
 
 - This document (`docs/WINDOWS_KNOWN_ISSUES.md`) for future-operator
   recall.
-- Banner update in `swarph spawn` to surface a warning when running on
-  Windows, with a pointer to this doc.
+- **Auto-relaunch in Windows Terminal.** `swarph spawn` detects a broken
+  console and relaunches the `claude` session inside Windows Terminal
+  (where the Ink TUI works), then exits the original console. This is the
+  primary fix — it sidesteps conhost's VT-input gap entirely rather than
+  trying to patch it. See `_relaunch_in_windows_terminal` in `spawn.py`.
+- **Env knobs** controlling that relaunch:
+  - `SWARPH_FORCE_WT=1` — **force the relaunch even when `WT_SESSION` is
+    set.** Needed on corporate boxes that *inherit* `WT_SESSION` into child
+    `conhost` consoles (so the console looks like Windows Terminal to env
+    detection but is actually a broken conhost). Set this once at User
+    scope and you never have to clear `WT_SESSION` by hand. This is the
+    clean replacement for the manual `Remove-Item Env:WT_SESSION` workaround.
+  - `SWARPH_WIN_ACK=1` — opt out of both the relaunch and the warning
+    (stay put in the current console).
+  - `SWARPH_SPAWN` (internal) — set on the relaunched session; the reliable
+    loop-guard so a relaunched session never re-relaunches, independent of
+    how `WT_SESSION` behaves.
+  - The relaunch also no-ops when stdout is not an interactive TTY (CI /
+    piped) and when `wt.exe` is absent (then it warns instead).
+- Banner update in `swarph spawn`: when it *can't* auto-relaunch (no
+  `wt.exe`), it warns and points here.
 
 ### Deferred (requires Windows test environment to validate)
 
@@ -147,7 +166,13 @@ other issues.
    ```powershell
    # In the failing shell, run:
    $Host.Name                # "ConsoleHost" / "Windows PowerShell ISE" / etc.
-   $env:WT_SESSION           # set iff Windows Terminal; empty otherwise
+   $env:WT_SESSION           # USUALLY set iff Windows Terminal — but NOT
+                             # reliable: it is INHERITED into child conhost
+                             # consoles spawned from a WT session, so a broken
+                             # conhost can carry a non-empty WT_SESSION. If you
+                             # see WT_SESSION set but the TUI is still broken,
+                             # you're in an inherited-env conhost — use
+                             # SWARPH_FORCE_WT=1 to force the WT relaunch.
    ```
    If `Windows PowerShell ISE` — switch immediately. ISE doesn't support
    ANSI at all.
