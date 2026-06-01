@@ -286,3 +286,35 @@ def test_swarph_native_path_falls_back_to_filename_stem(tmp_path, monkeypatch):
     )
     p = _swarph_native_path(None, result)
     assert p.name == "no-session-id.jsonl"
+
+
+def test_swarph_native_path_rejects_path_traversal(tmp_path, monkeypatch):
+    """Adversarial-sweep MED: a malicious imported JSONL whose session_id is a
+    traversal or absolute path must NOT escape the sessions dir on write."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    from swarph_cli.parsers.claude import ImportReport, ImportResult
+
+    sessions = tmp_path / ".swarph" / "sessions"
+    for evil in ("../../../../etc/cron.d/evil", "/etc/cron.d/evil",
+                 "../../.bashrc", "a/b/c"):
+        result = ImportResult(
+            messages=[],
+            report=ImportReport(source_path="/x/foo.jsonl"),
+            metadata={"session_id": evil},
+        )
+        p = _swarph_native_path(None, result)
+        # Always a direct child of the sessions dir — never escapes.
+        assert p.resolve().parent == sessions.resolve(), f"{evil!r} -> {p}"
+        assert "/" not in p.name.replace(".jsonl", "")
+        assert ".." not in p.name
+
+
+def test_swarph_native_path_explicit_target_also_sanitized(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    from swarph_cli.parsers.claude import ImportReport, ImportResult
+
+    result = ImportResult(messages=[], report=ImportReport(source_path="/x/foo.jsonl"),
+                          metadata={"session_id": "S-1"})
+    p = _swarph_native_path("/etc/passwd", result)
+    assert p.parent == tmp_path / ".swarph" / "sessions"
+    assert p.name == "passwd.jsonl"

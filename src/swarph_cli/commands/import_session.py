@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -110,20 +111,45 @@ def _detect_format(path: Path) -> Optional[str]:
     return None
 
 
+def _safe_session_filename(raw: str) -> str:
+    """Reduce an arbitrary session identifier to a SAFE basename confined to
+    the sessions dir.
+
+    The identifier may come from the parsed JSONL (``session_id``), which is
+    untrusted when importing a foreign file: an absolute value (``/etc/cron.d/
+    evil``) would make ``base / name`` discard ``base`` entirely, and ``../``
+    would escape it (adversarial-sweep path-traversal). Strip directory
+    components and whitelist the charset so the result is always a plain
+    filename inside the sessions dir.
+    """
+    # ``Path(...).name`` drops any directory components, incl a leading "/".
+    base_name = Path(str(raw)).name
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", base_name)
+    # Reject names that are empty or pure dots ("", ".", "..", ...).
+    if not safe.strip("."):
+        safe = "imported-session"
+    return safe
+
+
 def _swarph_native_path(target_session: Optional[str], result: ImportResult) -> Path:
-    """Resolve the target swarph-native session file path."""
+    """Resolve the target swarph-native session file path (path-traversal-safe)."""
     base = Path.home() / ".swarph" / "sessions"
     base.mkdir(parents=True, exist_ok=True)
-    if target_session:
-        name = target_session
-    else:
-        name = (
-            result.metadata.get("session_id")
-            or Path(result.report.source_path).stem
-        )
+    raw = target_session or (
+        result.metadata.get("session_id")
+        or Path(result.report.source_path).stem
+    )
+    name = _safe_session_filename(raw)
     if not name.endswith(".jsonl"):
         name = f"{name}.jsonl"
-    return base / name
+    out = base / name
+    # Defense in depth: the sanitized name has no separators, so this always
+    # holds — but assert the write target is a direct child of the sessions dir.
+    if out.resolve().parent != base.resolve():
+        raise ValueError(
+            f"import: refusing to write session outside {base} (got {out})"
+        )
+    return out
 
 
 def _write_swarph_native_session(
