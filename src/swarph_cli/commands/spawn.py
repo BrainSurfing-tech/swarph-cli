@@ -741,6 +741,17 @@ MEMBRANES: dict[str, ProviderMembrane] = {
     "antigravity": AntigravityMembrane(),
 }
 
+# Defensive coupling: MEMBRANES must stay in lockstep with the shared provider
+# whitelist. A future VALID_PROVIDERS entry without a matching membrane would
+# otherwise surface as a raw KeyError at spawn time — fail loud at import instead.
+from swarph_shared.cell import VALID_PROVIDERS as _VALID_PROVIDERS  # noqa: E402
+
+if set(MEMBRANES) != _VALID_PROVIDERS:
+    raise RuntimeError(
+        f"MEMBRANES {sorted(MEMBRANES)} out of sync with VALID_PROVIDERS "
+        f"{sorted(_VALID_PROVIDERS)} — add the missing provider membrane."
+    )
+
 
 def run_spawn(argv: Optional[list[str]] = None) -> int:
     if argv is None:
@@ -781,7 +792,18 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         print(f"swarph spawn: {exc}", file=sys.stderr)
         return 1
 
-    membrane = MEMBRANES[cell.provider]
+    membrane = MEMBRANES.get(cell.provider)
+    if membrane is None:
+        # Defense-in-depth: VALID_PROVIDERS (in load_cell) normally rejects
+        # unknown providers first, and _validate_routing covers the routing-field
+        # path — but a routing-less cell of an unmembraned provider would have hit
+        # a raw KeyError here. Fail clean instead (silent-failure-hunter #4).
+        print(
+            f"swarph spawn: provider {cell.provider!r} is not supported by this "
+            f"spawn membrane (have: {', '.join(sorted(MEMBRANES))}).",
+            file=sys.stderr,
+        )
+        return 1
 
     session_id: Optional[str]
     was_generated = False
