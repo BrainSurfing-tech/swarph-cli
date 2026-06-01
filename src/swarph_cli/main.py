@@ -48,6 +48,7 @@ Usage:
   swarph onboard <peer-name> [--gateway URL]
   swarph ratify <peer-name> [--reason "<text>"] [--witness-name <self>]
   swarph daemon [--state-dir DIR] [--self NAME] [--poll-seconds N]
+  swarph mesh send <peer> --kind question --content "..."
 
 Examples:
   swarph "explain Hawkes process briefly"
@@ -61,7 +62,7 @@ Examples:
 
 Status: Phase 2 one-shot + Phase 2.5 import + Phase 5 REPL +
 Phase 5.5 onboard/ratify + Phase 5.6 daemon + Phase 7 spawn ready.
---ask <peer> (Phase 3), REPL drain coroutine + /inbox /reply
+Layer-2 mesh bridge ships as `swarph mesh`; REPL /inbox /reply
 slash commands (Phase 5.6b) ship in subsequent releases.
 
 Spec: https://github.com/darw007d/hedge-fund-mcp/blob/main/research/swarph_cli/PLAN.md
@@ -81,6 +82,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "hook-output": "swarph_cli.commands.hook_output.run_hook_output",
     "watchdog": "swarph_cli.commands.watchdog.run_watchdog",
     "memory-sync": "swarph_cli.commands.memory_sync.run_memory_sync",
+    "mesh": "swarph_cli.commands.mesh.run_mesh",
     # Future: "list-peers", "list-adapters", etc.
 }
 
