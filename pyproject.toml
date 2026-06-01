@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.7.9"
-description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration: one-shot + chat REPL, multi-provider routing (gemini/claude/deepseek/openai/grok), cell.yaml spawn, session import, and watchdog. v0.7.9 reverts the v0.7.8 pyreadline3 dependency + chat-REPL shim: the Windows 'Enter renders m' symptom traced to Claude Code's own native-Windows TUI (no hooks, recent build, fails at the trust prompt — Anthropic-side), NOT this REPL, so the shim addressed the wrong layer. Bare input() + a CR-strip guard remain."
+version = "0.8.0"
+description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration: one-shot + chat REPL, multi-provider routing (gemini/claude/deepseek/openai/grok), cell.yaml spawn, session import, and watchdog. v0.8.0 ships the multi-provider spawn MEMBRANE: `swarph spawn` launches claude, codex (GPT), or antigravity/agy (Gemini) per the cell's `provider`, each with its own billing-scrub + sandbox; plus the Windows conhost fix — auto-relaunch into Windows Terminal to dodge the Enter-inserts-'m' TUI bug (SWARPH_FORCE_WT for inherited-WT_SESSION boxes)."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
