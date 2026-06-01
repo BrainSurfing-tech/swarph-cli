@@ -58,7 +58,7 @@ _USAGE = """\
 Usage:
   swarph spawn [<role-or-path>] [--onboarding PATH-OR-URL]
                [--dry-run] [--no-starter] [--print-id]
-               [-- claude-extra-args...]
+               [-- provider-extra-args...]
 
 Resolution (first match wins):
   --onboarding <path-or-url>      explicit override
@@ -68,14 +68,29 @@ Resolution (first match wins):
   mesh-gateway://...              v0.7+ — returns NotImplementedError now
 
 Flags:
-  --dry-run        Print the resolved claude command + cell summary; no exec
+  --dry-run        Print the resolved provider command + cell summary; no exec
   --no-starter     Skip starter-prompt injection even if cell.yaml sets one
   --print-id       Print resolved session-id to stdout before exec (useful
                    for shell scripts capturing the UUID for later resume)
 
-Anything after a literal `--` is passed through to claude unchanged
-(e.g. `swarph spawn lab -- --resume` to force the resume picker).
+Anything after a literal `--` is passed through to the provider CLI unchanged
+(e.g. `swarph spawn lab -- --resume` to force the Claude resume picker).
 """
+
+
+_CODEX_BILLING_LEAK_KEYS = (
+    "OPENAI_API_KEY",
+    "OPENAI_API_BASE",
+    "OPENAI_BASE_URL",
+    "CODEX_API_KEY",
+    "OPENAI_ORG_ID",
+    "OPENAI_ORGANIZATION",
+)
+
+_CODEX_SANDBOX_VALUES = frozenset({"workspace-write", "read-only"})
+_CODEX_DEFAULT_SANDBOX = "workspace-write"
+_CODEX_APPROVAL = "on-request"
+_CODEX_PRINT_ID_NOTE = "codex: fresh-session-per-spawn, no pinned id"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -202,36 +217,11 @@ def _resolve_cell(args: argparse.Namespace) -> tuple[Cell, Optional[str]]:
 
 
 def _validate_routing(cell: Cell) -> None:
-    """Phase 1B v0 (2026-05-19) — read + validate ``cell.extra.routing``.
-
-    Phase 1B-primary architecture commits the cell-membrane framing:
-    Claude CLI is the membrane for Anthropic-side spawns; non-Anthropic
-    cells get a different membrane (currently NOT implemented).
-
-    cell.yaml ``routing`` field shape (v0):
-    ::
-        routing:
-          native: anthropic         # only valid value in v0
-
-    v0 accepts ``routing`` absent (= default anthropic) OR
-    ``routing.native: anthropic``. Any other value raises CellError
-    pointing at Phase 1B v1+ direction.
-
-    Forward-compat: reads via ``Cell.extra`` (same pattern as
-    cursor_path / tmux_session shipped in v0.7.2 before graduating to
-    typed fields in swarph-shared 0.4.x). When swarph-shared graduates
-    ``routing`` to a typed Cell field, this helper swaps to typed
-    access with no API surface change for cell.yaml authors.
-
-    See research/swarph_cli/CELL_MEMBRANE_PHASE_0_RFC.md §5 (Phase 1B)
-    for the architectural context. See lab memory
-    ``project_next_up.md`` for the commander 2026-05-19 decision that
-    Phase 1B is primary + path (c) Anthropic-only v0.
-    """
+    """Validate optional ``cell.extra.routing`` against the spawn provider."""
     extra = cell.extra or {}
     routing = extra.get("routing")
     if routing is None:
-        return  # No routing field → default Anthropic, allow
+        return
     if not isinstance(routing, dict):
         raise CellError(
             f"swarph spawn: cell.yaml `routing` must be a mapping, "
@@ -239,20 +229,25 @@ def _validate_routing(cell: Cell) -> None:
             f"research/swarph_cli/CELL_MEMBRANE_PHASE_0_RFC.md for the "
             f"valid v0 schema."
         )
-    native = routing.get("native", "anthropic")
-    if native == "anthropic":
-        return  # Explicit Anthropic OR default → allow
-    # Any other native value is a Phase 1B v1+ feature not yet built
+
+    provider_native = {
+        "claude": "anthropic",
+        "codex": "codex",
+    }.get(cell.provider)
+    if provider_native is None:
+        raise CellError(
+            f"swarph spawn: provider {cell.provider!r} is not supported "
+            "by this spawn membrane."
+        )
+
+    native = routing.get("native", provider_native)
+    if native == provider_native:
+        return
+
     raise CellError(
-        f"swarph spawn: cell.yaml `routing.native: {native!r}` is not "
-        f"supported in v0 of Phase 1B (Anthropic-only). Non-Anthropic "
-        f"routing (e.g. routing.native: openrouter) is Phase 1B v1+ "
-        f"scope, deferred per commander 2026-05-19 until a concrete "
-        f"non-Anthropic-cell use case emerges. For now, remove the "
-        f"`routing.native` field OR set it to 'anthropic' to use the "
-        f"existing Claude CLI spawn path. See "
-        f"research/swarph_cli/CELL_MEMBRANE_PHASE_0_RFC.md §5 for the "
-        f"architectural direction."
+        f"swarph spawn: cell.yaml `routing.native: {native!r}` does not "
+        f"match provider {cell.provider!r}. Expected routing.native "
+        f"{provider_native!r}, or omit the routing field."
     )
 
 
@@ -309,6 +304,40 @@ def _build_claude_argv(
     return argv
 
 
+def _codex_sandbox(cell: Cell) -> str:
+    sandbox = getattr(cell, "sandbox", None) or _CODEX_DEFAULT_SANDBOX
+    if sandbox not in _CODEX_SANDBOX_VALUES:
+        raise CellError(
+            f"cell.yaml: sandbox {sandbox!r} is not valid for provider "
+            f"'codex'. Valid values: {sorted(_CODEX_SANDBOX_VALUES)}."
+        )
+    return sandbox
+
+
+def _build_codex_argv(cell: Cell, passthrough: list[str]) -> list[str]:
+    argv = [
+        "codex",
+        "-C",
+        str(cell.cwd),
+        "-s",
+        _codex_sandbox(cell),
+        "-a",
+        _CODEX_APPROVAL,
+    ]
+    argv.extend(passthrough)
+    return argv
+
+
+def _scrubbed_codex_env() -> dict[str, str]:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in _CODEX_BILLING_LEAK_KEYS
+    }
+    env["SWARPH_SPAWN"] = "1"
+    return env
+
+
 def _print_banner() -> None:
     sys.stderr.write(_BANNER.format(version=__version__))
     sys.stderr.flush()
@@ -316,7 +345,7 @@ def _print_banner() -> None:
 
 def _print_dry_run(
     cell: Cell,
-    session_id: str,
+    session_id: Optional[str],
     was_generated: bool,
     argv: list[str],
     new_instance: bool = False,
@@ -339,15 +368,29 @@ def _print_dry_run(
     print(f"#   name:        {cell.name}", file=sys.stderr)
     print(f"#   role:        {cell.role}", file=sys.stderr)
     print(f"#   cwd:         {cell.cwd}", file=sys.stderr)
-    print(
-        f"#   session_id:  {session_id} ({sid_label})",
-        file=sys.stderr,
-    )
-    print(
-        f"#   starter:     "
-        f"{cell.starter_prompt_path or '(none)'}",
-        file=sys.stderr,
-    )
+    if cell.provider == "codex":
+        print(
+            "#   session_id:  codex: fresh-session-per-spawn, no pinned id "
+            "(cell.yaml session_id ignored)",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"#   session_id:  {session_id} ({sid_label})",
+            file=sys.stderr,
+        )
+    if cell.provider == "codex":
+        print(
+            "#   starter:     cwd AGENTS.md auto-read by codex; no "
+            "--append-system-prompt injection",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"#   starter:     "
+            f"{cell.starter_prompt_path or '(none)'}",
+            file=sys.stderr,
+        )
     print(f"#   provider:    {cell.provider}", file=sys.stderr)
     if cell.lineage is not None:
         print(
@@ -410,77 +453,102 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         print(f"swarph spawn: {exc}", file=sys.stderr)
         return 1
 
-    # When user typed a slot-role (e.g. `swarph spawn drop-on-meta-edge-2`)
-    # the cell.yaml resolved to the BASE file (drop-on-meta-edge.yaml) so
-    # cell.role = "drop-on-meta-edge". But the operator wants slot 2's
-    # sidecar + display name. Use the user's typed role for the sidecar
-    # lookup; cell.role stays the base role for cell-context (cwd, starter
-    # prompt, lineage, provider).
-    sidecar_role = requested_role if requested_role else cell.role
+    session_id: Optional[str]
+    was_generated = False
+    effective_role: Optional[str] = None
 
-    try:
-        session_id, was_generated, effective_role = load_or_create_session_id(
-            sidecar_role, cell, new_instance=args.new_instance
-        )
-    except CellError as exc:
-        print(f"swarph spawn: {exc}", file=sys.stderr)
-        return 1
+    if cell.provider == "codex":
+        session_id = None
+        try:
+            spawn_argv = _build_codex_argv(cell, passthrough)
+        except CellError as exc:
+            print(f"swarph spawn: {exc}", file=sys.stderr)
+            return 1
+    else:
+        # When user typed a slot-role (e.g. `swarph spawn drop-on-meta-edge-2`)
+        # the cell.yaml resolved to the BASE file (drop-on-meta-edge.yaml) so
+        # cell.role = "drop-on-meta-edge". But the operator wants slot 2's
+        # sidecar + display name. Use the user's typed role for the sidecar
+        # lookup; cell.role stays the base role for cell-context (cwd, starter
+        # prompt, lineage, provider).
+        sidecar_role = requested_role if requested_role else cell.role
 
-    if args.new_instance and cell.session_id:
-        # Pinned cell.yaml session_id wins over --new-instance; surface
-        # the conflict on stderr so the operator knows the flag was a
-        # no-op for this cell.
-        print(
-            "swarph spawn: --new-instance ignored — cell.yaml pins "
-            "session_id explicitly. Remove the pinned UUID from cell.yaml "
-            "OR pass --session-id <new-uuid> on the claude command line "
-            "via `-- --session-id <uuid>` passthrough to override.",
-            file=sys.stderr,
-        )
+        try:
+            session_id, was_generated, effective_role = load_or_create_session_id(
+                sidecar_role, cell, new_instance=args.new_instance
+            )
+        except CellError as exc:
+            print(f"swarph spawn: {exc}", file=sys.stderr)
+            return 1
 
-    if args.new_instance and effective_role == sidecar_role and not cell.session_id:
-        # Degenerate case — --new-instance fired but no base sidecar
-        # existed, so we minted into the BASE slot (treating as the
-        # original). Surface this as a stderr note so the operator
-        # understands the v0.7 PR-B auto-suffix didn't kick in.
-        print(
-            "swarph spawn: --new-instance fired on a role with no "
-            f"existing sidecar — minted as the FIRST instance of "
-            f"{cell.role!r} (base slot), not as a sibling. Spawn the "
-            "original first via `swarph spawn <role>` (no --new-instance), "
-            "then re-run with --new-instance to mint a true sibling.",
-            file=sys.stderr,
-        )
+        if args.new_instance and cell.session_id:
+            # Pinned cell.yaml session_id wins over --new-instance; surface
+            # the conflict on stderr so the operator knows the flag was a
+            # no-op for this cell.
+            print(
+                "swarph spawn: --new-instance ignored — cell.yaml pins "
+                "session_id explicitly. Remove the pinned UUID from cell.yaml "
+                "OR pass --session-id <new-uuid> on the claude command line "
+                "via `-- --session-id <uuid>` passthrough to override.",
+                file=sys.stderr,
+            )
 
-    try:
-        claude_argv = _build_claude_argv(
-            cell, session_id, args.no_starter, passthrough,
-            effective_role=effective_role,
-        )
-    except CellError as exc:
-        print(f"swarph spawn: {exc}", file=sys.stderr)
-        return 1
+        if args.new_instance and effective_role == sidecar_role and not cell.session_id:
+            # Degenerate case — --new-instance fired but no base sidecar
+            # existed, so we minted into the BASE slot (treating as the
+            # original). Surface this as a stderr note so the operator
+            # understands the v0.7 PR-B auto-suffix didn't kick in.
+            print(
+                "swarph spawn: --new-instance fired on a role with no "
+                f"existing sidecar — minted as the FIRST instance of "
+                f"{cell.role!r} (base slot), not as a sibling. Spawn the "
+                "original first via `swarph spawn <role>` (no --new-instance), "
+                "then re-run with --new-instance to mint a true sibling.",
+                file=sys.stderr,
+            )
+
+        try:
+            spawn_argv = _build_claude_argv(
+                cell, session_id, args.no_starter, passthrough,
+                effective_role=effective_role,
+            )
+        except CellError as exc:
+            print(f"swarph spawn: {exc}", file=sys.stderr)
+            return 1
 
     if args.print_id:
-        print(session_id)
+        if cell.provider == "codex":
+            print(_CODEX_PRINT_ID_NOTE)
+        else:
+            print(session_id)
 
     if args.dry_run:
         _print_dry_run(
-            cell, session_id, was_generated, claude_argv,
+            cell, session_id, was_generated, spawn_argv,
             new_instance=args.new_instance,
             effective_role=effective_role,
         )
         return 0
 
-    claude_bin = shutil.which("claude")
-    if claude_bin is None:
-        print(
-            "swarph spawn: 'claude' binary not found on PATH. "
-            "Install Claude Code (https://docs.anthropic.com/claude/claude-code) "
-            "or set PATH explicitly.",
-            file=sys.stderr,
-        )
-        return 127
+    if cell.provider == "codex":
+        provider_bin = shutil.which("codex")
+        if provider_bin is None:
+            print(
+                "swarph spawn: 'codex' binary not found on PATH. "
+                "Install Codex CLI or set PATH explicitly.",
+                file=sys.stderr,
+            )
+            return 127
+    else:
+        provider_bin = shutil.which("claude")
+        if provider_bin is None:
+            print(
+                "swarph spawn: 'claude' binary not found on PATH. "
+                "Install Claude Code (https://docs.anthropic.com/claude/claude-code) "
+                "or set PATH explicitly.",
+                file=sys.stderr,
+            )
+            return 127
 
     # Windows-platform known-issues banner. Claude Code's TUI (Ink-based)
     # has documented input/rendering bugs on Windows native consoles
@@ -494,7 +562,8 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
     # already acknowledged via SWARPH_WIN_ACK=1 in env (set once after
     # reading the doc).
     if (
-        sys.platform == "win32"
+        cell.provider == "claude"
+        and sys.platform == "win32"
         and not args.no_banner
         and not os.environ.get("SWARPH_WIN_ACK")
     ):
@@ -508,23 +577,27 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr,
         )
 
-    try:
-        os.chdir(cell.cwd)
-    except OSError as exc:
-        print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
-        return 1
+    if cell.provider == "claude":
+        try:
+            os.chdir(cell.cwd)
+        except OSError as exc:
+            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
+            return 1
 
-    # v0.7 PR-C — set SWARPH_SPAWN=1 env so a SessionStart hook
-    # installed via `swarph install-hook` knows the prompt was
-    # already injected via --append-system-prompt and skips
-    # double-injection. The env propagates through execv since we
-    # don't use execve with a custom env.
-    os.environ["SWARPH_SPAWN"] = "1"
+        # v0.7 PR-C — set SWARPH_SPAWN=1 env so a SessionStart hook
+        # installed via `swarph install-hook` knows the prompt was
+        # already injected via --append-system-prompt and skips
+        # double-injection. The env propagates through execv since we
+        # don't use execve with a custom env.
+        os.environ["SWARPH_SPAWN"] = "1"
 
-    # exec-replace so the spawned claude session owns stdio +
-    # signals cleanly. argv[0] is preserved as 'claude' for ps-grep.
+    # exec-replace so the spawned provider session owns stdio +
+    # signals cleanly. argv[0] is preserved for ps-grep.
     try:
-        os.execv(claude_bin, claude_argv)
+        if cell.provider == "codex":
+            os.execve(provider_bin, spawn_argv, _scrubbed_codex_env())
+        else:
+            os.execv(provider_bin, spawn_argv)
     except OSError as exc:
         # execv only returns on failure.
         print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
