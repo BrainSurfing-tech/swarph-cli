@@ -790,3 +790,148 @@ def test_validate_routing_codex_rejects_openai_alias(tmp_path):
     err = str(exc_info.value)
     assert "openai" in err
     assert "codex" in err
+
+
+# ---------------------------------------------------------------------------
+# Antigravity Spawn Tests
+# ---------------------------------------------------------------------------
+
+
+def test_validate_routing_antigravity_allows(tmp_path):
+    """`routing.native: antigravity` or `gemini` → allowed for antigravity provider."""
+    from swarph_cli.commands.spawn import _validate_routing
+    for native in ("antigravity", "gemini"):
+        payload = {
+            "schema_version": SCHEMA_VERSION_V1,
+            "name": "gemini-researcher",
+            "role": "gemini-researcher",
+            "cwd": str(tmp_path),
+            "provider": "antigravity",
+            "routing": {"native": native},
+        }
+        p = tmp_path / f"cell_{native}.yaml"
+        p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+        cell = load_cell(p)
+        _validate_routing(cell)  # passes silently
+
+
+def test_validate_routing_antigravity_rejects_anthropic(tmp_path):
+    """`routing.native: anthropic` → rejected for antigravity provider."""
+    from swarph_cli.commands.spawn import _validate_routing
+    from swarph_cli.cell import CellError
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gemini-researcher",
+        "role": "gemini-researcher",
+        "cwd": str(tmp_path),
+        "provider": "antigravity",
+        "routing": {"native": "anthropic"},
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+    with pytest.raises(CellError) as exc_info:
+        _validate_routing(cell)
+    assert "anthropic" in str(exc_info.value)
+    assert "antigravity" in str(exc_info.value)
+
+
+def test_build_agy_argv_fresh(tmp_path):
+    """Verify agy argv when no session state exists on disk."""
+    from swarph_cli.commands.spawn import _build_agy_argv
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gemini-researcher",
+        "role": "gemini-researcher",
+        "cwd": str(tmp_path),
+        "provider": "antigravity",
+        "starter_prompt_path": str(tmp_path / "starter.txt"),
+    }
+    (tmp_path / "starter.txt").write_text("Hello starter!", encoding="utf-8")
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+
+    argv = _build_agy_argv(cell, no_starter=False, passthrough=["--extra"])
+    assert argv == [
+        "agy",
+        "--sandbox",
+        "--add-dir",
+        str(tmp_path),
+        "--prompt-interactive",
+        "Hello starter!",
+        "--extra",
+    ]
+
+
+def test_build_agy_argv_sandbox_none_defaults_true(tmp_path):
+    from swarph_cli.commands.spawn import _build_agy_argv
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gemini-researcher",
+        "role": "gemini-researcher",
+        "cwd": str(tmp_path),
+        "provider": "antigravity",
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+    # Simulate codex adding cell.sandbox = None
+    cell.sandbox = None
+    argv = _build_agy_argv(cell, no_starter=True, passthrough=[])
+    assert "--sandbox" in argv
+
+
+def test_build_agy_argv_sandbox_false(tmp_path):
+    from swarph_cli.commands.spawn import _build_agy_argv
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gemini-researcher",
+        "role": "gemini-researcher",
+        "cwd": str(tmp_path),
+        "provider": "antigravity",
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+    # Simulate cell.sandbox = False
+    cell.sandbox = False
+    argv = _build_agy_argv(cell, no_starter=True, passthrough=[])
+    assert "--sandbox" not in argv
+
+
+def test_agy_env_scrub(monkeypatch):
+    """Verify _agy_env correctly scrubs billing environment variables."""
+    from swarph_cli.commands.spawn import _agy_env
+
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/some/path.json")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "project-123")
+    monkeypatch.setenv("VERTEX_PROJECT", "v-project")
+    monkeypatch.setenv("VERTEX_LOCATION", "us-central1")
+
+    env = _agy_env()
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
+    assert "GOOGLE_CLOUD_PROJECT" not in env
+    assert "VERTEX_PROJECT" not in env
+    assert "VERTEX_LOCATION" not in env
+
+
+def test_run_spawn_antigravity_dry_run(tmp_path, isolated_xdg, capsys):
+    from swarph_cli.commands.spawn import run_spawn
+
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gemini-researcher",
+        "role": "gemini-researcher",
+        "cwd": str(tmp_path),
+        "provider": "antigravity",
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    import os
+    os.chdir(tmp_path)
+    run_spawn(["--dry-run"])
+    captured = capsys.readouterr()
+    assert "agy --sandbox --add-dir" in captured.out
+    assert "provider:    antigravity" in captured.err

@@ -234,6 +234,7 @@ def _validate_routing(cell: Cell) -> None:
     provider_native = {
         "claude": "anthropic",
         "codex": "codex",
+        "antigravity": "antigravity",
     }.get(cell.provider)
     if provider_native is None:
         raise CellError(
@@ -242,13 +243,20 @@ def _validate_routing(cell: Cell) -> None:
         )
 
     native = routing.get("native", provider_native)
-    if native == provider_native:
-        return
+    
+    if cell.provider == "antigravity":
+        if native in ("antigravity", "gemini"):
+            return
+        expected = "'antigravity' or 'gemini'"
+    else:
+        if native == provider_native:
+            return
+        expected = repr(provider_native)
 
     raise CellError(
         f"swarph spawn: cell.yaml `routing.native: {native!r}` does not "
         f"match provider {cell.provider!r}. Expected routing.native "
-        f"{provider_native!r}, or omit the routing field."
+        f"{expected}, or omit the routing field."
     )
 
 
@@ -313,6 +321,41 @@ def _codex_sandbox(cell: Cell) -> str:
             f"'codex'. Valid values: {sorted(_CODEX_SANDBOX_VALUES)}."
         )
     return sandbox
+
+
+def _agy_env() -> dict[str, str]:
+    """Return a copy of the environment scrubbed of billing credentials."""
+    env = os.environ.copy()
+    env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+    env.pop("GOOGLE_CLOUD_PROJECT", None)
+    env.pop("VERTEX_PROJECT", None)
+    env.pop("VERTEX_LOCATION", None)
+    return env
+
+
+def _build_agy_argv(
+    cell: Cell, no_starter: bool, passthrough: list[str]
+) -> list[str]:
+    argv = ["agy"]
+    
+    # codex is adding cell.sandbox; default ON, only off on explicit falsy
+    sandbox_attr = getattr(cell, "sandbox", None)
+    if sandbox_attr is not None:
+        is_sandbox = sandbox_attr
+    else:
+        is_sandbox = cell.extra.get("sandbox", True)
+        
+    if is_sandbox is not False:
+        argv.append("--sandbox")
+    
+    # Pass --add-dir <cwd> for directory setup.
+    argv.extend(["--add-dir", str(cell.cwd)])
+    
+    if not no_starter and cell.starter_prompt_path:
+        argv.extend(["--prompt-interactive", read_starter_prompt(cell)])
+    
+    argv.extend(passthrough)
+    return argv
 
 
 def _build_codex_argv(cell: Cell, passthrough: list[str]) -> list[str]:
@@ -528,6 +571,18 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         except CellError as exc:
             print(f"swarph spawn: {exc}", file=sys.stderr)
             return 1
+    elif cell.provider == "antigravity":
+        session_id = "(fresh-session-per-spawn, no pinned id)"
+        was_generated = True
+        sidecar_role = requested_role if requested_role else cell.role
+        effective_role = sidecar_role
+        try:
+            spawn_argv = _build_agy_argv(
+                cell, args.no_starter, passthrough
+            )
+        except CellError as exc:
+            print(f"swarph spawn: {exc}", file=sys.stderr)
+            return 1
     else:
         # When user typed a slot-role (e.g. `swarph spawn drop-on-meta-edge-2`)
         # the cell.yaml resolved to the BASE file (drop-on-meta-edge.yaml) so
@@ -603,6 +658,19 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 127
+    elif cell.provider == "antigravity":
+        provider_bin = shutil.which("agy")
+        if provider_bin is None:
+            home_local = Path.home() / ".local" / "bin" / "agy"
+            if home_local.exists():
+                provider_bin = str(home_local)
+        if provider_bin is None:
+            print(
+                "swarph spawn: 'agy' binary not found on PATH. "
+                "Install Antigravity CLI or set PATH explicitly.",
+                file=sys.stderr,
+            )
+            return 127
     else:
         provider_bin = shutil.which("claude")
         if provider_bin is None:
@@ -666,6 +734,11 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         # already injected via --append-system-prompt and skips
         # double-injection. The env propagates through execv since we
         # don't use execve with a custom env.
+        os.environ["SWARPH_SPAWN"] = "1"
+    elif cell.provider == "antigravity":
+        env = _agy_env()
+        os.environ.clear()
+        os.environ.update(env)
         os.environ["SWARPH_SPAWN"] = "1"
 
     # exec-replace so the spawned provider session owns stdio +
