@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -371,6 +372,69 @@ def _print_dry_run(
     print(" ".join(redacted))
 
 
+def _relaunch_in_windows_terminal(
+    claude_bin: str, claude_argv: list[str], cwd: Path,
+) -> bool:
+    """Auto-fix the conhost TUI bug by relaunching the session in Windows Terminal.
+
+    On legacy Windows console (``conhost.exe``), Claude Code's Ink TUI breaks: the
+    SGR terminator ``m`` leaks from the output stream into stdin, so pressing Enter
+    inserts a literal ``m`` instead of submitting (see docs/WINDOWS_KNOWN_ISSUES.md).
+    Windows Terminal handles VT-input correctly. If we're on conhost AND ``wt.exe``
+    is available, relaunch the ``claude`` session inside Windows Terminal and return
+    True (the caller should exit this console). Otherwise return False (caller
+    proceeds in-place and warns).
+
+    No-op (returns False) when:
+      * not Windows;
+      * stdout is not an interactive TTY (CI / piped / redirected) — there is no
+        human console to relaunch from, and a detached WT window would be wrong;
+      * we are already inside a session WE spawned (``SWARPH_SPAWN`` set) — the
+        reliable loop-guard: a relaunched session can never re-relaunch, regardless
+        of how ``WT_SESSION`` behaves on this box;
+      * operator opted to stay put (``SWARPH_WIN_ACK=1``);
+      * already inside Windows Terminal (``WT_SESSION`` set) AND not force-requested
+        — the TUI works there. NOTE: some corporate setups INHERIT ``WT_SESSION``
+        into child ``conhost`` consoles, so this is a comfort heuristic, not ground
+        truth. Set ``SWARPH_FORCE_WT=1`` to relaunch anyway when you know you are on
+        a broken conhost that carries an inherited ``WT_SESSION``;
+      * ``wt.exe`` is not installed (e.g. locked-down corporate box) — caller warns.
+    """
+    if sys.platform != "win32":
+        return False
+    if not sys.stdout.isatty():
+        return False
+    if os.environ.get("SWARPH_SPAWN"):
+        return False
+    if os.environ.get("SWARPH_WIN_ACK"):
+        return False
+    if os.environ.get("WT_SESSION") and not os.environ.get("SWARPH_FORCE_WT"):
+        return False
+    wt = shutil.which("wt")
+    if not wt:
+        return False
+    # Relaunch claude inside Windows Terminal, in the cell's cwd, carrying
+    # SWARPH_SPAWN=1 so a SessionStart hook doesn't double-inject the starter.
+    # claude_argv[0] is the "claude" argv0; the real flags are claude_argv[1:].
+    wt_cmd = [wt, "-d", str(cwd), "--", claude_bin, *claude_argv[1:]]
+    env = {**os.environ, "SWARPH_SPAWN": "1"}
+    try:
+        subprocess.Popen(wt_cmd, env=env)
+    except OSError as exc:
+        print(
+            f"swarph spawn: Windows Terminal relaunch failed ({exc}); continuing "
+            f"in this console (TUI may misbehave — see docs/WINDOWS_KNOWN_ISSUES.md).",
+            file=sys.stderr,
+        )
+        return False
+    print(
+        "swarph spawn: relaunched the session in Windows Terminal (avoids the "
+        "conhost Enter-inserts-'m' TUI bug). This console can be closed.",
+        file=sys.stderr,
+    )
+    return True
+
+
 def run_spawn(argv: Optional[list[str]] = None) -> int:
     if argv is None:
         argv = sys.argv[2:]  # skip "swarph spawn"
@@ -493,18 +557,28 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
     # Banner is suppressed by --no-banner OR when the operator has
     # already acknowledged via SWARPH_WIN_ACK=1 in env (set once after
     # reading the doc).
+    # conhost TUI auto-fix: on legacy Windows console (not Windows Terminal),
+    # relaunch the session in Windows Terminal where the Ink TUI works. Returns
+    # True (and we exit this console) only when it actually relaunched.
+    if _relaunch_in_windows_terminal(claude_bin, claude_argv, cell.cwd):
+        return 0
+
+    # Still in a broken console (conhost with no wt.exe, or operator acked).
+    # Warn unless suppressed. Inside Windows Terminal (WT_SESSION set) the TUI
+    # works, so no warning fires there.
     if (
         sys.platform == "win32"
         and not args.no_banner
         and not os.environ.get("SWARPH_WIN_ACK")
+        and not os.environ.get("WT_SESSION")
     ):
         print(
-            "swarph spawn: WARNING — Windows shell detected. Claude Code's "
-            "TUI has documented input/rendering issues on Windows native "
-            "consoles (conhost.exe). Known symptom: Enter inserts literal "
-            "'m' character. See docs/WINDOWS_KNOWN_ISSUES.md for "
-            "workarounds (use Windows Terminal not conhost, or WSL2). "
-            "Set SWARPH_WIN_ACK=1 in env to suppress this warning.",
+            "swarph spawn: WARNING — legacy Windows console (conhost) and Windows "
+            "Terminal (wt.exe) was not found, so the session couldn't be "
+            "auto-relaunched. Claude Code's TUI mis-handles input here (Enter "
+            "inserts literal 'm'). Install Windows Terminal (Microsoft Store) and "
+            "re-run, or use WSL2. See docs/WINDOWS_KNOWN_ISSUES.md. Set "
+            "SWARPH_WIN_ACK=1 to suppress and run here anyway.",
             file=sys.stderr,
         )
 
