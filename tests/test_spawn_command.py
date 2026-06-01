@@ -8,9 +8,11 @@ from typing import Iterator
 import pytest
 import yaml
 
-from swarph_cli.cell import SCHEMA_VERSION_V1
+from swarph_cli.cell import SCHEMA_VERSION_V1, CellError
 from swarph_cli.commands.spawn import (
     _build_claude_argv,
+    _build_codex_argv,
+    _scrubbed_codex_env,
     _split_passthrough,
     run_spawn,
 )
@@ -125,6 +127,103 @@ def test_build_claude_argv_passthrough_appended_in_order(fake_cell_yaml):
     assert argv[-3:] == ["--resume", "--profile", "x"]
 
 
+def test_build_codex_argv_default_sandbox(tmp_path):
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gpt-ops",
+        "role": "gpt-ops",
+        "cwd": str(tmp_path),
+        "provider": "codex",
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+
+    argv = _build_codex_argv(cell, passthrough=[])
+    assert argv == [
+        "codex",
+        "-C",
+        str(tmp_path),
+        "-s",
+        "workspace-write",
+        "-a",
+        "on-request",
+    ]
+    assert "--append-system-prompt" not in argv
+    assert "--session-id" not in argv
+    assert "--resume" not in argv
+
+
+def test_build_codex_argv_explicit_sandbox_and_passthrough(tmp_path):
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gpt-ops",
+        "role": "gpt-ops",
+        "cwd": str(tmp_path),
+        "provider": "codex",
+        "sandbox": "read-only",
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+
+    argv = _build_codex_argv(cell, passthrough=["--model", "gpt-5"])
+    assert argv == [
+        "codex",
+        "-C",
+        str(tmp_path),
+        "-s",
+        "read-only",
+        "-a",
+        "on-request",
+        "--model",
+        "gpt-5",
+    ]
+
+
+def test_build_codex_argv_rejects_unknown_sandbox(tmp_path):
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gpt-ops",
+        "role": "gpt-ops",
+        "cwd": str(tmp_path),
+        "provider": "codex",
+        "sandbox": "danger-full-access",
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+
+    with pytest.raises(CellError, match="sandbox"):
+        _build_codex_argv(cell, passthrough=[])
+
+
+def test_scrubbed_codex_env_drops_openai_billing_keys(monkeypatch):
+    for key in (
+        "OPENAI_API_KEY",
+        "OPENAI_API_BASE",
+        "OPENAI_BASE_URL",
+        "CODEX_API_KEY",
+        "OPENAI_ORG_ID",
+        "OPENAI_ORGANIZATION",
+    ):
+        monkeypatch.setenv(key, f"leak-{key}")
+    monkeypatch.setenv("KEEP_ME", "ok")
+
+    env = _scrubbed_codex_env()
+    assert "KEEP_ME" in env
+    assert env["SWARPH_SPAWN"] == "1"
+    for key in (
+        "OPENAI_API_KEY",
+        "OPENAI_API_BASE",
+        "OPENAI_BASE_URL",
+        "CODEX_API_KEY",
+        "OPENAI_ORG_ID",
+        "OPENAI_ORGANIZATION",
+    ):
+        assert key not in env
+
+
 # ---------------------------------------------------------------------------
 # run_spawn — argparse + dispatch (without exec)
 # ---------------------------------------------------------------------------
@@ -214,6 +313,112 @@ def test_run_spawn_passthrough_args_after_double_dash(
     captured = capsys.readouterr()
     assert rc == 0
     assert "--resume" in captured.out
+
+
+def test_run_spawn_codex_dry_run_prints_fresh_session_note(
+    isolated_xdg, tmp_path, capsys
+):
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gpt-ops",
+        "role": "gpt-ops",
+        "cwd": str(tmp_path),
+        "provider": "codex",
+        "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    rc = run_spawn(argv=[str(p), "--dry-run", "--print-id"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out.splitlines()[0] == "codex: fresh-session-per-spawn, no pinned id"
+    assert captured.out.splitlines()[1].startswith(f"codex -C {tmp_path}")
+    assert "-s workspace-write" in captured.out
+    assert "-a on-request" in captured.out
+    assert "--append-system-prompt" not in captured.out
+    assert "session_id:  codex: fresh-session-per-spawn" in captured.err
+    assert "cell.yaml session_id ignored" in captured.err
+
+
+def test_run_spawn_codex_execve_scrubs_env(
+    isolated_xdg, tmp_path, monkeypatch
+):
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gpt-ops",
+        "role": "gpt-ops",
+        "cwd": str(tmp_path),
+        "provider": "codex",
+        "sandbox": "read-only",
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    captured = {}
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: "/usr/bin/codex" if name == "codex" else None,
+    )
+
+    def fake_execve(path, argv, env):
+        captured["path"] = path
+        captured["argv"] = argv
+        captured["env"] = env
+
+    monkeypatch.setattr("os.execve", fake_execve)
+    for key in (
+        "OPENAI_API_KEY",
+        "OPENAI_API_BASE",
+        "OPENAI_BASE_URL",
+        "CODEX_API_KEY",
+        "OPENAI_ORG_ID",
+        "OPENAI_ORGANIZATION",
+    ):
+        monkeypatch.setenv(key, f"leak-{key}")
+
+    rc = run_spawn(argv=[str(p), "--no-banner"])
+    assert rc == 0
+    assert captured["path"] == "/usr/bin/codex"
+    assert captured["argv"] == [
+        "codex",
+        "-C",
+        str(tmp_path),
+        "-s",
+        "read-only",
+        "-a",
+        "on-request",
+    ]
+    assert captured["env"]["SWARPH_SPAWN"] == "1"
+    for key in (
+        "OPENAI_API_KEY",
+        "OPENAI_API_BASE",
+        "OPENAI_BASE_URL",
+        "CODEX_API_KEY",
+        "OPENAI_ORG_ID",
+        "OPENAI_ORGANIZATION",
+    ):
+        assert key not in captured["env"]
+
+
+def test_run_spawn_codex_missing_binary_returns_127(
+    isolated_xdg, tmp_path, monkeypatch, capsys
+):
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gpt-ops",
+        "role": "gpt-ops",
+        "cwd": str(tmp_path),
+        "provider": "codex",
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    monkeypatch.setattr("shutil.which", lambda name: None)
+
+    rc = run_spawn(argv=[str(p), "--no-banner"])
+    captured = capsys.readouterr()
+    assert rc == 127
+    assert "'codex' binary not found" in captured.err
 
 
 def test_run_spawn_auto_discovers_cwd_cell_yaml(
@@ -461,7 +666,7 @@ def test_validate_routing_explicit_anthropic_allows(tmp_path):
 
 
 def test_validate_routing_non_anthropic_rejects(tmp_path):
-    """`routing.native: openrouter` → rejected with v0 + v1 direction message."""
+    """`routing.native: openrouter` → rejected for claude provider."""
     from swarph_cli.commands.spawn import _validate_routing
     from swarph_cli.cell import CellError
     payload = {
@@ -479,9 +684,8 @@ def test_validate_routing_non_anthropic_rejects(tmp_path):
         _validate_routing(cell)
     err = str(exc_info.value)
     assert "openrouter" in err
-    assert "v0" in err
-    assert "Phase 1B" in err
-    assert "anthropic" in err  # should point at the only valid value
+    assert "claude" in err
+    assert "anthropic" in err
 
 
 def test_validate_routing_non_dict_rejects(tmp_path):
@@ -532,4 +736,57 @@ def test_run_spawn_rejects_non_anthropic_routing_in_dry_run(
     assert rc == 1
     captured = capsys.readouterr()
     assert "gemini" in captured.err
-    assert "Phase 1B" in captured.err
+    assert "claude" in captured.err
+    assert "anthropic" in captured.err
+
+
+def test_validate_routing_codex_absent_allows(tmp_path):
+    from swarph_cli.commands.spawn import _validate_routing
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gpt-ops",
+        "role": "gpt-ops",
+        "cwd": str(tmp_path),
+        "provider": "codex",
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+    _validate_routing(cell)
+
+
+def test_validate_routing_codex_native_allows(tmp_path):
+    from swarph_cli.commands.spawn import _validate_routing
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gpt-ops",
+        "role": "gpt-ops",
+        "cwd": str(tmp_path),
+        "provider": "codex",
+        "routing": {"native": "codex"},
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+    _validate_routing(cell)
+
+
+def test_validate_routing_codex_rejects_openai_alias(tmp_path):
+    from swarph_cli.commands.spawn import _validate_routing
+    from swarph_cli.cell import CellError
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1,
+        "name": "gpt-ops",
+        "role": "gpt-ops",
+        "cwd": str(tmp_path),
+        "provider": "codex",
+        "routing": {"native": "openai"},
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    cell = load_cell(p)
+    with pytest.raises(CellError) as exc_info:
+        _validate_routing(cell)
+    err = str(exc_info.value)
+    assert "openai" in err
+    assert "codex" in err
