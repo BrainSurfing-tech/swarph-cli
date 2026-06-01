@@ -115,8 +115,16 @@ def test_load_cell_minimal_required_fields(cell_yaml_factory, tmp_path):
     assert cell.provider == "claude"
     assert cell.session_id is None
     assert cell.starter_prompt_path is None
+    assert cell.sandbox is None
     assert cell.lineage is None
     assert cell.schema_version == SCHEMA_VERSION_V1
+
+
+def test_load_cell_codex_provider_with_sandbox(cell_yaml_factory):
+    path = cell_yaml_factory(provider="codex", sandbox="workspace-write")
+    cell = load_cell(path)
+    assert cell.provider == "codex"
+    assert cell.sandbox == "workspace-write"
 
 
 def test_load_cell_pinned_session_id(cell_yaml_factory):
@@ -208,9 +216,9 @@ def test_load_cell_invalid_session_id_rejected(cell_yaml_factory):
         load_cell(path)
 
 
-def test_load_cell_non_claude_provider_rejected_in_v0_6(cell_yaml_factory):
+def test_load_cell_unsupported_provider_rejected(cell_yaml_factory):
     path = cell_yaml_factory(provider="gemini")
-    with pytest.raises(CellError, match="v0.8"):
+    with pytest.raises(CellError, match="Unsupported provider"):
         load_cell(path)
 
 
