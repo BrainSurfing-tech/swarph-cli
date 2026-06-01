@@ -521,6 +521,227 @@ def _relaunch_in_windows_terminal(
     return True
 
 
+class ProviderMembrane:
+    """Per-provider divergence boundary for ``swarph spawn``.
+
+    Each concrete membrane encapsulates exactly how one provider differs:
+    argv construction, binary resolution (+ not-found message), whether a
+    pinned session UUID is used, any pre-launch step (e.g. the claude-only
+    Windows Terminal relaunch + conhost warning), and the final
+    chdir/env/exec sequence.
+
+    Membranes are thin: they DELEGATE to the existing module-level helper
+    functions rather than reimplementing them, so this refactor is purely a
+    re-organization of the dispatch that previously lived inline in
+    ``run_spawn`` as ``if cell.provider == ...`` blocks.
+    """
+
+    name: str = ""
+
+    def uses_pinned_session(self) -> bool:
+        """True if ``run_spawn`` should mint/resume a pinned UUID.
+
+        Claude pins a UUID via ``load_or_create_session_id``; codex and
+        antigravity are fresh-session-per-spawn (``session_id = None`` /
+        a human-readable placeholder).
+        """
+        return False
+
+    def build_argv(
+        self,
+        cell: Cell,
+        *,
+        session_id: Optional[str],
+        no_starter: bool,
+        passthrough: list[str],
+        effective_role: Optional[str],
+    ) -> list[str]:
+        raise NotImplementedError
+
+    def resolve_binary(self) -> Optional[str]:
+        """Return the provider binary path, or None if not found."""
+        raise NotImplementedError
+
+    def binary_not_found_message(self) -> str:
+        raise NotImplementedError
+
+    def pre_launch(
+        self, cell: Cell, binary: str, argv: list[str], *, no_banner: bool
+    ) -> Optional[int]:
+        """Hook run after binary resolution, before launch.
+
+        Return an int exit code to short-circuit ``run_spawn`` (claude uses
+        this for the Windows Terminal relaunch). Return None to proceed.
+        """
+        return None
+
+    def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
+        """chdir + env setup + exec-replace. Only returns on exec failure."""
+        raise NotImplementedError
+
+
+class ClaudeMembrane(ProviderMembrane):
+    name = "claude"
+
+    def uses_pinned_session(self) -> bool:
+        return True
+
+    def build_argv(
+        self,
+        cell: Cell,
+        *,
+        session_id: Optional[str],
+        no_starter: bool,
+        passthrough: list[str],
+        effective_role: Optional[str],
+    ) -> list[str]:
+        assert session_id is not None  # claude always pins a UUID
+        return _build_claude_argv(
+            cell, session_id, no_starter, passthrough,
+            effective_role=effective_role,
+        )
+
+    def resolve_binary(self) -> Optional[str]:
+        return shutil.which("claude")
+
+    def binary_not_found_message(self) -> str:
+        return (
+            "swarph spawn: 'claude' binary not found on PATH. "
+            "Install Claude Code (https://docs.anthropic.com/claude/claude-code) "
+            "or set PATH explicitly."
+        )
+
+    def pre_launch(
+        self, cell: Cell, binary: str, argv: list[str], *, no_banner: bool
+    ) -> Optional[int]:
+        # conhost TUI auto-fix (CLAUDE only — codex/agy don't use the claude
+        # TUI): on legacy Windows console (not Windows Terminal), relaunch the
+        # claude session in Windows Terminal where the Ink TUI works. Returns 0
+        # (and we exit this console) only when it actually relaunched.
+        if _relaunch_in_windows_terminal(binary, argv, cell.cwd):
+            return 0
+
+        # Still in a broken console (conhost with no wt.exe, or operator acked).
+        # Warn unless suppressed. Inside Windows Terminal (WT_SESSION set) the
+        # TUI works, so no warning fires there.
+        if (
+            sys.platform == "win32"
+            and not no_banner
+            and not os.environ.get("SWARPH_WIN_ACK")
+            and not os.environ.get("WT_SESSION")
+        ):
+            print(
+                "swarph spawn: WARNING — legacy Windows console (conhost) and Windows "
+                "Terminal (wt.exe) was not found, so the session couldn't be "
+                "auto-relaunched. Claude Code's TUI mis-handles input here (Enter "
+                "inserts literal 'm'). Install Windows Terminal (Microsoft Store) and "
+                "re-run, or use WSL2. See docs/WINDOWS_KNOWN_ISSUES.md. Set "
+                "SWARPH_WIN_ACK=1 to suppress and run here anyway.",
+                file=sys.stderr,
+            )
+        return None
+
+    def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
+        try:
+            os.chdir(cell.cwd)
+        except OSError as exc:
+            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
+            return 1
+
+        # v0.7 PR-C — set SWARPH_SPAWN=1 env so a SessionStart hook
+        # installed via `swarph install-hook` knows the prompt was
+        # already injected via --append-system-prompt and skips
+        # double-injection. The env propagates through execv since we
+        # don't use execve with a custom env.
+        os.environ["SWARPH_SPAWN"] = "1"
+        try:
+            os.execv(binary, argv)
+        except OSError as exc:
+            print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
+            return 1
+        return 0  # unreachable, keeps type checker happy
+
+
+class CodexMembrane(ProviderMembrane):
+    name = "codex"
+
+    def build_argv(
+        self,
+        cell: Cell,
+        *,
+        session_id: Optional[str],
+        no_starter: bool,
+        passthrough: list[str],
+        effective_role: Optional[str],
+    ) -> list[str]:
+        return _build_codex_argv(cell, passthrough)
+
+    def resolve_binary(self) -> Optional[str]:
+        return shutil.which("codex")
+
+    def binary_not_found_message(self) -> str:
+        return (
+            "swarph spawn: 'codex' binary not found on PATH. "
+            "Install Codex CLI or set PATH explicitly."
+        )
+
+    def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
+        try:
+            os.execve(binary, argv, _scrubbed_codex_env())
+        except OSError as exc:
+            print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
+            return 1
+        return 0  # unreachable, keeps type checker happy
+
+
+class AntigravityMembrane(ProviderMembrane):
+    name = "antigravity"
+
+    def build_argv(
+        self,
+        cell: Cell,
+        *,
+        session_id: Optional[str],
+        no_starter: bool,
+        passthrough: list[str],
+        effective_role: Optional[str],
+    ) -> list[str]:
+        return _build_agy_argv(cell, no_starter, passthrough)
+
+    def resolve_binary(self) -> Optional[str]:
+        provider_bin = shutil.which("agy")
+        if provider_bin is None:
+            home_local = Path.home() / ".local" / "bin" / "agy"
+            if home_local.exists():
+                provider_bin = str(home_local)
+        return provider_bin
+
+    def binary_not_found_message(self) -> str:
+        return (
+            "swarph spawn: 'agy' binary not found on PATH. "
+            "Install Antigravity CLI or set PATH explicitly."
+        )
+
+    def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
+        env = _agy_env()
+        os.environ.clear()
+        os.environ.update(env)
+        os.environ["SWARPH_SPAWN"] = "1"
+        try:
+            os.execv(binary, argv)
+        except OSError as exc:
+            print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
+            return 1
+        return 0  # unreachable, keeps type checker happy
+
+
+MEMBRANES: dict[str, ProviderMembrane] = {
+    "claude": ClaudeMembrane(),
+    "codex": CodexMembrane(),
+    "antigravity": AntigravityMembrane(),
+}
+
+
 def run_spawn(argv: Optional[list[str]] = None) -> int:
     if argv is None:
         argv = sys.argv[2:]  # skip "swarph spawn"
@@ -560,30 +781,13 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         print(f"swarph spawn: {exc}", file=sys.stderr)
         return 1
 
+    membrane = MEMBRANES[cell.provider]
+
     session_id: Optional[str]
     was_generated = False
     effective_role: Optional[str] = None
 
-    if cell.provider == "codex":
-        session_id = None
-        try:
-            spawn_argv = _build_codex_argv(cell, passthrough)
-        except CellError as exc:
-            print(f"swarph spawn: {exc}", file=sys.stderr)
-            return 1
-    elif cell.provider == "antigravity":
-        session_id = "(fresh-session-per-spawn, no pinned id)"
-        was_generated = True
-        sidecar_role = requested_role if requested_role else cell.role
-        effective_role = sidecar_role
-        try:
-            spawn_argv = _build_agy_argv(
-                cell, args.no_starter, passthrough
-            )
-        except CellError as exc:
-            print(f"swarph spawn: {exc}", file=sys.stderr)
-            return 1
-    else:
+    if membrane.uses_pinned_session():
         # When user typed a slot-role (e.g. `swarph spawn drop-on-meta-edge-2`)
         # the cell.yaml resolved to the BASE file (drop-on-meta-edge.yaml) so
         # cell.role = "drop-on-meta-edge". But the operator wants slot 2's
@@ -625,15 +829,25 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                 "then re-run with --new-instance to mint a true sibling.",
                 file=sys.stderr,
             )
+    elif cell.provider == "antigravity":
+        session_id = "(fresh-session-per-spawn, no pinned id)"
+        was_generated = True
+        sidecar_role = requested_role if requested_role else cell.role
+        effective_role = sidecar_role
+    else:  # codex
+        session_id = None
 
-        try:
-            spawn_argv = _build_claude_argv(
-                cell, session_id, args.no_starter, passthrough,
-                effective_role=effective_role,
-            )
-        except CellError as exc:
-            print(f"swarph spawn: {exc}", file=sys.stderr)
-            return 1
+    try:
+        spawn_argv = membrane.build_argv(
+            cell,
+            session_id=session_id,
+            no_starter=args.no_starter,
+            passthrough=passthrough,
+            effective_role=effective_role,
+        )
+    except CellError as exc:
+        print(f"swarph spawn: {exc}", file=sys.stderr)
+        return 1
 
     if args.print_id:
         if cell.provider == "codex":
@@ -649,40 +863,12 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         )
         return 0
 
-    if cell.provider == "codex":
-        provider_bin = shutil.which("codex")
-        if provider_bin is None:
-            print(
-                "swarph spawn: 'codex' binary not found on PATH. "
-                "Install Codex CLI or set PATH explicitly.",
-                file=sys.stderr,
-            )
-            return 127
-    elif cell.provider == "antigravity":
-        provider_bin = shutil.which("agy")
-        if provider_bin is None:
-            home_local = Path.home() / ".local" / "bin" / "agy"
-            if home_local.exists():
-                provider_bin = str(home_local)
-        if provider_bin is None:
-            print(
-                "swarph spawn: 'agy' binary not found on PATH. "
-                "Install Antigravity CLI or set PATH explicitly.",
-                file=sys.stderr,
-            )
-            return 127
-    else:
-        provider_bin = shutil.which("claude")
-        if provider_bin is None:
-            print(
-                "swarph spawn: 'claude' binary not found on PATH. "
-                "Install Claude Code (https://docs.anthropic.com/claude/claude-code) "
-                "or set PATH explicitly.",
-                file=sys.stderr,
-            )
-            return 127
+    provider_bin = membrane.resolve_binary()
+    if provider_bin is None:
+        print(membrane.binary_not_found_message(), file=sys.stderr)
+        return 127
 
-    # Windows-platform known-issues banner. Claude Code's TUI (Ink-based)
+    # Windows-platform known-issues handling. Claude Code's TUI (Ink-based)
     # has documented input/rendering bugs on Windows native consoles
     # (conhost.exe in particular). Specific symptom commander hit
     # 2026-05-17 on workstation-lc: pressing Enter inserts literal 'm'
@@ -690,66 +876,18 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
     # for the full hypothesis chain + workarounds (Windows Terminal vs
     # conhost, WSL2 fallback, TERM env injection).
     #
-    # Banner is suppressed by --no-banner OR when the operator has
-    # already acknowledged via SWARPH_WIN_ACK=1 in env (set once after
-    # reading the doc).
-    # conhost TUI auto-fix (CLAUDE only — codex/agy don't use the claude TUI):
-    # on legacy Windows console (not Windows Terminal), relaunch the claude
-    # session in Windows Terminal where the Ink TUI works. Returns True (and we
-    # exit this console) only when it actually relaunched.
-    if cell.provider == "claude" and _relaunch_in_windows_terminal(
-        provider_bin, spawn_argv, cell.cwd
-    ):
-        return 0
-
-    # Still in a broken console (conhost with no wt.exe, or operator acked).
-    # Warn unless suppressed. Inside Windows Terminal (WT_SESSION set) the TUI
-    # works, so no warning fires there.
-    if (
-        cell.provider == "claude"
-        and sys.platform == "win32"
-        and not args.no_banner
-        and not os.environ.get("SWARPH_WIN_ACK")
-        and not os.environ.get("WT_SESSION")
-    ):
-        print(
-            "swarph spawn: WARNING — legacy Windows console (conhost) and Windows "
-            "Terminal (wt.exe) was not found, so the session couldn't be "
-            "auto-relaunched. Claude Code's TUI mis-handles input here (Enter "
-            "inserts literal 'm'). Install Windows Terminal (Microsoft Store) and "
-            "re-run, or use WSL2. See docs/WINDOWS_KNOWN_ISSUES.md. Set "
-            "SWARPH_WIN_ACK=1 to suppress and run here anyway.",
-            file=sys.stderr,
-        )
-
-    if cell.provider == "claude":
-        try:
-            os.chdir(cell.cwd)
-        except OSError as exc:
-            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
-            return 1
-
-        # v0.7 PR-C — set SWARPH_SPAWN=1 env so a SessionStart hook
-        # installed via `swarph install-hook` knows the prompt was
-        # already injected via --append-system-prompt and skips
-        # double-injection. The env propagates through execv since we
-        # don't use execve with a custom env.
-        os.environ["SWARPH_SPAWN"] = "1"
-    elif cell.provider == "antigravity":
-        env = _agy_env()
-        os.environ.clear()
-        os.environ.update(env)
-        os.environ["SWARPH_SPAWN"] = "1"
+    # The claude membrane's pre_launch handles the conhost auto-fix
+    # (relaunch in Windows Terminal) + the fallback warning; codex/agy
+    # no-op. A non-None return short-circuits run_spawn (claude returns 0
+    # when it relaunched and this console should exit).
+    pre = membrane.pre_launch(
+        cell, provider_bin, spawn_argv, no_banner=args.no_banner
+    )
+    if pre is not None:
+        return pre
 
     # exec-replace so the spawned provider session owns stdio +
-    # signals cleanly. argv[0] is preserved for ps-grep.
-    try:
-        if cell.provider == "codex":
-            os.execve(provider_bin, spawn_argv, _scrubbed_codex_env())
-        else:
-            os.execv(provider_bin, spawn_argv)
-    except OSError as exc:
-        # execv only returns on failure.
-        print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
-        return 1
-    return 0  # unreachable, keeps type checker happy
+    # signals cleanly. argv[0] is preserved for ps-grep. launch()
+    # encapsulates the per-provider chdir + env setup + exec and only
+    # returns on failure.
+    return membrane.launch(cell, provider_bin, spawn_argv)
