@@ -42,6 +42,7 @@ from swarph_cli.cell import (
     read_starter_prompt,
     resolve_cell_path,
 )
+from swarph_shared.subprocess_env import scrub_env_for_subprocess
 
 
 _BANNER = """\
@@ -79,11 +80,13 @@ Anything after a literal `--` is passed through to the provider CLI unchanged
 """
 
 
-_CODEX_BILLING_LEAK_KEYS = (
-    "OPENAI_API_KEY",
-    "OPENAI_API_BASE",
-    "OPENAI_BASE_URL",
-    "CODEX_API_KEY",
+# Codex-specific org-scoping keys NOT covered by the shared billing denylist
+# (scrub_env_for_subprocess already strips OPENAI_API_KEY / OPENAI_API_BASE /
+# OPENAI_BASE_URL via its explicit set + *_BASE_URL/*_API_KEY suffix sweep, and
+# CODEX_API_KEY via the *_API_KEY suffix). These two route billing to a specific
+# org rather than redirect the endpoint, so they live as a codex-layer extra on
+# top of the canonical scrub.
+_CODEX_EXTRA_LEAK_KEYS = (
     "OPENAI_ORG_ID",
     "OPENAI_ORGANIZATION",
 )
@@ -323,13 +326,30 @@ def _codex_sandbox(cell: Cell) -> str:
     return sandbox
 
 
+def _claude_env() -> dict[str, str]:
+    """Subscription-billing env for an interactive ``claude`` session.
+
+    The canonical billing-redirect scrub plus the SWARPH_SPAWN marker. Without
+    this an ``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_AUTH_TOKEN`` set in the parent
+    env (an identity proxy / metered relay) would be inherited by the spawned
+    ``claude`` and silently flip it off subscription auth to a metered endpoint
+    while still reporting ``cost_usd`` 0.0 — the adversarial-sweep CRIT.
+    """
+    env = scrub_env_for_subprocess()
+    env["SWARPH_SPAWN"] = "1"
+    return env
+
+
 def _agy_env() -> dict[str, str]:
-    """Return a copy of the environment scrubbed of billing credentials."""
-    env = os.environ.copy()
-    env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-    env.pop("GOOGLE_CLOUD_PROJECT", None)
-    env.pop("VERTEX_PROJECT", None)
-    env.pop("VERTEX_LOCATION", None)
+    """Subscription-billing env for an ``agy`` (antigravity/Gemini) session.
+
+    Delegates to the shared scrub, which strips the full billing-redirect class
+    (GEMINI_API_KEY / GOOGLE_API_KEY / GEMINI_BASE_URL / GOOGLE_APPLICATION_
+    CREDENTIALS / GOOGLE_CLOUD_PROJECT / VERTEX_*) — a superset of the four GCP
+    keys this previously popped by hand.
+    """
+    env = scrub_env_for_subprocess()
+    env["SWARPH_SPAWN"] = "1"
     return env
 
 
@@ -373,11 +393,14 @@ def _build_codex_argv(cell: Cell, passthrough: list[str]) -> list[str]:
 
 
 def _scrubbed_codex_env() -> dict[str, str]:
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in _CODEX_BILLING_LEAK_KEYS
-    }
+    """Subscription-billing env for a ``codex`` (GPT) session.
+
+    The shared billing-redirect scrub plus the codex-specific org-scoping keys
+    (see ``_CODEX_EXTRA_LEAK_KEYS``) that the shared denylist does not cover.
+    """
+    env = scrub_env_for_subprocess()
+    for key in _CODEX_EXTRA_LEAK_KEYS:
+        env.pop(key, None)
     env["SWARPH_SPAWN"] = "1"
     return env
 
@@ -648,14 +671,14 @@ class ClaudeMembrane(ProviderMembrane):
             print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
             return 1
 
-        # v0.7 PR-C — set SWARPH_SPAWN=1 env so a SessionStart hook
-        # installed via `swarph install-hook` knows the prompt was
-        # already injected via --append-system-prompt and skips
-        # double-injection. The env propagates through execv since we
-        # don't use execve with a custom env.
-        os.environ["SWARPH_SPAWN"] = "1"
+        # Exec with the billing-redirect-scrubbed env (NOT raw inherited env) so
+        # a parent-set ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN can't silently
+        # flip the spawned claude off subscription billing. SWARPH_SPAWN=1 (set
+        # in _claude_env) tells a `swarph install-hook` SessionStart hook the
+        # prompt was already injected via --append-system-prompt, so it skips
+        # double-injection. execve carries exactly this env to the child.
         try:
-            os.execv(binary, argv)
+            os.execve(binary, argv, _claude_env())
         except OSError as exc:
             print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
             return 1
@@ -723,12 +746,10 @@ class AntigravityMembrane(ProviderMembrane):
         )
 
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
-        env = _agy_env()
-        os.environ.clear()
-        os.environ.update(env)
-        os.environ["SWARPH_SPAWN"] = "1"
+        # execve carries exactly the scrubbed env to the child without mutating
+        # this process's os.environ first (so a failed exec leaves us intact).
         try:
-            os.execv(binary, argv)
+            os.execve(binary, argv, _agy_env())
         except OSError as exc:
             print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
             return 1

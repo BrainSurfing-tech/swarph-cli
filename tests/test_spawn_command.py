@@ -901,19 +901,54 @@ def test_build_agy_argv_sandbox_false(tmp_path):
 
 
 def test_agy_env_scrub(monkeypatch):
-    """Verify _agy_env correctly scrubs billing environment variables."""
+    """Verify _agy_env scrubs the full billing-redirect class via the shared
+    scrub — including the GEMINI_API_KEY/GOOGLE_API_KEY/GEMINI_BASE_URL keys the
+    old hand-rolled four-key pop missed."""
     from swarph_cli.commands.spawn import _agy_env
 
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/some/path.json")
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "project-123")
     monkeypatch.setenv("VERTEX_PROJECT", "v-project")
     monkeypatch.setenv("VERTEX_LOCATION", "us-central1")
+    # Previously NOT scrubbed by _agy_env's four-key pop — now covered:
+    monkeypatch.setenv("GEMINI_API_KEY", "leak")
+    monkeypatch.setenv("GOOGLE_API_KEY", "leak")
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://metered.example")
+    monkeypatch.setenv("KEEP_ME", "ok")
 
     env = _agy_env()
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
     assert "GOOGLE_CLOUD_PROJECT" not in env
     assert "VERTEX_PROJECT" not in env
     assert "VERTEX_LOCATION" not in env
+    assert "GEMINI_API_KEY" not in env
+    assert "GOOGLE_API_KEY" not in env
+    assert "GEMINI_BASE_URL" not in env
+    assert env["KEEP_ME"] == "ok"
+    assert env["SWARPH_SPAWN"] == "1"
+
+
+def test_claude_env_scrubs_billing_redirect(monkeypatch):
+    """CRIT regression (adversarial-sweep 2026-06-01): the interactive claude
+    membrane must NOT inherit ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL from the
+    parent env — they would silently flip the spawned claude off subscription
+    auth to a metered/relay endpoint while cost_usd still reports 0.0."""
+    from swarph_cli.commands.spawn import _claude_env
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-leak")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-leak")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://metered.relay.example")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("KEEP_ME", "ok")
+
+    env = _claude_env()
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert "ANTHROPIC_BASE_URL" not in env
+    # Non-billing env survives so the claude TUI still works.
+    assert "PATH" in env
+    assert env["KEEP_ME"] == "ok"
+    assert env["SWARPH_SPAWN"] == "1"
 
 
 def test_run_spawn_antigravity_dry_run(tmp_path, isolated_xdg, capsys):

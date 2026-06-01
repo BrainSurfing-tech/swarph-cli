@@ -37,7 +37,10 @@ dependencies = [
     # cell.yaml-format-home RESOLVED). swarph-cli's cell.py now
     # re-exports data shapes from swarph_shared.cell + keeps file
     # I/O + sidecar + slot allocation locally.
-    "swarph-shared>=0.3.0",
+    # >=0.3.1 is load-bearing: 0.3.1 is the first release whose
+    # scrub_env_for_subprocess closes the ANTHROPIC_AUTH_TOKEN/*_BASE_URL
+    # billing-redirect class that the membrane env builders delegate to.
+    "swarph-shared>=0.3.1",
     # Phase 7 spawn — cell.yaml parser. PyYAML 6.x is the standard.
     # Stays a swarph-cli dep since file I/O is operator-tooling-layer
     # concern; swarph-shared cell module is pure-stdlib.
