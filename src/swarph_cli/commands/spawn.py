@@ -886,6 +886,23 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
     if pre is not None:
         return pre
 
+    if cell.assisted_memory and cell.assisted_memory.get("enabled"):
+        try:
+            from swarph_cli.commands.memory_sync import perform_restore
+            current_task_text = perform_restore(cell)
+            if current_task_text:
+                lines = current_task_text.splitlines()
+                first_line = lines[0] if lines else "(empty)"
+                print(f"swarph spawn: restored current-task: {first_line}", file=sys.stderr)
+                
+                inject_text = f"Your active task is in CURRENT_TASK.md — read it first:\n\n{current_task_text}"
+                if cell.provider == "claude":
+                    spawn_argv.extend(["--append-system-prompt", inject_text])
+                elif cell.provider in ("codex", "antigravity"):
+                    spawn_argv.extend(["--prompt-interactive", inject_text])
+        except Exception as exc:
+            print(f"swarph spawn: restore failed: {exc}", file=sys.stderr)
+
     # exec-replace so the spawned provider session owns stdio +
     # signals cleanly. argv[0] is preserved for ps-grep. launch()
     # encapsulates the per-provider chdir + env setup + exec and only
