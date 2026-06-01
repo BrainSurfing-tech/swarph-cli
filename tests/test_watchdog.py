@@ -712,3 +712,63 @@ def test_resolve_swarph_bin_relative_with_slash_resolves_to_absolute(tmp_path, m
         f"resolver returned non-absolute path: {resolved!r}"
     )
     assert resolved == str(fake)
+
+
+# ---------------------------------------------------------------------------
+# _process_alive — session-scoped (adversarial-sweep MED, watchdog.py:361)
+# ---------------------------------------------------------------------------
+
+import os
+import swarph_cli.commands.watchdog as _wd
+
+
+class _R:
+    def __init__(self, returncode, stdout=""):
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def _fake_run_factory(tmux_rc, tmux_out, pgrep_rc, pgrep_out):
+    def fake_run(cmd, **kw):
+        if cmd[0] == "tmux":
+            return _R(tmux_rc, tmux_out)
+        if cmd[0] == "pgrep":
+            return _R(pgrep_rc, pgrep_out)
+        return _R(1, "")
+    return fake_run
+
+
+def test_pid_under_walks_proc_ancestry():
+    pid = os.getpid()
+    assert _wd._pid_under(pid, {pid}) is True            # self
+    assert _wd._pid_under(pid, {os.getppid()}) is True   # parent
+    assert _wd._pid_under(pid, {999999999}) is False     # bogus ancestor
+
+
+def test_process_alive_ignores_host_wide_claude(monkeypatch):
+    """A claude process that is NOT a descendant of THIS session's panes must
+    NOT count as alive (the old host-wide pgrep masked dead sessions)."""
+    monkeypatch.setattr(_wd.subprocess, "run",
+                        _fake_run_factory(0, "1000\n", 0, "2000\n"))
+    monkeypatch.setattr(_wd, "_pid_under", lambda pid, anc, **k: False)
+    assert _wd._process_alive("mysess") is False
+
+
+def test_process_alive_true_when_claude_under_session(monkeypatch):
+    monkeypatch.setattr(_wd.subprocess, "run",
+                        _fake_run_factory(0, "1000\n", 0, "2000\n"))
+    monkeypatch.setattr(_wd, "_pid_under", lambda pid, anc, **k: True)
+    assert _wd._process_alive("mysess") is True
+
+
+def test_process_alive_false_when_session_absent(monkeypatch):
+    """tmux has no such session → not alive (don't fall through to host-wide)."""
+    monkeypatch.setattr(_wd.subprocess, "run",
+                        _fake_run_factory(1, "", 0, "2000\n"))
+    assert _wd._process_alive("ghost") is False
+
+
+def test_process_alive_false_when_no_claude_anywhere(monkeypatch):
+    monkeypatch.setattr(_wd.subprocess, "run",
+                        _fake_run_factory(0, "1000\n", 1, ""))
+    assert _wd._process_alive("mysess") is False

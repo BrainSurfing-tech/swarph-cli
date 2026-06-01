@@ -194,7 +194,7 @@ def test_load_cell_top_level_must_be_mapping(tmp_path):
 
 def test_load_cell_invalid_peer_name_rejected(cell_yaml_factory):
     path = cell_yaml_factory(name="UPPER_CASE")
-    with pytest.raises(CellError, match="kebab/snake-case"):
+    with pytest.raises(CellError, match="kebab-case"):
         load_cell(path)
 
 

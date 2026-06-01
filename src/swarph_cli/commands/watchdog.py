@@ -358,28 +358,56 @@ def _gateway_recent_recovery_event(
     return None
 
 
-def _process_alive(tmux_session: str) -> bool:
-    """Detect if a claude process is running inside the tmux session.
+def _pid_under(pid: int, ancestors: set, _max_depth: int = 40) -> bool:
+    """Walk the PPID chain up from ``pid``; True if any ancestor is in
+    ``ancestors``. Reads ``/proc/<pid>/stat`` (Linux). The ``comm`` field can
+    contain spaces/parens, so parse PPID after the final ``)``."""
+    cur = pid
+    for _ in range(_max_depth):
+        if cur in ancestors:
+            return True
+        if cur <= 1:
+            return False
+        try:
+            with open(f"/proc/{cur}/stat", encoding="utf-8") as f:
+                data = f.read()
+            after = data[data.rfind(")") + 2:].split()
+            cur = int(after[1])  # stat field 4 (PPID): state, ppid, ...
+        except (OSError, ValueError, IndexError):
+            return False
+    return cur in ancestors
 
-    Returns True iff there's at least one ``claude`` process whose
-    parent is the named tmux session. Best-effort; uses pgrep+ps; falls
-    back to True (assume alive) if detection itself errors so we don't
-    fire A2 on detection-broken-system.
+
+def _process_alive(tmux_session: str) -> bool:
+    """Detect if a claude process is running INSIDE the named tmux session.
+
+    Scopes to the session's pane PIDs (and their descendants) rather than a
+    host-wide ``pgrep claude``: on a multi-session host, an unrelated cell's
+    claude would otherwise mask THIS session's death and suppress the A2 alert
+    (adversarial-sweep MED). Best-effort; falls back to True (assume alive) on
+    detection error so a broken detector never false-fires A2.
     """
     try:
-        result = subprocess.run(
+        panes = subprocess.run(
+            ["tmux", "list-panes", "-t", tmux_session, "-F", "#{pane_pid}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if panes.returncode != 0:
+            return False  # session has no panes / doesn't exist → not alive
+        pane_pids = {int(p) for p in panes.stdout.split() if p.strip().isdigit()}
+        if not pane_pids:
+            return False
+
+        pg = subprocess.run(
             ["pgrep", "-f", "claude"],
             capture_output=True, text=True, timeout=5,
         )
-        if result.returncode != 0:
-            return False  # no claude process anywhere
-        # At least one claude found — return True.
-        # We don't enforce tmux-parentage here since pgrep matching by
-        # tmux-pane-process is fragile across tmux versions; "any claude"
-        # is sufficient for FALLBACK signal per mother #1021 AND-gate
-        # design (cursor staleness is the PRIMARY).
-        return bool(result.stdout.strip())
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        if pg.returncode != 0:
+            return False  # no claude process anywhere on the host
+        claude_pids = [int(p) for p in pg.stdout.split() if p.strip().isdigit()]
+        # Alive only if a claude process is a descendant of THIS session's panes.
+        return any(_pid_under(cpid, pane_pids) for cpid in claude_pids)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return True  # assume alive on detection error
 
 
