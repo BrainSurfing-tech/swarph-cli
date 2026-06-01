@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.8.0"
-description = "The `swarph` binary — multi-LLM CLI with mesh-gateway integration: one-shot + chat REPL, multi-provider routing, cell.yaml spawn, session import, watchdog. v0.8.0: multi-provider spawn membrane — `swarph spawn` launches claude, codex (GPT), or antigravity/agy (Gemini) per cell.provider, each with billing-scrub + sandbox; plus the Windows conhost auto-relaunch into Windows Terminal (the Enter-inserts-'m' TUI fix)."
+version = "0.9.0"
+description = "The `swarph` binary — multi-LLM CLI + mesh-gateway integration: multi-provider spawn (claude/codex/antigravity per cell.provider, via a ProviderMembrane), cell.yaml, session import, watchdog. v0.9.0 adds `swarph mesh` (send/inbox/register with per-peer tokens) + a provider-agnostic inbox sidecar, and `assisted_memory` (git-backed durable memory: restore-on-spawn + saver loop + current-task anchor) toggled per cell."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
