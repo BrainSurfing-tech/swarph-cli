@@ -625,10 +625,13 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
     # Banner is suppressed by --no-banner OR when the operator has
     # already acknowledged via SWARPH_WIN_ACK=1 in env (set once after
     # reading the doc).
-    # conhost TUI auto-fix: on legacy Windows console (not Windows Terminal),
-    # relaunch the session in Windows Terminal where the Ink TUI works. Returns
-    # True (and we exit this console) only when it actually relaunched.
-    if _relaunch_in_windows_terminal(claude_bin, claude_argv, cell.cwd):
+    # conhost TUI auto-fix (CLAUDE only — codex/agy don't use the claude TUI):
+    # on legacy Windows console (not Windows Terminal), relaunch the claude
+    # session in Windows Terminal where the Ink TUI works. Returns True (and we
+    # exit this console) only when it actually relaunched.
+    if cell.provider == "claude" and _relaunch_in_windows_terminal(
+        provider_bin, spawn_argv, cell.cwd
+    ):
         return 0
 
     # Still in a broken console (conhost with no wt.exe, or operator acked).
