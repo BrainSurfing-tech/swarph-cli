@@ -241,7 +241,8 @@ def _run_send(args: argparse.Namespace) -> int:
         token,
     )
     if status < 200 or status >= 300:
-        print(f"swarph mesh send: gateway {status}: {payload.get('detail', payload)}", file=sys.stderr)
+        detail = payload.get("detail", "<gateway error>")
+        print(f"swarph mesh send: gateway {status}: {detail}", file=sys.stderr)
         return 1
     print(
         f"sent id={payload.get('id')} from={payload.get('from_node')} "
@@ -259,7 +260,8 @@ def _run_inbox(args: argparse.Namespace) -> int:
     url = f"{args.gateway.rstrip('/')}/messages?{urllib.parse.urlencode(params)}"
     status, payload = _http_get_json(url, token)
     if status < 200 or status >= 300:
-        print(f"swarph mesh inbox: gateway {status}: {payload.get('detail', payload)}", file=sys.stderr)
+        detail = payload.get("detail", "<gateway error>")
+        print(f"swarph mesh inbox: gateway {status}: {detail}", file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -304,7 +306,8 @@ def _run_register(args: argparse.Namespace) -> int:
         token,
     )
     if status < 200 or status >= 300:
-        print(f"swarph mesh register: gateway {status}: {payload.get('detail', payload)}", file=sys.stderr)
+        detail = payload.get("detail", "<gateway error>")
+        print(f"swarph mesh register: gateway {status}: {detail}", file=sys.stderr)
         return 1
     peer_token = payload.get("peer_token")
     token_status = payload.get("token_status")
@@ -329,7 +332,20 @@ def _default_sidecar_state_dir(self_name: str) -> Path:
 def _read_cursor(path: Path) -> dict:
     if not path.exists():
         return {"last_msg_id": 0, "last_wake_at": 0.0}
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        cursor = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(
+            f"[mesh-sidecar] ignoring unreadable cursor {path}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return {"last_msg_id": 0, "last_wake_at": 0.0}
+    if not isinstance(cursor, dict):
+        return {"last_msg_id": 0, "last_wake_at": 0.0}
+    cursor.setdefault("last_msg_id", 0)
+    cursor.setdefault("last_wake_at", 0.0)
+    return cursor
 
 
 def _write_cursor_atomic(path: Path, cursor: dict) -> None:
@@ -447,11 +463,10 @@ def _sidecar_iteration(state: MeshSidecarState) -> None:
         if _tmux_wake(state.tmux_target):
             state.cursor["last_wake_at"] = now
             state.wakes_sent += 1
+            state.cursor["last_msg_id"] = new_last_id
+            _write_cursor_atomic(state.cursor_path, state.cursor)
     else:
         print("[mesh-sidecar] wake suppressed by idle guard", flush=True)
-
-    state.cursor["last_msg_id"] = new_last_id
-    _write_cursor_atomic(state.cursor_path, state.cursor)
 
 
 def _run_sidecar(args: argparse.Namespace) -> int:

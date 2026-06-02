@@ -116,7 +116,7 @@ def test_sidecar_filters_old_and_self_messages(tmp_path, monkeypatch):
     assert json.loads(log_lines[0])["id"] == 12
 
 
-def test_sidecar_idle_guard_suppresses_repeated_wake_but_advances_cursor(
+def test_sidecar_idle_guard_suppresses_wake_without_advancing_cursor(
     tmp_path, monkeypatch, capsys
 ):
     state = _state(tmp_path)
@@ -132,10 +132,49 @@ def test_sidecar_idle_guard_suppresses_repeated_wake_but_advances_cursor(
     monkeypatch.setattr(mesh, "_tmux_wake", lambda target: (_ for _ in ()).throw(AssertionError("guarded")))
     monkeypatch.setattr(mesh.time, "time", lambda: 1000.0)
     mesh._sidecar_iteration(state)
-    assert state.cursor["last_msg_id"] == 1
+    assert state.cursor["last_msg_id"] == 0
     assert state.cursor["last_wake_at"] == 995.0
     assert state.wakes_sent == 0
+    assert not (tmp_path / "cursor.json").exists()
     assert "wake suppressed" in capsys.readouterr().out
+
+
+def test_sidecar_wakes_throttled_message_after_guard_window(tmp_path, monkeypatch):
+    state = _state(tmp_path)
+    state.cursor["last_wake_at"] = 995.0
+    now = 1000.0
+
+    monkeypatch.setattr(
+        mesh,
+        "_http_get_json",
+        lambda url, token, *, timeout=10.0: (
+            200,
+            {"messages": [{"id": 1, "from_node": "lab-ovh", "content": "new"}]},
+        ),
+    )
+    wakes = []
+    monkeypatch.setattr(mesh, "_tmux_wake", lambda target: wakes.append(target) or True)
+    monkeypatch.setattr(mesh.time, "time", lambda: now)
+
+    mesh._sidecar_iteration(state)
+    assert wakes == []
+    assert state.cursor["last_msg_id"] == 0
+
+    now = 1060.0
+    mesh._sidecar_iteration(state)
+    assert wakes == ["gpt-ops-pane"]
+    assert state.cursor["last_msg_id"] == 1
+    assert state.cursor["last_wake_at"] == 1060.0
+
+
+def test_sidecar_corrupt_cursor_defaults_without_crashing(tmp_path, capsys):
+    (tmp_path / "cursor.json").write_text("{", encoding="utf-8")
+
+    state = _state(tmp_path)
+
+    assert state.cursor["last_msg_id"] == 0
+    assert state.cursor["last_wake_at"] == 0.0
+    assert "ignoring unreadable cursor" in capsys.readouterr().err
 
 
 def test_sidecar_network_failure_records_disconnect(tmp_path, monkeypatch):
