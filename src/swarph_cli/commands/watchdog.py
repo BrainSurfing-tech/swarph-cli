@@ -448,34 +448,39 @@ def _tmux_send_keys(name: str, text: str) -> bool:
 
 
 def _pane_activity_age_sec(name: str) -> Optional[int]:
-    """Age in seconds since the tmux pane's last activity event.
+    """Age in seconds since the target session's most recent tmux activity.
 
-    Reads tmux's `#{pane_activity}` format variable, which returns a unix
-    epoch timestamp of the most recent activity in the active pane of the
-    target session. Returns None if tmux is missing, the session doesn't
-    exist, or tmux's output isn't parseable as an integer epoch.
+    Reads tmux activity-timestamp format vars and uses the MOST RECENT
+    (max epoch) across pane / window / session. ``#{pane_activity}`` is only
+    populated when monitor-activity is on (empty on a default tmux 3.x), so
+    relying on it alone made F3 a no-op — it returned None and never
+    suppressed A1 for a genuinely-active session (adversarial-deploy finding
+    2026-06-02). ``#{window_activity}`` / ``#{session_activity}`` are tracked
+    unconditionally and give the same "is this session alive right now" signal.
 
-    Used by F3 (mother #1087 / drop-on-meta-edge proposal) as a third
-    AND-gate input to distinguish (a) session genuinely stalled from (b)
-    session actively working in a long bash block. cursor-mtime alone
-    measures "time since last turn-end" not "time since last activity";
-    pane_activity covers the mid-turn-active case.
+    Used by F3 (mother #1087) as a third AND-gate input to distinguish (a) a
+    session genuinely stalled from (b) one actively working in a long bash
+    block where cursor-mtime (last turn-end) is stale but the session is alive.
 
-    Returns None on detection error so the caller can fall through to
-    the legacy AND-gate behavior — F3 is a strengthening of the gate,
-    not a replacement of it.
+    Returns None only when NO activity timestamp is parseable (tmux missing /
+    session absent), so the caller falls through to the legacy AND-gate.
     """
     try:
         result = subprocess.run(
-            ["tmux", "display", "-p", "-t", name, "#{pane_activity}"],
+            ["tmux", "display", "-p", "-t", name,
+             "#{pane_activity}|#{window_activity}|#{session_activity}"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
             return None
-        out = result.stdout.strip()
-        if not out:
+        epochs = []
+        for tok in result.stdout.strip().split("|"):
+            tok = tok.strip()
+            if tok.isdigit():
+                epochs.append(int(tok))
+        if not epochs:
             return None
-        return max(0, _now() - int(out))
+        return max(0, _now() - max(epochs))
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return None
 
