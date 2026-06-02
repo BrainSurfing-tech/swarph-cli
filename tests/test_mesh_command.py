@@ -68,6 +68,27 @@ def test_mesh_send_gateway_error_is_nonsecret(monkeypatch, capsys):
     assert "secret-token" not in err
 
 
+def test_mesh_gateway_error_without_detail_does_not_echo_payload(monkeypatch, capsys):
+    monkeypatch.setenv("SWARPH_SELF", "gpt-ops")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "secret-token")
+    monkeypatch.setattr(
+        mesh,
+        "_post_json",
+        lambda url, body, token, *, timeout=10.0: (
+            403,
+            {"authorization": "secret-token", "body": {"peer_token": "minted-secret"}},
+        ),
+    )
+
+    rc = mesh.run_mesh(["send", "lab-ovh", "--kind", "answer", "--content", "x"])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "<gateway error>" in err
+    assert "secret-token" not in err
+    assert "minted-secret" not in err
+
+
 def test_mesh_inbox_uses_to_query_and_unread(monkeypatch, capsys):
     monkeypatch.setenv("SWARPH_SELF", "gpt-ops")
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
