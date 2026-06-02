@@ -393,10 +393,24 @@ def _process_alive(tmux_session: str) -> bool:
             capture_output=True, text=True, timeout=5,
         )
         if panes.returncode != 0:
-            return False  # session has no panes / doesn't exist → not alive
+            # list-panes fails for TWO very different reasons:
+            #   (a) the tmux server is reachable but this session is genuinely
+            #       gone → really dead → False (let A2 fire).
+            #   (b) there is no tmux server reachable from THIS uid (e.g. the
+            #       watchdog runs as root while sessions live under ubuntu's
+            #       /tmp/tmux-1000 socket) → we simply CAN'T determine liveness
+            #       via tmux → must NOT false-fire A2.
+            # Distinguish by probing the server itself.
+            server = subprocess.run(
+                ["tmux", "list-sessions"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if server.returncode != 0:
+                return True  # no reachable tmux server here → can't tell → assume alive
+            return False     # server reachable, session absent → genuinely dead
         pane_pids = {int(p) for p in panes.stdout.split() if p.strip().isdigit()}
         if not pane_pids:
-            return False
+            return True  # ambiguous (session with no pane pids) → don't false-fire
 
         pg = subprocess.run(
             ["pgrep", "-f", "claude"],
