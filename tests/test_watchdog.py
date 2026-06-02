@@ -728,10 +728,13 @@ class _R:
         self.stdout = stdout
 
 
-def _fake_run_factory(tmux_rc, tmux_out, pgrep_rc, pgrep_out):
+def _fake_run_factory(panes_rc, panes_out, pgrep_rc, pgrep_out, sessions_rc=0):
+    """Mock subprocess.run distinguishing tmux list-panes vs list-sessions."""
     def fake_run(cmd, **kw):
-        if cmd[0] == "tmux":
-            return _R(tmux_rc, tmux_out)
+        if cmd[0] == "tmux" and cmd[1] == "list-panes":
+            return _R(panes_rc, panes_out)
+        if cmd[0] == "tmux" and cmd[1] == "list-sessions":
+            return _R(sessions_rc, "" if sessions_rc else "lab: 1 windows\n")
         if cmd[0] == "pgrep":
             return _R(pgrep_rc, pgrep_out)
         return _R(1, "")
@@ -761,11 +764,21 @@ def test_process_alive_true_when_claude_under_session(monkeypatch):
     assert _wd._process_alive("mysess") is True
 
 
-def test_process_alive_false_when_session_absent(monkeypatch):
-    """tmux has no such session → not alive (don't fall through to host-wide)."""
+def test_process_alive_false_when_session_absent_but_server_up(monkeypatch):
+    """Server reachable + this session genuinely gone → dead (A2 may fire)."""
     monkeypatch.setattr(_wd.subprocess, "run",
-                        _fake_run_factory(1, "", 0, "2000\n"))
+                        _fake_run_factory(1, "", 0, "2000\n", sessions_rc=0))
     assert _wd._process_alive("ghost") is False
+
+
+def test_process_alive_assumes_alive_when_no_tmux_server(monkeypatch):
+    """Regression (deploy 2026-06-02): the watchdog runs as ROOT, whose tmux
+    socket is empty — list-panes AND list-sessions both fail. We CANNOT
+    determine liveness via tmux, so must assume alive, NOT false-fire an A2
+    respawn of a session that's actually alive under ubuntu's tmux."""
+    monkeypatch.setattr(_wd.subprocess, "run",
+                        _fake_run_factory(1, "", 0, "2000\n", sessions_rc=1))
+    assert _wd._process_alive("lab") is True
 
 
 def test_process_alive_false_when_no_claude_anywhere(monkeypatch):
