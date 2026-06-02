@@ -132,6 +132,7 @@ def test_stale_cursor_alive_process_unread_dms_fires_a1(
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
         rc = run_watchdog(argv=[
             "--check", "--cell", "lab",
@@ -279,6 +280,7 @@ def test_a1_fires_at_most_once_per_stale_window(
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
         # First invocation — A1 fires
         rc1 = run_watchdog(argv=[
@@ -322,6 +324,7 @@ def test_a1_rearms_after_cursor_advance(
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=2), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
         # First A1 fires
         run_watchdog(argv=[
@@ -482,6 +485,7 @@ def test_a2_escalation_clears_a1_marker(
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=5), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True):
         # First fire — record marker
         run_watchdog(argv=[
@@ -785,3 +789,35 @@ def test_process_alive_false_when_no_claude_anywhere(monkeypatch):
     monkeypatch.setattr(_wd.subprocess, "run",
                         _fake_run_factory(0, "1000\n", 1, ""))
     assert _wd._process_alive("mysess") is False
+
+
+# ---------------------------------------------------------------------------
+# _pane_activity_age_sec — fallback across pane/window/session (F3 fix 2026-06-02)
+# ---------------------------------------------------------------------------
+
+
+def test_pane_activity_age_falls_back_when_pane_empty(monkeypatch):
+    """pane_activity is empty without monitor-activity (tmux 3.x). F3 must fall
+    back to window/session activity, NOT return None — returning None made F3 a
+    no-op and let A1 fire against a genuinely-active session."""
+    recent = _wd._now() - 30
+    monkeypatch.setattr(_wd.subprocess, "run",
+                        lambda cmd, **kw: _R(0, f"|{recent}|{recent - 5}\n"))
+    age = _wd._pane_activity_age_sec("lab")
+    assert age is not None
+    assert 25 <= age <= 40  # ~30s, allowing for execution slack
+
+
+def test_pane_activity_age_none_when_all_blank(monkeypatch):
+    monkeypatch.setattr(_wd.subprocess, "run", lambda cmd, **kw: _R(0, "||\n"))
+    assert _wd._pane_activity_age_sec("lab") is None
+
+
+def test_pane_activity_age_takes_most_recent(monkeypatch):
+    """Uses the MAX (most recent) epoch across the three vars."""
+    now = _wd._now()
+    # pane empty, window 500s ago, session 10s ago → most recent = 10s
+    monkeypatch.setattr(_wd.subprocess, "run",
+                        lambda cmd, **kw: _R(0, f"|{now - 500}|{now - 10}\n"))
+    age = _wd._pane_activity_age_sec("lab")
+    assert age is not None and age <= 20
