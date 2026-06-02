@@ -970,3 +970,45 @@ def test_run_spawn_antigravity_dry_run(tmp_path, isolated_xdg, capsys):
     captured = capsys.readouterr()
     assert "agy --sandbox --add-dir" in captured.out
     assert "provider:    antigravity" in captured.err
+
+def test_run_spawn_codex_assisted_memory_injects_agents_md(tmp_path, isolated_xdg, capsys, monkeypatch):
+    from swarph_cli.commands.spawn import run_spawn
+    import yaml
+    
+    payload = {
+        "schema_version": "v1",
+        "name": "codex-test",
+        "role": "codex-test",
+        "cwd": str(tmp_path),
+        "provider": "codex",
+        "assisted_memory": {
+            "enabled": True,
+            "repo": "test-repo"
+        }
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    import os
+    os.chdir(tmp_path)
+    
+    import swarph_cli.commands.memory_sync
+    monkeypatch.setattr(swarph_cli.commands.memory_sync, "perform_restore", lambda c: "Restore Task text")
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/fake-codex")
+    
+    exec_args = []
+    def fake_execve(path, argv, env):
+        exec_args.append((path, argv, env))
+    monkeypatch.setattr("os.execve", fake_execve)
+    
+    run_spawn([])
+    
+    agents_md = tmp_path / "AGENTS.md"
+    assert agents_md.exists()
+    content = agents_md.read_text(encoding="utf-8")
+    assert "Your active task is in CURRENT_TASK.md" in content
+    assert "Restore Task text" in content
+    
+    assert len(exec_args) == 1
+    argv = exec_args[0][1]
+    assert "--prompt-interactive" not in argv
