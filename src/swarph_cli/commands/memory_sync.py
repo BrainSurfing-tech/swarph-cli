@@ -39,7 +39,7 @@ def _get_files_to_sync(cell: Cell) -> list[tuple[str, Path]]:
         if (cell.cwd / "AGENTS.md").exists():
             files_to_sync.append(("AGENTS.md", cell.cwd / "AGENTS.md"))
 
-    elif cell.provider in ("antigravity", "gemini"):
+    elif cell.provider == "antigravity":
         if (cell.cwd / "GEMINI.md").exists():
             files_to_sync.append(("GEMINI.md", cell.cwd / "GEMINI.md"))
         if (cell.cwd / "inbox-cursor.json").exists():
@@ -94,6 +94,7 @@ def perform_restore(cell: Cell) -> Optional[str]:
         subprocess.run(["git", "-C", str(repo_dir), "pull", "--ff-only", "origin", "main"], check=True, capture_output=True)
     except subprocess.CalledProcessError as exc:
         print(f"swarph: memory pull --ff-only failed (diverged/offline?): {exc}", file=sys.stderr)
+        return None
 
     # Walk the repo dir and copy everything back, EXCEPT .git and .gitignore
     for root, dirs, files in os.walk(repo_dir):
@@ -104,6 +105,10 @@ def perform_restore(cell: Cell) -> Optional[str]:
                 continue
             
             src = Path(root) / f
+            if f in ("CLAUDE.md", "AGENTS.md", "GEMINI.md") and src.stat().st_size == 0:
+                print(f"swarph: SAFETY: remote {f} is empty. Refusing to restore and clobber local.", file=sys.stderr)
+                continue
+
             rel = src.relative_to(repo_dir)
             
             dest = None
@@ -115,9 +120,9 @@ def perform_restore(cell: Cell) -> Optional[str]:
                 dest = Path.home() / ".claude" / rel
             elif cell.provider == "claude" and rel.parts[0] == "inbox-cursor":
                 dest = Path.home() / ".claude" / "inbox-cursor"
-            elif cell.provider in ("antigravity", "gemini") and rel.parts[0] == "tmp":
+            elif cell.provider == "antigravity" and rel.parts[0] == "tmp":
                 dest = Path.home() / ".gemini" / rel
-            elif cell.provider in ("antigravity", "gemini") and rel.parts[0] == "history":
+            elif cell.provider == "antigravity" and rel.parts[0] == "history":
                 dest = Path.home() / ".gemini" / rel
                 
             if dest:
@@ -168,7 +173,7 @@ def run_memory_sync(argv: list[str]) -> int:
         guard_file = cell.cwd / "CLAUDE.md"
     elif cell.provider == "codex":
         guard_file = cell.cwd / "AGENTS.md"
-    elif cell.provider in ("antigravity", "gemini"):
+    elif cell.provider == "antigravity":
         guard_file = cell.cwd / "GEMINI.md"
 
     if guard_file and (not guard_file.exists() or guard_file.stat().st_size == 0):

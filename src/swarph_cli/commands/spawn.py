@@ -941,8 +941,16 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                 inject_text = f"Your active task is in CURRENT_TASK.md — read it first:\n\n{current_task_text}"
                 if cell.provider == "claude":
                     spawn_argv.extend(["--append-system-prompt", inject_text])
-                elif cell.provider in ("codex", "antigravity"):
+                elif cell.provider == "antigravity":
                     spawn_argv.extend(["--prompt-interactive", inject_text])
+                elif cell.provider == "codex":
+                    agents_md = cell.cwd / "AGENTS.md"
+                    if agents_md.exists():
+                        content = agents_md.read_text(encoding="utf-8")
+                        if "CURRENT_TASK.md" not in content:
+                            agents_md.write_text(inject_text + "\n\n" + content, encoding="utf-8")
+                    else:
+                        agents_md.write_text(inject_text, encoding="utf-8")
         except Exception as exc:
             print(f"swarph spawn: restore failed: {exc}", file=sys.stderr)
 
