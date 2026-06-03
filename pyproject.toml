@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "swarph-cli"
 version = "0.9.4"
-description = "The `swarph` binary — multi-LLM CLI + mesh-gateway integration: multi-provider spawn (claude/codex/antigravity per cell.provider via a ProviderMembrane), `swarph init` (interactive cell.yaml scaffolder), `swarph mesh` (send/inbox/register) + inbox sidecar, `assisted_memory` (git-backed durable memory), session import, watchdog. v0.9.3 adds `swarph init` + hardens assisted_memory restore (fail-closed pull, empty-guards, codex AGENTS.md) and the mesh sidecar (no DM-loss on idle-guard). v0.9.4 fixes session-pin cwd-mismatch (resume across a changed cwd): the session sidecar now records the cwd a UUID was minted for and re-pins a fresh UUID when a cell spawns from a different cwd."
+description = "The `swarph` binary — multi-LLM CLI + mesh-gateway integration: multi-provider `swarph spawn` (claude/codex/antigravity per cell.provider via a ProviderMembrane + subprocess billing-scrub), interactive `swarph init`, `swarph mesh` (send/inbox/register) + inbox sidecar, `assisted_memory` (git-backed durable memory), session import, watchdog. v0.9.4: fixes session-pin resume across a changed cwd."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
