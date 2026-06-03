@@ -7,9 +7,28 @@ hit on workstation-lc 2026-05-17.
 
 ## TL;DR — if you're hitting it now
 
-If `swarph spawn <cell>` on Windows shows Claude Code's TUI rendering
-incorrectly **and pressing Enter inserts a literal `m` character into the
-input**, try the workarounds in order of decreasing severity:
+**Good news: `swarph spawn` now auto-rescues you.** It detects a *genuine*
+Windows Terminal by walking the process ancestry (looking for a
+`WindowsTerminal.exe` ancestor) — it is **no longer fooled by an inherited
+`WT_SESSION`** env var. The default is to **relaunch**: unless it can
+positively confirm you're already in a real Windows Terminal, it pops a fresh
+WT window (where the Ink TUI works) and tells you the old console can be
+closed. It only stays put when it's *confirmed* in a genuine WT.
+
+- `SWARPH_FORCE_WT=1` — force a relaunch even from a genuine Windows Terminal.
+- `SWARPH_WIN_ACK=1` — stay in the current console (opt out of relaunch + warning).
+
+> **Why ancestry, not `WT_SESSION`?** Live repro 2026-06-03 on workstation-lc:
+> launching from Windows Terminal *sets* `WT_SESSION`, and corporate setups
+> *inherit* it into child `conhost` consoles. The old skip heuristic keyed on
+> `WT_SESSION` → it wrongly concluded "already in a good WT, no relaunch
+> needed" → the user was left stuck on a broken console with **no new window**.
+> Process ancestry is ground truth and fixes this.
+
+If the auto-relaunch can't fire (e.g. `wt.exe` isn't installed) and Claude
+Code's TUI renders incorrectly **with pressing Enter inserting a literal `m`
+character into the input**, try the workarounds in order of decreasing
+severity:
 
 1. **Switch terminal emulator from legacy `conhost.exe` to Windows
    Terminal** (the modern Microsoft Store app). Most TUI issues collapse
@@ -112,23 +131,31 @@ other issues.
 
 - This document (`docs/WINDOWS_KNOWN_ISSUES.md`) for future-operator
   recall.
-- **Auto-relaunch in Windows Terminal.** `swarph spawn` detects a broken
-  console and relaunches the `claude` session inside Windows Terminal
-  (where the Ink TUI works), then exits the original console. This is the
-  primary fix — it sidesteps conhost's VT-input gap entirely rather than
-  trying to patch it. See `_relaunch_in_windows_terminal` in `spawn.py`.
+- **Auto-relaunch in Windows Terminal (relaunch-by-default).** `swarph spawn`
+  relaunches the `claude` session inside Windows Terminal (where the Ink TUI
+  works), then exits the original console — UNLESS it can positively confirm
+  it's already in a genuine Windows Terminal. This is the primary fix — it
+  sidesteps conhost's VT-input gap entirely rather than trying to patch it.
+  See `_relaunch_in_windows_terminal` + `_console_is_genuine_wt` in `spawn.py`.
+- **Genuine-WT detection via process ancestry, not `WT_SESSION`.**
+  `_console_is_genuine_wt()` walks the parent-process chain (Win32
+  `CreateToolhelp32Snapshot` / `Process32First` / `Process32Next`) and returns
+  True only if an ancestor process is `WindowsTerminal.exe` (case-insensitive).
+  It fail-safes to False on any error or non-Windows platform → which makes the
+  caller relaunch (the foolproof direction). This replaces the old
+  `WT_SESSION`-env heuristic, which was inherited into child `conhost` consoles
+  and set whenever a shell was launched from WT — so it wrongly skipped the
+  relaunch and stranded users on a broken console with no new window.
 - **Env knobs** controlling that relaunch:
-  - `SWARPH_FORCE_WT=1` — **force the relaunch even when `WT_SESSION` is
-    set.** Needed on corporate boxes that *inherit* `WT_SESSION` into child
-    `conhost` consoles (so the console looks like Windows Terminal to env
-    detection but is actually a broken conhost). Set this once at User
-    scope and you never have to clear `WT_SESSION` by hand. This is the
-    clean replacement for the manual `Remove-Item Env:WT_SESSION` workaround.
+  - `SWARPH_FORCE_WT=1` — **force the relaunch even when already in a genuine
+    Windows Terminal.** (The old "needed because `WT_SESSION` is inherited"
+    rationale is now obsolete — ancestry detection handles that case
+    automatically — but the override is kept for operators who want a fresh WT
+    window unconditionally.)
   - `SWARPH_WIN_ACK=1` — opt out of both the relaunch and the warning
     (stay put in the current console).
   - `SWARPH_SPAWN` (internal) — set on the relaunched session; the reliable
-    loop-guard so a relaunched session never re-relaunches, independent of
-    how `WT_SESSION` behaves.
+    loop-guard so a relaunched session never re-relaunches.
   - The relaunch also no-ops when stdout is not an interactive TTY (CI /
     piped) and when `wt.exe` is absent (then it warns instead).
 - Banner update in `swarph spawn`: when it *can't* auto-relaunch (no
