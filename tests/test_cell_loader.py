@@ -22,6 +22,8 @@ from swarph_cli.cell import (
     load_or_create_session_id,
     resolve_cell_path,
     session_state_path,
+    _read_session_sidecar,
+    _write_session_sidecar,
 )
 
 
@@ -264,7 +266,9 @@ def test_load_or_create_session_id_mints_and_persists(
     uuid.UUID(sid1)  # raises if not a valid UUID
     sidecar = session_state_path("lab")
     assert sidecar.exists()
-    assert sidecar.read_text().strip() == sid1
+    rec_uuid, rec_cwd = _read_session_sidecar(sidecar)
+    assert rec_uuid == sid1
+    assert rec_cwd == str(cell.cwd)
 
 
 def test_load_or_create_session_id_reuses_persisted_value(
@@ -287,7 +291,102 @@ def test_load_or_create_session_id_corrupted_sidecar_regenerates(
     sid, generated, _role = load_or_create_session_id("lab", cell)
     uuid.UUID(sid)
     assert generated is True
-    assert sidecar.read_text().strip() == sid
+    rec_uuid, _rec_cwd = _read_session_sidecar(sidecar)
+    assert rec_uuid == sid
+
+
+# ---------------------------------------------------------------------------
+# v0.9.4 — session-pin cwd-mismatch fix (project-scoped --resume)
+# ---------------------------------------------------------------------------
+
+
+def test_session_sidecar_fresh_mint_writes_two_line_uuid_and_cwd(
+    isolated_xdg, cell_yaml_factory, tmp_path
+):
+    """v0.9.4 — first mint records BOTH the uuid AND the cwd (cwd=A)."""
+    cell = load_cell(cell_yaml_factory())  # cwd == tmp_path (== A)
+    sid, gen, _role = load_or_create_session_id("lab", cell)
+    assert gen is True
+    uuid.UUID(sid)
+    rec_uuid, rec_cwd = _read_session_sidecar(session_state_path("lab"))
+    assert rec_uuid == sid
+    assert rec_cwd == str(tmp_path)
+    assert rec_cwd == str(cell.cwd)
+
+
+def test_session_sidecar_same_cwd_reuses_same_uuid(
+    isolated_xdg, cell_yaml_factory, tmp_path
+):
+    """v0.9.4 — pre-pinned {uuid=U, cwd=A}; spawn from cwd=A reuses U."""
+    cell = load_cell(cell_yaml_factory())  # cwd == tmp_path (== A)
+    fixed = "550e8400-e29b-41d4-a716-446655440000"
+    _write_session_sidecar(session_state_path("lab"), fixed, str(tmp_path))
+    sid, gen, role = load_or_create_session_id("lab", cell)
+    assert sid == fixed
+    assert gen is False
+    assert role == "lab"
+
+
+def test_session_sidecar_different_cwd_mints_fresh_and_repins(
+    isolated_xdg, cell_yaml_factory, tmp_path
+):
+    """v0.9.4 REGRESSION — the bug: pin minted for cwd=A, spawn from cwd=B.
+
+    A project-scoped ``claude --resume <U>`` from B dies with
+    "No conversation found". Fix: mint a FRESH (clean) uuid and re-pin
+    it for cwd=B.
+    """
+    cwd_b = tmp_path / "project_b"
+    cwd_b.mkdir()
+    cell = load_cell(cell_yaml_factory(cwd=str(cwd_b)))  # cell.cwd == B
+    fixed = "550e8400-e29b-41d4-a716-446655440000"  # pinned for cwd=A
+    _write_session_sidecar(session_state_path("lab"), fixed, str(tmp_path))
+
+    sid, gen, role = load_or_create_session_id("lab", cell)
+    assert gen is True
+    assert sid != fixed  # genuine fresh UUID
+    uuid.UUID(sid)
+    assert role == "lab"
+    # Sidecar now re-pinned for cwd=B with the fresh UUID.
+    rec_uuid, rec_cwd = _read_session_sidecar(session_state_path("lab"))
+    assert rec_uuid == sid
+    assert rec_cwd == str(cwd_b)
+
+
+def test_session_sidecar_legacy_one_line_is_reused_not_reminted(
+    isolated_xdg, cell_yaml_factory, tmp_path
+):
+    """v0.9.4 back-compat — legacy bare-uuid (no cwd) sidecar is reused
+    as-is regardless of cwd (origin cwd unknown; do NOT re-mint)."""
+    cell = load_cell(cell_yaml_factory())
+    fixed = "550e8400-e29b-41d4-a716-446655440000"
+    sidecar = session_state_path("lab")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(fixed + "\n")  # legacy one-line format
+    sid, gen, role = load_or_create_session_id("lab", cell)
+    assert sid == fixed
+    assert gen is False
+    assert role == "lab"
+    # Not upgraded/rewritten — stays legacy one-line.
+    assert sidecar.read_text() == fixed + "\n"
+
+
+def test_read_session_sidecar_parses_both_formats(tmp_path):
+    """v0.9.4 — _read_session_sidecar handles 2-line AND legacy 1-line."""
+    two_line = tmp_path / "two.session-id"
+    two_line.write_text("550e8400-e29b-41d4-a716-446655440000\n/home/x/proj\n")
+    assert _read_session_sidecar(two_line) == (
+        "550e8400-e29b-41d4-a716-446655440000",
+        "/home/x/proj",
+    )
+    one_line = tmp_path / "one.session-id"
+    one_line.write_text("550e8400-e29b-41d4-a716-446655440000\n")
+    assert _read_session_sidecar(one_line) == (
+        "550e8400-e29b-41d4-a716-446655440000",
+        None,
+    )
+    missing = tmp_path / "missing.session-id"
+    assert _read_session_sidecar(missing) == (None, None)
 
 
 def test_load_or_create_session_id_atomic_no_tempfile_left_behind(
@@ -435,8 +534,8 @@ def test_new_instance_with_existing_base_mints_into_slot_2(
     base_path = session_state_path("drop")
     sib_path = session_state_path("drop-2")
     assert base_path.exists() and sib_path.exists()
-    assert base_path.read_text().strip() == sid_base
-    assert sib_path.read_text().strip() == sid_sib
+    assert _read_session_sidecar(base_path)[0] == sid_base
+    assert _read_session_sidecar(sib_path)[0] == sid_sib
 
 
 def test_new_instance_third_call_lands_at_slot_3(

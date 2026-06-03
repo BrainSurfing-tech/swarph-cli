@@ -459,7 +459,7 @@ def test_run_spawn_new_instance_with_base_mints_sibling_slot(
 ):
     """v0.7 PR-B — `--new-instance` with base sidecar present allocates
     slot 2 AND persists. Sibling resumable via `swarph spawn <role>-2`."""
-    from swarph_cli.cell import session_state_path
+    from swarph_cli.cell import session_state_path, _read_session_sidecar
 
     # First spawn establishes base slot
     run_spawn(argv=[str(fake_cell_yaml), "--dry-run", "--print-id"])
@@ -474,8 +474,8 @@ def test_run_spawn_new_instance_with_base_mints_sibling_slot(
 
     base_sidecar = session_state_path("lab-test")
     sibling_sidecar = session_state_path("lab-test-2")
-    assert base_sidecar.read_text().strip() == base_uuid
-    assert sibling_sidecar.read_text().strip() == sibling_uuid
+    assert _read_session_sidecar(base_sidecar)[0] == base_uuid
+    assert _read_session_sidecar(sibling_sidecar)[0] == sibling_uuid
 
     # Dry-run output shows the sibling slot label
     assert "lab-test-2" in captured.err

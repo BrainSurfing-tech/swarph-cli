@@ -252,6 +252,42 @@ def load_cell(path: Path) -> Cell:
     return cell
 
 
+def _write_session_sidecar(target: Path, session_id: str, cwd) -> None:
+    """Write the two-line ``{uuid, cwd}`` session sidecar atomically.
+
+    v0.9.4 (session-pin cwd-mismatch fix): the sidecar records the cwd
+    the session UUID was minted for so a later spawn from a DIFFERENT
+    cwd can detect the mismatch and re-pin a fresh UUID rather than
+    handing a project-scoped UUID to ``claude --resume`` from the wrong
+    project (which dies with "No conversation found with session ID").
+
+    Format (trailing-newline convention preserved):
+
+        <uuid>\\n
+        <cwd>\\n
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(target, f"{session_id}\n{str(cwd)}\n")
+
+
+def _read_session_sidecar(path: Path) -> tuple[Optional[str], Optional[str]]:
+    """Parse a session sidecar → ``(uuid, cwd)``.
+
+    Returns ``(None, None)`` for a missing/empty file. ``cwd`` is
+    ``None`` for a **legacy one-line** sidecar (bare UUID, pre-0.9.4)
+    — we cannot know which project that UUID belongs to.
+    """
+    if not path.exists():
+        return None, None
+    raw = path.read_text(encoding="utf-8")
+    lines = raw.splitlines()
+    if not lines:
+        return None, None
+    uuid_str = lines[0].strip() or None
+    cwd_str = lines[1].strip() if len(lines) >= 2 and lines[1].strip() else None
+    return uuid_str, cwd_str
+
+
 def load_or_create_session_id(
     role: str,
     cell: Cell,
@@ -266,6 +302,10 @@ def load_or_create_session_id(
       2. ``new_instance=True`` AND base sidecar exists — auto-suffix slot
       3. ``new_instance=True`` AND no base sidecar — fall through (degenerate)
       4. session_state_path(role) reused — default re-resume path
+         (v0.9.4: only when the sidecar's recorded cwd matches cell.cwd;
+         on cwd-mismatch a fresh UUID is minted + re-pinned for the new
+         cwd, because ``claude --resume`` is PROJECT-scoped and a pin
+         from another cwd dies with "No conversation found")
       5. mint new uuid4 + persist
 
     Caller-side discipline (mother iter-1 #986): the ``effective_role``
@@ -282,23 +322,33 @@ def load_or_create_session_id(
             sibling_role = next_free_slot_role(role)
             sibling_state = session_state_path(sibling_role)
             new_id = str(uuid.uuid4())
-            sibling_state.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write_text(sibling_state, new_id + "\n")
+            _write_session_sidecar(sibling_state, new_id, cell.cwd)
             return new_id, True, sibling_role
 
     state_file = session_state_path(role)
     if state_file.exists():
-        existing = state_file.read_text(encoding="utf-8").strip()
-        if existing:
+        existing_uuid, recorded_cwd = _read_session_sidecar(state_file)
+        if existing_uuid:
             try:
-                return validate_uuid_str(existing), False, role
+                valid_uuid = validate_uuid_str(existing_uuid)
             except CellError:
                 # Corrupted state — fall through and regenerate.
-                pass
+                valid_uuid = None
+            if valid_uuid is not None:
+                if recorded_cwd is not None and recorded_cwd != str(cell.cwd):
+                    # v0.9.4: pin belongs to a different project. A
+                    # project-scoped --resume would die from this cwd, so
+                    # mint a fresh (clean) UUID + re-pin for the new cwd.
+                    fresh = str(uuid.uuid4())
+                    _write_session_sidecar(state_file, fresh, cell.cwd)
+                    return fresh, True, role
+                # Legacy (recorded_cwd is None) → reuse as-is; do NOT
+                # rewrite, since the UUID's true origin cwd is unknown.
+                # Matching cwd → reuse.
+                return valid_uuid, False, role
 
     new_id = str(uuid.uuid4())
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(state_file, new_id + "\n")
+    _write_session_sidecar(state_file, new_id, cell.cwd)
     return new_id, True, role
 
 
@@ -352,6 +402,8 @@ __all__ = [
     "read_starter_prompt",
     "load_cell",
     "load_or_create_session_id",
+    "_read_session_sidecar",
+    "_write_session_sidecar",
     # Backward-compat aliases
     "_PEER_NAME_RE",
     "_VALID_SCHEMA_VERSIONS",
