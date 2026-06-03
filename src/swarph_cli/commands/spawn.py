@@ -481,6 +481,92 @@ def _print_dry_run(
     print(" ".join(redacted))
 
 
+def _console_is_genuine_wt() -> bool:
+    """True ONLY if the controlling terminal is positively a real Windows Terminal.
+
+    Confirms a genuine Windows Terminal by walking the parent-process chain (via the
+    Win32 toolhelp snapshot API) and checking whether any ancestor process executable
+    is ``WindowsTerminal.exe`` (case-insensitive). This is GROUND TRUTH, unlike the
+    ``WT_SESSION`` environment variable — which is inherited into child ``conhost``
+    consoles on corporate setups, and is set whenever a shell is launched from WT at
+    all, so it cannot distinguish "this console is a real WT" from "an ancestor once
+    was, but I'm now in a broken conhost".
+
+    Returns False on any non-win32 platform (the whole relaunch is win32-gated). The
+    ENTIRE Win32 body is wrapped in ``try/except Exception: return False`` so any
+    error — missing API, weird process state, access denied — fails SAFE toward
+    "not confirmed", which makes the caller RELAUNCH (the foolproof direction).
+
+    This helper is the ONLY piece that touches ctypes/Win32 and cannot be exercised
+    on a non-Windows box; the decision logic around it is fully unit-tested via mocks.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        TH32CS_SNAPPROCESS = 0x00000002
+        MAX_PATH = 260
+
+        class PROCESSENTRY32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_char * MAX_PATH),
+            ]
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+        if not snapshot or snapshot == INVALID_HANDLE_VALUE:
+            return False
+        try:
+            # Build {pid: (ppid, exe_name_lower)} for every live process.
+            procs: dict[int, tuple[int, str]] = {}
+            entry = PROCESSENTRY32()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+            ok = kernel32.Process32First(snapshot, ctypes.byref(entry))
+            while ok:
+                try:
+                    exe = entry.szExeFile.decode("utf-8", "replace").lower()
+                except Exception:
+                    exe = ""
+                procs[int(entry.th32ProcessID)] = (
+                    int(entry.th32ParentProcessID),
+                    exe,
+                )
+                ok = kernel32.Process32Next(snapshot, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snapshot)
+
+        # Walk from our own pid up through ppids; bounded + cycle-guarded.
+        pid = os.getpid()
+        seen: set[int] = set()
+        for _ in range(12):
+            if pid in seen or pid == 0:
+                break
+            seen.add(pid)
+            info = procs.get(pid)
+            if info is None:
+                break
+            ppid, _exe = info
+            parent = procs.get(ppid)
+            if parent is not None and parent[1] == "windowsterminal.exe":
+                return True
+            pid = ppid
+        return False
+    except Exception:
+        return False
+
+
 def _relaunch_in_windows_terminal(
     claude_bin: str, claude_argv: list[str], cwd: Path,
 ) -> bool:
@@ -489,24 +575,28 @@ def _relaunch_in_windows_terminal(
     On legacy Windows console (``conhost.exe``), Claude Code's Ink TUI breaks: the
     SGR terminator ``m`` leaks from the output stream into stdin, so pressing Enter
     inserts a literal ``m`` instead of submitting (see docs/WINDOWS_KNOWN_ISSUES.md).
-    Windows Terminal handles VT-input correctly. If we're on conhost AND ``wt.exe``
-    is available, relaunch the ``claude`` session inside Windows Terminal and return
-    True (the caller should exit this console). Otherwise return False (caller
-    proceeds in-place and warns).
+    Windows Terminal handles VT-input correctly. The DEFAULT is to relaunch (rescue):
+    unless we can POSITIVELY confirm we're already in a genuine Windows Terminal, we
+    pop a fresh WT window and return True (the caller should exit this console).
+
+    Genuine-WT detection is via process ancestry (``_console_is_genuine_wt``), NOT the
+    inheritable ``WT_SESSION`` env var — which wrongly looked like "already in good WT"
+    on corporate conhosts and on any shell launched from WT, leaving users stuck on a
+    broken console with no new window (live repro 2026-06-03 on workstation-lc).
+
+    Two env overrides:
+      * ``SWARPH_FORCE_WT=1`` — ALWAYS relaunch, even from a genuine Windows Terminal;
+      * ``SWARPH_WIN_ACK=1``  — NEVER relaunch (explicit "run here anyway" opt-out).
 
     No-op (returns False) when:
       * not Windows;
       * stdout is not an interactive TTY (CI / piped / redirected) — there is no
         human console to relaunch from, and a detached WT window would be wrong;
       * we are already inside a session WE spawned (``SWARPH_SPAWN`` set) — the
-        reliable loop-guard: a relaunched session can never re-relaunch, regardless
-        of how ``WT_SESSION`` behaves on this box;
+        reliable loop-guard: a relaunched session can never re-relaunch;
       * operator opted to stay put (``SWARPH_WIN_ACK=1``);
-      * already inside Windows Terminal (``WT_SESSION`` set) AND not force-requested
-        — the TUI works there. NOTE: some corporate setups INHERIT ``WT_SESSION``
-        into child ``conhost`` consoles, so this is a comfort heuristic, not ground
-        truth. Set ``SWARPH_FORCE_WT=1`` to relaunch anyway when you know you are on
-        a broken conhost that carries an inherited ``WT_SESSION``;
+      * we positively confirm a genuine Windows Terminal via ancestry AND not
+        force-requested — the TUI works there, no redundant window;
       * ``wt.exe`` is not installed (e.g. locked-down corporate box) — caller warns.
     """
     if sys.platform != "win32":
@@ -517,7 +607,12 @@ def _relaunch_in_windows_terminal(
         return False
     if os.environ.get("SWARPH_WIN_ACK"):
         return False
-    if os.environ.get("WT_SESSION") and not os.environ.get("SWARPH_FORCE_WT"):
+    # Skip the relaunch ONLY when we can positively confirm we're already in a
+    # genuine Windows Terminal (TUI works there) — verified by process ancestry,
+    # NOT the inheritable WT_SESSION env var. Default is to relaunch (rescue):
+    # if we can't confirm a good WT, we pop a fresh one. SWARPH_FORCE_WT forces
+    # relaunch even from a genuine WT.
+    if not os.environ.get("SWARPH_FORCE_WT") and _console_is_genuine_wt():
         return False
     wt = shutil.which("wt")
     if not wt:
@@ -645,13 +740,14 @@ class ClaudeMembrane(ProviderMembrane):
             return 0
 
         # Still in a broken console (conhost with no wt.exe, or operator acked).
-        # Warn unless suppressed. Inside Windows Terminal (WT_SESSION set) the
-        # TUI works, so no warning fires there.
+        # Warn unless suppressed. Inside a genuine Windows Terminal (confirmed by
+        # ancestry, NOT the inheritable WT_SESSION) the TUI works, so no warning
+        # fires there.
         if (
             sys.platform == "win32"
             and not no_banner
             and not os.environ.get("SWARPH_WIN_ACK")
-            and not os.environ.get("WT_SESSION")
+            and not _console_is_genuine_wt()
         ):
             print(
                 "swarph spawn: WARNING — legacy Windows console (conhost) and Windows "
