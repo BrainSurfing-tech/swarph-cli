@@ -55,6 +55,11 @@ Spec = "https://github.com/darw007d/hedge-fund-mcp/blob/main/research/swarph_cli
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+# Door 1: `swarph mcp-server` runs an MCP (stdio) server exposing the swarph
+# toolbelt (swarph_search/add/describe) to any MCP host. The SDK is an extra
+# so the core one-shot/mesh paths don't pull it in; `swarph mcp-server`
+# prints a `pip install swarph-cli[mcp]` hint when it's absent.
+mcp = ["mcp>=1.0"]
 
 [project.scripts]
 swarph = "swarph_cli.main:main"

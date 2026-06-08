@@ -88,6 +88,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "protocol-handler": "swarph_cli.commands.protocol_handler.run_protocol_handler",
     "memory-sync": "swarph_cli.commands.memory_sync.run_memory_sync",
     "mesh": "swarph_cli.commands.mesh.run_mesh",
+    "mcp-server": "swarph_cli.commands.mcp_server.run_mcp_server",
     # Future: "list-peers", "list-adapters", etc.
 }
 
