@@ -5,7 +5,8 @@ Exercises ``run_add`` / ``dispatch_add`` directly with tmp
 
 * builtin hook installs (script written + bindings merged into settings)
 * published hook fails closed (returns non-zero, mutates NOTHING)
-* stub class (tool) returns 3 with a "not yet implemented" message
+* tool class (real handler) records a swarph-mesh adapter as a mesh lane;
+  an unknown builtin tool adapter surfaces a clean ValueError (rc 2)
 * unknown builtin name surfaces the resolve_builtin ValueError, nothing written
 * bad URI returns 2, nothing written
 * the ``add`` verb is registered in main._VERB_HANDLERS (round-trip wiring)
@@ -84,24 +85,31 @@ def test_published_hook_fails_closed(tmp_path, capsys):
 # --------------------------------------------------------------------------- #
 
 
-def test_stub_class_clean_error(tmp_path, capsys):
+def test_unknown_builtin_tool_clean_error(tmp_path, capsys):
+    # The ``tool`` class is now a real handler (bridges to swarph-mesh's
+    # adapter registry). ``openrouter`` is NOT a swarph-mesh builtin adapter,
+    # so this surfaces a clean ValueError (rc 2) and writes nothing.
     settings_path = tmp_path / "settings.json"
     hooks_home = tmp_path / "hooks"
+    lanes_path = tmp_path / "tool_lanes.json"
 
     rc = run_add(
         ["swarph://tool/swarph-builtin/openrouter", "--yes"],
         settings_path=settings_path,
         hooks_home=hooks_home,
+        lanes_path=lanes_path,
     )
-    assert rc == 3
+    assert rc == 2
 
     assert not settings_path.exists()
+    assert not lanes_path.exists()
     if hooks_home.exists():
         assert list(hooks_home.iterdir()) == []
 
     captured = capsys.readouterr()
     combined = captured.out + captured.err
-    assert "not yet implemented" in combined
+    assert "swarph add:" in combined
+    assert "openrouter" in combined
 
 
 # --------------------------------------------------------------------------- #
@@ -165,12 +173,15 @@ def test_dispatch_add_routes_by_class(tmp_path):
     registry = build_registry(
         settings_path=tmp_path / "settings.json",
         hooks_home=tmp_path / "hooks",
+        lanes_path=tmp_path / "tool_lanes.json",
     )
-    ref = parse_uri("swarph://tool/swarph-builtin/openrouter")
+    # Routes a ``tool`` URI to the real ToolHandler (4th class), which records
+    # a swarph-mesh adapter as a mesh lane. "gemini" is a real builtin adapter.
+    ref = parse_uri("swarph://tool/swarph-builtin/gemini")
     lines: list[str] = []
     rc = dispatch_add(ref, assume_yes=True, out=lines.append, registry=registry)
-    assert rc == 3
-    assert any("not yet implemented" in x for x in lines)
+    assert rc == 0
+    assert any("tool lane" in x for x in lines)
 
 
 # --------------------------------------------------------------------------- #
