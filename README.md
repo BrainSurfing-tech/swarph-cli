@@ -145,6 +145,31 @@ tail -f /var/log/swarph-watchdog.log         # append-log alternative
 
 Why this matters: pre-v0.7.3, swarph-cli shipped the watchdog code but no install path. Lab ran it via cron (manual setup); droplet never installed it at all. A real production silence-window (drop's ~24min mute 2026-05-14 08:38→09:02 UTC after an Anthropic API error) made the install-gap visible. v0.7.3 closes it for any peer with one command.
 
+**Cross-host throttle-recovery wake (`--dm-wake`, "mesh-monitor mode"):**
+
+A1 (local tmux send-keys) and A2 (respawn) can only recover a cell on the watchdog's *own* host. `--dm-wake` adds the cross-host complement: the watchdog also scans the gateway `/peers` list, finds peers whose `last_health` is stale (throttle-stranded sessions on *other* hosts), and sends each a wake DM (`kind="fyi"`) via the gateway `/messages`. The wake chain is **watchdog → wake DM → target peer's sidecar/inbox-watcher → `tmux send-keys` wakes that session**. Reuses the same `--gateway` URL + `MESH_GATEWAY_TOKEN` and the same `--threshold` staleness window as the local check.
+
+```bash
+swarph watchdog --check --peer lab-ovh --gateway http://localhost:8788 --dm-wake --dm-wake-cooldown-sec 1800
+```
+
+- `--dm-wake-cooldown-sec SEC` (default `1800` / 30 min) — no-spam gate: each stale peer is DM-woken at most once per window, so a peer that stays stale across many ticks is woken once, not every tick. Per-peer cooldown state lives at `$XDG_STATE_HOME/swarph/dm_wake_state.json` (falls back to `~/.local/state/swarph/dm_wake_state.json`).
+
+**Scope honesty (v1):** the wake DM is *wake + re-drain* — the woken cell drains its inbox and resumes work; it does **not** resume the exact throttled in-flight task (per-cell task-checkpointing is future v2 scope).
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | no action (session healthy / no unread DMs queued) or install ok |
+| `1` | A1 fired (local tmux send-keys wake-prompt) |
+| `2` | A2 fired (local full respawn) |
+| `3` | watchdog acted/couldn't-read — **either** a cross-host wake DM (A1-DM) fired this tick (local was a no-op) **or** detection error (cursor unreadable / gateway unreachable). Both map to `3`. |
+| `4` | configuration error (invalid args, no cell.yaml resolved); install needs sudo |
+| `5` | install error (file write failed / systemctl failed) |
+
+**Deploy (COMMANDER-GATED — lab does not self-publish/self-deploy):** now that `--dm-wake` ships, the lab + droplet watchdog crons can drop their placeholder note ("REMOVE when lab ships `swarph watchdog --dm-wake`"). The deploy step — described here, not an instruction to run — is: (a) publish the new swarph-cli, (b) add `--dm-wake` (and optionally `--dm-wake-cooldown-sec`) to the watchdog cron line on the always-on mesh-monitor host (lab), (c) drop the placeholder note from that cron entry.
+
 ### `swarph hooks`
 
 Installs Claude Code hooks as **content** wired into `~/.claude/settings.json` — a hook becomes an installable artifact (a script + its event/matcher bindings merged into your settings) with no swarph-cli version bump per hook, the same way `watchdog --install-service` ships systemd units as bundled data.
