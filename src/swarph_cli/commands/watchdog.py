@@ -370,6 +370,77 @@ def _gateway_recent_recovery_event(
     return None
 
 
+def _parse_last_health(value) -> Optional[float]:
+    """Parse a peer's ``last_health`` ISO-8601 string → epoch seconds (UTC).
+
+    Robust to the three observed forms:
+      * trailing ``Z`` (Zulu) — normalized to ``+00:00`` before parsing
+      * explicit ``+00:00`` offset
+      * naive (no tz) — assumed UTC
+
+    Returns None on any failure (absent / empty / non-str / unparseable), so the
+    caller can SKIP that peer rather than treat absence-of-data as staleness.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _stale_peers(
+    peers: list[dict],
+    now_epoch: float,
+    stale_sec: int,
+    exclude: Optional[set[str]] = None,
+) -> list[str]:
+    """Return names of peers whose last_health is older than stale_sec (idle/stranded
+    candidates), excluding any name in ``exclude`` (e.g. self + known laptop-only cells).
+    A peer with no/empty/unparseable last_health is SKIPPED (not treated as stale —
+    absence of data must not trigger a wake). Returns names sorted, deterministic."""
+    exclude = exclude or set()
+    out: list[str] = []
+    for peer in peers:
+        if not isinstance(peer, dict):
+            continue
+        name = peer.get("name")
+        if not name or name in exclude:
+            continue
+        parsed = _parse_last_health(peer.get("last_health"))
+        if parsed is None:
+            continue  # absent / unparseable → skip, never treat as stale
+        age = now_epoch - parsed
+        if age > stale_sec:
+            out.append(name)
+    return sorted(out)
+
+
+def _fetch_peers(gateway: str, token: str) -> list[dict]:
+    """GET {gateway}/peers (Bearer token). Returns the peer list, or [] on any error
+    (never raises). The response may be a bare list OR {"peers": [...]} — handle both."""
+    url = f"{gateway.rstrip('/')}/peers"
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError):
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("peers"), list):
+        return data["peers"]
+    return []
+
+
 def _pid_under(pid: int, ancestors: set, _max_depth: int = 40) -> bool:
     """Walk the PPID chain up from ``pid``; True if any ancestor is in
     ``ancestors``. Reads ``/proc/<pid>/stat`` (Linux). The ``comm`` field can
