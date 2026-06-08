@@ -37,8 +37,10 @@ on POSIX) so a crash mid-write never leaves a truncated settings.json.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -285,3 +287,210 @@ def _unmerge_hook(settings: dict, event: str, matcher: str, command: str) -> dic
         del hooks[event]
 
     return settings
+
+
+# --------------------------------------------------------------------------- #
+# Local-bundle resolver (T3)
+# --------------------------------------------------------------------------- #
+
+
+_DEFAULT_HOOKS_HOME = "~/.swarph/hooks"
+_DEFAULT_SETTINGS_PATH = "~/.claude/settings.json"
+
+
+def resolve_local(path) -> HookBundle:
+    """Resolve a LOCAL hook bundle directory into a :class:`HookBundle`.
+
+    ``path`` is a directory containing:
+      * ``hook.json`` — manifest ``{"name","description","script_name",
+        "bindings":[{"event","matcher"},...]}``
+      * the script file named by ``script_name``.
+
+    The returned bundle is tagged ``trust="local"`` and ``publisher=
+    f"local:{path}"`` so the installer knows to REQUIRE confirmation before
+    writing (vs. builtins which are trusted). ``script_body`` is read inline
+    from the script file, mirroring the builtin bundles.
+
+    Raises ``FileNotFoundError`` with a clear message when ``hook.json`` or
+    the named script file is missing.
+    """
+    d = Path(path).expanduser()
+    manifest_path = d / "hook.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"local hook bundle missing manifest: {manifest_path} not found"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"hook.json at {manifest_path} is not valid JSON: {exc}") from exc
+
+    script_name = manifest["script_name"]
+    script_path = d / script_name
+    if not script_path.is_file():
+        raise FileNotFoundError(
+            f"local hook bundle missing script: {script_path} "
+            f"(referenced by hook.json script_name={script_name!r})"
+        )
+    script_body = script_path.read_text(encoding="utf-8")
+
+    bindings = tuple(
+        HookBinding(event=b["event"], matcher=b.get("matcher", ""))
+        for b in manifest.get("bindings", [])
+    )
+
+    return HookBundle(
+        name=manifest["name"],
+        description=manifest.get("description", ""),
+        publisher=f"local:{d}",
+        trust="local",
+        script_name=script_name,
+        script_body=script_body,
+        bindings=bindings,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Install (T3)
+# --------------------------------------------------------------------------- #
+
+
+def install_hook(
+    bundle: HookBundle,
+    *,
+    settings_path=_DEFAULT_SETTINGS_PATH,
+    hooks_home=_DEFAULT_HOOKS_HOME,
+    assume_yes: bool = False,
+    out=print,
+) -> int:
+    """Install ``bundle``: write its script + merge every binding into settings.
+
+    Steps (with a show-before-write preview):
+
+      1. Resolve the absolute installed-script path
+         (``hooks_home/script_name`` expanded + absolute) — this is the
+         command string written into settings.
+      2. ``out(...)`` a preview: the script body (head) and a human-readable
+         per-binding summary of what will be added (event / matcher / command).
+      3. For ``trust != "builtin"`` (local bundles) REQUIRE confirmation. When
+         ``assume_yes`` is False, prompt via ``input()`` and ABORT — writing
+         NOTHING (no script, no settings) and returning non-zero — on anything
+         but an affirmative ("y"/"yes"). Builtins proceed without a prompt.
+      4. Write the script to ``hooks_home`` (mkdir -p, chmod 0755).
+      5. ``_load_settings`` → ``_merge_hook`` each binding → ``_save_settings``.
+      6. ``out`` the activation caveat (open ``/hooks`` once or restart —
+         Claude Code can't hot-load a hook into a running session).
+
+    Returns 0 on success, non-zero on abort.
+    """
+    hooks_home_p = Path(hooks_home).expanduser()
+    script_dst = (hooks_home_p / bundle.script_name).resolve()
+    command = str(script_dst)
+
+    # ---- show-before-write preview ----
+    out(f"hook: {bundle.name}  (trust={bundle.trust}, publisher={bundle.publisher})")
+    if bundle.description:
+        out(f"  {bundle.description}")
+    out(f"script → {script_dst}")
+    body_lines = bundle.script_body.splitlines()
+    head = body_lines[:12]
+    out("  --- script (head) ---")
+    for line in head:
+        out(f"  | {line}")
+    if len(body_lines) > len(head):
+        out(f"  | ... ({len(body_lines) - len(head)} more lines)")
+    out("  will add these bindings to settings:")
+    for b in bundle.bindings:
+        matcher_disp = b.matcher if b.matcher else "(all)"
+        out(f"    - event={b.event}  matcher={matcher_disp}  command={command}")
+
+    # ---- confirmation gate for non-builtin (local) bundles ----
+    if bundle.trust != "builtin" and not assume_yes:
+        try:
+            answer = input(f"install local hook '{bundle.name}'? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            out("aborted — nothing written.")
+            return 1
+
+    # ---- write the script ----
+    hooks_home_p.mkdir(parents=True, exist_ok=True)
+    script_dst.write_text(bundle.script_body, encoding="utf-8")
+    os.chmod(script_dst, 0o755)
+
+    # ---- merge each binding into settings + atomic save ----
+    settings = _load_settings(settings_path)
+    for b in bundle.bindings:
+        settings = _merge_hook(settings, b.event, b.matcher, command)
+    _save_settings(settings_path, settings)
+
+    out("installed — open /hooks once or restart to activate")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# CLI surface (T3): swarph hooks add <name|path> [--yes]
+# --------------------------------------------------------------------------- #
+
+
+def _resolve_bundle(target: str) -> HookBundle:
+    """Resolve ``target`` to a bundle: builtin name first, else local dir.
+
+    Raises ``ValueError`` (with the builtin list) when ``target`` is neither a
+    known builtin nor an existing local bundle directory.
+    """
+    if target in BUILTIN_HOOKS:
+        return resolve_builtin(target)
+    if Path(target).expanduser().is_dir():
+        return resolve_local(target)
+    available = ", ".join(sorted(BUILTIN_HOOKS))
+    raise ValueError(
+        f"unknown hook {target!r} — not a builtin (available: {available}) "
+        f"and not a local bundle dir"
+    )
+
+
+def run_hooks(argv: list[str] | None = None) -> int:
+    """``swarph hooks`` dispatch. T3 ships the ``add`` action only."""
+    if argv is None:
+        argv = sys.argv[2:]  # skip "swarph hooks"
+
+    parser = argparse.ArgumentParser(
+        prog="swarph hooks",
+        description="Install Claude Code hooks (builtin or local bundle).",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+
+    add = sub.add_parser("add", help="install a builtin or local hook bundle")
+    add.add_argument(
+        "target",
+        help="builtin hook name (e.g. cell-resilience) or a local bundle dir "
+        "containing hook.json + its script",
+    )
+    add.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip the confirmation prompt for local (untrusted) bundles",
+    )
+
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+
+    if args.action == "add":
+        try:
+            bundle = _resolve_bundle(args.target)
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"swarph hooks: {exc}", file=sys.stderr)
+            return 2
+        return install_hook(
+            bundle,
+            settings_path=_DEFAULT_SETTINGS_PATH,
+            hooks_home=_DEFAULT_HOOKS_HOME,
+            assume_yes=args.yes,
+        )
+
+    parser.error(f"unknown action: {args.action}")
+    return 2
