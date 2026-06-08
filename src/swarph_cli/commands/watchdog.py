@@ -97,6 +97,10 @@ _DEFAULT_PANE_ACTIVITY_THRESHOLD_SEC = 600
 # itself before we send-keys at it.
 _DEFAULT_PEER_HEALTH_WINDOW_SEC = 600
 _DEFAULT_PEER_HEALTH_RECOVERY_THRESHOLD_SEC = 120
+# T4 — per-peer dm-wake cooldown. One wake-DM per peer per window so a peer
+# that stays stale across many ticks is DM'd once, not every tick. Default
+# 1800s (30min) mirrors the metered-fallback-alert throttle.
+_DEFAULT_DM_WAKE_COOLDOWN_SEC = 1800
 _RECOVERY_EVENT_TYPES = ("usage_limit_reset",)
 # A1-DM — cross-host wake. Default prompt sent as a mesh DM to a stranded
 # peer on another host; the peer's sidecar/inbox-watcher then wakes it.
@@ -111,6 +115,7 @@ Usage:
                           [--gateway URL] [--tmux-session NAME]
                           [--peer NAME] [--no-respawn]
                           [--peer-health-poll] [--dm-wake]
+                          [--dm-wake-cooldown-sec SEC]
                           [--peer-health-window-sec SEC]
                           [--peer-health-recovery-threshold SEC]
                           [--log PATH] [--verbose]
@@ -157,6 +162,12 @@ Flags:
   --dm-wake                             send a cross-host wake DM to a stranded
                                         peer (A1-DM) instead of only local tmux
                                         send-keys.
+  --dm-wake-cooldown-sec SEC            T4 no-spam gate: DM-wake each stale peer
+                                        at most once per this window, so a peer
+                                        that stays stale across many ticks is
+                                        woken once, not every tick; default 1800
+                                        (30 min). Per-peer state lives in
+                                        $XDG_STATE_HOME/swarph/dm_wake_state.json
   --peer-health-window-sec SEC          how far back to look for recovery
                                         events; default 600 (10 min)
   --peer-health-recovery-threshold SEC  min cursor staleness before a recovery
@@ -294,6 +305,55 @@ def _resolve_log_path(explicit: Optional[str]) -> Path:
     if state_root:
         return Path(state_root) / "swarph" / "watchdog.log"
     return Path.home() / ".local" / "state" / "swarph" / "watchdog.log"
+
+
+def _resolve_dm_wake_state_path(explicit: Optional[str]) -> Path:
+    """Resolve the per-peer dm-wake cooldown state file path.
+
+    Mirrors the watchdog's existing state convention: co-located under
+    ``$XDG_STATE_HOME/swarph/`` (same dir as the log + A1 marker), falling
+    back to ``~/.local/state/swarph/`` when XDG_STATE_HOME is unset. An
+    explicit override (e.g. ``--dm-wake-state`` / injected in tests) wins.
+    """
+    if explicit:
+        return Path(explicit).expanduser()
+    state_root = os.environ.get("XDG_STATE_HOME", "").strip()
+    if state_root:
+        return Path(state_root) / "swarph" / "dm_wake_state.json"
+    return Path.home() / ".local" / "state" / "swarph" / "dm_wake_state.json"
+
+
+def _load_dm_wake_state(path: Path) -> dict:
+    """Read the ``{peer_name: last_wake_epoch}`` cooldown map.
+
+    Returns ``{}`` on a missing or corrupt/unreadable file — never raises
+    (a state-read failure must not crash the watchdog). Non-dict JSON
+    payloads are also treated as empty.
+    """
+    try:
+        with Path(path).open(encoding="utf-8") as fp:
+            data = json.load(fp)
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_dm_wake_state(path: Path, state: dict) -> None:
+    """Atomically persist the cooldown map; best-effort (never raises).
+
+    Writes to a temp sibling then ``os.replace`` (atomic on POSIX), mirroring
+    the cursor/marker write discipline. Any failure (unwritable dir, etc.) is
+    swallowed — a state-write failure must not crash the watchdog.
+    """
+    path = Path(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as fp:
+            json.dump(state, fp, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Optional[int]:
@@ -712,7 +772,11 @@ def _log_event(log_path: Path, event: str, details: dict, verbose: bool = False)
         print(line, file=sys.stderr, end="")
 
 
-def _dm_wake_scan(args: argparse.Namespace, log_path: Path) -> int:
+def _dm_wake_scan(
+    args: argparse.Namespace,
+    log_path: Path,
+    now_epoch: Optional[int] = None,
+) -> int:
     """A1-DM mesh-monitor scan (T3). Wakes stranded peers on OTHER hosts.
 
     When ``--dm-wake`` is set, the watchdog also acts as the mesh's wake
@@ -721,22 +785,39 @@ def _dm_wake_scan(args: argparse.Namespace, log_path: Path) -> int:
     watchdog's own cell is covered by the local A1/A2 path), and sends each a
     wake DM (``_dm_wake`` → POST /messages). Reuses the SAME gateway-URL +
     token plumbing as ``--peer-health-poll`` (``args.gateway`` +
-    ``MESH_GATEWAY_TOKEN``) and the SAME ``_now()`` epoch + ``--threshold``
-    staleness window the local session check uses.
+    ``MESH_GATEWAY_TOKEN``) and the SAME ``--threshold`` staleness window the
+    local session check uses.
 
-    Returns the count of wake DMs that fired successfully (0 if none / if
-    ``--dm-wake`` is off). Never raises (an alert path must not crash the
-    watchdog).
+    T4 — per-peer no-spam cooldown. A peer that stays stale across many ticks
+    is DM'd ONCE per ``--dm-wake-cooldown-sec`` window, not every tick. The
+    cooldown state ``{peer: last_wake_epoch}`` is loaded once at scan start;
+    inside the loop a peer is SKIPPED while ``now - last_wake < cooldown_sec``
+    (a cooldown-skip does NOT count as a wake). Only a SUCCESSFUL ``_dm_wake``
+    stamps the cooldown; the state is saved once after the loop.
+
+    ``now_epoch`` defaults to ``_now()`` (injectable for deterministic tests).
+
+    Returns the count of wake DMs that fired successfully THIS tick (0 if none
+    / if ``--dm-wake`` is off / if every stale peer was within cooldown). Never
+    raises (an alert path must not crash the watchdog).
     """
     if not args.dm_wake:
         return 0
+
+    if now_epoch is None:
+        now_epoch = _now()
 
     role = args.cell
     self_peer = args.peer or role
     gateway = args.gateway
     token = os.environ.get("MESH_GATEWAY_TOKEN")
-    now_epoch = _now()
     stale_sec = args.threshold
+    cooldown_sec = getattr(
+        args, "dm_wake_cooldown_sec", _DEFAULT_DM_WAKE_COOLDOWN_SEC
+    )
+    state_path = _resolve_dm_wake_state_path(
+        getattr(args, "dm_wake_state_path", None)
+    )
 
     peers = _fetch_peers(gateway, token or "")
     # Exclude SELF — never DM-wake yourself; the watchdog's own cell is
@@ -746,10 +827,26 @@ def _dm_wake_scan(args: argparse.Namespace, log_path: Path) -> int:
     exclude = {self_peer, role}
     stale = _stale_peers(peers, now_epoch, stale_sec, exclude=exclude)
 
+    # T4 — load the per-peer cooldown map once at scan start.
+    state = _load_dm_wake_state(state_path)
+
     fired = 0
+    skipped: list[str] = []
     for target in stale:
+        last_wake = state.get(target, 0)
+        if now_epoch - last_wake < cooldown_sec:
+            # Within cooldown — already DM'd this peer recently. Skip; a
+            # cooldown-skip must NOT count toward the exit-3 wake tally.
+            skipped.append(target)
+            continue
         if _dm_wake(gateway, self_peer, target, token or "", _DM_WAKE_PROMPT):
+            # Only a SUCCESSFUL DM starts the cooldown — a failed send must
+            # be retried next tick, not suppressed.
+            state[target] = now_epoch
             fired += 1
+
+    # Persist the (possibly-updated) cooldown map once after the loop.
+    _save_dm_wake_state(state_path, state)
 
     _log_event(
         log_path,
@@ -757,7 +854,9 @@ def _dm_wake_scan(args: argparse.Namespace, log_path: Path) -> int:
         {
             "self_peer": self_peer,
             "stale_peers": stale,
+            "skipped_cooldown": skipped,
             "wakes_fired": fired,
+            "cooldown_sec": cooldown_sec,
         },
         args.verbose,
     )
@@ -1143,6 +1242,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dm-wake", action="store_true",
         help="send a cross-host wake DM to a stranded peer (A1-DM) instead "
              "of only local tmux send-keys.",
+    )
+    p.add_argument(
+        "--dm-wake-cooldown-sec",
+        type=int,
+        default=_DEFAULT_DM_WAKE_COOLDOWN_SEC,
+        help="T4 no-spam gate: DM-wake each stale peer at most once per this "
+             "many seconds, so a peer that stays stale across many ticks is "
+             "woken once, not every tick. Default 1800 (30 min).",
     )
     p.add_argument(
         "--peer-health-window-sec",
