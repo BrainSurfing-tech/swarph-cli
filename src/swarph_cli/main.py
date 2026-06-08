@@ -84,6 +84,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "hook-output": "swarph_cli.commands.hook_output.run_hook_output",
     "watchdog": "swarph_cli.commands.watchdog.run_watchdog",
     "hooks": "swarph_cli.commands.hooks.run_hooks",
+    "protocol-handler": "swarph_cli.commands.protocol_handler.run_protocol_handler",
     "memory-sync": "swarph_cli.commands.memory_sync.run_memory_sync",
     "mesh": "swarph_cli.commands.mesh.run_mesh",
     # Future: "list-peers", "list-adapters", etc.
