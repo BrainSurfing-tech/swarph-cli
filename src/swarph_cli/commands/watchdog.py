@@ -77,6 +77,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+from swarph_cli.commands.mesh import _post_json
+
 
 _DEFAULT_THRESHOLD_SEC = 1800  # 30 minutes
 _DEFAULT_A1_RETRIES = 3
@@ -95,14 +97,26 @@ _DEFAULT_PANE_ACTIVITY_THRESHOLD_SEC = 600
 # itself before we send-keys at it.
 _DEFAULT_PEER_HEALTH_WINDOW_SEC = 600
 _DEFAULT_PEER_HEALTH_RECOVERY_THRESHOLD_SEC = 120
+# T4 — per-peer dm-wake cooldown. One wake-DM per peer per window so a peer
+# that stays stale across many ticks is DM'd once, not every tick. Default
+# 1800s (30min) mirrors the metered-fallback-alert throttle.
+_DEFAULT_DM_WAKE_COOLDOWN_SEC = 1800
 _RECOVERY_EVENT_TYPES = ("usage_limit_reset",)
+# A1-DM — cross-host wake. Default prompt sent as a mesh DM to a stranded
+# peer on another host; the peer's sidecar/inbox-watcher then wakes it.
+_DM_WAKE_PROMPT = (
+    "watchdog wake — you appear throttle-stranded (node healthy, session "
+    "idle). Drain your inbox and resume work."
+)
 
 _USAGE = """\
 Usage:
   swarph watchdog --check [--cell ROLE] [--cursor PATH] [--threshold SEC]
                           [--gateway URL] [--tmux-session NAME]
                           [--peer NAME] [--no-respawn]
-                          [--peer-health-poll] [--peer-health-window-sec SEC]
+                          [--peer-health-poll] [--dm-wake]
+                          [--dm-wake-cooldown-sec SEC]
+                          [--peer-health-window-sec SEC]
                           [--peer-health-recovery-threshold SEC]
                           [--log PATH] [--verbose]
   swarph watchdog --install-service [--cell ROLE] [--dry-run]
@@ -145,6 +159,15 @@ Flags:
                                         sessions as wake-candidates even before
                                         the 30min cursor-staleness threshold.
                                         Requires MESH_GATEWAY_TOKEN in env.
+  --dm-wake                             send a cross-host wake DM to a stranded
+                                        peer (A1-DM) instead of only local tmux
+                                        send-keys.
+  --dm-wake-cooldown-sec SEC            T4 no-spam gate: DM-wake each stale peer
+                                        at most once per this window, so a peer
+                                        that stays stale across many ticks is
+                                        woken once, not every tick; default 1800
+                                        (30 min). Per-peer state lives in
+                                        $XDG_STATE_HOME/swarph/dm_wake_state.json
   --peer-health-window-sec SEC          how far back to look for recovery
                                         events; default 600 (10 min)
   --peer-health-recovery-threshold SEC  min cursor staleness before a recovery
@@ -284,6 +307,55 @@ def _resolve_log_path(explicit: Optional[str]) -> Path:
     return Path.home() / ".local" / "state" / "swarph" / "watchdog.log"
 
 
+def _resolve_dm_wake_state_path(explicit: Optional[str]) -> Path:
+    """Resolve the per-peer dm-wake cooldown state file path.
+
+    Mirrors the watchdog's existing state convention: co-located under
+    ``$XDG_STATE_HOME/swarph/`` (same dir as the log + A1 marker), falling
+    back to ``~/.local/state/swarph/`` when XDG_STATE_HOME is unset. An
+    explicit override (e.g. ``--dm-wake-state`` / injected in tests) wins.
+    """
+    if explicit:
+        return Path(explicit).expanduser()
+    state_root = os.environ.get("XDG_STATE_HOME", "").strip()
+    if state_root:
+        return Path(state_root) / "swarph" / "dm_wake_state.json"
+    return Path.home() / ".local" / "state" / "swarph" / "dm_wake_state.json"
+
+
+def _load_dm_wake_state(path: Path) -> dict:
+    """Read the ``{peer_name: last_wake_epoch}`` cooldown map.
+
+    Returns ``{}`` on a missing or corrupt/unreadable file — never raises
+    (a state-read failure must not crash the watchdog). Non-dict JSON
+    payloads are also treated as empty.
+    """
+    try:
+        with Path(path).open(encoding="utf-8") as fp:
+            data = json.load(fp)
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_dm_wake_state(path: Path, state: dict) -> None:
+    """Atomically persist the cooldown map; best-effort (never raises).
+
+    Writes to a temp sibling then ``os.replace`` (atomic on POSIX), mirroring
+    the cursor/marker write discipline. Any failure (unwritable dir, etc.) is
+    swallowed — a state-write failure must not crash the watchdog.
+    """
+    path = Path(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as fp:
+            json.dump(state, fp, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Optional[int]:
     """Query gateway for unread DM count addressed to peer.
 
@@ -356,6 +428,77 @@ def _gateway_recent_recovery_event(
         if isinstance(ev, dict) and ev.get("event_type") in _RECOVERY_EVENT_TYPES:
             return ev
     return None
+
+
+def _parse_last_health(value) -> Optional[float]:
+    """Parse a peer's ``last_health`` ISO-8601 string → epoch seconds (UTC).
+
+    Robust to the three observed forms:
+      * trailing ``Z`` (Zulu) — normalized to ``+00:00`` before parsing
+      * explicit ``+00:00`` offset
+      * naive (no tz) — assumed UTC
+
+    Returns None on any failure (absent / empty / non-str / unparseable), so the
+    caller can SKIP that peer rather than treat absence-of-data as staleness.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _stale_peers(
+    peers: list[dict],
+    now_epoch: float,
+    stale_sec: int,
+    exclude: Optional[set[str]] = None,
+) -> list[str]:
+    """Return names of peers whose last_health is older than stale_sec (idle/stranded
+    candidates), excluding any name in ``exclude`` (e.g. self + known laptop-only cells).
+    A peer with no/empty/unparseable last_health is SKIPPED (not treated as stale —
+    absence of data must not trigger a wake). Returns names sorted, deterministic."""
+    exclude = exclude or set()
+    out: list[str] = []
+    for peer in peers:
+        if not isinstance(peer, dict):
+            continue
+        name = peer.get("name")
+        if not name or name in exclude:
+            continue
+        parsed = _parse_last_health(peer.get("last_health"))
+        if parsed is None:
+            continue  # absent / unparseable → skip, never treat as stale
+        age = now_epoch - parsed
+        if age > stale_sec:
+            out.append(name)
+    return sorted(out)
+
+
+def _fetch_peers(gateway: str, token: str) -> list[dict]:
+    """GET {gateway}/peers (Bearer token). Returns the peer list, or [] on any error
+    (never raises). The response may be a bare list OR {"peers": [...]} — handle both."""
+    url = f"{gateway.rstrip('/')}/peers"
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError):
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("peers"), list):
+        return data["peers"]
+    return []
 
 
 def _pid_under(pid: int, ancestors: set, _max_depth: int = 40) -> bool:
@@ -444,6 +587,36 @@ def _tmux_send_keys(name: str, text: str) -> bool:
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
+def _dm_wake(
+    gateway: str,
+    self_peer: str,
+    target_peer: str,
+    token: str,
+    content: str,
+) -> bool:
+    """A1-DM: send a cross-host wake DM to a stranded peer on another host.
+
+    POSTs a mesh DM (kind=fyi) to ``{gateway}/messages``; the target peer's
+    sidecar/inbox-watcher then wakes it. Pure send action — never raises (an
+    alert/wake path must not crash the watchdog); returns True iff 2xx.
+    """
+    try:
+        body = {
+            "from_node": self_peer,
+            "to_node": target_peer,
+            "kind": "fyi",
+            "content": content,
+        }
+        status, _payload = _post_json(
+            f"{gateway.rstrip('/')}/messages",
+            body,
+            token,
+        )
+        return 200 <= status < 300
+    except Exception:
         return False
 
 
@@ -599,7 +772,119 @@ def _log_event(log_path: Path, event: str, details: dict, verbose: bool = False)
         print(line, file=sys.stderr, end="")
 
 
+def _dm_wake_scan(
+    args: argparse.Namespace,
+    log_path: Path,
+    now_epoch: Optional[int] = None,
+) -> int:
+    """A1-DM mesh-monitor scan (T3). Wakes stranded peers on OTHER hosts.
+
+    When ``--dm-wake`` is set, the watchdog also acts as the mesh's wake
+    source: it fetches the gateway peer list, finds peers whose ``last_health``
+    is staler than the session staleness threshold (excluding SELF — the
+    watchdog's own cell is covered by the local A1/A2 path), and sends each a
+    wake DM (``_dm_wake`` → POST /messages). Reuses the SAME gateway-URL +
+    token plumbing as ``--peer-health-poll`` (``args.gateway`` +
+    ``MESH_GATEWAY_TOKEN``) and the SAME ``--threshold`` staleness window the
+    local session check uses.
+
+    T4 — per-peer no-spam cooldown. A peer that stays stale across many ticks
+    is DM'd ONCE per ``--dm-wake-cooldown-sec`` window, not every tick. The
+    cooldown state ``{peer: last_wake_epoch}`` is loaded once at scan start;
+    inside the loop a peer is SKIPPED while ``now - last_wake < cooldown_sec``
+    (a cooldown-skip does NOT count as a wake). Only a SUCCESSFUL ``_dm_wake``
+    stamps the cooldown; the state is saved once after the loop.
+
+    ``now_epoch`` defaults to ``_now()`` (injectable for deterministic tests).
+
+    Returns the count of wake DMs that fired successfully THIS tick (0 if none
+    / if ``--dm-wake`` is off / if every stale peer was within cooldown). Never
+    raises (an alert path must not crash the watchdog).
+    """
+    if not args.dm_wake:
+        return 0
+
+    if now_epoch is None:
+        now_epoch = _now()
+
+    role = args.cell
+    self_peer = args.peer or role
+    gateway = args.gateway
+    token = os.environ.get("MESH_GATEWAY_TOKEN")
+    stale_sec = args.threshold
+    cooldown_sec = getattr(
+        args, "dm_wake_cooldown_sec", _DEFAULT_DM_WAKE_COOLDOWN_SEC
+    )
+    state_path = _resolve_dm_wake_state_path(
+        getattr(args, "dm_wake_state_path", None)
+    )
+
+    peers = _fetch_peers(gateway, token or "")
+    # Exclude SELF — never DM-wake yourself; the watchdog's own cell is
+    # covered by the local A1/A2 send-keys/respawn path. Both the peer name
+    # and the cell role are excluded (they coincide by default, but a custom
+    # --peer must not leave the role addressable as a cross-host target).
+    exclude = {self_peer, role}
+    stale = _stale_peers(peers, now_epoch, stale_sec, exclude=exclude)
+
+    # T4 — load the per-peer cooldown map once at scan start.
+    state = _load_dm_wake_state(state_path)
+
+    fired = 0
+    skipped: list[str] = []
+    for target in stale:
+        last_wake = state.get(target, 0)
+        if now_epoch - last_wake < cooldown_sec:
+            # Within cooldown — already DM'd this peer recently. Skip; a
+            # cooldown-skip must NOT count toward the exit-3 wake tally.
+            skipped.append(target)
+            continue
+        if _dm_wake(gateway, self_peer, target, token or "", _DM_WAKE_PROMPT):
+            # Only a SUCCESSFUL DM starts the cooldown — a failed send must
+            # be retried next tick, not suppressed.
+            state[target] = now_epoch
+            fired += 1
+
+    # Persist the (possibly-updated) cooldown map once after the loop.
+    _save_dm_wake_state(state_path, state)
+
+    _log_event(
+        log_path,
+        "dm_wake_scan",
+        {
+            "self_peer": self_peer,
+            "stale_peers": stale,
+            "skipped_cooldown": skipped,
+            "wakes_fired": fired,
+            "cooldown_sec": cooldown_sec,
+        },
+        args.verbose,
+    )
+    return fired
+
+
 def run_check(args: argparse.Namespace) -> int:
+    """Entry point. Runs the local own-session decision FIRST (A1/A2/noop,
+    exit 0/1/2/3/4 — byte-for-byte unchanged), then layers the ``--dm-wake``
+    mesh-monitor scan on top.
+
+    Exit precedence (T3): the local own-session action wins. If the local
+    decision took a real action or errored (rc != 0), that code is returned
+    unchanged — the dm-wake scan is an ADDITIONAL mesh-monitor action and
+    must not suppress or be suppressed by the local signal. ONLY when the
+    local decision was a no-op (rc == 0) AND at least one cross-host wake DM
+    fired do we surface exit 3 (A1-DM). When ``--dm-wake`` is off the scan is
+    a pure no-op, so the 0/1/2 behavior is preserved exactly.
+    """
+    log_path = _resolve_log_path(args.log)
+    local_rc = _run_local_check(args)
+    wakes_fired = _dm_wake_scan(args, log_path)
+    if local_rc == 0 and wakes_fired > 0:
+        return 3
+    return local_rc
+
+
+def _run_local_check(args: argparse.Namespace) -> int:
     role = args.cell
     # F4 — cell.yaml-pinned cursor_path + tmux_session (mother #1057/#1060
     # + beta #1061/#1065). Reads cell.yaml `extra.cursor_path` /
@@ -915,14 +1200,7 @@ def run_install_service(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_watchdog(argv: Optional[list[str]] = None) -> int:
-    if argv is None:
-        argv = sys.argv[2:]  # skip "swarph watchdog"
-
-    if not argv:
-        print(_USAGE, file=sys.stderr)
-        return 0
-
+def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="swarph watchdog", add_help=True)
     p.add_argument(
         "--check", action="store_true",
@@ -961,6 +1239,19 @@ def run_watchdog(argv: Optional[list[str]] = None) -> int:
              "Requires MESH_GATEWAY_TOKEN in env. Default OFF (opt-in).",
     )
     p.add_argument(
+        "--dm-wake", action="store_true",
+        help="send a cross-host wake DM to a stranded peer (A1-DM) instead "
+             "of only local tmux send-keys.",
+    )
+    p.add_argument(
+        "--dm-wake-cooldown-sec",
+        type=int,
+        default=_DEFAULT_DM_WAKE_COOLDOWN_SEC,
+        help="T4 no-spam gate: DM-wake each stale peer at most once per this "
+             "many seconds, so a peer that stays stale across many ticks is "
+             "woken once, not every tick. Default 1800 (30 min).",
+    )
+    p.add_argument(
         "--peer-health-window-sec",
         type=int,
         default=_DEFAULT_PEER_HEALTH_WINDOW_SEC,
@@ -975,6 +1266,19 @@ def run_watchdog(argv: Optional[list[str]] = None) -> int:
     )
     p.add_argument("--log", default=None)
     p.add_argument("--verbose", action="store_true")
+
+    return p
+
+
+def run_watchdog(argv: Optional[list[str]] = None) -> int:
+    if argv is None:
+        argv = sys.argv[2:]  # skip "swarph watchdog"
+
+    if not argv:
+        print(_USAGE, file=sys.stderr)
+        return 0
+
+    p = _build_parser()
 
     try:
         args = p.parse_args(argv)
