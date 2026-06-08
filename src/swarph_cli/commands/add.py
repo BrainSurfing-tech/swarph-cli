@@ -284,6 +284,47 @@ def _hash_guard(ref: ArtifactRef, canonical: bytes, out) -> Optional[int]:
     return 5
 
 
+def _scan_guard(klass: str, text: str, out) -> Optional[int]:
+    """Gate the §3.1 watchtower static scan into the install path.
+
+    Runs AFTER :func:`_hash_guard` passes and BEFORE the actual install, on the
+    artifact's canonical TEXT. Defense-in-depth: even a builtin with a HIGH
+    pattern is refused (the 3 shipped builtins are expected to scan PASS — if
+    one trips a rule the rule is too broad, not the builtin too risky).
+
+    * ``FAIL`` → prints the findings + a refusal line and returns the distinct
+      refuse-code ``7``; the caller installs NOTHING.
+    * ``FLAG`` → prints the findings as a WARNING but returns ``None`` to
+      PROCEED. Builtins are trusted, so the scan is informational here;
+      non-builtins already fail closed earlier in each handler.
+    * ``PASS`` → ``None`` (silent, proceed).
+    """
+    from . import security
+
+    result = security.static_scan(klass, text)
+    if result.verdict == "PASS":
+        return None
+
+    for f in result.findings:
+        out(f"  [{f.severity.upper():6}] {f.rule}: {f.message}")
+        out(f"           ↳ {f.excerpt}")
+
+    if result.verdict == "FAIL":
+        out(
+            "swarph add: refusing — security scan FAILED (a HIGH-severity "
+            "dangerous pattern was found in the artifact's content); nothing "
+            "installed"
+        )
+        return 7
+
+    # FLAG — informational warning, proceed.
+    out(
+        "swarph add: WARNING — security scan flagged this artifact "
+        "(MEDIUM-severity); proceeding because it is a trusted builtin"
+    )
+    return None
+
+
 @dataclass(frozen=True)
 class HandlerResult:
     """Outcome of a single handler ``add`` call.
@@ -360,6 +401,9 @@ class HookHandler:
         guard = _hash_guard(ref, self._canonical_bytes(bundle), out)
         if guard is not None:
             return guard
+        scan = _scan_guard(ref.klass, bundle.script_body, out)
+        if scan is not None:
+            return scan
         return hooks.install_hook(
             bundle,
             settings_path=self.settings_path,
@@ -552,6 +596,10 @@ class McpHandler:
         if guard is not None:
             return guard
 
+        scan = _scan_guard(ref.klass, json.dumps(bundle.server_spec), out)
+        if scan is not None:
+            return scan
+
         # ---- show-before-write preview (builtin = trusted, no prompt) ----
         out(f"mcp: {bundle.name}  (trust={bundle.trust}, publisher={bundle.publisher})")
         if bundle.description:
@@ -725,6 +773,11 @@ class SkillHandler:
         guard = _hash_guard(ref, self._canonical_bytes(bundle), out)
         if guard is not None:
             return guard
+
+        skill_text = "\n".join(content for _relpath, content in bundle.files)
+        scan = _scan_guard(ref.klass, skill_text, out)
+        if scan is not None:
+            return scan
 
         # ---- show-before-write preview (builtin = trusted, no prompt) ----
         dest_dir = Path(self.skills_home).expanduser() / bundle.name
@@ -946,6 +999,10 @@ class ToolHandler:
         guard = _hash_guard(ref, self._canonical_bytes(spec_dict), out)
         if guard is not None:
             return guard
+
+        scan = _scan_guard(ref.klass, json.dumps(spec_dict), out)
+        if scan is not None:
+            return scan
 
         lanes_path = Path(self.lanes_path).expanduser()
 
