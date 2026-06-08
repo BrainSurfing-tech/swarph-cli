@@ -40,7 +40,136 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+
+
+# --------------------------------------------------------------------------- #
+# HookBundle model (T2)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class HookBinding:
+    """One event/matcher wiring for a hook script.
+
+    A single script may be bound to MULTIPLE (event, matcher) pairs — e.g.
+    ``cell-resilience`` listens on both ``StopFailure``/``rate_limit`` and
+    ``Stop``/``""``. ``matcher == ""`` means match-all.
+    """
+
+    event: str  # "StopFailure" | "Stop" | ...
+    matcher: str  # "rate_limit" | "" (= all)
+
+
+@dataclass(frozen=True)
+class HookBundle:
+    """An installable hook: one script + its event/matcher bindings.
+
+    ``script_body`` is carried INLINE (no package-data plumbing in v1) so the
+    installer can write it under ``~/.swarph/hooks/<script_name>`` and then
+    ``_merge_hook`` each binding into settings.json pointing at that path.
+    """
+
+    name: str
+    description: str
+    publisher: str  # "swarph-builtin" for bundled
+    trust: str  # "builtin" | "local"
+    script_name: str  # filename under ~/.swarph/hooks/, e.g. "cell-resilience.sh"
+    script_body: str  # full shell-script content (inline)
+    bindings: tuple  # tuple[HookBinding, ...]
+
+
+# The bundled cell-resilience script. POSIX sh. Observational only: it
+# records WHY a session went idle (throttle vs normal completion) into the
+# watchdog's state home so a wake-on-throttle loop can read it. It MUST NOT
+# fail the session — every path exits 0, and jq is optional (a printf/sed
+# fallback handles the flat hook-stdin JSON when jq is absent).
+_CELL_RESILIENCE_SH = r"""#!/bin/sh
+# cell-resilience.sh — swarph bundled Claude Code hook (StopFailure/Stop).
+#
+# Reads the hook stdin JSON and records WHY the session just went idle into
+#   $XDG_STATE_HOME/swarph/idle_since.json   (default ~/.local/state/swarph/)
+# as {"session","reason","hook_event","ts"} where reason is "throttle" when
+# the event is StopFailure (or error_type == rate_limit) else "normal".
+# Observational: never blocks, always exits 0. jq used if present, else a
+# printf/sed/grep fallback parses the flat hook-stdin JSON shape.
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/swarph"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+
+PAYLOAD=$(cat 2>/dev/null)
+TS=$(date +%s 2>/dev/null || echo 0)
+
+SESSION=""
+EVENT=""
+ERROR_TYPE=""
+
+if command -v jq >/dev/null 2>&1; then
+    SESSION=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // ""' 2>/dev/null)
+    EVENT=$(printf '%s' "$PAYLOAD" | jq -r '.hook_event_name // ""' 2>/dev/null)
+    ERROR_TYPE=$(printf '%s' "$PAYLOAD" | jq -r '.error_type // ""' 2>/dev/null)
+else
+    # Degraded fallback: extract "key":"value" from flat JSON via sed.
+    _extract() {
+        printf '%s' "$PAYLOAD" \
+            | tr ',' '\n' \
+            | grep "\"$1\"" \
+            | sed -e 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"//' -e 's/".*//' \
+            | head -n 1
+    }
+    SESSION=$(_extract session_id)
+    EVENT=$(_extract hook_event_name)
+    ERROR_TYPE=$(_extract error_type)
+fi
+
+REASON="normal"
+if [ "$EVENT" = "StopFailure" ] || [ "$ERROR_TYPE" = "rate_limit" ]; then
+    REASON="throttle"
+fi
+
+printf '{"session":"%s","reason":"%s","hook_event":"%s","ts":%s}\n' \
+    "$SESSION" "$REASON" "$EVENT" "$TS" \
+    > "$STATE_DIR/idle_since.json" 2>/dev/null || true
+
+exit 0
+"""
+
+
+BUILTIN_HOOKS: dict = {
+    "cell-resilience": HookBundle(
+        name="cell-resilience",
+        description=(
+            "Records why a Claude Code session went idle (throttle vs normal) "
+            "into $XDG_STATE_HOME/swarph/idle_since.json for the watchdog's "
+            "wake-on-throttle loop."
+        ),
+        publisher="swarph-builtin",
+        trust="builtin",
+        script_name="cell-resilience.sh",
+        script_body=_CELL_RESILIENCE_SH,
+        bindings=(
+            HookBinding("StopFailure", "rate_limit"),
+            HookBinding("Stop", ""),
+        ),
+    ),
+}
+
+
+def resolve_builtin(name: str) -> HookBundle:
+    """Return the bundled :class:`HookBundle` named ``name``.
+
+    Raises ``ValueError`` (with the list of available builtin names) for an
+    unknown name so the caller surfaces what IS installable. Local-path and
+    published resolution are out of scope here (T3/T4).
+    """
+    try:
+        return BUILTIN_HOOKS[name]
+    except KeyError:
+        available = ", ".join(sorted(BUILTIN_HOOKS))
+        raise ValueError(
+            f"unknown builtin hook {name!r}; available builtin hooks: {available}"
+        ) from None
 
 
 def _load_settings(path) -> dict:
