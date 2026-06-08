@@ -35,8 +35,12 @@ in later tasks. The parse/format pair round-trips:
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from swarph_cli.commands import hooks
@@ -223,6 +227,191 @@ class HookHandler:
         )
 
 
+# --------------------------------------------------------------------------- #
+# MCP handler (T3-mcp) — install an MCP server into project .mcp.json
+# --------------------------------------------------------------------------- #
+
+
+def _load_mcp_config(path) -> dict:
+    """Load a project ``.mcp.json``, returning ``{}`` for a missing file.
+
+    Mirrors :func:`hooks._load_settings`'s fail-closed contract:
+
+    * Missing file → ``{}`` — a fine empty starting point for the installer.
+    * CORRUPT JSON → ``ValueError`` (with the path). We MUST NOT silently
+      return ``{}``: a later :func:`_save_mcp_config` would then overwrite the
+      user's real-but-unparseable file with our merged-onto-empty result,
+      destroying their config.
+    * VALID-yet-NON-OBJECT JSON (``[]``, ``null``, ``5`` …) → ``ValueError``
+      too. A non-dict can't be merged onto (``setdefault`` would crash) and
+      silently treating it as ``{}`` would overwrite the user's real file. The
+      contract is "never silently overwrite a user's real .mcp.json."
+    * Valid OBJECT → the parsed dict.
+    """
+    p = Path(path).expanduser()
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f".mcp.json at {p} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f".mcp.json at {p} is not a JSON object (got "
+            f"{type(data).__name__}); refusing to merge onto a non-object "
+            f".mcp.json file"
+        )
+    return data
+
+
+def _save_mcp_config(path, obj) -> None:
+    """Atomically write ``obj`` as JSON to ``path`` (``indent=2``, mkdir -p).
+
+    Writes to a temp file in the same directory then ``os.replace`` — a crash
+    mid-write leaves either the old complete file or the new complete file,
+    never a truncated one. Mirrors :func:`hooks._save_settings`.
+    """
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(p.parent), prefix=f".{p.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            json.dump(obj, fp, indent=2)
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(tmp_name, p)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _merge_mcp_server(config: dict, name: str, server_spec: dict) -> dict:
+    """Merge one ``name`` → ``server_spec`` into ``config["mcpServers"]``.
+
+    Mutate-and-return. Ensures ``config.setdefault("mcpServers", {})`` then
+    sets ``config["mcpServers"][name] = server_spec``. Idempotent (same
+    name+spec twice = identical result). Preserves every other server and
+    every other top-level key.
+    """
+    servers = config.setdefault("mcpServers", {})
+    servers[name] = server_spec
+    return config
+
+
+def _unmerge_mcp_server(config: dict, name: str) -> dict:
+    """Reverse of :func:`_merge_mcp_server`. Mutate-and-return, idempotent.
+
+    Removes ``mcpServers[name]`` if present; prunes an emptied ``mcpServers``
+    key; no-op (never raises) when the key or the server is absent. Preserves
+    all siblings.
+    """
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict):
+        return config
+    servers.pop(name, None)
+    if not servers:
+        config.pop("mcpServers", None)
+    return config
+
+
+@dataclass(frozen=True)
+class McpBundle:
+    """An installable MCP server: a ``.mcp.json`` server-spec + metadata."""
+
+    name: str
+    description: str
+    publisher: str  # "swarph-builtin" for bundled
+    trust: str  # "builtin"
+    server_spec: dict  # the .mcp.json server config object
+
+
+BUILTIN_MCP: dict = {
+    "everything": McpBundle(
+        name="everything",
+        description=(
+            "The official Model Context Protocol reference server "
+            "(@modelcontextprotocol/server-everything) — exercises prompts, "
+            "resources, and tools over stdio. A safe smoke-test MCP server."
+        ),
+        publisher="swarph-builtin",
+        trust="builtin",
+        server_spec={
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-everything"],
+        },
+    ),
+}
+
+
+def resolve_builtin_mcp(name: str) -> McpBundle:
+    """Return the bundled :class:`McpBundle` named ``name``.
+
+    Raises :class:`ValueError` (listing the available names) for an unknown
+    name — propagated to the CLI layer, which surfaces it; nothing installed.
+    """
+    try:
+        return BUILTIN_MCP[name]
+    except KeyError:
+        available = ", ".join(sorted(BUILTIN_MCP))
+        raise ValueError(
+            f"unknown builtin MCP server {name!r}; available: {available}"
+        ) from None
+
+
+class McpHandler:
+    """Installs ``mcp`` artifacts into a project-scope ``.mcp.json``.
+
+    v1 is BUILTIN-ONLY (mirrors :class:`HookHandler`): a ``swarph-builtin``
+    publisher resolves to a bundled :class:`McpBundle` and writes its
+    ``server_spec`` under ``mcpServers/<name>``. ANY other publisher is a
+    published/untrusted reference and FAILS CLOSED, mutating nothing
+    (signed-publisher + per-class security gate is v2, scope §3.1/§4).
+    """
+
+    klass = "mcp"
+
+    def __init__(self, *, mcp_config_path=None) -> None:
+        self.mcp_config_path = (
+            mcp_config_path if mcp_config_path is not None else Path.cwd() / ".mcp.json"
+        )
+
+    def add(self, ref: ArtifactRef, *, assume_yes: bool, out) -> int:
+        if ref.publisher != _BUILTIN_PUBLISHER:
+            out(
+                "swarph add: published MCP servers are not yet trusted — only "
+                "swarph-builtin in v1 (v2: signed-publisher + per-class security "
+                "gate, scope §3.1/§4); nothing installed"
+            )
+            return 2
+
+        # ValueError for an unknown builtin name propagates → caught at run_add.
+        bundle = resolve_builtin_mcp(ref.name)
+
+        # ---- show-before-write preview (builtin = trusted, no prompt) ----
+        out(f"mcp: {bundle.name}  (trust={bundle.trust}, publisher={bundle.publisher})")
+        if bundle.description:
+            out(f"  {bundle.description}")
+        out(f"config → {Path(self.mcp_config_path).expanduser()}")
+        out("  will add this server spec to mcpServers:")
+        out(f"    {bundle.name} = {json.dumps(bundle.server_spec)}")
+
+        # ---- load + merge FIRST (load failure aborts with nothing written) --
+        config = _load_mcp_config(self.mcp_config_path)
+        config = _merge_mcp_server(config, bundle.name, bundle.server_spec)
+        _save_mcp_config(self.mcp_config_path, config)
+
+        out(f"installed MCP server '{bundle.name}' into {Path(self.mcp_config_path).expanduser()}")
+        return 0
+
+
 class StubHandler:
     """Placeholder handler for an artifact class not yet implemented.
 
@@ -244,12 +433,13 @@ class StubHandler:
         return 3
 
 
-def build_registry(*, settings_path=None, hooks_home=None) -> dict:
+def build_registry(*, settings_path=None, hooks_home=None, mcp_config_path=None) -> dict:
     """Build the ``klass`` → handler registry for one ``add`` invocation.
 
-    The hook paths are threaded into :class:`HookHandler` (defaulting to the
-    hooks-module defaults when ``None``) so tests can point the whole install
-    at tmp paths. The not-yet-built classes get :class:`StubHandler`s.
+    The hook paths are threaded into :class:`HookHandler` and the
+    ``.mcp.json`` path into :class:`McpHandler` (each defaulting to its
+    module/cwd default when ``None``) so tests can point the whole install at
+    tmp paths. The not-yet-built classes get :class:`StubHandler`s.
     """
     hook_kwargs = {}
     if settings_path is not None:
@@ -259,9 +449,7 @@ def build_registry(*, settings_path=None, hooks_home=None) -> dict:
 
     return {
         "hook": HookHandler(**hook_kwargs),
-        "mcp": StubHandler(
-            "mcp", "registers an MCP server in .mcp.json — T3"
-        ),
+        "mcp": McpHandler(mcp_config_path=mcp_config_path),
         "skill": StubHandler(
             "skill", "drops a skill bundle into the skills dir — T3"
         ),
@@ -285,7 +473,7 @@ def dispatch_add(ref: ArtifactRef, *, assume_yes: bool, out, registry) -> int:
     return handler.add(ref, assume_yes=assume_yes, out=out)
 
 
-def run_add(argv, *, settings_path=None, hooks_home=None) -> int:
+def run_add(argv, *, settings_path=None, hooks_home=None, mcp_config_path=None) -> int:
     """``swarph add <uri> [--yes]`` — parse + dispatch a swarph artifact URI.
 
     Parses the positional ``uri`` into an :class:`ArtifactRef` (a malformed
@@ -319,7 +507,11 @@ def run_add(argv, *, settings_path=None, hooks_home=None) -> int:
         print(f"swarph add: {exc}", file=sys.stderr)
         return 2
 
-    registry = build_registry(settings_path=settings_path, hooks_home=hooks_home)
+    registry = build_registry(
+        settings_path=settings_path,
+        hooks_home=hooks_home,
+        mcp_config_path=mcp_config_path,
+    )
 
     try:
         return dispatch_add(ref, assume_yes=args.yes, out=print, registry=registry)

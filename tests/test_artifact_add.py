@@ -5,7 +5,7 @@ Exercises ``run_add`` / ``dispatch_add`` directly with tmp
 
 * builtin hook installs (script written + bindings merged into settings)
 * published hook fails closed (returns non-zero, mutates NOTHING)
-* stub class (mcp) returns 3 with a "not yet implemented" message
+* stub class (skill) returns 3 with a "not yet implemented" message
 * unknown builtin name surfaces the resolve_builtin ValueError, nothing written
 * bad URI returns 2, nothing written
 * the ``add`` verb is registered in main._VERB_HANDLERS (round-trip wiring)
@@ -89,7 +89,7 @@ def test_stub_class_clean_error(tmp_path, capsys):
     hooks_home = tmp_path / "hooks"
 
     rc = run_add(
-        ["swarph://mcp/swarph-builtin/fmp", "--yes"],
+        ["swarph://skill/swarph-builtin/pdf", "--yes"],
         settings_path=settings_path,
         hooks_home=hooks_home,
     )
