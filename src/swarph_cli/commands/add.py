@@ -35,6 +35,7 @@ in later tasks. The parse/format pair round-trips:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -42,7 +43,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Optional, Protocol
 
 from swarph_cli.commands import hooks
 
@@ -153,6 +154,57 @@ def format_uri(ref: ArtifactRef) -> str:
 #: The publisher token that marks a bundled (trusted) artifact.
 _BUILTIN_PUBLISHER = "swarph-builtin"
 
+#: The set of publishers swarph-cli trusts to install via URI in v1. One
+#: place defines the trust boundary; the per-class handlers consult
+#: :func:`_is_trusted_publisher` rather than inlining the literal so the
+#: boundary moves in exactly one edit when the v2 signed-publisher gate lands.
+TRUSTED_PUBLISHERS = frozenset({_BUILTIN_PUBLISHER})
+
+
+def _is_trusted_publisher(publisher: str) -> bool:
+    """True iff ``publisher`` is in the v1 trust set (:data:`TRUSTED_PUBLISHERS`)."""
+    return publisher in TRUSTED_PUBLISHERS
+
+
+# --------------------------------------------------------------------------- #
+# Content-hash verification (T4) — the #sha256 in a magnet-link URI
+# --------------------------------------------------------------------------- #
+
+
+def sha256_hex(content: bytes) -> str:
+    """Return the lowercase hex SHA-256 digest of ``content``."""
+    return hashlib.sha256(content).hexdigest()
+
+
+def verify_sha256(content: bytes, expected_hex: str) -> bool:
+    """True iff ``sha256_hex(content)`` equals ``expected_hex``.
+
+    Case-insensitive, surrounding whitespace stripped on the expected value.
+    Full-digest exact match only — abbreviated/prefix digests are a future
+    nicety (a magnet link should carry the full digest), not supported here.
+    """
+    return sha256_hex(content) == expected_hex.strip().lower()
+
+
+def _hash_guard(ref: ArtifactRef, canonical: bytes, out) -> Optional[int]:
+    """Verify a URI's ``#sha256`` against an artifact's canonical bytes.
+
+    Returns ``None`` to PROCEED — either the URI carries no ``#sha256``
+    (``ref.sha256 is None``) or the digest matches. On MISMATCH, prints the
+    refusal line and returns refuse-code ``5`` (distinct from 2=fail-closed /
+    3=stub / 4=missing-handler) so the caller installs nothing.
+    """
+    if ref.sha256 is None:
+        return None
+    if verify_sha256(canonical, ref.sha256):
+        return None
+    out(
+        "swarph add: content-hash mismatch — the artifact does not match the "
+        f"#sha256 in the URI (expected {ref.sha256}, got "
+        f"{sha256_hex(canonical)}); refusing to install"
+    )
+    return 5
+
 
 @dataclass(frozen=True)
 class HandlerResult:
@@ -208,8 +260,16 @@ class HookHandler:
         self.settings_path = settings_path
         self.hooks_home = hooks_home
 
+    def _canonical_bytes(self, bundle) -> bytes:
+        """Deterministic installable bytes for a :class:`hooks.HookBundle`.
+
+        The hook's installable content is its inline ``script_body`` — the
+        exact bytes written under ``hooks_home/<script_name>``.
+        """
+        return bundle.script_body.encode("utf-8")
+
     def add(self, ref: ArtifactRef, *, assume_yes: bool, out) -> int:
-        if ref.publisher != _BUILTIN_PUBLISHER:
+        if not _is_trusted_publisher(ref.publisher):
             out(
                 "swarph add: published hooks are not yet trusted — only "
                 "swarph-builtin hooks install via URI in v1 (signed-publisher "
@@ -219,6 +279,9 @@ class HookHandler:
         # A ValueError for an unknown builtin name propagates — caught at the
         # CLI layer (run_add).
         bundle = hooks.resolve_builtin(ref.name)
+        guard = _hash_guard(ref, self._canonical_bytes(bundle), out)
+        if guard is not None:
+            return guard
         return hooks.install_hook(
             bundle,
             settings_path=self.settings_path,
@@ -384,8 +447,19 @@ class McpHandler:
             mcp_config_path if mcp_config_path is not None else Path.cwd() / ".mcp.json"
         )
 
+    def _canonical_bytes(self, bundle) -> bytes:
+        """Deterministic installable bytes for an :class:`McpBundle`.
+
+        The installable content is the ``server_spec`` written under
+        ``mcpServers/<name>``; serialized with sorted keys + compact
+        separators so equal specs always hash equal regardless of key order.
+        """
+        return json.dumps(
+            bundle.server_spec, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+
     def add(self, ref: ArtifactRef, *, assume_yes: bool, out) -> int:
-        if ref.publisher != _BUILTIN_PUBLISHER:
+        if not _is_trusted_publisher(ref.publisher):
             out(
                 "swarph add: published MCP servers are not yet trusted — only "
                 "swarph-builtin in v1 (v2: signed-publisher + per-class security "
@@ -395,6 +469,10 @@ class McpHandler:
 
         # ValueError for an unknown builtin name propagates → caught at run_add.
         bundle = resolve_builtin_mcp(ref.name)
+
+        guard = _hash_guard(ref, self._canonical_bytes(bundle), out)
+        if guard is not None:
+            return guard
 
         # ---- show-before-write preview (builtin = trusted, no prompt) ----
         out(f"mcp: {bundle.name}  (trust={bundle.trust}, publisher={bundle.publisher})")
@@ -541,8 +619,21 @@ class SkillHandler:
             skills_home if skills_home is not None else _DEFAULT_SKILLS_HOME
         )
 
+    def _canonical_bytes(self, bundle) -> bytes:
+        """Deterministic installable bytes for a :class:`SkillBundle`.
+
+        The installable content is the ``files`` tuple-of-(path, content)
+        pairs; each pair is serialized as a list (JSON has no tuple) with
+        compact separators, preserving file order (``sort_keys=False``).
+        """
+        return json.dumps(
+            [list(p) for p in bundle.files],
+            sort_keys=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
     def add(self, ref: ArtifactRef, *, assume_yes: bool, out) -> int:
-        if ref.publisher != _BUILTIN_PUBLISHER:
+        if not _is_trusted_publisher(ref.publisher):
             out(
                 "swarph add: published skills are not yet trusted — only "
                 "swarph-builtin in v1 (v2: signed-publisher + per-class "
@@ -552,6 +643,10 @@ class SkillHandler:
 
         # ValueError for an unknown builtin name propagates → caught at run_add.
         bundle = resolve_builtin_skill(ref.name)
+
+        guard = _hash_guard(ref, self._canonical_bytes(bundle), out)
+        if guard is not None:
+            return guard
 
         # ---- show-before-write preview (builtin = trusted, no prompt) ----
         dest_dir = Path(self.skills_home).expanduser() / bundle.name
