@@ -76,6 +76,27 @@ def test_published_add_mutates_nothing(tmp_path):
     assert not hooks_home.exists() or not any(hooks_home.iterdir())
 
 
+def test_add_cli_non_object_settings_returns_nonzero_writes_nothing(tmp_path):
+    # CLI `add` of a trusted builtin onto a valid-but-non-object settings.json
+    # surfaces the load/merge failure as a non-zero return (the CLI catches the
+    # propagated ValueError) and leaves NOTHING written — all-or-nothing.
+    settings_path = tmp_path / "settings.json"
+    hooks_home = tmp_path / "hooks"
+    settings_path.write_text("[]", encoding="utf-8")  # valid JSON, not an object
+    before_bytes = settings_path.read_bytes()
+
+    rc = run_hooks(
+        ["add", "cell-resilience"],
+        settings_path=settings_path,
+        hooks_home=hooks_home,
+    )
+    assert rc != 0
+    # user's settings untouched + no orphaned script
+    assert settings_path.read_bytes() == before_bytes
+    assert not (hooks_home / "cell-resilience.sh").exists()
+    assert not hooks_home.exists() or not any(hooks_home.iterdir())
+
+
 # --------------------------------------------------------------------------- #
 # round-trip install → list → remove
 # --------------------------------------------------------------------------- #

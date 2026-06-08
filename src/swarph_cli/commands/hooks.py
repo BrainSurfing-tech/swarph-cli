@@ -191,7 +191,13 @@ def _load_settings(path) -> dict:
       settings with our merged-onto-empty result, silently destroying their
       config. Surfacing the error protects them — the caller stops and the
       user fixes (or we back up) the broken file first.
-    * Valid → the parsed dict.
+    * Present but VALID-yet-NON-OBJECT JSON (``[]``, ``null``, ``5``, ``"x"`` —
+      e.g. a truncated/fragment file) → raise ``ValueError`` too. Same
+      fail-closed reasoning: a non-dict can't be merged onto (it would crash
+      ``_merge_hook``'s ``setdefault``), and silently treating it as ``{}``
+      would overwrite the user's real file. The contract is "never silently
+      overwrite a user's real settings file."
+    * Valid OBJECT → the parsed dict.
     """
     p = Path(path).expanduser()
     try:
@@ -199,11 +205,18 @@ def _load_settings(path) -> dict:
     except FileNotFoundError:
         return {}
     try:
-        return json.loads(text)
+        data = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"settings.json at {p} is not valid JSON: {exc}"
         ) from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"settings.json at {p} is not a JSON object (got "
+            f"{type(data).__name__}); refusing to merge onto a non-object "
+            f"settings file"
+        )
+    return data
 
 
 def _save_settings(path, obj) -> None:
@@ -382,12 +395,20 @@ def install_hook(
          ``assume_yes`` is False, prompt via ``input()`` and ABORT — writing
          NOTHING (no script, no settings) and returning non-zero — on anything
          but an affirmative ("y"/"yes"). Builtins proceed without a prompt.
-      4. Write the script to ``hooks_home`` (mkdir -p, chmod 0755).
-      5. ``_load_settings`` → ``_merge_hook`` each binding → ``_save_settings``.
+      4. ``_load_settings`` → ``_merge_hook`` each binding into an in-memory
+         merged dict. This happens BEFORE any disk write so a load/merge
+         failure (corrupt or non-object settings.json, permission error)
+         aborts with NOTHING written — all-or-nothing, no orphaned script.
+      5. Write the script to ``hooks_home`` (mkdir -p, chmod 0755), then
+         ``_save_settings`` the merged dict. If the save fails after the
+         script write, best-effort remove the just-written script so a
+         save-failure also leaves no orphan.
       6. ``out`` the activation caveat (open ``/hooks`` once or restart —
          Claude Code can't hot-load a hook into a running session).
 
-    Returns 0 on success, non-zero on abort.
+    Returns 0 on success, non-zero on abort. A load/merge failure (e.g. a
+    non-object settings.json) propagates as ``ValueError`` — the caller (CLI
+    layer) surfaces it; nothing is written.
     """
     hooks_home_p = Path(hooks_home).expanduser()
     script_dst = (hooks_home_p / bundle.script_name).resolve()
@@ -420,16 +441,28 @@ def install_hook(
             out("aborted — nothing written.")
             return 1
 
-    # ---- write the script ----
-    hooks_home_p.mkdir(parents=True, exist_ok=True)
-    script_dst.write_text(bundle.script_body, encoding="utf-8")
-    os.chmod(script_dst, 0o755)
-
-    # ---- merge each binding into settings + atomic save ----
+    # ---- load + merge FIRST (all-or-nothing) ----
+    # Compute the final merged settings in memory BEFORE touching disk. If
+    # _load_settings raises (corrupt or non-object settings.json, perm error),
+    # we abort here having written NOTHING — no orphaned script.
     settings = _load_settings(settings_path)
     for b in bundle.bindings:
         settings = _merge_hook(settings, b.event, b.matcher, command)
-    _save_settings(settings_path, settings)
+
+    # ---- write the script, then atomic-save settings ----
+    hooks_home_p.mkdir(parents=True, exist_ok=True)
+    script_dst.write_text(bundle.script_body, encoding="utf-8")
+    os.chmod(script_dst, 0o755)
+    try:
+        _save_settings(settings_path, settings)
+    except BaseException:
+        # Save failed AFTER the script write — best-effort remove the orphan
+        # so a save-failure also leaves nothing behind.
+        try:
+            script_dst.unlink()
+        except OSError:
+            pass
+        raise
 
     out("installed — open /hooks once or restart to activate")
     return 0
@@ -674,11 +707,15 @@ def run_hooks(
         return int(exc.code or 0)
 
     if args.action == "init":
-        return init_hooks(
-            settings_path=settings_path,
-            hooks_home=hooks_home,
-            assume_yes=args.yes,
-        )
+        try:
+            return init_hooks(
+                settings_path=settings_path,
+                hooks_home=hooks_home,
+                assume_yes=args.yes,
+            )
+        except (ValueError, OSError) as exc:
+            print(f"swarph hooks: {exc}", file=sys.stderr)
+            return 2
 
     if args.action == "add":
         try:
@@ -686,12 +723,16 @@ def run_hooks(
         except (ValueError, FileNotFoundError) as exc:
             print(f"swarph hooks: {exc}", file=sys.stderr)
             return 2
-        return install_hook(
-            bundle,
-            settings_path=settings_path,
-            hooks_home=hooks_home,
-            assume_yes=args.yes,
-        )
+        try:
+            return install_hook(
+                bundle,
+                settings_path=settings_path,
+                hooks_home=hooks_home,
+                assume_yes=args.yes,
+            )
+        except (ValueError, OSError) as exc:
+            print(f"swarph hooks: {exc}", file=sys.stderr)
+            return 2
 
     if args.action == "list":
         return list_hooks(settings_path=settings_path, hooks_home=hooks_home)

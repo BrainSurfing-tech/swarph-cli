@@ -50,6 +50,29 @@ def test_load_settings_valid_round_trips(tmp_path):
     assert _load_settings(path) == obj
 
 
+def test_load_settings_empty_object_loads(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text("{}")
+    assert _load_settings(path) == {}
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", "5", '"x"'])
+def test_load_settings_non_object_raises_value_error(tmp_path, payload):
+    # Syntactically valid JSON that is NOT an object (a list / null / int /
+    # string — e.g. a truncated/fragment file) must fail closed exactly like
+    # corrupt JSON, NOT slip through and later crash _merge_hook's setdefault.
+    path = tmp_path / "settings.json"
+    path.write_text(payload)
+    with pytest.raises(ValueError) as excinfo:
+        _load_settings(path)
+    msg = str(excinfo.value)
+    # path included so the user can find the file to fix
+    assert str(path) in msg
+    # actual type named in the message
+    actual_type = type(json.loads(payload)).__name__
+    assert actual_type in msg
+
+
 # --------------------------------------------------------------------------
 # _save_settings
 # --------------------------------------------------------------------------

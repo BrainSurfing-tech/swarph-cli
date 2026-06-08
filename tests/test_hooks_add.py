@@ -121,6 +121,54 @@ def test_add_builtin_preserves_existing_settings(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# all-or-nothing: load/merge failure leaves nothing written
+# --------------------------------------------------------------------------- #
+
+
+def test_install_aborts_on_non_object_settings_writes_no_script(tmp_path):
+    # A valid-but-non-object settings.json (a truncated/fragment file) must
+    # abort the install BEFORE the script is written — the all-or-nothing
+    # guarantee. install_hook lets the ValueError propagate; the CLI layer
+    # catches it and returns non-zero.
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("[]", encoding="utf-8")  # valid JSON, not an object
+    hooks_home = tmp_path / "hooks"
+
+    with pytest.raises(ValueError):
+        install_hook(
+            resolve_builtin("cell-resilience"),
+            settings_path=settings_path,
+            hooks_home=hooks_home,
+            assume_yes=True,
+        )
+
+    # NOTHING written: no script orphaned in hooks_home (dir absent or empty),
+    # and the user's settings.json is untouched.
+    assert not (hooks_home / "cell-resilience.sh").exists()
+    if hooks_home.exists():
+        assert list(hooks_home.iterdir()) == []
+    assert settings_path.read_text(encoding="utf-8") == "[]"
+
+
+def test_install_aborts_on_corrupt_settings_writes_no_script(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text("{ not json", encoding="utf-8")
+    hooks_home = tmp_path / "hooks"
+
+    with pytest.raises(ValueError):
+        install_hook(
+            resolve_builtin("cell-resilience"),
+            settings_path=settings_path,
+            hooks_home=hooks_home,
+            assume_yes=True,
+        )
+
+    assert not (hooks_home / "cell-resilience.sh").exists()
+    if hooks_home.exists():
+        assert list(hooks_home.iterdir()) == []
+
+
+# --------------------------------------------------------------------------- #
 # resolve_local
 # --------------------------------------------------------------------------- #
 
