@@ -147,6 +147,84 @@ def format_uri(ref: ArtifactRef) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Registry-record → URI contract helper (T5a) — the discover→install bridge
+# --------------------------------------------------------------------------- #
+
+
+#: Map a registry feature record's ``type`` onto an :data:`ARTIFACT_CLASSES`
+#: class. A search face (metaedge.surf) and the cell registry describe a
+#: capability by ``type``; this is the one place that vocabulary maps onto the
+#: ``swarph add`` artifact classes. Synonyms collapse: ``mcp_server`` → ``mcp``
+#: and ``adapter`` → ``tool``.
+_TYPE_TO_CLASS = {
+    "hook": "hook",
+    "mcp": "mcp",
+    "mcp_server": "mcp",
+    "skill": "skill",
+    "tool": "tool",
+    "adapter": "tool",
+}
+
+
+def feature_to_uri(record: dict, *, default_publisher: Optional[str] = None) -> str:
+    """Build a ``swarph://`` URI from a registry/feature record dict.
+
+    This is the swarph-cli HALF of the discover→install loop: a search face
+    (metaedge.surf) or the cell registry hands back a feature record, and this
+    turns it into a typed, content-addressed magnet-link URI a user/LLM can
+    ``swarph add``. Field resolution:
+
+    * **name**: ``record["name"]`` — required (``ValueError`` if absent/empty).
+    * **publisher**: first non-empty of ``record["publisher"]``,
+      ``record["cell"]``, then ``default_publisher`` — else ``ValueError``.
+    * **class**: ``record["artifact_class"]`` if it is a valid class; else
+      ``record["type"]`` mapped through :data:`_TYPE_TO_CLASS`. An
+      unmappable/absent type → ``ValueError``.
+    * **version**: ``record.get("version")`` — optional.
+    * **sha256**: first non-empty of ``record["sha256"]``, ``record["sha"]`` —
+      optional.
+
+    Reuses :func:`format_uri` so the output always round-trips with
+    :func:`parse_uri`.
+    """
+    name = record.get("name")
+    if not name:
+        raise ValueError("record has no 'name' field")
+
+    publisher = (
+        record.get("publisher") or record.get("cell") or default_publisher
+    )
+    if not publisher:
+        raise ValueError(
+            "no publisher in record and no default_publisher given"
+        )
+
+    artifact_class = record.get("artifact_class")
+    if artifact_class in ARTIFACT_CLASSES:
+        klass = artifact_class
+    else:
+        klass = _TYPE_TO_CLASS.get(record.get("type"))
+        if klass is None:
+            raise ValueError(
+                f"cannot determine artifact class from record: "
+                f"artifact_class={record.get('artifact_class')!r}, "
+                f"type={record.get('type')!r}"
+            )
+
+    version = record.get("version")
+    sha256 = record.get("sha256") or record.get("sha")
+
+    ref = ArtifactRef(
+        klass=klass,
+        publisher=publisher,
+        name=name,
+        version=version,
+        sha256=sha256,
+    )
+    return format_uri(ref)
+
+
+# --------------------------------------------------------------------------- #
 # Handler interface + result (T2)
 # --------------------------------------------------------------------------- #
 
