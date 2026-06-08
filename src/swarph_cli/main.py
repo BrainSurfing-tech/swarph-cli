@@ -73,6 +73,7 @@ Spec: https://github.com/darw007d/hedge-fund-mcp/blob/main/research/swarph_cli/P
 _VERB_HANDLERS: dict[str, str] = {
     # verb keyword: dotted-path to handler function (lazy-imported)
     "init": "swarph_cli.commands.init.run_init",
+    "add": "swarph_cli.commands.add.run_add",
     "import": "swarph_cli.commands.import_session.run_import",
     "chat": "swarph_cli.commands.chat.run_chat",
     "onboard": "swarph_cli.commands.onboard.run_onboard",
