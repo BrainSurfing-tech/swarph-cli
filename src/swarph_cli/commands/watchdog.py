@@ -712,7 +712,80 @@ def _log_event(log_path: Path, event: str, details: dict, verbose: bool = False)
         print(line, file=sys.stderr, end="")
 
 
+def _dm_wake_scan(args: argparse.Namespace, log_path: Path) -> int:
+    """A1-DM mesh-monitor scan (T3). Wakes stranded peers on OTHER hosts.
+
+    When ``--dm-wake`` is set, the watchdog also acts as the mesh's wake
+    source: it fetches the gateway peer list, finds peers whose ``last_health``
+    is staler than the session staleness threshold (excluding SELF — the
+    watchdog's own cell is covered by the local A1/A2 path), and sends each a
+    wake DM (``_dm_wake`` → POST /messages). Reuses the SAME gateway-URL +
+    token plumbing as ``--peer-health-poll`` (``args.gateway`` +
+    ``MESH_GATEWAY_TOKEN``) and the SAME ``_now()`` epoch + ``--threshold``
+    staleness window the local session check uses.
+
+    Returns the count of wake DMs that fired successfully (0 if none / if
+    ``--dm-wake`` is off). Never raises (an alert path must not crash the
+    watchdog).
+    """
+    if not args.dm_wake:
+        return 0
+
+    role = args.cell
+    self_peer = args.peer or role
+    gateway = args.gateway
+    token = os.environ.get("MESH_GATEWAY_TOKEN")
+    now_epoch = _now()
+    stale_sec = args.threshold
+
+    peers = _fetch_peers(gateway, token or "")
+    # Exclude SELF — never DM-wake yourself; the watchdog's own cell is
+    # covered by the local A1/A2 send-keys/respawn path. Both the peer name
+    # and the cell role are excluded (they coincide by default, but a custom
+    # --peer must not leave the role addressable as a cross-host target).
+    exclude = {self_peer, role}
+    stale = _stale_peers(peers, now_epoch, stale_sec, exclude=exclude)
+
+    fired = 0
+    for target in stale:
+        if _dm_wake(gateway, self_peer, target, token or "", _DM_WAKE_PROMPT):
+            fired += 1
+
+    _log_event(
+        log_path,
+        "dm_wake_scan",
+        {
+            "self_peer": self_peer,
+            "stale_peers": stale,
+            "wakes_fired": fired,
+        },
+        args.verbose,
+    )
+    return fired
+
+
 def run_check(args: argparse.Namespace) -> int:
+    """Entry point. Runs the local own-session decision FIRST (A1/A2/noop,
+    exit 0/1/2/3/4 — byte-for-byte unchanged), then layers the ``--dm-wake``
+    mesh-monitor scan on top.
+
+    Exit precedence (T3): the local own-session action wins. If the local
+    decision took a real action or errored (rc != 0), that code is returned
+    unchanged — the dm-wake scan is an ADDITIONAL mesh-monitor action and
+    must not suppress or be suppressed by the local signal. ONLY when the
+    local decision was a no-op (rc == 0) AND at least one cross-host wake DM
+    fired do we surface exit 3 (A1-DM). When ``--dm-wake`` is off the scan is
+    a pure no-op, so the 0/1/2 behavior is preserved exactly.
+    """
+    log_path = _resolve_log_path(args.log)
+    local_rc = _run_local_check(args)
+    wakes_fired = _dm_wake_scan(args, log_path)
+    if local_rc == 0 and wakes_fired > 0:
+        return 3
+    return local_rc
+
+
+def _run_local_check(args: argparse.Namespace) -> int:
     role = args.cell
     # F4 — cell.yaml-pinned cursor_path + tmux_session (mother #1057/#1060
     # + beta #1061/#1065). Reads cell.yaml `extra.cursor_path` /
