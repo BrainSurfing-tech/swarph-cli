@@ -158,6 +158,12 @@ BUILTIN_HOOKS: dict = {
 }
 
 
+# The curated set a fresh cell should start with — the recommended bundled
+# hooks ``swarph hooks init`` installs in one shot. Today just cell-resilience
+# (the push-side throttle detector); add future builtins here, not at call sites.
+RECOMMENDED_HOOKS: tuple = ("cell-resilience",)
+
+
 def resolve_builtin(name: str) -> HookBundle:
     """Return the bundled :class:`HookBundle` named ``name``.
 
@@ -430,6 +436,52 @@ def install_hook(
 
 
 # --------------------------------------------------------------------------- #
+# Recommended-set installer (T5): swarph hooks init
+# --------------------------------------------------------------------------- #
+
+
+def init_hooks(
+    *,
+    settings_path=_DEFAULT_SETTINGS_PATH,
+    hooks_home=_DEFAULT_HOOKS_HOME,
+    assume_yes: bool = False,
+    out=print,
+) -> int:
+    """Install the recommended bundled set (:data:`RECOMMENDED_HOOKS`).
+
+    For each recommended builtin name, ``install_hook(resolve_builtin(name),
+    ...)``. Idempotent — re-running installs nothing new because ``_merge_hook``
+    dedups on command, so a second ``init`` leaves each binding's ``hooks[]``
+    untouched. Builtins are trusted, so no per-hook prompt fires regardless of
+    ``assume_yes`` (it's threaded through anyway for symmetry / future local
+    recommendations).
+
+    Returns 0 when every install succeeded, non-zero if any returned non-zero
+    (the worst rc is propagated). Emits one summary line at the end.
+    """
+    rc = 0
+    for name in RECOMMENDED_HOOKS:
+        bundle = resolve_builtin(name)
+        one = install_hook(
+            bundle,
+            settings_path=settings_path,
+            hooks_home=hooks_home,
+            assume_yes=assume_yes,
+            out=out,
+        )
+        if one != 0 and rc == 0:
+            rc = one
+
+    names = ", ".join(RECOMMENDED_HOOKS)
+    status = "all installed" if rc == 0 else "completed with errors"
+    out(
+        f"hooks init: recommended set [{names}] {status} "
+        f"— open /hooks once or restart to activate"
+    )
+    return rc
+
+
+# --------------------------------------------------------------------------- #
 # Uninstall + list (T4)
 # --------------------------------------------------------------------------- #
 
@@ -571,7 +623,7 @@ def run_hooks(
     settings_path=_DEFAULT_SETTINGS_PATH,
     hooks_home=_DEFAULT_HOOKS_HOME,
 ) -> int:
-    """``swarph hooks`` dispatch: ``add`` / ``list`` / ``remove`` (T4).
+    """``swarph hooks`` dispatch: ``init`` / ``add`` / ``list`` / ``remove``.
 
     ``settings_path``/``hooks_home`` default to the real ``~`` locations but are
     overridable — the test seam for pointing the whole command at tmp paths
@@ -585,6 +637,16 @@ def run_hooks(
         description="Manage Claude Code hooks (builtin or local bundle).",
     )
     sub = parser.add_subparsers(dest="action", required=True)
+
+    init = sub.add_parser(
+        "init", help="install the recommended bundled set (cell-resilience)"
+    )
+    init.add_argument(
+        "--yes",
+        action="store_true",
+        help="skip confirmation prompts (no-op for trusted builtins, "
+        "future-proofs against recommended local bundles)",
+    )
 
     add = sub.add_parser("add", help="install a builtin or local hook bundle")
     add.add_argument(
@@ -610,6 +672,13 @@ def run_hooks(
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 0)
+
+    if args.action == "init":
+        return init_hooks(
+            settings_path=settings_path,
+            hooks_home=hooks_home,
+            assume_yes=args.yes,
+        )
 
     if args.action == "add":
         try:
