@@ -430,8 +430,122 @@ def install_hook(
 
 
 # --------------------------------------------------------------------------- #
+# Uninstall + list (T4)
+# --------------------------------------------------------------------------- #
+
+
+def _installed_command(bundle: HookBundle, hooks_home) -> str:
+    """The absolute installed-script path written into settings for ``bundle``.
+
+    SAME construction ``install_hook`` uses, so unmerge/list match what install
+    merged: ``(hooks_home/script_name).expanduser().resolve()`` as a string.
+    """
+    return str((Path(hooks_home).expanduser() / bundle.script_name).resolve())
+
+
+def uninstall_hook(
+    bundle: HookBundle,
+    *,
+    settings_path=_DEFAULT_SETTINGS_PATH,
+    hooks_home=_DEFAULT_HOOKS_HOME,
+    remove_script: bool = True,
+    out=print,
+) -> int:
+    """Inverse of :func:`install_hook` — strip every binding + drop the script.
+
+    For each binding, ``_unmerge_hook`` the resolved installed-script command
+    (matching what install merged) out of settings, then atomically save. When
+    ``remove_script`` and the script exists under ``hooks_home``, delete it
+    (best-effort; errors swallowed). Idempotent: removing a not-installed hook
+    is a no-op — never raises, returns 0.
+    """
+    command = _installed_command(bundle, hooks_home)
+
+    settings = _load_settings(settings_path)
+    for b in bundle.bindings:
+        settings = _unmerge_hook(settings, b.event, b.matcher, command)
+    _save_settings(settings_path, settings)
+
+    if remove_script:
+        script = Path(hooks_home).expanduser() / bundle.script_name
+        if script.exists():
+            try:
+                script.unlink()
+            except OSError:
+                pass
+
+    out(f"removed {bundle.name} — open /hooks once or restart to deactivate")
+    return 0
+
+
+def _is_installed(settings: dict, command: str, bundle: HookBundle) -> bool:
+    """True when ALL of ``bundle``'s bindings' commands are present in settings."""
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    for b in bundle.bindings:
+        event_list = hooks.get(b.event)
+        if not isinstance(event_list, list):
+            return False
+        found = False
+        for entry in event_list:
+            if entry.get("matcher", "") == b.matcher:
+                if any(
+                    a.get("command") == command for a in entry.get("hooks", [])
+                ):
+                    found = True
+                break
+        if not found:
+            return False
+    return True
+
+
+def list_hooks(
+    *,
+    settings_path=_DEFAULT_SETTINGS_PATH,
+    hooks_home=_DEFAULT_HOOKS_HOME,
+    out=print,
+) -> int:
+    """List builtin hooks with install status. One greppable line per builtin::
+
+        name  [installed|available]  trust=builtin  — description
+    """
+    settings = _load_settings(settings_path)
+    for name in sorted(BUILTIN_HOOKS):
+        bundle = BUILTIN_HOOKS[name]
+        command = _installed_command(bundle, hooks_home)
+        status = "installed" if _is_installed(settings, command, bundle) else "available"
+        out(f"{name}  [{status}]  trust=builtin  — {bundle.description}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # CLI surface (T3): swarph hooks add <name|path> [--yes]
 # --------------------------------------------------------------------------- #
+
+
+# The commons sigil. A ``target`` starting with this is a PUBLISHED reference
+# (commons / another cell). v1 supports builtin + local ONLY — a published
+# reference FAILS CLOSED (never installs an unreviewed peer's code).
+_PUBLISHED_SIGIL = "@"
+
+
+def _resolve_add_target(target: str) -> HookBundle:
+    """Resolve an ``add`` target to a bundle, failing closed on published refs.
+
+    A ``target`` starting with ``@`` is a published/commons reference. v1's
+    trust gate REFUSES it outright (the real security evaluation is v2, scope
+    §3.1) — raising ``ValueError`` BEFORE any builtin/local resolution so the
+    add path mutates nothing. Otherwise: builtin name first, else local dir.
+    """
+    if target.startswith(_PUBLISHED_SIGIL):
+        available = ", ".join(sorted(BUILTIN_HOOKS))
+        raise ValueError(
+            f"published hook {target!r} is not yet trusted — install a builtin "
+            f"(available: {available}) or a local bundle dir you've reviewed; "
+            f"signed-publisher + security-gate support is coming (scope §3.1)"
+        )
+    return _resolve_bundle(target)
 
 
 def _resolve_bundle(target: str) -> HookBundle:
@@ -451,14 +565,24 @@ def _resolve_bundle(target: str) -> HookBundle:
     )
 
 
-def run_hooks(argv: list[str] | None = None) -> int:
-    """``swarph hooks`` dispatch. T3 ships the ``add`` action only."""
+def run_hooks(
+    argv: list[str] | None = None,
+    *,
+    settings_path=_DEFAULT_SETTINGS_PATH,
+    hooks_home=_DEFAULT_HOOKS_HOME,
+) -> int:
+    """``swarph hooks`` dispatch: ``add`` / ``list`` / ``remove`` (T4).
+
+    ``settings_path``/``hooks_home`` default to the real ``~`` locations but are
+    overridable — the test seam for pointing the whole command at tmp paths
+    without monkeypatching the default-path constants.
+    """
     if argv is None:
         argv = sys.argv[2:]  # skip "swarph hooks"
 
     parser = argparse.ArgumentParser(
         prog="swarph hooks",
-        description="Install Claude Code hooks (builtin or local bundle).",
+        description="Manage Claude Code hooks (builtin or local bundle).",
     )
     sub = parser.add_subparsers(dest="action", required=True)
 
@@ -474,6 +598,14 @@ def run_hooks(argv: list[str] | None = None) -> int:
         help="skip the confirmation prompt for local (untrusted) bundles",
     )
 
+    sub.add_parser("list", help="list builtin hooks and their install status")
+
+    remove = sub.add_parser("remove", help="uninstall a builtin hook by name")
+    remove.add_argument(
+        "name",
+        help="builtin hook name to uninstall (e.g. cell-resilience)",
+    )
+
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -481,15 +613,32 @@ def run_hooks(argv: list[str] | None = None) -> int:
 
     if args.action == "add":
         try:
-            bundle = _resolve_bundle(args.target)
+            bundle = _resolve_add_target(args.target)
         except (ValueError, FileNotFoundError) as exc:
             print(f"swarph hooks: {exc}", file=sys.stderr)
             return 2
         return install_hook(
             bundle,
-            settings_path=_DEFAULT_SETTINGS_PATH,
-            hooks_home=_DEFAULT_HOOKS_HOME,
+            settings_path=settings_path,
+            hooks_home=hooks_home,
             assume_yes=args.yes,
+        )
+
+    if args.action == "list":
+        return list_hooks(settings_path=settings_path, hooks_home=hooks_home)
+
+    if args.action == "remove":
+        try:
+            bundle = resolve_builtin(args.name)
+        except ValueError as exc:
+            print(
+                f"swarph hooks: {exc}; remove targets builtins by name "
+                f"(local-remove-by-path is a future nicety)",
+                file=sys.stderr,
+            )
+            return 2
+        return uninstall_hook(
+            bundle, settings_path=settings_path, hooks_home=hooks_home
         )
 
     parser.error(f"unknown action: {args.action}")
