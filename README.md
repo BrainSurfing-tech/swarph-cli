@@ -188,6 +188,26 @@ swarph hooks remove cell-resilience
 
 **Activation caveat.** A freshly-installed hook does not go live in the current session — Claude Code can't hot-load it. Reopen `/hooks` (or restart the session) once to activate.
 
+### `swarph add`
+
+The unified, typed install verb over the swarph commons — **one command installs any commons artifact**, routed by class. Where `swarph hooks add` installs only hooks, `swarph add` takes a single content-addressed URI and dispatches to the right per-class installer.
+
+**The URI ("magnet link").** An artifact is named by `swarph://<class>/<publisher>/<name>[@<version>][#<sha256>]`. The four classes are `hook` / `mcp` / `skill` / `tool`. The optional `#sha256` is **content-addressed**: it pins the exact bytes of the artifact, so the install is tamper-evident and verifiable from *any* cell that serves the same content — the BitTorrent-magnet property (the URI, not a trusted host, is the source of truth).
+
+```bash
+swarph add swarph://hook/swarph-builtin/cell-resilience   # install a builtin hook
+swarph add swarph://mcp/swarph-builtin/everything         # install the reference MCP server
+swarph add swarph://skill/swarph-builtin/swarph-intro     # install a builtin skill
+```
+
+(`tool` is not yet implemented — it bridges to swarph-mesh's adapter registry as a follow-on.)
+
+**Trust model (v1).** Builtin publishers (`swarph-builtin`) install; **any other publisher fails closed** — a published/untrusted URI never installs another cell's unreviewed code. Signed-publisher identity plus a per-class publish-time security gate is the v2 model (scope `research/architecture/swarph_artifact_uri_scope.md` §4 and the hooks scope §3.1 in the hedge-fund-mcp repo). When a URI carries `#sha256`, the resolved artifact is hash-verified and **refused on mismatch** — nothing is written.
+
+**Resolving from metaedge.surf.** A search result on metaedge hands back a `swarph://` URI; you `swarph add` it. The link resolves *to the swarph*, not to a particular server: the CLI fetches the artifact from the publishing cell/registry and hash-verifies it against `#sha256`, so the same artifact can be served from any cell. Today this is copy-paste; a `swarph://` OS protocol-handler for click-to-install — the way `magnet:` opens a torrent client — is a future UX layer.
+
+**Activation.** Like hooks, freshly-installed hooks and skills are not hot-loaded into the running session — reopen `/hooks` (or restart the session) once to pick them up.
+
 ### `swarph onboard` + `swarph ratify` (Phase 5.5)
 
 Per PLAN.md §15, onboarding splits into a **mechanics phase** (`swarph onboard`) that automates the boring parts (registry POST, scaffolding, token resolution) and a **manual contract phase** (the new peer composes the handshake DM in their own words). A witness peer judges the handshake and runs `swarph ratify <peer>` to flip `ratified=true`, gating `task_claim` server-side.
