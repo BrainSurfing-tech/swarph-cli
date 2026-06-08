@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -412,6 +413,169 @@ class McpHandler:
         return 0
 
 
+# --------------------------------------------------------------------------- #
+# Skill handler (T3-skill) — install a skill bundle into the skills dir
+# --------------------------------------------------------------------------- #
+
+
+_DEFAULT_SKILLS_HOME = Path.home() / ".claude" / "skills"
+
+
+#: The body of the bundled ``swarph-intro`` skill's ``SKILL.md``. Valid Claude
+#: Code skill frontmatter (``name``/``description``) + a short body.
+_SWARPH_INTRO_SKILL_MD = """\
+---
+name: swarph-intro
+description: Use when the user asks what the swarph is or how to discover and install capabilities across the mesh.
+---
+# swarph-intro
+The swarph is the agnostic AI coordination mesh. Discover capabilities by \
+searching (metaedge), install them with `swarph add \
+swarph://<class>/<publisher>/<name>` (class = hook | mcp | skill | tool), or \
+browse builtins with `swarph hooks list`. Every build leaves a reusable tool \
+in the commons.
+"""
+
+
+@dataclass(frozen=True)
+class SkillBundle:
+    """An installable skill: its files + metadata.
+
+    ``files`` is a tuple of ``(relative_path, file_content)`` pairs (a tuple,
+    not a dict, so the dataclass stays ``frozen``/hashable) and MUST include a
+    ``"SKILL.md"`` entry — the YAML-frontmatter + body that Claude Code reads.
+    """
+
+    name: str
+    description: str
+    publisher: str  # "swarph-builtin" for bundled
+    trust: str  # "builtin"
+    files: tuple  # tuple[tuple[str, str], ...] — (relpath, content) pairs
+
+
+BUILTIN_SKILLS: dict = {
+    "swarph-intro": SkillBundle(
+        name="swarph-intro",
+        description=(
+            "Use when the user asks what the swarph is or how to discover and "
+            "install capabilities across the mesh."
+        ),
+        publisher="swarph-builtin",
+        trust="builtin",
+        files=(("SKILL.md", _SWARPH_INTRO_SKILL_MD),),
+    ),
+}
+
+
+def resolve_builtin_skill(name: str) -> SkillBundle:
+    """Return the bundled :class:`SkillBundle` named ``name``.
+
+    Raises :class:`ValueError` (listing the available names) for an unknown
+    name — propagated to the CLI layer, which surfaces it; nothing installed.
+    """
+    try:
+        return BUILTIN_SKILLS[name]
+    except KeyError:
+        available = ", ".join(sorted(BUILTIN_SKILLS))
+        raise ValueError(
+            f"unknown builtin skill {name!r}; available: {available}"
+        ) from None
+
+
+def _install_skill_files(skills_home, name: str, files) -> None:
+    """Write a skill's ``files`` into ``skills_home/name/``.
+
+    For each ``(relpath, content)`` pair, write ``skills_home/name/relpath``
+    (creating parents, utf-8). Each file is written atomically (temp +
+    ``os.replace``). Idempotent — a second call overwrites with the same
+    content. It's a file drop, not a merge.
+    """
+    dest_dir = Path(skills_home).expanduser() / name
+    for relpath, content in files:
+        target = dest_dir / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fp:
+                fp.write(content)
+                fp.flush()
+                os.fsync(fp.fileno())
+            os.replace(tmp_name, target)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+            raise
+
+
+def _remove_skill(skills_home, name: str) -> None:
+    """Best-effort remove ``skills_home/name/`` — no-op if absent.
+
+    Swallows errors (a skill drop is fire-and-forget); a missing dir is a
+    clean no-op.
+    """
+    target = Path(skills_home).expanduser() / name
+    shutil.rmtree(target, ignore_errors=True)
+
+
+class SkillHandler:
+    """Installs ``skill`` artifacts into the skills home directory.
+
+    v1 is BUILTIN-ONLY (mirrors :class:`HookHandler` / :class:`McpHandler`): a
+    ``swarph-builtin`` publisher resolves to a bundled :class:`SkillBundle` and
+    drops its files into ``skills_home/<name>/``. ANY other publisher is a
+    published/untrusted reference and FAILS CLOSED, writing nothing
+    (signed-publisher + per-class security gate is v2, scope §3.1/§4).
+
+    Skills aren't hot-loaded mid-session, so a successful install prints a
+    one-time restart/reopen activation note (like hooks).
+    """
+
+    klass = "skill"
+
+    def __init__(self, *, skills_home=None) -> None:
+        self.skills_home = (
+            skills_home if skills_home is not None else _DEFAULT_SKILLS_HOME
+        )
+
+    def add(self, ref: ArtifactRef, *, assume_yes: bool, out) -> int:
+        if ref.publisher != _BUILTIN_PUBLISHER:
+            out(
+                "swarph add: published skills are not yet trusted — only "
+                "swarph-builtin in v1 (v2: signed-publisher + per-class "
+                "security gate, scope §3.1/§4); nothing installed"
+            )
+            return 2
+
+        # ValueError for an unknown builtin name propagates → caught at run_add.
+        bundle = resolve_builtin_skill(ref.name)
+
+        # ---- show-before-write preview (builtin = trusted, no prompt) ----
+        dest_dir = Path(self.skills_home).expanduser() / bundle.name
+        out(
+            f"skill: {bundle.name}  (trust={bundle.trust}, "
+            f"publisher={bundle.publisher})"
+        )
+        if bundle.description:
+            out(f"  {bundle.description}")
+        out(f"skills dir → {dest_dir}")
+        out("  will write:")
+        for relpath, _content in bundle.files:
+            out(f"    {dest_dir / relpath}")
+
+        _install_skill_files(self.skills_home, bundle.name, bundle.files)
+
+        out(f"installed skill '{bundle.name}' into {dest_dir}")
+        out(
+            "installed — restart/reopen the session once to pick up the new "
+            "skill"
+        )
+        return 0
+
+
 class StubHandler:
     """Placeholder handler for an artifact class not yet implemented.
 
@@ -433,13 +597,16 @@ class StubHandler:
         return 3
 
 
-def build_registry(*, settings_path=None, hooks_home=None, mcp_config_path=None) -> dict:
+def build_registry(
+    *, settings_path=None, hooks_home=None, mcp_config_path=None, skills_home=None
+) -> dict:
     """Build the ``klass`` → handler registry for one ``add`` invocation.
 
-    The hook paths are threaded into :class:`HookHandler` and the
-    ``.mcp.json`` path into :class:`McpHandler` (each defaulting to its
-    module/cwd default when ``None``) so tests can point the whole install at
-    tmp paths. The not-yet-built classes get :class:`StubHandler`s.
+    The hook paths are threaded into :class:`HookHandler`, the ``.mcp.json``
+    path into :class:`McpHandler`, and the skills home into
+    :class:`SkillHandler` (each defaulting to its module/cwd default when
+    ``None``) so tests can point the whole install at tmp paths. The
+    not-yet-built classes get :class:`StubHandler`s.
     """
     hook_kwargs = {}
     if settings_path is not None:
@@ -450,9 +617,7 @@ def build_registry(*, settings_path=None, hooks_home=None, mcp_config_path=None)
     return {
         "hook": HookHandler(**hook_kwargs),
         "mcp": McpHandler(mcp_config_path=mcp_config_path),
-        "skill": StubHandler(
-            "skill", "drops a skill bundle into the skills dir — T3"
-        ),
+        "skill": SkillHandler(skills_home=skills_home),
         "tool": StubHandler(
             "tool", "bridges to swarph-mesh's adapter registry — follow-on"
         ),
@@ -473,7 +638,14 @@ def dispatch_add(ref: ArtifactRef, *, assume_yes: bool, out, registry) -> int:
     return handler.add(ref, assume_yes=assume_yes, out=out)
 
 
-def run_add(argv, *, settings_path=None, hooks_home=None, mcp_config_path=None) -> int:
+def run_add(
+    argv,
+    *,
+    settings_path=None,
+    hooks_home=None,
+    mcp_config_path=None,
+    skills_home=None,
+) -> int:
     """``swarph add <uri> [--yes]`` — parse + dispatch a swarph artifact URI.
 
     Parses the positional ``uri`` into an :class:`ArtifactRef` (a malformed
@@ -511,6 +683,7 @@ def run_add(argv, *, settings_path=None, hooks_home=None, mcp_config_path=None) 
         settings_path=settings_path,
         hooks_home=hooks_home,
         mcp_config_path=mcp_config_path,
+        skills_home=skills_home,
     )
 
     try:

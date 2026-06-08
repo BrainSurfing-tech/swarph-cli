@@ -5,7 +5,7 @@ Exercises ``run_add`` / ``dispatch_add`` directly with tmp
 
 * builtin hook installs (script written + bindings merged into settings)
 * published hook fails closed (returns non-zero, mutates NOTHING)
-* stub class (skill) returns 3 with a "not yet implemented" message
+* stub class (tool) returns 3 with a "not yet implemented" message
 * unknown builtin name surfaces the resolve_builtin ValueError, nothing written
 * bad URI returns 2, nothing written
 * the ``add`` verb is registered in main._VERB_HANDLERS (round-trip wiring)
@@ -89,7 +89,7 @@ def test_stub_class_clean_error(tmp_path, capsys):
     hooks_home = tmp_path / "hooks"
 
     rc = run_add(
-        ["swarph://skill/swarph-builtin/pdf", "--yes"],
+        ["swarph://tool/swarph-builtin/openrouter", "--yes"],
         settings_path=settings_path,
         hooks_home=hooks_home,
     )
@@ -166,7 +166,7 @@ def test_dispatch_add_routes_by_class(tmp_path):
         settings_path=tmp_path / "settings.json",
         hooks_home=tmp_path / "hooks",
     )
-    ref = parse_uri("swarph://skill/swarph-builtin/pdf")
+    ref = parse_uri("swarph://tool/swarph-builtin/openrouter")
     lines: list[str] = []
     rc = dispatch_add(ref, assume_yes=True, out=lines.append, registry=registry)
     assert rc == 3
