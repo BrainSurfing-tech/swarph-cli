@@ -1,0 +1,212 @@
+"""``swarph mcp-server`` — Door 1 of the swarph reach strategy.
+
+Runs an MCP (stdio) server that exposes the swarph capabilities as MCP
+tools, so any MCP host (Claude Desktop, Cursor, a future OpenClaw service)
+can mount it and its AI gets the swarph toolbelt — discover + install
+capabilities with no human CLI use.
+
+A host mounts it with a stdio server entry, e.g. in ``.mcp.json`` /
+``claude_desktop_config.json``::
+
+    {"mcpServers": {"swarph": {"command": "swarph",
+                               "args": ["mcp-server"]}}}
+
+Three tools are exposed, each backed by a plain, unit-testable helper so the
+tool LOGIC is tested without spinning up the stdio transport:
+
+* ``swarph_search(query)`` → :func:`_search` — metaedge.surf semantic search.
+* ``swarph_add(uri)``      → :func:`_add`    — trust-gated + scanned install.
+* ``swarph_describe(uri)`` → :func:`_describe` — parse a URI, no install.
+
+The MCP Python SDK (``mcp``) is an OPTIONAL extra. :func:`run_mcp_server`
+fails gracefully with a ``pip install swarph-cli[mcp]`` hint when it's absent;
+the helpers themselves carry no MCP dependency, so they (and their tests) run
+without the SDK installed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import urllib.error
+import urllib.request
+
+from swarph_cli.commands import add
+
+# --------------------------------------------------------------------------- #
+# Config
+# --------------------------------------------------------------------------- #
+
+#: Default search face. Overridable via ``SWARPH_METAEDGE_URL`` or the
+#: ``--metaedge-url`` flag.
+_DEFAULT_METAEDGE_URL = "https://metaedge.surf"
+
+#: Module-level URL the FastMCP tool wrappers read. ``run_mcp_server`` sets
+#: this from env / ``--metaedge-url`` before ``mcp.run()`` so a single source
+#: of truth feeds every ``swarph_search`` call.
+_METAEDGE_URL = os.environ.get("SWARPH_METAEDGE_URL", _DEFAULT_METAEDGE_URL)
+
+
+def _metaedge_token() -> str | None:
+    """Optional bearer token for the search face (``SWARPH_METAEDGE_TOKEN``)."""
+    return os.environ.get("SWARPH_METAEDGE_TOKEN") or None
+
+
+# --------------------------------------------------------------------------- #
+# Tool logic — plain helpers (no MCP dependency)
+# --------------------------------------------------------------------------- #
+
+
+def _search(query: str, *, url: str, token: str | None = None) -> list[dict]:
+    """Search the swarph via metaedge.surf's ``/api/ask`` endpoint.
+
+    POSTs ``{"message": query}`` (plus ``"token"`` when given) to
+    ``{url}/api/ask``, parses the JSON, and returns its ``results`` list. NEVER
+    raises — any network/parse error (or a body without a list ``results``)
+    returns ``[]`` so the host AI gets a clean empty result rather than a
+    transport exception.
+    """
+    endpoint = url.rstrip("/") + "/api/ask"
+    payload: dict = {"message": query}
+    if token:
+        payload["token"] = token
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return []
+    results = body.get("results") if isinstance(body, dict) else None
+    return results if isinstance(results, list) else []
+
+
+def _add(uri: str) -> dict:
+    """Install a swarph artifact by its ``swarph://`` URI.
+
+    Parses the URI FIRST — a malformed URI returns an error dict WITHOUT
+    calling :func:`add.run_add` (so a bad URI never reaches the installer).
+    Otherwise delegates to ``add.run_add([uri, "--yes"])``, whose trust gate +
+    static-scan watchtower decide whether anything installs, and reports the
+    int exit code (0 = installed).
+    """
+    try:
+        add.parse_uri(uri)
+    except ValueError as exc:
+        return {"installed": False, "code": 2, "detail": str(exc)}
+
+    code = add.run_add([uri, "--yes"])
+    if code == 0:
+        detail = f"installed {uri}"
+    else:
+        detail = (
+            f"not installed (exit {code}) — likely trust-gated "
+            f"(untrusted publisher) or failed the security scan"
+        )
+    return {"installed": code == 0, "code": code, "detail": detail}
+
+
+def _describe(uri: str) -> dict:
+    """Parse a ``swarph://`` URI and report what it points at, no install.
+
+    Returns the five fields of the parsed reference; a malformed URI returns
+    ``{"error": "<msg>"}``.
+    """
+    try:
+        ref = add.parse_uri(uri)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return {
+        "class": ref.klass,
+        "publisher": ref.publisher,
+        "name": ref.name,
+        "version": ref.version,
+        "sha256": ref.sha256,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# FastMCP server — thin @tool wrappers over the helpers above
+# --------------------------------------------------------------------------- #
+#
+# Build at import time so tests can introspect the registered tools without
+# running the stdio transport. The ``mcp`` SDK is an optional extra; if it's
+# absent, ``mcp`` is None and ``run_mcp_server`` prints the install hint. The
+# helpers above carry no MCP dependency, so they import + test fine either way.
+
+try:
+    from mcp.server.fastmcp import FastMCP
+
+    mcp = FastMCP("swarph")
+
+    @mcp.tool()
+    def swarph_search(query: str) -> list[dict]:
+        """Search the swarph for a capability (hooks, MCP servers, skills, tools, libraries). Returns matches with an install URI where applicable."""
+        return _search(query, url=_METAEDGE_URL, token=_metaedge_token())
+
+    @mcp.tool()
+    def swarph_add(uri: str) -> dict:
+        """Install a swarph artifact by its swarph:// URI (trust-gated + security-scanned). Returns whether it installed."""
+        return _add(uri)
+
+    @mcp.tool()
+    def swarph_describe(uri: str) -> dict:
+        """Parse a swarph:// URI and show what it points at, without installing."""
+        return _describe(uri)
+
+except ImportError:  # pragma: no cover - exercised only when SDK absent
+    mcp = None
+
+
+_MCP_MISSING_HINT = (
+    "swarph mcp-server: the MCP Python SDK is not installed. Install it with:\n"
+    "    pip install 'swarph-cli[mcp]'\n"
+    "(or: pip install 'mcp>=1.0')"
+)
+
+
+def run_mcp_server(argv) -> int:
+    """``swarph mcp-server [--metaedge-url URL]`` — run the stdio MCP server.
+
+    Sets the module search-face URL from ``--metaedge-url`` (else the
+    ``SWARPH_METAEDGE_URL`` env / default), then serves the three swarph tools
+    over stdio via FastMCP. Returns non-zero with an install hint when the
+    ``mcp`` SDK is absent.
+    """
+    parser = argparse.ArgumentParser(
+        prog="swarph mcp-server",
+        description=(
+            "Run an MCP (stdio) server exposing swarph_search / swarph_add / "
+            "swarph_describe so any MCP host's AI gets the swarph toolbelt."
+        ),
+    )
+    parser.add_argument(
+        "--metaedge-url",
+        default=None,
+        help=(
+            "Search-face base URL (default: $SWARPH_METAEDGE_URL or "
+            f"{_DEFAULT_METAEDGE_URL})."
+        ),
+    )
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+
+    if mcp is None:
+        print(_MCP_MISSING_HINT)
+        return 1
+
+    if args.metaedge_url:
+        global _METAEDGE_URL
+        _METAEDGE_URL = args.metaedge_url
+
+    # Serve over stdio (blocks until the host disconnects).
+    mcp.run()
+    return 0
