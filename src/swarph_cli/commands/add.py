@@ -749,6 +749,233 @@ class SkillHandler:
         return 0
 
 
+# --------------------------------------------------------------------------- #
+# Tool handler (T3-tool) — bridge to swarph-mesh's adapter registry (4th class)
+# --------------------------------------------------------------------------- #
+
+
+_DEFAULT_LANES_PATH = Path.home() / ".swarph" / "tool_lanes.json"
+
+#: The builtin adapter names swarph-mesh's registry dispatches. Kept in sync
+#: with ``swarph_mesh.adapters.get_adapter`` (v0.5.0: gemini + deepseek + claude
+#: + openai + grok). Only used to give an unknown-name ``ValueError`` a useful
+#: "available:" list when swarph-mesh's own ``UnknownProvider`` doesn't enumerate
+#: the providers.
+_BUILTIN_TOOL_ADAPTERS = ("gemini", "deepseek", "claude", "openai", "grok")
+
+
+def _load_lanes(path) -> dict:
+    """Load ``~/.swarph/tool_lanes.json``, returning ``{}`` for a missing file.
+
+    Mirrors :func:`_load_mcp_config`'s fail-closed contract:
+
+    * Missing file → ``{}`` (a fine empty starting point).
+    * CORRUPT JSON → ``ValueError`` — never silently return ``{}`` and let a
+      later :func:`_save_lanes` overwrite the user's real-but-unparseable file.
+    * VALID-yet-NON-OBJECT JSON (``[]``, ``null``, ``5`` …) → ``ValueError`` —
+      a non-dict can't be merged onto and silently treating it as ``{}`` would
+      destroy the user's real lane config.
+    * Valid OBJECT → the parsed dict.
+    """
+    p = Path(path).expanduser()
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"tool_lanes.json at {p} is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"tool_lanes.json at {p} is not a JSON object (got "
+            f"{type(data).__name__}); refusing to merge onto a non-object "
+            f"tool_lanes.json file"
+        )
+    return data
+
+
+def _save_lanes(path, obj) -> None:
+    """Atomically write ``obj`` as JSON to ``path`` (``indent=2``, mkdir -p).
+
+    Temp file in the same directory then ``os.replace`` — a crash mid-write
+    leaves either the old complete file or the new complete file, never a
+    truncated one. Mirrors :func:`_save_mcp_config`.
+    """
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(p.parent), prefix=f".{p.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            json.dump(obj, fp, indent=2)
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(tmp_name, p)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _merge_lane(config: dict, name: str, spec_dict: dict) -> dict:
+    """Merge one ``name`` → ``spec_dict`` into ``config["lanes"]``.
+
+    Mutate-and-return. Ensures ``config.setdefault("lanes", {})`` then sets
+    ``config["lanes"][name] = spec_dict``. Idempotent (same name+spec twice =
+    identical result). Preserves every other lane and every other top-level key.
+    """
+    lanes = config.setdefault("lanes", {})
+    lanes[name] = spec_dict
+    return config
+
+
+def resolve_builtin_tool(name: str) -> tuple[str, dict]:
+    """Resolve a builtin adapter ``name`` via swarph-mesh's adapter registry.
+
+    Bridges ``swarph add swarph://tool/swarph-builtin/<name>`` to swarph-mesh.
+    Returns ``(name, spec_dict)`` where ``spec_dict`` is a plain JSON-able dict
+    extracted from the adapter (swarph-mesh adapters are instances exposing
+    ``name`` / ``default_model`` / ``cost_per_token``, not pydantic specs).
+
+    * swarph-mesh NOT importable → :class:`RuntimeError` with a clear
+      "pip install swarph-mesh" message (NOT a bare ``ImportError``) so the
+      handler can present the graceful absent-mesh path.
+    * Unknown adapter name → :class:`ValueError` listing the available names.
+    """
+    try:
+        from swarph_mesh import get_adapter
+        from swarph_mesh.exceptions import UnknownProvider
+    except ImportError as exc:
+        raise RuntimeError(
+            "tool install requires swarph-mesh — pip install swarph-mesh"
+        ) from exc
+
+    try:
+        adapter = get_adapter(name, api_key="swarph-cli-introspection")
+    except UnknownProvider as exc:
+        available = ", ".join(_BUILTIN_TOOL_ADAPTERS)
+        raise ValueError(
+            f"unknown builtin tool adapter {name!r}; available: {available}"
+        ) from exc
+
+    # swarph-mesh adapters are instances (no .model_dump()); extract the
+    # stable, serializable fields into a plain dict. cost_per_token(model)
+    # returns (input_per_mtok, output_per_mtok) USD; record it for the
+    # default model so the lane carries its $0-vs-metered economics.
+    adapter_name = getattr(adapter, "name", name)
+    default_model = getattr(adapter, "default_model", None)
+    spec_dict: dict = {
+        "name": adapter_name,
+        "kind": "llm-adapter",
+        "publisher": _BUILTIN_PUBLISHER,
+        "default_model": default_model,
+    }
+    try:
+        in_cost, out_cost = adapter.cost_per_token(default_model)
+        spec_dict["cost_per_mtok"] = [in_cost, out_cost]
+    except Exception:
+        # cost is best-effort metadata; a model lookup miss must not break
+        # recording the lane.
+        pass
+    return adapter_name, spec_dict
+
+
+class ToolHandler:
+    """Installs ``tool`` artifacts as available mesh lanes (4th artifact class).
+
+    v1 is BUILTIN-ONLY (mirrors :class:`HookHandler` / :class:`McpHandler` /
+    :class:`SkillHandler`): a ``swarph-builtin`` publisher resolves to a
+    swarph-mesh builtin adapter via :func:`resolve_builtin_tool` and records it
+    as an available ``$0-first`` lane under ``lanes/<name>`` in a local config
+    the mesh reads (``~/.swarph/tool_lanes.json``). ANY other publisher is a
+    published/untrusted reference and FAILS CLOSED, writing nothing
+    (signed-publisher + per-class security gate is v2, scope §3.1/§4).
+
+    "Installing a tool" RECORDS the lane only — it does NOT run the adapter's
+    gate-probes (probing may spawn the wrapped CLI). ``swarph`` can probe the
+    lane later.
+
+    swarph-mesh absent is a GRACEFUL path: :func:`resolve_builtin_tool` raises
+    a clear :class:`RuntimeError`, which ``add`` turns into a one-line message +
+    exit code 6 (distinct: 2=fail-closed / 3=stub / 4=missing-handler /
+    5=hash-mismatch / 6=missing-dep), writing nothing.
+    """
+
+    klass = "tool"
+
+    def __init__(self, *, lanes_path=None) -> None:
+        self.lanes_path = (
+            lanes_path if lanes_path is not None else _DEFAULT_LANES_PATH
+        )
+
+    def _canonical_bytes(self, spec_dict) -> bytes:
+        """Deterministic installable bytes for a resolved adapter spec dict.
+
+        The installable content is the lane ``spec_dict`` recorded under
+        ``lanes/<name>``; serialized with sorted keys + compact separators so
+        equal specs always hash equal regardless of key order.
+        """
+        return json.dumps(
+            spec_dict, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+
+    def add(self, ref: ArtifactRef, *, assume_yes: bool, out) -> int:
+        if not _is_trusted_publisher(ref.publisher):
+            out(
+                "swarph add: published tools are not yet trusted — only "
+                "swarph-builtin in v1 (v2: signed-publisher + per-class "
+                "security gate, scope §3.1/§4); nothing installed"
+            )
+            return 2
+
+        # swarph-mesh-absent → graceful (code 6, writes nothing). A ValueError
+        # for an unknown builtin name propagates → caught at run_add.
+        try:
+            name, spec_dict = resolve_builtin_tool(ref.name)
+        except RuntimeError as exc:
+            out("swarph add: " + str(exc))
+            return 6
+
+        guard = _hash_guard(ref, self._canonical_bytes(spec_dict), out)
+        if guard is not None:
+            return guard
+
+        lanes_path = Path(self.lanes_path).expanduser()
+
+        # ---- show-before-write preview (builtin = trusted, no prompt) ----
+        out(
+            f"tool: {name}  (trust=builtin, publisher={ref.publisher}, "
+            f"kind={spec_dict.get('kind')})"
+        )
+        if spec_dict.get("default_model"):
+            out(f"  default model → {spec_dict['default_model']}")
+        out(f"lane config → {lanes_path}")
+        out("  will record this adapter as an available mesh lane:")
+        out(f"    {name} = {json.dumps(spec_dict)}")
+
+        # ---- load + merge FIRST (load failure aborts with nothing written) --
+        config = _load_lanes(self.lanes_path)
+        config = _merge_lane(config, name, spec_dict)
+        _save_lanes(self.lanes_path, config)
+
+        out(
+            f"installed tool lane {name!r} to {lanes_path} — the mesh will use "
+            f"it as a $0-first lane"
+        )
+        out(
+            "lane recorded only (not probed) — run `swarph` later to probe the "
+            "adapter's gates"
+        )
+        return 0
+
+
 class StubHandler:
     """Placeholder handler for an artifact class not yet implemented.
 
@@ -771,15 +998,20 @@ class StubHandler:
 
 
 def build_registry(
-    *, settings_path=None, hooks_home=None, mcp_config_path=None, skills_home=None
+    *,
+    settings_path=None,
+    hooks_home=None,
+    mcp_config_path=None,
+    skills_home=None,
+    lanes_path=None,
 ) -> dict:
     """Build the ``klass`` → handler registry for one ``add`` invocation.
 
     The hook paths are threaded into :class:`HookHandler`, the ``.mcp.json``
-    path into :class:`McpHandler`, and the skills home into
-    :class:`SkillHandler` (each defaulting to its module/cwd default when
-    ``None``) so tests can point the whole install at tmp paths. The
-    not-yet-built classes get :class:`StubHandler`s.
+    path into :class:`McpHandler`, the skills home into :class:`SkillHandler`,
+    and the tool lane-config path into :class:`ToolHandler` (each defaulting to
+    its module/cwd default when ``None``) so tests can point the whole install
+    at tmp paths. All four artifact classes now have real handlers.
     """
     hook_kwargs = {}
     if settings_path is not None:
@@ -791,9 +1023,7 @@ def build_registry(
         "hook": HookHandler(**hook_kwargs),
         "mcp": McpHandler(mcp_config_path=mcp_config_path),
         "skill": SkillHandler(skills_home=skills_home),
-        "tool": StubHandler(
-            "tool", "bridges to swarph-mesh's adapter registry — follow-on"
-        ),
+        "tool": ToolHandler(lanes_path=lanes_path),
     }
 
 
@@ -818,6 +1048,7 @@ def run_add(
     hooks_home=None,
     mcp_config_path=None,
     skills_home=None,
+    lanes_path=None,
 ) -> int:
     """``swarph add <uri> [--yes]`` — parse + dispatch a swarph artifact URI.
 
@@ -857,6 +1088,7 @@ def run_add(
         hooks_home=hooks_home,
         mcp_config_path=mcp_config_path,
         skills_home=skills_home,
+        lanes_path=lanes_path,
     )
 
     try:
