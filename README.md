@@ -170,6 +170,24 @@ swarph watchdog --check --peer lab-ovh --gateway http://localhost:8788 --dm-wake
 
 **Deploy (COMMANDER-GATED — lab does not self-publish/self-deploy):** now that `--dm-wake` ships, the lab + droplet watchdog crons can drop their placeholder note ("REMOVE when lab ships `swarph watchdog --dm-wake`"). The deploy step — described here, not an instruction to run — is: (a) publish the new swarph-cli, (b) add `--dm-wake` (and optionally `--dm-wake-cooldown-sec`) to the watchdog cron line on the always-on mesh-monitor host (lab), (c) drop the placeholder note from that cron entry.
 
+### `swarph hooks`
+
+Installs Claude Code hooks as **content** wired into `~/.claude/settings.json` — a hook becomes an installable artifact (a script + its event/matcher bindings merged into your settings) with no swarph-cli version bump per hook, the same way `watchdog --install-service` ships systemd units as bundled data.
+
+```bash
+swarph hooks init                 # install the recommended bundled set (cell-resilience)
+swarph hooks add cell-resilience  # install one builtin by name
+swarph hooks add ./my-hook        # install a local bundle dir (hook.json + script)
+swarph hooks list                 # builtins + install status (installed|available)
+swarph hooks remove cell-resilience
+```
+
+**Trust model.** Three tiers: `builtin` (trusted, bundled with swarph-cli — installs without a prompt), `local` (a bundle dir you point at — shown then confirmed before any write), and `published`/`@cell/name` (**fails closed in v1** — never installs another cell's unreviewed code). Signed-publisher identity plus a publish-time security gate is the v2 model (see the scope doc `research/architecture/swarph_hooks_installer_scope.md` §3.1 in the hedge-fund-mcp repo).
+
+**Bundled `cell-resilience`.** Binds `StopFailure`/`rate_limit` + `Stop`/`(all)` to a script that writes `$XDG_STATE_HOME/swarph/idle_since.json` (`{"session","reason","hook_event","ts"}`, `reason=throttle|normal`) — the push-side throttle detector the watchdog's `--dm-wake` can read instead of polling. Observational only: it never blocks the session and always exits 0 (jq if present, printf/sed fallback otherwise).
+
+**Activation caveat.** A freshly-installed hook does not go live in the current session — Claude Code can't hot-load it. Reopen `/hooks` (or restart the session) once to activate.
+
 ### `swarph onboard` + `swarph ratify` (Phase 5.5)
 
 Per PLAN.md §15, onboarding splits into a **mechanics phase** (`swarph onboard`) that automates the boring parts (registry POST, scaffolding, token resolution) and a **manual contract phase** (the new peer composes the handshake DM in their own words). A witness peer judges the handshake and runs `swarph ratify <peer>` to flip `ratified=true`, gating `task_claim` server-side.
