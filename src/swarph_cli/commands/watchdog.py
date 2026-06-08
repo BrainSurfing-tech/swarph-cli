@@ -77,6 +77,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+from swarph_cli.commands.mesh import _post_json
+
 
 _DEFAULT_THRESHOLD_SEC = 1800  # 30 minutes
 _DEFAULT_A1_RETRIES = 3
@@ -96,13 +98,20 @@ _DEFAULT_PANE_ACTIVITY_THRESHOLD_SEC = 600
 _DEFAULT_PEER_HEALTH_WINDOW_SEC = 600
 _DEFAULT_PEER_HEALTH_RECOVERY_THRESHOLD_SEC = 120
 _RECOVERY_EVENT_TYPES = ("usage_limit_reset",)
+# A1-DM — cross-host wake. Default prompt sent as a mesh DM to a stranded
+# peer on another host; the peer's sidecar/inbox-watcher then wakes it.
+_DM_WAKE_PROMPT = (
+    "watchdog wake — you appear throttle-stranded (node healthy, session "
+    "idle). Drain your inbox and resume work."
+)
 
 _USAGE = """\
 Usage:
   swarph watchdog --check [--cell ROLE] [--cursor PATH] [--threshold SEC]
                           [--gateway URL] [--tmux-session NAME]
                           [--peer NAME] [--no-respawn]
-                          [--peer-health-poll] [--peer-health-window-sec SEC]
+                          [--peer-health-poll] [--dm-wake]
+                          [--peer-health-window-sec SEC]
                           [--peer-health-recovery-threshold SEC]
                           [--log PATH] [--verbose]
   swarph watchdog --install-service [--cell ROLE] [--dry-run]
@@ -145,6 +154,9 @@ Flags:
                                         sessions as wake-candidates even before
                                         the 30min cursor-staleness threshold.
                                         Requires MESH_GATEWAY_TOKEN in env.
+  --dm-wake                             send a cross-host wake DM to a stranded
+                                        peer (A1-DM) instead of only local tmux
+                                        send-keys.
   --peer-health-window-sec SEC          how far back to look for recovery
                                         events; default 600 (10 min)
   --peer-health-recovery-threshold SEC  min cursor staleness before a recovery
@@ -444,6 +456,36 @@ def _tmux_send_keys(name: str, text: str) -> bool:
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
+def _dm_wake(
+    gateway: str,
+    self_peer: str,
+    target_peer: str,
+    token: str,
+    content: str,
+) -> bool:
+    """A1-DM: send a cross-host wake DM to a stranded peer on another host.
+
+    POSTs a mesh DM (kind=fyi) to ``{gateway}/messages``; the target peer's
+    sidecar/inbox-watcher then wakes it. Pure send action — never raises (an
+    alert/wake path must not crash the watchdog); returns True iff 2xx.
+    """
+    try:
+        body = {
+            "from_node": self_peer,
+            "to_node": target_peer,
+            "kind": "fyi",
+            "content": content,
+        }
+        status, _payload = _post_json(
+            f"{gateway.rstrip('/')}/messages",
+            body,
+            token,
+        )
+        return 200 <= status < 300
+    except Exception:
         return False
 
 
@@ -915,14 +957,7 @@ def run_install_service(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_watchdog(argv: Optional[list[str]] = None) -> int:
-    if argv is None:
-        argv = sys.argv[2:]  # skip "swarph watchdog"
-
-    if not argv:
-        print(_USAGE, file=sys.stderr)
-        return 0
-
+def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="swarph watchdog", add_help=True)
     p.add_argument(
         "--check", action="store_true",
@@ -961,6 +996,11 @@ def run_watchdog(argv: Optional[list[str]] = None) -> int:
              "Requires MESH_GATEWAY_TOKEN in env. Default OFF (opt-in).",
     )
     p.add_argument(
+        "--dm-wake", action="store_true",
+        help="send a cross-host wake DM to a stranded peer (A1-DM) instead "
+             "of only local tmux send-keys.",
+    )
+    p.add_argument(
         "--peer-health-window-sec",
         type=int,
         default=_DEFAULT_PEER_HEALTH_WINDOW_SEC,
@@ -975,6 +1015,19 @@ def run_watchdog(argv: Optional[list[str]] = None) -> int:
     )
     p.add_argument("--log", default=None)
     p.add_argument("--verbose", action="store_true")
+
+    return p
+
+
+def run_watchdog(argv: Optional[list[str]] = None) -> int:
+    if argv is None:
+        argv = sys.argv[2:]  # skip "swarph watchdog"
+
+    if not argv:
+        print(_USAGE, file=sys.stderr)
+        return 0
+
+    p = _build_parser()
 
     try:
         args = p.parse_args(argv)
