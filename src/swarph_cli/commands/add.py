@@ -39,6 +39,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -54,7 +55,7 @@ from swarph_cli.commands import hooks
 
 
 #: The fixed enum of installable artifact classes.
-ARTIFACT_CLASSES = ("hook", "mcp", "skill", "tool")
+ARTIFACT_CLASSES = ("hook", "mcp", "skill", "tool", "lib")
 
 #: URI scheme prefix.
 _SCHEME = "swarph://"
@@ -1033,6 +1034,287 @@ class ToolHandler:
         return 0
 
 
+# --------------------------------------------------------------------------- #
+# Lib handler (T3-lib) — thin pip wrapper + registry (5th artifact class)
+# --------------------------------------------------------------------------- #
+#
+# The swarph's job for a Python lib is DISCOVERY + the uniform ``swarph add``
+# verb + a registry record — NOT reimplementing pip. ``swarph add
+# swarph://lib/swarph-builtin/phawkes`` resolves a builtin PyPI package name,
+# runs ``pip install <package>`` (with ``==<version>`` when the URI pins one),
+# and records the lib under ``libs/<name>`` in ``~/.swarph/libs.json``. pip does
+# the real install.
+
+
+_DEFAULT_LIBS_PATH = Path.home() / ".swarph" / "libs.json"
+
+
+def _load_libs(path) -> dict:
+    """Load ``~/.swarph/libs.json``, returning ``{}`` for a missing file.
+
+    Mirrors :func:`_load_lanes`'s fail-closed contract:
+
+    * Missing file → ``{}`` (a fine empty starting point).
+    * CORRUPT JSON → ``ValueError`` — never silently return ``{}`` and let a
+      later :func:`_save_libs` overwrite the user's real-but-unparseable file.
+    * VALID-yet-NON-OBJECT JSON (``[]``, ``null``, ``5`` …) → ``ValueError`` —
+      a non-dict can't be merged onto and silently treating it as ``{}`` would
+      destroy the user's real lib registry.
+    * Valid OBJECT → the parsed dict.
+    """
+    p = Path(path).expanduser()
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"libs.json at {p} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"libs.json at {p} is not a JSON object (got "
+            f"{type(data).__name__}); refusing to merge onto a non-object "
+            f"libs.json file"
+        )
+    return data
+
+
+def _save_libs(path, obj) -> None:
+    """Atomically write ``obj`` as JSON to ``path`` (``indent=2``, mkdir -p).
+
+    Temp file in the same directory then ``os.replace`` — a crash mid-write
+    leaves either the old complete file or the new complete file, never a
+    truncated one. Mirrors :func:`_save_lanes`.
+    """
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(p.parent), prefix=f".{p.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            json.dump(obj, fp, indent=2)
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(tmp_name, p)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _merge_lib(config: dict, name: str, meta: dict) -> dict:
+    """Merge one ``name`` → ``meta`` into ``config["libs"]``.
+
+    Mutate-and-return. Ensures ``config.setdefault("libs", {})`` then sets
+    ``config["libs"][name] = meta``. Idempotent (same name+meta twice =
+    identical result). Preserves every other lib and every other top-level key.
+    """
+    libs = config.setdefault("libs", {})
+    libs[name] = meta
+    return config
+
+
+@dataclass(frozen=True)
+class LibBundle:
+    """An installable Python lib: a PyPI package name + metadata.
+
+    ``package`` is the PyPI distribution name pip installs. ``version`` is an
+    OPTIONAL default pin (``None`` = let pip resolve the latest compatible).
+    """
+
+    name: str
+    description: str
+    publisher: str  # "swarph-builtin" for bundled
+    trust: str  # "builtin"
+    package: str  # the PyPI distribution name
+    version: Optional[str] = None
+
+
+#: The Samson+Claude MIT libraries — each published to PyPI, each a reusable
+#: core extracted from a swarph build ("every build leaves a tool in the
+#: commons"). All ``swarph-builtin`` / ``trust="builtin"`` in v1.
+BUILTIN_LIBS: dict = {
+    "phawkes": LibBundle(
+        name="phawkes",
+        description=(
+            "multivariate Hawkes process MLE (self/cross-exciting point "
+            "processes)"
+        ),
+        publisher="swarph-builtin",
+        trust="builtin",
+        package="phawkes",
+    ),
+    "fisherrao": LibBundle(
+        name="fisherrao",
+        description=(
+            "Fisher-Rao geodesic distance between multivariate-normal "
+            "parameter sets"
+        ),
+        publisher="swarph-builtin",
+        trust="builtin",
+        package="fisherrao",
+    ),
+    "tailcor": LibBundle(
+        name="tailcor",
+        description="tail-dependence correlation decomposition (TailCoR)",
+        publisher="swarph-builtin",
+        trust="builtin",
+        package="tailcor",
+    ),
+    "diebold-yilmaz": LibBundle(
+        name="diebold-yilmaz",
+        description="Diebold-Yilmaz connectedness/spillover index",
+        publisher="swarph-builtin",
+        trust="builtin",
+        package="diebold-yilmaz",
+    ),
+    "hodgex": LibBundle(
+        name="hodgex",
+        description="Hodge decomposition on graphs/simplicial complexes",
+        publisher="swarph-builtin",
+        trust="builtin",
+        package="hodgex",
+    ),
+}
+
+
+def resolve_builtin_lib(name: str) -> LibBundle:
+    """Return the bundled :class:`LibBundle` named ``name``.
+
+    Raises :class:`ValueError` (listing the available names) for an unknown
+    name — propagated to the CLI layer, which surfaces it; nothing installed.
+    """
+    try:
+        return BUILTIN_LIBS[name]
+    except KeyError:
+        available = ", ".join(sorted(BUILTIN_LIBS))
+        raise ValueError(
+            f"unknown builtin lib {name!r}; available: {available}"
+        ) from None
+
+
+def _default_pip_runner(args: list) -> int:
+    """Run ``python -m pip <args>`` in this interpreter; return its exit code.
+
+    The real default for :class:`LibHandler`'s injectable ``pip_runner`` seam.
+    Uses ``sys.executable`` so the lib lands in the SAME environment swarph-cli
+    runs in. Tests inject a fake callable instead of shelling out.
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "pip", *args]
+    ).returncode
+
+
+class LibHandler:
+    """Installs ``lib`` artifacts as a thin pip wrapper + registry (5th class).
+
+    v1 is BUILTIN-ONLY (mirrors :class:`McpHandler` / :class:`ToolHandler`): a
+    ``swarph-builtin`` publisher resolves to a bundled :class:`LibBundle` and
+    runs ``pip install <package>`` (``==<version>`` when the URI pins one), then
+    records the lib under ``libs/<name>`` in ``~/.swarph/libs.json``. ANY other
+    publisher is a published/untrusted reference and FAILS CLOSED, neither
+    invoking pip nor writing anything (signed-publisher gate is v2, scope §3.1).
+
+    pip does the real install — the swarph contributes DISCOVERY + the uniform
+    verb + the registry record, not a reimplementation of a package manager.
+
+    The ``pip_runner`` is an injectable ``(args: list[str]) -> int`` callable
+    (default :func:`_default_pip_runner`) so tests verify the install path
+    without shelling out. A non-zero pip exit yields code 6 (install/dep
+    failure), writing nothing to the registry.
+    """
+
+    klass = "lib"
+
+    def __init__(self, *, libs_path=None, pip_runner=None) -> None:
+        self.libs_path = (
+            libs_path if libs_path is not None else _DEFAULT_LIBS_PATH
+        )
+        self.pip_runner = (
+            pip_runner if pip_runner is not None else _default_pip_runner
+        )
+
+    def _canonical_bytes(self, bundle) -> bytes:
+        """Deterministic installable bytes for a :class:`LibBundle`.
+
+        The installable identity is the ``package`` + ``version`` pip resolves
+        against; serialized with sorted keys + compact separators so the
+        ``#sha256`` in a URI is verifiable and stable.
+        """
+        return json.dumps(
+            {"package": bundle.package, "version": bundle.version},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    def add(self, ref: ArtifactRef, *, assume_yes: bool, out) -> int:
+        if not _is_trusted_publisher(ref.publisher):
+            out(
+                "swarph add: published libs are not yet trusted — only "
+                "swarph-builtin in v1 (v2: signed-publisher gate, scope §3.1); "
+                "nothing installed"
+            )
+            return 2
+
+        # ValueError for an unknown builtin name propagates → caught at run_add.
+        bundle = resolve_builtin_lib(ref.name)
+
+        # The #sha256 (when present) verifies the SPEC bytes — pip's own
+        # --require-hashes needs a requirements file, so for v1 we verify the
+        # spec here and record the sha in the registry rather than passing
+        # --require-hashes to a bare ``pip install pkg`` (which errors).
+        guard = _hash_guard(ref, self._canonical_bytes(bundle), out)
+        if guard is not None:
+            return guard
+
+        # ---- build the pip args (version pin appended to the package spec) ---
+        spec = bundle.package
+        if ref.version:
+            spec = f"{bundle.package}=={ref.version}"
+        pip_args = ["install", spec]
+
+        libs_path = Path(self.libs_path).expanduser()
+
+        # ---- show-before-run preview (builtin = trusted, no prompt) ----
+        out(
+            f"lib: {bundle.name}  (trust={bundle.trust}, "
+            f"publisher={bundle.publisher})"
+        )
+        if bundle.description:
+            out(f"  {bundle.description}")
+        out(f"registry → {libs_path}")
+        out(f"  running: pip {' '.join(pip_args)}")
+
+        rc = self.pip_runner(pip_args)
+        if rc != 0:
+            out(
+                f"swarph add: pip install failed (exit {rc}) for "
+                f"{spec!r}; nothing registered"
+            )
+            return 6
+
+        meta = {
+            "package": bundle.package,
+            "version": ref.version or bundle.version,
+            "publisher": bundle.publisher,
+            "sha256": ref.sha256,
+        }
+        config = _load_libs(self.libs_path)
+        config = _merge_lib(config, ref.name, meta)
+        _save_libs(self.libs_path, config)
+
+        out(
+            f"installed lib '{ref.name}' (pip install {bundle.package}) — "
+            f"registered in {libs_path}"
+        )
+        return 0
+
+
 class StubHandler:
     """Placeholder handler for an artifact class not yet implemented.
 
@@ -1061,14 +1343,18 @@ def build_registry(
     mcp_config_path=None,
     skills_home=None,
     lanes_path=None,
+    libs_path=None,
+    pip_runner=None,
 ) -> dict:
     """Build the ``klass`` → handler registry for one ``add`` invocation.
 
     The hook paths are threaded into :class:`HookHandler`, the ``.mcp.json``
     path into :class:`McpHandler`, the skills home into :class:`SkillHandler`,
-    and the tool lane-config path into :class:`ToolHandler` (each defaulting to
-    its module/cwd default when ``None``) so tests can point the whole install
-    at tmp paths. All four artifact classes now have real handlers.
+    the tool lane-config path into :class:`ToolHandler`, and the lib registry
+    path + injectable ``pip_runner`` into :class:`LibHandler` (each defaulting
+    to its module/cwd default when ``None``) so tests can point the whole
+    install at tmp paths and inject a fake pip. All five artifact classes now
+    have real handlers.
     """
     hook_kwargs = {}
     if settings_path is not None:
@@ -1081,6 +1367,7 @@ def build_registry(
         "mcp": McpHandler(mcp_config_path=mcp_config_path),
         "skill": SkillHandler(skills_home=skills_home),
         "tool": ToolHandler(lanes_path=lanes_path),
+        "lib": LibHandler(libs_path=libs_path, pip_runner=pip_runner),
     }
 
 
@@ -1106,6 +1393,8 @@ def run_add(
     mcp_config_path=None,
     skills_home=None,
     lanes_path=None,
+    libs_path=None,
+    pip_runner=None,
 ) -> int:
     """``swarph add <uri> [--yes]`` — parse + dispatch a swarph artifact URI.
 
@@ -1146,6 +1435,8 @@ def run_add(
         mcp_config_path=mcp_config_path,
         skills_home=skills_home,
         lanes_path=lanes_path,
+        libs_path=libs_path,
+        pip_runner=pip_runner,
     )
 
     try:
