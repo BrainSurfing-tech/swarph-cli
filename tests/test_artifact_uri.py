@@ -29,7 +29,7 @@ def test_parse_full_uri_all_fields(klass: str) -> None:
 
 
 def test_artifact_classes_value() -> None:
-    assert ARTIFACT_CLASSES == ("hook", "mcp", "skill", "tool")
+    assert ARTIFACT_CLASSES == ("hook", "mcp", "skill", "tool", "lib")
 
 
 # --------------------------------------------------------------------------- #
