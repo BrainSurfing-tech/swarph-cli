@@ -622,6 +622,10 @@ def test_install_service_two_cells_distinct_targets(isolated_state, capsys):
     lab_t, sci_t = targets(out_lab), targets(out_sci)
     assert len(lab_t) == 3 and len(sci_t) == 3
     assert lab_t.isdisjoint(sci_t)  # the whole point: no shared filenames
+    # Template-drift guard (drop nit): each cell's ExecStart MUST carry its
+    # own --cell — the 0.10.0 generated ExecStart dropped the flag entirely.
+    assert "watchdog --check --cell lab" in out_lab
+    assert "watchdog --check --cell science-claude" in out_sci
 
 
 def test_install_service_dry_run_default_cell_is_lab(isolated_state, capsys):

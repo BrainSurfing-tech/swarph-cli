@@ -117,7 +117,7 @@ _DEFAULT_STABLE_MODEL = "claude-opus-4-8"
 # the --stable-model CONFIG value must look like a model id before it reaches
 # the TUI. A malformed override falls back to the known-good default — a
 # config typo must not block recovery, and must not inject an arbitrary string.
-_STABLE_MODEL_RE = re.compile(r"claude-[a-z0-9.-]+")
+_STABLE_MODEL_RE = re.compile(r"claude-[a-z0-9][a-z0-9.-]*")
 # Cross-WINDOW circuit breakers (drop seat-A C1/C3, PR #58 follow-up). The
 # per-window marker bounds one swap per stale window, but a FLAPPING cursor
 # (turn-ends without real progress) restarts the ladder each window — A1.5
@@ -861,17 +861,59 @@ def _history_path(
     return log_path.parent / f"{kind}-{role}-{safe_tmux}.json"
 
 
-def _load_recent_events(path: Path, window_sec: int, now: int) -> list:
-    """Timestamps within the window; unreadable/corrupt history reads as
-    EMPTY (the breakers are cross-window insurance on top of the per-window
-    verified marker — a lost history must not block recovery)."""
+def _load_recent_events(path: Path, window_sec: int, now: int) -> tuple:
+    """Return (timestamps-within-window, blind).
+
+    `blind` is True only for CHRONIC unreadability — the history file EXISTS
+    but cannot be read (OSError/PermissionError: read-only rootfs, NFS perms,
+    tmpfs quota). Distinct from a legit FileNotFound (first run) or a
+    corrupt/empty JSON (a write overwrites it) — both return ([], False) and
+    are NOT breaker-blind.
+
+    Why the distinction matters (drop seat-A, PR #60): the breakers degrade to
+    the bounded per-window baseline on a lost history (fail-open is right — a
+    recovery tool must not brick a recoverable cell). BUT a PERMANENTLY
+    unreadable history pins len(recent) at 0 forever, so the loud circuit-open
+    can never fire — the breaker goes SILENTLY blind. Surfacing `blind` lets
+    the caller emit the same loud signal the circuit-open path emits, so a
+    dead breaker is visible instead of a no-op."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, list):
-            return []
-        return [t for t in data if isinstance(t, (int, float)) and now - t <= window_sec]
-    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
-        return []
+    except FileNotFoundError:
+        return [], False  # legit first run — not blind
+    except (json.JSONDecodeError, ValueError):
+        return [], False  # corrupt/empty — a write overwrites it; not blind
+    except OSError:
+        return [], True   # file exists but unreadable — BREAKER BLIND
+    if not isinstance(data, list):
+        return [], False
+    fresh = [t for t in data if isinstance(t, (int, float)) and now - t <= window_sec]
+    return fresh, False
+
+
+def _signal_breaker_blind(
+    args: argparse.Namespace, role: str, which: str, diag: dict
+) -> None:
+    """Loud signal that a cross-window circuit breaker can't read its history
+    (drop seat-A, PR #60). Gives a blind breaker the SAME visibility the
+    circuit-OPEN path gets: a distinct stderr line + diag flag + an N1 emit.
+    Dedup across ticks is impossible by construction — the would-be dedup
+    store lives in the same unwritable dir — so on a chronically-broken host
+    this recurs every tick. That is the correct failure mode for a recovery
+    tool: a blind breaker is a standing emergency, not a one-time blip."""
+    diag["breaker_blind"] = which
+    print(
+        f"[watchdog] BREAKER BLIND ({which}) for {role}: circuit-breaker "
+        f"history unreadable — cross-window bound degraded to per-window "
+        f"baseline; the loud circuit-open can NOT fire. Check state-dir perms "
+        f"(read-only rootfs / NFS / tmpfs quota).",
+        file=sys.stderr,
+    )
+    _notify_peer_event(
+        args, role, "breaker_blind",
+        f"which={which} — circuit history unreadable, breaker degraded; "
+        f"operator attention required", diag,
+    )
 
 
 def _append_event(path: Path, now: int, recent: list) -> None:
@@ -945,11 +987,13 @@ def _escalate_a2(
         return 2
     respawn_hist = _history_path(log_path, role, tmux_session, "a2-respawns")
     now = _now()
-    recent = _load_recent_events(
+    recent, respawn_blind = _load_recent_events(
         respawn_hist,
         getattr(args, "a2_respawn_window_sec", _DEFAULT_A2_RESPAWN_WINDOW_SEC),
         now,
     )
+    if respawn_blind:
+        _signal_breaker_blind(args, role, "a2_respawn", diag)
     diag["a2_recent_respawns"] = len(recent)
     if len(recent) >= getattr(args, "a2_max_respawns", _DEFAULT_A2_MAX_RESPAWNS):
         diag["decision"] = "a2_circuit_open"
@@ -1308,9 +1352,11 @@ def _run_local_check(args: argparse.Namespace) -> int:
             # the swap demonstrably isn't recovering the cell ⇒ escalate.
             swap_hist = _history_path(log_path, role, tmux_session, "a15-swaps")
             now = _now()
-            recent_swaps = _load_recent_events(
+            recent_swaps, swap_blind = _load_recent_events(
                 swap_hist, getattr(args, "a15_swap_window_sec",
                                    _DEFAULT_A15_SWAP_WINDOW_SEC), now)
+            if swap_blind:
+                _signal_breaker_blind(args, role, "a15_thrash", diag)
             diag["a15_recent_swaps"] = len(recent_swaps)
             if len(recent_swaps) >= getattr(
                 args, "a15_max_swaps", _DEFAULT_A15_MAX_SWAPS

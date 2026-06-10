@@ -778,3 +778,85 @@ def test_notify_peer_emits_on_circuit_open(isolated_state, stale_cursor, monkeyp
         c for c in dm_mock.call_args_list if "event=a2_circuit_open" in c[0][4]
     ]
     assert len(circuit_emits) == 1
+
+
+# ---------------------------------------------------------------------------
+# Breaker-blind loud signal (drop seat-A PR #60 — the headline CHANGE)
+# A circuit-breaker that can't read its history must SAY SO, never no-op.
+# ---------------------------------------------------------------------------
+
+
+def test_load_recent_events_distinguishes_blind_from_absent(tmp_path):
+    """FileNotFound + corrupt-JSON are NOT blind (return [], False); a file
+    that exists but raises OSError on read IS blind ([], True)."""
+    from swarph_cli.commands.watchdog import _load_recent_events
+    now = int(time.time())
+
+    missing = tmp_path / "nope.json"
+    assert _load_recent_events(missing, 3600, now) == ([], False)
+
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text("{not json")
+    assert _load_recent_events(corrupt, 3600, now) == ([], False)
+
+    blind = tmp_path / "blind.json"
+    blind.write_text("[]")
+    with patch(
+        "swarph_cli.commands.watchdog.Path.read_text",
+        side_effect=PermissionError,
+    ):
+        events, is_blind = _load_recent_events(blind, 3600, now)
+    assert events == [] and is_blind is True
+
+
+def test_partial_unreadable_history_emits_breaker_blind(isolated_state, stale_cursor, monkeypatch, capsys):
+    """The partial case: A1/A1.5 markers persist (ladder reaches the breaker)
+    but the .json history is unreadable → BREAKER BLIND stderr + N1 emit, and
+    the breaker degrades to the bounded per-window baseline (still swaps, not
+    a hard hold)."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "test-token")
+    log_path = isolated_state / "wd.log"
+    from swarph_cli.commands import watchdog as wd
+    real_load = wd._load_recent_events
+
+    def blind_for_history(path, window, now):
+        if str(path).endswith(".json"):      # the swap/respawn history files
+            return [], True
+        return real_load(path, window, now)
+
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True), \
+         patch("swarph_cli.commands.watchdog._load_recent_events", side_effect=blind_for_history), \
+         patch("swarph_cli.commands.watchdog._dm_wake", return_value=True) as dm_mock:
+        _tick(stale_cursor, log_path, "--notify-peer", "lab-ovh")          # A1
+        rc2 = _tick(stale_cursor, log_path, "--notify-peer", "lab-ovh")    # A1.5 — blind history
+    err = capsys.readouterr().err
+    assert "BREAKER BLIND (a15_thrash)" in err
+    assert rc2 == 5                                    # degrades to baseline swap, not a hold
+    blind_emits = [
+        c for c in dm_mock.call_args_list if "event=breaker_blind" in c[0][4]
+    ]
+    assert len(blind_emits) == 1
+
+
+def test_homogeneous_unwritable_state_dir_a1_still_fires(isolated_state, stale_cursor):
+    """CHANGE-2 scenario: a state dir unwritable from tick 1. The A1 marker
+    never persists → the ladder never escalates and A1 prose re-fires each
+    tick. Documents the (pre-existing) behavior: the cell still gets its
+    wake-prose every tick; the slash-command rung simply never engages — the
+    homogeneous-unwritable case can't reach a blind /model inject."""
+    log_path = isolated_state / "wd.log"
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
+         patch("swarph_cli.commands.watchdog._record_a1_fired", side_effect=lambda *a, **k: None), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
+        rcs = [_tick(stale_cursor, log_path) for _ in range(3)]
+    assert rcs == [1, 1, 1]                            # A1 every tick — never escalates
+    assert all(
+        c[0][1].startswith("watchdog wake") for c in send_mock.call_args_list
+    )                                                  # only prose; no blind /model inject
