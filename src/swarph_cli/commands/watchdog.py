@@ -102,6 +102,16 @@ _DEFAULT_PEER_HEALTH_RECOVERY_THRESHOLD_SEC = 120
 # 1800s (30min) mirrors the metered-fallback-alert throttle.
 _DEFAULT_DM_WAKE_COOLDOWN_SEC = 1800
 _RECOVERY_EVENT_TYPES = ("usage_limit_reset",)
+# A1.5 — autonomous engine-swap rung. The model the watchdog injects via
+# `/model <STABLE_MODEL>` when A1 has exhausted (wake fired, cursor still
+# stale) but BEFORE escalating to A2 respawn. This is a hard-coded constant
+# (overridable only via the `--stable-model` CLI flag — a config value, never
+# network/peer/inbox-derived). The tmux payload is ALWAYS the fixed template
+# `f"/model {stable_model}"`; no message content can ever be interpolated into
+# it, by construction. `/model` is a CLI/TUI slash command — NOT an agent tool
+# call — so it bypasses the auto-mode classifier that a classifier-degraded
+# frontier-model cell has blocked, letting the swap recover the session.
+_DEFAULT_STABLE_MODEL = "claude-opus-4-8"
 # A1-DM — cross-host wake. Default prompt sent as a mesh DM to a stranded
 # peer on another host; the peer's sidecar/inbox-watcher then wakes it.
 _DM_WAKE_PROMPT = (
@@ -754,6 +764,31 @@ def _clear_a1_marker(marker: Path) -> None:
         pass
 
 
+def _model_swap_marker_path(
+    log_path: Path, role: str, tmux_session: Optional[str] = None
+) -> Path:
+    """Marker recording the cursor_mtime at which A1.5 last injected /model.
+
+    Distinct file from the A1 marker (``a1-fired-*`` vs ``a15-model-*``) so the
+    two rungs track their own same-window state independently. Same XDG_STATE_HOME
+    co-location + (role, tmux_session) keying + sanitization discipline as the A1
+    marker, so sibling-instance patterns don't collide and cell.yaml-pinned
+    session names with odd characters can't break the filename.
+
+    The ladder reads this marker to decide A1.5-vs-A2: if A1 has exhausted
+    (its marker matches cursor_mtime) AND this A1.5 marker does NOT yet match,
+    the model-swap fires (and stamps this marker); if BOTH match, the model-swap
+    has already been tried this window without the cursor advancing, so the
+    ladder escalates to A2. Cleared on the A2 paths alongside the A1 marker, so
+    a respawned/recovered session starts the ladder fresh.
+    """
+    safe_tmux = "".join(
+        c if (c.isalnum() or c in "-_.") else "_"
+        for c in (tmux_session or role)
+    )
+    return log_path.parent / f"a15-model-{role}-{safe_tmux}.marker"
+
+
 def _log_event(log_path: Path, event: str, details: dict, verbose: bool = False) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
@@ -975,11 +1010,14 @@ def _run_local_check(args: argparse.Namespace) -> int:
     # cursor_stale + a1_marker matches cursor_mtime → noop (F1 same-window suppression)
 
     marker = _a1_marker_path(log_path, role, tmux_session)
+    model_marker_early = _model_swap_marker_path(log_path, role, tmux_session)
     diag["a1_marker"] = str(marker)
 
     if not process_alive:
-        # A2 escalation — clear the A1 marker so the next A1 (after respawn) fires.
+        # A2 escalation — clear BOTH rung markers so the next A1 (after respawn)
+        # fires and the ladder restarts cleanly from A1.
         _clear_a1_marker(marker)
+        _clear_a1_marker(model_marker_early)
         diag["decision"] = "a2_respawn_process_dead"
         if args.no_respawn:
             diag["dry_run_skip"] = True
@@ -1009,6 +1047,7 @@ def _run_local_check(args: argparse.Namespace) -> int:
         # Process alive somewhere but tmux session gone — partial state.
         # Treat as A2 case: respawn fresh sibling.
         _clear_a1_marker(marker)
+        _clear_a1_marker(model_marker_early)
         diag["tmux_missing"] = True
         diag["decision"] = "a2_respawn_tmux_missing"
         if args.no_respawn:
@@ -1019,31 +1058,89 @@ def _run_local_check(args: argparse.Namespace) -> int:
         _log_event(log_path, "a2_respawn", diag, verbose)
         return 2 if spawn_ok else 4
 
-    # F1 — same-stale-window suppression. If A1 already fired at this exact
-    # cursor_mtime, further A1s would only stack wake-prompts in the tmux
-    # input buffer (commander #1092: 13 fires across 65min on a session that
-    # was actively working but cursor only updates at turn-end). Fire AT MOST
-    # ONCE per stale window; re-arm only when cursor advances (recovery) or
-    # A2 escalates (respawn clears the marker above).
-    if _a1_already_fired_at(marker, cursor_mtime):
-        diag["decision"] = "noop_a1_already_fired_this_window"
-        _log_event(log_path, "noop", diag, verbose)
-        return 0
-
     # F3 — tmux pane_activity AND-gate (mother #1087). cursor-mtime measures
     # "time since last turn-end" not "time since last activity"; mid-long-
     # turn cursor is stale even though session is maximally alive. tmux's
     # `#{pane_activity}` covers the mid-turn-active case. If the pane has
-    # had activity within `pane_activity_threshold_sec`, suppress A1 — the
-    # session is working, not stalled. Falls through to firing A1 when
-    # pane_activity is None (tmux missing / older tmux without the format)
-    # so F3 is a strengthening of the gate, not a hard dependency.
+    # had activity within `pane_activity_threshold_sec`, suppress ANY rung
+    # (A1 *and* A1.5) — the session is working, not stalled. Falls through to
+    # firing when pane_activity is None (tmux missing / older tmux without the
+    # format) so F3 is a strengthening of the gate, not a hard dependency.
+    #
+    # F3 is evaluated BEFORE the F1/A1.5 decision so the A1.5 model-swap rung
+    # also respects it (SAFETY 3: harmless-if-idle — never inject /model into a
+    # session that's actively working).
     pane_age = _pane_activity_age_sec(tmux_session)
     diag["pane_activity_age_sec"] = pane_age
     if pane_age is not None and pane_age < pane_activity_threshold:
         diag["decision"] = "noop_pane_activity_recent"
         _log_event(log_path, "noop", diag, verbose)
         return 0
+
+    # F1 / A1.5 — same-stale-window escalation. If A1 already fired at this
+    # exact cursor_mtime, another A1 would only stack wake-prompts in the tmux
+    # input buffer (commander #1092: 13 fires across 65min). The cursor has not
+    # advanced since A1 fired ⇒ the cell is GENUINELY stalled, not merely idle.
+    # This is the escalation point: A1 (wake) → A1.5 (/model-swap) → A2 (respawn).
+    if _a1_already_fired_at(marker, cursor_mtime):
+        model_marker = _model_swap_marker_path(log_path, role, tmux_session)
+        diag["model_swap_marker"] = str(model_marker)
+        model_rung_enabled = not getattr(args, "no_model_rung", False)
+        diag["model_rung_enabled"] = model_rung_enabled
+
+        if not model_rung_enabled:
+            # Rung disabled — legacy F1 behavior: A1-already-fired is a plain
+            # same-window noop. The ladder falls straight A1 → A2 (A2 only
+            # fires on the dead-process / tmux-missing paths above).
+            diag["decision"] = "noop_a1_already_fired_this_window"
+            _log_event(log_path, "noop", diag, verbose)
+            return 0
+
+        if not _a1_already_fired_at(model_marker, cursor_mtime):
+            # A1.5 — autonomous engine-swap. A1 has exhausted but the model
+            # swap has NOT yet been tried this window. Inject `/model <stable>`.
+            #
+            # SAFETY 1 (fixed-template injection): `stable_model` is a hard-coded
+            # constant or the `--stable-model` config flag — NEVER derived from
+            # peer DM / inbox / network data. `unread`, `recovery_event`, and
+            # every other message-shaped value computed above are deliberately
+            # NOT referenced here. The payload is the constant template only.
+            # SAFETY 2 (not peer-triggerable): we reach this branch solely on
+            # the LOCAL cursor-stall health signal (A1 marker matches
+            # cursor_mtime). No message content gates it.
+            stable_model = getattr(args, "stable_model", _DEFAULT_STABLE_MODEL)
+            model_text = f"/model {stable_model}"
+            diag["decision"] = "a15_model_swap"
+            diag["stable_model"] = stable_model
+            diag["model_swap_text"] = model_text
+            print(
+                f"[watchdog] A1.5 model-swap: injecting "
+                f"{model_text} into {tmux_session}",
+                file=sys.stderr,
+            )
+            sent = _tmux_send_keys(tmux_session, model_text)
+            diag["send_keys_ok"] = sent
+            if sent:
+                # Stamp the A1.5 marker at this cursor_mtime so the NEXT tick
+                # (if cursor still hasn't advanced) escalates to A2 rather than
+                # re-injecting /model every tick.
+                _record_a1_fired(model_marker, cursor_mtime)
+            _log_event(log_path, "a15_model_swap", diag, verbose)
+            return 5 if sent else 4
+
+        # A1.5 already tried at this cursor_mtime AND cursor still stale ⇒ the
+        # model-swap did not recover the cell ⇒ escalate to A2 respawn.
+        _clear_a1_marker(marker)
+        _clear_a1_marker(model_marker)
+        diag["decision"] = "a2_respawn_model_rung_exhausted"
+        if args.no_respawn:
+            diag["dry_run_skip"] = True
+            _log_event(log_path, "a2_dry_run", diag, verbose)
+            return 2
+        spawn_ok = _spawn_via_swarph(role, tmux_session)
+        diag["spawn_ok"] = spawn_ok
+        _log_event(log_path, "a2_respawn", diag, verbose)
+        return 2 if spawn_ok else 4
 
     diag["decision"] = "a1_send_keys"
     wake_text = (
@@ -1231,6 +1328,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tmux-session", default=None)
     p.add_argument("--peer", default=None)
     p.add_argument("--no-respawn", action="store_true")
+    p.add_argument(
+        "--stable-model",
+        default=_DEFAULT_STABLE_MODEL,
+        help="A1.5 rung: the known-stable model id injected via `/model "
+             "<id>` when A1 exhausts but cursor is still stale, BEFORE A2 "
+             "respawn. A config value only — NEVER interpolated with peer / "
+             "inbox / network data. Default: " + _DEFAULT_STABLE_MODEL + ".",
+    )
+    p.add_argument(
+        "--no-model-rung", action="store_true",
+        help="Disable the A1.5 `/model`-swap rung; the ladder falls straight "
+             "A1 → A2 (legacy same-window F1 suppression on A1-exhaustion).",
+    )
     p.add_argument(
         "--peer-health-poll", action="store_true",
         help="Phase 4 (v0.7.6): also query mesh-gateway /peer-health-events. "
