@@ -275,6 +275,11 @@ def test_a1_fires_at_most_once_per_stale_window(
     across 65min into an actively-working session's tmux buffer because
     cursor only updates at turn-end, not mid-bash. After F1, watchdog
     fires AT MOST ONCE per stale window; re-arms on cursor advance.
+
+    Pinned to ``--no-model-rung``: with the A1.5 rung enabled (default),
+    same-window escalation goes A1 -> A1.5 -> A2 instead of noop — that
+    ladder is covered in test_watchdog_model_rung.py. This test guards the
+    F1 suppression semantics on the rung-disabled path.
     """
     log_path = isolated_state / "wd.log"
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
@@ -286,21 +291,21 @@ def test_a1_fires_at_most_once_per_stale_window(
         rc1 = run_watchdog(argv=[
             "--check", "--cell", "lab",
             "--cursor", str(stale_cursor),
-            "--threshold", "60",
+            "--threshold", "60", "--no-model-rung",
             "--log", str(log_path),
         ])
         # Second invocation, no cursor change — A1 must NOT fire again
         rc2 = run_watchdog(argv=[
             "--check", "--cell", "lab",
             "--cursor", str(stale_cursor),
-            "--threshold", "60",
+            "--threshold", "60", "--no-model-rung",
             "--log", str(log_path),
         ])
         # Third invocation — still suppressed
         rc3 = run_watchdog(argv=[
             "--check", "--cell", "lab",
             "--cursor", str(stale_cursor),
-            "--threshold", "60",
+            "--threshold", "60", "--no-model-rung",
             "--log", str(log_path),
         ])
     assert rc1 == 1
