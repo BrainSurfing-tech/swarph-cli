@@ -139,7 +139,15 @@ def run_init(argv: list[str]) -> int:
     cwd_raw = args.cwd or (_ask("Working dir (cwd)", str(Path.cwd())) if interactive else str(Path.cwd()))
     cwd = Path(cwd_raw).expanduser().resolve()
     tmux = args.tmux or (_ask("tmux session", name) if interactive else name)
-    cursor = args.cursor or f"/tmp/{name}-cursor.json"
+    # Default MUST match where `swarph mesh sidecar` actually writes its
+    # cursor (<state-dir>/cursor.json, state-dir defaulting to
+    # ~/swarph_state/<name>/mesh-sidecar) — the watchdog reads THIS pin while
+    # the sidecar maintains THAT file. The old /tmp default left the two
+    # shipped components pointing at different paths out of the box
+    # (science-claude onboarding, 2026-06-10).
+    cursor = args.cursor or str(
+        Path.home() / "swarph_state" / name / "mesh-sidecar" / "cursor.json"
+    )
 
     # ── sandbox ──
     if provider == "codex":

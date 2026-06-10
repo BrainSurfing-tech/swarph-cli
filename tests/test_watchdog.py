@@ -586,14 +586,46 @@ def test_install_service_dry_run_writes_no_files(isolated_state, capsys):
     # Dry-run output goes to stderr
     assert "DRY RUN" in captured.err
     assert "cell=droplet" in captured.err
-    # All three target files surface in the preview
-    assert "/etc/systemd/system/swarph-watchdog.service" in captured.err
-    assert "/etc/systemd/system/swarph-watchdog.timer" in captured.err
-    assert "/etc/default/swarph-watchdog" in captured.err
+    # All three target files surface in the preview — PER-CELL names
+    # (v0.10.1: fixed names clobbered the existing unit on multi-cell hosts)
+    assert "/etc/systemd/system/swarph-watchdog-droplet.service" in captured.err
+    assert "/etc/systemd/system/swarph-watchdog-droplet.timer" in captured.err
+    assert "/etc/default/swarph-watchdog-droplet" in captured.err
     # SWARPH_CELL was templated to the requested role
     assert "SWARPH_CELL=droplet" in captured.err
+    # ExecStart carries the cell explicitly (0.10.0 dropped it entirely)
+    assert "watchdog --check --cell droplet" in captured.err
+    # Timer requires the PER-CELL service, not the legacy fixed name
+    assert "Requires=swarph-watchdog-droplet.service" in captured.err
+    # EnvironmentFile is per-cell too
+    assert "EnvironmentFile=-/etc/default/swarph-watchdog-droplet" in captured.err
     # The bundled service file's identifying line shows up
     assert "Swarph watchdog one-shot check" in captured.err
+
+
+def test_install_service_two_cells_distinct_targets(isolated_state, capsys):
+    """The clobber regression: two cells on one host must produce DISJOINT
+    target paths — a second-cell install can never overwrite the first's
+    unit/timer/default files (0.10.0 wrote fixed names and clobbered)."""
+    run_watchdog(argv=["--install-service", "--cell", "lab", "--dry-run"])
+    out_lab = capsys.readouterr().err
+    run_watchdog(argv=["--install-service", "--cell", "science-claude", "--dry-run"])
+    out_sci = capsys.readouterr().err
+
+    def targets(err):
+        return {
+            line.split("would write ")[1].rstrip(":")
+            for line in err.splitlines()
+            if "would write " in line
+        }
+
+    lab_t, sci_t = targets(out_lab), targets(out_sci)
+    assert len(lab_t) == 3 and len(sci_t) == 3
+    assert lab_t.isdisjoint(sci_t)  # the whole point: no shared filenames
+    # Template-drift guard (drop nit): each cell's ExecStart MUST carry its
+    # own --cell — the 0.10.0 generated ExecStart dropped the flag entirely.
+    assert "watchdog --check --cell lab" in out_lab
+    assert "watchdog --check --cell science-claude" in out_sci
 
 
 def test_install_service_dry_run_default_cell_is_lab(isolated_state, capsys):
