@@ -330,3 +330,136 @@ def test_no_model_rung_falls_straight_a1_to_a2(isolated_state, stale_cursor):
     assert rc2 == 0  # legacy F1 noop, NOT 5 (model-swap)
     # No /model was ever injected.
     assert all(not c[0][1].startswith("/model") for c in send_mock.call_args_list)
+
+
+# ---------------------------------------------------------------------------
+# SAFETY 4 — fail-safe-to-A2 (drop seat-A BLOCK-1 / BLOCK-2, PR #58 review)
+# A failure in the rung's BOUNDING mechanism must fail toward respawn,
+# never open toward unbounded /model re-injection.
+# ---------------------------------------------------------------------------
+
+
+def test_send_failure_escalates_to_a2_same_tick(isolated_state, stale_cursor):
+    """BLOCK-1: a FAILED /model send (wedged / timing-out pane) escalates to
+    A2 in the SAME tick. The wedged pane IS the respawn case — re-looping
+    A1.5 every tick would leave A2 permanently unreachable."""
+    log_path = isolated_state / "wd.log"
+
+    def send(session, text):
+        # A1 wake goes through; the /model inject fails (wedged pane).
+        return not text.startswith("/model")
+
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", side_effect=send) as send_mock, \
+         patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True) as spawn_mock:
+        rc1 = run_watchdog(argv=[
+            "--check", "--cell", "lab", "--cursor", str(stale_cursor),
+            "--threshold", "60", "--log", str(log_path),
+        ])
+        rc2 = run_watchdog(argv=[
+            "--check", "--cell", "lab", "--cursor", str(stale_cursor),
+            "--threshold", "60", "--log", str(log_path),
+        ])
+    assert rc1 == 1   # A1
+    assert rc2 == 2   # A2 — same tick as the failed inject, NOT rc=4 re-loop
+    spawn_mock.assert_called_once()
+    model_attempts = [
+        c for c in send_mock.call_args_list if c[0][1].startswith("/model")
+    ]
+    assert len(model_attempts) == 1  # exactly one inject attempt, no re-loop
+
+
+def test_marker_write_failure_escalates_to_a2(isolated_state, stale_cursor):
+    """BLOCK-2: send SUCCEEDS but the A1.5 marker stamp does not persist —
+    the once-per-window bound is gone, so escalate to A2 in the SAME tick
+    rather than re-injecting /model unboundedly on subsequent ticks."""
+    from swarph_cli.commands import watchdog as wd
+
+    log_path = isolated_state / "wd.log"
+    model_marker = _model_swap_marker_path(log_path, "lab", "lab")
+    real_record = wd._record_a1_fired
+
+    def record(marker, mtime):
+        if marker == model_marker:
+            return  # the swallowed-OSError shape: stamp silently lost
+        real_record(marker, mtime)
+
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock, \
+         patch("swarph_cli.commands.watchdog._record_a1_fired", side_effect=record), \
+         patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True) as spawn_mock:
+        rc1 = run_watchdog(argv=[
+            "--check", "--cell", "lab", "--cursor", str(stale_cursor),
+            "--threshold", "60", "--log", str(log_path),
+        ])
+        rc2 = run_watchdog(argv=[
+            "--check", "--cell", "lab", "--cursor", str(stale_cursor),
+            "--threshold", "60", "--log", str(log_path),
+        ])
+    assert rc1 == 1
+    assert rc2 == 2   # verify-after-write failed -> A2 same tick, NOT rc=5
+    spawn_mock.assert_called_once()
+    model_attempts = [
+        c for c in send_mock.call_args_list if c[0][1].startswith("/model")
+    ]
+    assert len(model_attempts) == 1  # the bound held despite the lost stamp
+
+
+def test_marker_oserror_real_path_escalates_to_a2(isolated_state, stale_cursor):
+    """BLOCK-2 end-to-end: drive the GENUINE _record_a1_fired OSError-swallow
+    path (read-only state dir — no mocks on the marker helpers) and assert
+    the rung still fails safe to A2 with exactly one inject."""
+    import os as _os
+
+    state_dir = isolated_state / "wdstate"
+    state_dir.mkdir()
+    log_path = state_dir / "wd.log"
+    common = ["--check", "--cell", "lab", "--cursor", str(stale_cursor),
+              "--threshold", "60", "--log", str(log_path)]
+    try:
+        with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+             patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+             patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+             patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+             patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock, \
+             patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True) as spawn_mock:
+            rc1 = run_watchdog(argv=common)   # A1 — markers/log created writable
+            _os.chmod(state_dir, 0o555)       # now the a15 stamp CANNOT persist
+            rc2 = run_watchdog(argv=common)
+    finally:
+        _os.chmod(state_dir, 0o755)
+    assert rc1 == 1
+    assert rc2 == 2   # real OSError swallowed in stamp -> verify fails -> A2
+    spawn_mock.assert_called_once()
+    model_attempts = [
+        c for c in send_mock.call_args_list if c[0][1].startswith("/model")
+    ]
+    assert len(model_attempts) == 1
+
+
+def test_malformed_stable_model_falls_back_to_default(isolated_state, stale_cursor):
+    """Allowlist (drop nit 2): a --stable-model value that does not look like
+    a model id never reaches the TUI — the payload falls back to the
+    known-good default (typo'd config must not block recovery either)."""
+    log_path = isolated_state / "wd.log"
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
+        for _ in range(2):
+            run_watchdog(argv=[
+                "--check", "--cell", "lab", "--cursor", str(stale_cursor),
+                "--threshold", "60", "--log", str(log_path),
+                "--stable-model", "evil; rm -rf /",
+            ])
+    model_calls = [c for c in send_mock.call_args_list if c[0][1].startswith("/model")]
+    assert len(model_calls) == 1
+    assert model_calls[0][0][1] == f"/model {_DEFAULT_STABLE_MODEL}"
+    assert "evil" not in model_calls[0][0][1]

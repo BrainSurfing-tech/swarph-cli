@@ -65,6 +65,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -112,6 +113,11 @@ _RECOVERY_EVENT_TYPES = ("usage_limit_reset",)
 # call — so it bypasses the auto-mode classifier that a classifier-degraded
 # frontier-model cell has blocked, letting the swap recover the session.
 _DEFAULT_STABLE_MODEL = "claude-opus-4-8"
+# Allowlist shape for the injected model id (drop seat-A nit, PR #58): even
+# the --stable-model CONFIG value must look like a model id before it reaches
+# the TUI. A malformed override falls back to the known-good default — a
+# config typo must not block recovery, and must not inject an arbitrary string.
+_STABLE_MODEL_RE = re.compile(r"claude-[a-z0-9.-]+")
 # A1-DM — cross-host wake. Default prompt sent as a mesh DM to a stranded
 # peer on another host; the peer's sidecar/inbox-watcher then wakes it.
 _DM_WAKE_PROMPT = (
@@ -1096,6 +1102,12 @@ def _run_local_check(args: argparse.Namespace) -> int:
             _log_event(log_path, "noop", diag, verbose)
             return 0
 
+        # SAFETY 4 — fail-safe-to-A2 (drop seat-A, PR #58 BLOCK-1/BLOCK-2):
+        # every failure of the rung's BOUNDING mechanism below escalates to
+        # A2 in the SAME tick. The once-per-window bound must never rest on
+        # a best-effort marker alone — a failure in the bounding mechanism
+        # fails toward respawn, never open toward unbounded /model re-inject.
+        a2_reason = "model_rung_exhausted"
         if not _a1_already_fired_at(model_marker, cursor_mtime):
             # A1.5 — autonomous engine-swap. A1 has exhausted but the model
             # swap has NOT yet been tried this window. Inject `/model <stable>`.
@@ -1104,13 +1116,18 @@ def _run_local_check(args: argparse.Namespace) -> int:
             # constant or the `--stable-model` config flag — NEVER derived from
             # peer DM / inbox / network data. `unread`, `recovery_event`, and
             # every other message-shaped value computed above are deliberately
-            # NOT referenced here. The payload is the constant template only.
+            # NOT referenced here. The payload is the constant template only,
+            # and even the config value must match the model-id allowlist
+            # (_STABLE_MODEL_RE) before it reaches the TUI — a malformed
+            # override falls back to the known-good default.
             # SAFETY 2 (not peer-triggerable): we reach this branch solely on
             # the LOCAL cursor-stall health signal (A1 marker matches
             # cursor_mtime). No message content gates it.
             stable_model = getattr(args, "stable_model", _DEFAULT_STABLE_MODEL)
+            if not _STABLE_MODEL_RE.fullmatch(stable_model):
+                diag["stable_model_rejected"] = stable_model
+                stable_model = _DEFAULT_STABLE_MODEL
             model_text = f"/model {stable_model}"
-            diag["decision"] = "a15_model_swap"
             diag["stable_model"] = stable_model
             diag["model_swap_text"] = model_text
             print(
@@ -1120,19 +1137,35 @@ def _run_local_check(args: argparse.Namespace) -> int:
             )
             sent = _tmux_send_keys(tmux_session, model_text)
             diag["send_keys_ok"] = sent
-            if sent:
-                # Stamp the A1.5 marker at this cursor_mtime so the NEXT tick
-                # (if cursor still hasn't advanced) escalates to A2 rather than
-                # re-injecting /model every tick.
+            if not sent:
+                # BLOCK-1 fix: a FAILED inject (wedged / timing-out pane) is
+                # exactly the respawn case. Re-trying A1.5 next tick would
+                # leave A2 permanently unreachable behind a pane that cannot
+                # accept input. Escalate NOW.
+                a2_reason = "a15_send_failed"
+            else:
                 _record_a1_fired(model_marker, cursor_mtime)
-            _log_event(log_path, "a15_model_swap", diag, verbose)
-            return 5 if sent else 4
+                if not _a1_already_fired_at(model_marker, cursor_mtime):
+                    # BLOCK-2 fix: the stamp did not persist (unwritable state
+                    # dir / full disk / swallowed OSError) — the once-per-window
+                    # bound is GONE and the next tick would re-inject /model
+                    # unboundedly. Verify-after-write; on failure escalate NOW.
+                    a2_reason = "a15_marker_unverified"
+                else:
+                    # Marker stamped AND verified: the NEXT tick (if the cursor
+                    # still hasn't advanced) escalates to A2 rather than
+                    # re-injecting /model.
+                    diag["decision"] = "a15_model_swap"
+                    _log_event(log_path, "a15_model_swap", diag, verbose)
+                    return 5
 
-        # A1.5 already tried at this cursor_mtime AND cursor still stale ⇒ the
-        # model-swap did not recover the cell ⇒ escalate to A2 respawn.
+        # A2 — the single escalation path. Reached when the model-swap was
+        # already tried this window without the cursor advancing
+        # (model_rung_exhausted), OR same-tick when the rung's bounding
+        # mechanism itself failed (a15_send_failed / a15_marker_unverified).
         _clear_a1_marker(marker)
         _clear_a1_marker(model_marker)
-        diag["decision"] = "a2_respawn_model_rung_exhausted"
+        diag["decision"] = f"a2_respawn_{a2_reason}"
         if args.no_respawn:
             diag["dry_run_skip"] = True
             _log_event(log_path, "a2_dry_run", diag, verbose)
