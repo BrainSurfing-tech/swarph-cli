@@ -35,7 +35,11 @@ def test_init_writes_validated_cell(tmp_path):
     assert c.role == "gpt-test"                      # default = name
     assert c.sandbox == "workspace-write"            # codex default
     assert c.extra["tmux_session"] == "gpt-test"     # default = name
-    assert c.extra["cursor_path"] == "/tmp/gpt-test-cursor.json"
+    # Default must match the sidecar's actual write path (<state-dir>/cursor.json)
+    # so watchdog-read and sidecar-write align out of the box.
+    assert c.extra["cursor_path"] == str(
+        Path.home() / "swarph_state" / "gpt-test" / "mesh-sidecar" / "cursor.json"
+    )
 
 
 def test_init_rejects_underscore_name(tmp_path):
