@@ -92,7 +92,7 @@ def test_a1_fires_first_not_model_rung(isolated_state, stale_cursor):
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
         rc = run_watchdog(argv=[
             "--check", "--cell", "lab",
@@ -114,7 +114,7 @@ def test_a1_exhausted_cursor_stale_fires_model_rung(isolated_state, stale_cursor
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
         # Tick 1 → A1
         rc1 = run_watchdog(argv=[
@@ -143,7 +143,7 @@ def test_model_rung_exhausted_escalates_to_a2(isolated_state, stale_cursor):
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True), \
          patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True) as spawn_mock:
         for _ in range(3):
@@ -165,7 +165,7 @@ def test_cursor_advance_after_model_rung_deescalates(isolated_state, stale_curso
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True), \
          patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True) as spawn_mock:
         # Tick 1 → A1
@@ -201,7 +201,7 @@ def test_injected_payload_is_exactly_fixed_template(isolated_state, stale_cursor
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
         for _ in range(2):
             run_watchdog(argv=[
@@ -212,7 +212,11 @@ def test_injected_payload_is_exactly_fixed_template(isolated_state, stale_cursor
         c for c in send_mock.call_args_list if c[0][1].startswith("/model")
     ]
     assert len(model_calls) == 1
-    assert model_calls[0] == call("lab", f"/model {_DEFAULT_STABLE_MODEL}")
+    # clear_input=True is part of the fixed contract (drop C2): C-u precedes
+    # the payload so it can never concatenate onto a half-typed buffer.
+    assert model_calls[0] == call(
+        "lab", f"/model {_DEFAULT_STABLE_MODEL}", clear_input=True
+    )
 
 
 def test_peer_message_content_cannot_reach_injection(isolated_state, stale_cursor):
@@ -228,7 +232,7 @@ def test_peer_message_content_cannot_reach_injection(isolated_state, stale_curso
          patch("swarph_cli.commands.watchdog._gateway_recent_recovery_event",
                return_value={"event_type": evil, "time": evil}), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
         for _ in range(2):
             run_watchdog(argv=[
@@ -260,7 +264,7 @@ def test_model_rung_skipped_when_pane_active(isolated_state, stale_cursor):
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True):
         run_watchdog(argv=[
             "--check", "--cell", "lab", "--cursor", str(stale_cursor),
@@ -293,7 +297,7 @@ def test_stable_model_flag_overrides_default(isolated_state, stale_cursor):
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
         for _ in range(2):
             run_watchdog(argv=[
@@ -313,7 +317,7 @@ def test_no_model_rung_falls_straight_a1_to_a2(isolated_state, stale_cursor):
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
         # Tick 1 → A1.
         rc1 = run_watchdog(argv=[
@@ -345,14 +349,14 @@ def test_send_failure_escalates_to_a2_same_tick(isolated_state, stale_cursor):
     A1.5 every tick would leave A2 permanently unreachable."""
     log_path = isolated_state / "wd.log"
 
-    def send(session, text):
+    def send(session, text, **kwargs):
         # A1 wake goes through; the /model inject fails (wedged pane).
         return not text.startswith("/model")
 
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", side_effect=send) as send_mock, \
          patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True) as spawn_mock:
         rc1 = run_watchdog(argv=[
@@ -390,7 +394,7 @@ def test_marker_write_failure_escalates_to_a2(isolated_state, stale_cursor):
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock, \
          patch("swarph_cli.commands.watchdog._record_a1_fired", side_effect=record), \
          patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True) as spawn_mock:
@@ -426,7 +430,7 @@ def test_marker_oserror_real_path_escalates_to_a2(isolated_state, stale_cursor):
         with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
              patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
              patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-             patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+             patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
              patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock, \
              patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True) as spawn_mock:
             rc1 = run_watchdog(argv=common)   # A1 — markers/log created writable
@@ -451,7 +455,7 @@ def test_malformed_stable_model_falls_back_to_default(isolated_state, stale_curs
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
          patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
-         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
          patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
         for _ in range(2):
             run_watchdog(argv=[
@@ -463,3 +467,314 @@ def test_malformed_stable_model_falls_back_to_default(isolated_state, stale_curs
     assert len(model_calls) == 1
     assert model_calls[0][0][1] == f"/model {_DEFAULT_STABLE_MODEL}"
     assert "evil" not in model_calls[0][0][1]
+
+
+# ---------------------------------------------------------------------------
+# SAFETY 3b — pane-state precondition for the slash-command rung (drop C2)
+# ---------------------------------------------------------------------------
+
+
+def test_a15_skipped_when_pane_state_unreadable(isolated_state, stale_cursor):
+    """When tmux cannot report pane_activity (None — missing/ancient tmux),
+    A1's prose wake still falls through, but the SLASH-COMMAND rung must NOT
+    inject into an unverifiable pane: the window behaves as --no-model-rung."""
+    log_path = isolated_state / "wd.log"
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
+        rc1 = run_watchdog(argv=[
+            "--check", "--cell", "lab", "--cursor", str(stale_cursor),
+            "--threshold", "60", "--log", str(log_path),
+        ])
+        rc2 = run_watchdog(argv=[
+            "--check", "--cell", "lab", "--cursor", str(stale_cursor),
+            "--threshold", "60", "--log", str(log_path),
+        ])
+    assert rc1 == 1   # A1 wake still fires on unreadable pane state (prose)
+    assert rc2 == 0   # A1.5 SKIPPED — no blind slash-command inject
+    assert all(
+        not c[0][1].startswith("/model") for c in send_mock.call_args_list
+    )
+
+
+def test_a15_send_includes_clear_input(isolated_state, stale_cursor):
+    """The /model inject always carries clear_input=True (C-u prefix) so a
+    half-typed input buffer can never corrupt the slash command (drop C2)."""
+    log_path = isolated_state / "wd.log"
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
+        for _ in range(2):
+            run_watchdog(argv=[
+                "--check", "--cell", "lab", "--cursor", str(stale_cursor),
+                "--threshold", "60", "--log", str(log_path),
+            ])
+    model_calls = [
+        c for c in send_mock.call_args_list if c[0][1].startswith("/model")
+    ]
+    assert len(model_calls) == 1
+    assert model_calls[0].kwargs.get("clear_input") is True
+    # The A1 wake (prose) does NOT need the clear prefix — unchanged contract.
+    wake_calls = [
+        c for c in send_mock.call_args_list if c[0][1].startswith("watchdog wake")
+    ]
+    assert wake_calls and all(
+        not c.kwargs.get("clear_input") for c in wake_calls
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pane targeting — send to the claude pane, never a shell pane (drop N3)
+# ---------------------------------------------------------------------------
+
+
+def _panes_result(stdout, rc=0):
+    from unittest.mock import MagicMock
+    m = MagicMock()
+    m.returncode = rc
+    m.stdout = stdout
+    return m
+
+
+def test_resolve_send_target_prefers_claude_pane():
+    """Multi-pane session with a bash pane listed first: the claude/node pane
+    wins — /model must never land in a shell."""
+    from swarph_cli.commands.watchdog import _resolve_send_target
+
+    with patch(
+        "swarph_cli.commands.watchdog.subprocess.run",
+        return_value=_panes_result("%1 bash\n%2 node\n%3 tail\n"),
+    ):
+        assert _resolve_send_target("lab") == "%2"
+
+
+def test_resolve_send_target_falls_back_to_session():
+    """No claude-shaped pane (or tmux failure) → the session name passes
+    through unchanged: behavior identical to pre-N3."""
+    from swarph_cli.commands.watchdog import _resolve_send_target
+
+    with patch(
+        "swarph_cli.commands.watchdog.subprocess.run",
+        return_value=_panes_result("%1 bash\n%2 vim\n"),
+    ):
+        assert _resolve_send_target("lab") == "lab"
+    with patch(
+        "swarph_cli.commands.watchdog.subprocess.run",
+        side_effect=FileNotFoundError,
+    ):
+        assert _resolve_send_target("lab") == "lab"
+    with patch(
+        "swarph_cli.commands.watchdog.subprocess.run",
+        return_value=_panes_result("", rc=1),
+    ):
+        assert _resolve_send_target("lab") == "lab"
+
+
+def test_send_keys_targets_resolved_pane():
+    """_tmux_send_keys sends to the RESOLVED pane id, with C-u preceding the
+    payload when clear_input=True."""
+    from swarph_cli.commands import watchdog as wd
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[1] == "list-panes":
+            return _panes_result("%1 bash\n%2 claude\n")
+        return _panes_result("", rc=0)
+
+    with patch("swarph_cli.commands.watchdog.subprocess.run", side_effect=fake_run):
+        ok = wd._tmux_send_keys("lab", "/model claude-opus-4-8", clear_input=True)
+    assert ok
+    send = [c for c in calls if c[1] == "send-keys"][0]
+    target = send[send.index("-t") + 1]
+    assert target == "%2"                       # the claude pane, not the session
+    assert send[send.index("-t") + 2] == "C-u"  # clear precedes the payload
+
+
+# ---------------------------------------------------------------------------
+# Circuit breakers — C1 thrash + C3 respawn cap (drop seat-A, cross-window)
+# ---------------------------------------------------------------------------
+
+
+def _tick(cursor, log_path, *extra):
+    return run_watchdog(argv=[
+        "--check", "--cell", "lab", "--cursor", str(cursor),
+        "--threshold", "60", "--log", str(log_path), *extra,
+    ])
+
+
+def _set_window(cursor, mtime):
+    import os as _os
+    _os.utime(cursor, (mtime, mtime))
+
+
+def test_flapping_cursor_trips_thrash_circuit(isolated_state, stale_cursor):
+    """C1: a cursor that ADVANCES each window without real progress restarts
+    the ladder forever — per-window bounds alone let A1.5 fire once per
+    window, unbounded, with A2 never engaging. After max-swaps within the
+    window, the next would-be swap escalates to A2 instead."""
+    log_path = isolated_state / "wd.log"
+    base = time.time() - 3600
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock, \
+         patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True) as spawn_mock:
+        rcs = []
+        for w in range(3):                      # three flapping windows
+            _set_window(stale_cursor, base + w * 10)
+            rcs.append(_tick(stale_cursor, log_path))   # A1
+            rcs.append(_tick(stale_cursor, log_path))   # A1.5 or circuit
+    # W1, W2: swap fired. W3: thrash circuit -> A2 instead of a third swap.
+    assert rcs == [1, 5, 1, 5, 1, 2]
+    model_count = sum(
+        1 for c in send_mock.call_args_list if c[0][1].startswith("/model")
+    )
+    assert model_count == 2                     # never a third swap
+    spawn_mock.assert_called_once()             # A2 engaged exactly once
+
+
+def test_a2_circuit_opens_after_max_respawns(isolated_state, stale_cursor):
+    """C3: when respawns themselves don't recover the cell (both engines
+    degraded), the ladder must not respawn-churn forever — after max
+    respawns within the window the circuit OPENS (exit 6, no spawn)."""
+    log_path = isolated_state / "wd.log"
+    base = time.time() - 3600
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True), \
+         patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True) as spawn_mock:
+        finals = []
+        for w in range(4):                      # four degraded windows
+            _set_window(stale_cursor, base + w * 10)
+            last = 0
+            for _ in range(3):                  # drive each window to its end
+                last = _tick(stale_cursor, log_path)
+                if last in (2, 6):
+                    break
+            finals.append(last)
+    # W1-W3 end in A2 respawns; W4 the circuit is open: exit 6, NO 4th spawn.
+    assert finals[:3] == [2, 2, 2]
+    assert finals[3] == 6
+    assert spawn_mock.call_count == 3
+
+
+def test_respawn_circuit_resets_outside_window(isolated_state, stale_cursor):
+    """The circuit is a WINDOW, not a lifetime cap: respawns older than the
+    window age out and A2 becomes available again."""
+    log_path = isolated_state / "wd.log"
+    base = time.time() - 3600
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True), \
+         patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True) as spawn_mock:
+        # Tight window (1s) so prior respawns age out between windows.
+        for w in range(4):
+            _set_window(stale_cursor, base + w * 10)
+            last = 0
+            for _ in range(3):
+                last = _tick(stale_cursor, log_path,
+                             "--a2-respawn-window-sec", "1")
+                if last in (2, 6):
+                    break
+            time.sleep(1.1)                     # age the respawn out
+            assert last == 2                    # never opens: history expired
+    assert spawn_mock.call_count == 4
+
+
+# ---------------------------------------------------------------------------
+# N1 observability — --notify-peer mesh emit (drop seat-A)
+# ---------------------------------------------------------------------------
+
+
+def test_notify_peer_default_off_no_dm(isolated_state, stale_cursor):
+    """Without --notify-peer, NO mesh DM fires on a swap — current behavior
+    unchanged by default."""
+    log_path = isolated_state / "wd.log"
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True), \
+         patch("swarph_cli.commands.watchdog._dm_wake", return_value=True) as dm_mock:
+        for _ in range(2):
+            _tick(stale_cursor, log_path)
+    dm_mock.assert_not_called()
+
+
+def test_notify_peer_emits_fixed_template_on_swap(isolated_state, stale_cursor, monkeypatch):
+    """--notify-peer + token: the swap emits ONE mesh DM whose content is the
+    fixed template (config-validated stable model only — adversarial
+    recovery-event content can never reach it)."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "test-token")
+    log_path = isolated_state / "wd.log"
+    evil = "; rm -rf / ; injected"
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._gateway_recent_recovery_event",
+               return_value={"event_type": evil, "time": evil}), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True), \
+         patch("swarph_cli.commands.watchdog._dm_wake", return_value=True) as dm_mock:
+        for _ in range(2):
+            _tick(stale_cursor, log_path, "--notify-peer", "lab-ovh")
+    assert dm_mock.call_count == 1
+    content = dm_mock.call_args[0][4]
+    assert "event=a15_model_swap" in content
+    assert _DEFAULT_STABLE_MODEL in content
+    assert evil not in content                  # fixed-template discipline
+    assert dm_mock.call_args[0][2] == "lab-ovh"  # target peer from the flag
+
+
+def test_notify_peer_without_token_skips_quietly(isolated_state, stale_cursor):
+    """--notify-peer but no MESH_GATEWAY_TOKEN: skip the emit, never raise,
+    ladder behavior unchanged (best-effort by construction)."""
+    log_path = isolated_state / "wd.log"
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True), \
+         patch("swarph_cli.commands.watchdog._dm_wake", return_value=True) as dm_mock:
+        rc1 = _tick(stale_cursor, log_path, "--notify-peer", "lab-ovh")
+        rc2 = _tick(stale_cursor, log_path, "--notify-peer", "lab-ovh")
+    assert (rc1, rc2) == (1, 5)                 # ladder unchanged
+    dm_mock.assert_not_called()
+
+
+def test_notify_peer_emits_on_circuit_open(isolated_state, stale_cursor, monkeypatch):
+    """The circuit-open HOLD is precisely the event an operator must see —
+    assert the emit fires there too."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "test-token")
+    log_path = isolated_state / "wd.log"
+    base = time.time() - 3600
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True), \
+         patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True), \
+         patch("swarph_cli.commands.watchdog._dm_wake", return_value=True) as dm_mock:
+        last = 0
+        for w in range(4):
+            _set_window(stale_cursor, base + w * 10)
+            for _ in range(3):
+                last = _tick(stale_cursor, log_path, "--notify-peer", "lab-ovh")
+                if last in (2, 6):
+                    break
+    assert last == 6
+    circuit_emits = [
+        c for c in dm_mock.call_args_list if "event=a2_circuit_open" in c[0][4]
+    ]
+    assert len(circuit_emits) == 1

@@ -118,6 +118,19 @@ _DEFAULT_STABLE_MODEL = "claude-opus-4-8"
 # the TUI. A malformed override falls back to the known-good default — a
 # config typo must not block recovery, and must not inject an arbitrary string.
 _STABLE_MODEL_RE = re.compile(r"claude-[a-z0-9.-]+")
+# Cross-WINDOW circuit breakers (drop seat-A C1/C3, PR #58 follow-up). The
+# per-window marker bounds one swap per stale window, but a FLAPPING cursor
+# (turn-ends without real progress) restarts the ladder each window — A1.5
+# would fire once per window forever and A2 never engages (C1). And if BOTH
+# engines are degraded, each A2 respawns onto a crushed default and the whole
+# ladder repeats across windows (C3). History files (timestamps, pruned to a
+# window) bound both: >= max swaps in the window → escalate to A2 instead of
+# swapping again; >= max respawns in the window → STOP respawning (circuit
+# open, exit 6, operator attention) rather than churn the cell.
+_DEFAULT_A15_MAX_SWAPS = 2
+_DEFAULT_A15_SWAP_WINDOW_SEC = 21600   # 6h
+_DEFAULT_A2_MAX_RESPAWNS = 3
+_DEFAULT_A2_RESPAWN_WINDOW_SEC = 3600  # 1h
 # A1-DM — cross-host wake. Default prompt sent as a mesh DM to a stranded
 # peer on another host; the peer's sidecar/inbox-watcher then wakes it.
 _DM_WAKE_PROMPT = (
@@ -595,10 +608,50 @@ def _tmux_session_exists(name: str) -> bool:
         return False
 
 
-def _tmux_send_keys(name: str, text: str) -> bool:
+def _resolve_send_target(name: str) -> str:
+    """Resolve a session name to the pane actually running the claude TUI.
+
+    `send-keys -t <session>` lands on the session's ACTIVE pane — on a
+    multi-pane cell that can be a bash/log pane, where an injected
+    `/model ...` would execute as a SHELL command (drop seat-A N3). Prefer
+    the pane whose current command looks like the claude CLI (node/claude);
+    fall back to the session name unchanged when tmux is unavailable, the
+    listing fails, or no pane matches.
+    """
     try:
         result = subprocess.run(
-            ["tmux", "send-keys", "-t", name, text, "Enter"],
+            ["tmux", "list-panes", "-t", name, "-F",
+             "#{pane_id} #{pane_current_command}"],
+            capture_output=True, timeout=5, text=True,
+        )
+        if result.returncode != 0:
+            return name
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] in ("claude", "node"):
+                return parts[0]
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    return name
+
+
+def _tmux_send_keys(name: str, text: str, clear_input: bool = False) -> bool:
+    """Send `text` + Enter to a tmux target.
+
+    The target is resolved to the claude-TUI pane first (_resolve_send_target,
+    drop N3) so multi-pane cells never receive the payload in a shell pane.
+
+    clear_input=True prepends C-u (clear current input line) so the payload
+    can never CONCATENATE onto a half-typed buffer — required for the A1.5
+    slash-command inject (drop seat-A C2): a prose wake merging into typed
+    text is noise, but `/model ...` merging into typed text submits a
+    corrupted command.
+    """
+    target = _resolve_send_target(name)
+    keys = ["C-u", text, "Enter"] if clear_input else [text, "Enter"]
+    try:
+        result = subprocess.run(
+            ["tmux", "send-keys", "-t", target, *keys],
             capture_output=True, timeout=5,
         )
         return result.returncode == 0
@@ -793,6 +846,135 @@ def _model_swap_marker_path(
         for c in (tmux_session or role)
     )
     return log_path.parent / f"a15-model-{role}-{safe_tmux}.marker"
+
+
+def _history_path(
+    log_path: Path, role: str, tmux_session: Optional[str], kind: str
+) -> Path:
+    """Cross-window event-history file (circuit-breaker state). Same keying +
+    sanitization discipline as the markers; `kind` is 'a15-swaps' or
+    'a2-respawns'."""
+    safe_tmux = "".join(
+        c if (c.isalnum() or c in "-_.") else "_"
+        for c in (tmux_session or role)
+    )
+    return log_path.parent / f"{kind}-{role}-{safe_tmux}.json"
+
+
+def _load_recent_events(path: Path, window_sec: int, now: int) -> list:
+    """Timestamps within the window; unreadable/corrupt history reads as
+    EMPTY (the breakers are cross-window insurance on top of the per-window
+    verified marker — a lost history must not block recovery)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            return []
+        return [t for t in data if isinstance(t, (int, float)) and now - t <= window_sec]
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
+        return []
+
+
+def _append_event(path: Path, now: int, recent: list) -> None:
+    """Persist pruned history + the new event. Best-effort by design — the
+    per-window marker (verify-after-write) carries the hard bound; history
+    only widens it across windows."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(recent + [now]), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _notify_peer_event(
+    args: argparse.Namespace, role: str, event: str, detail: str, diag: dict
+) -> None:
+    """N1 observability (drop seat-A): an autonomous engine-swap / respawn /
+    circuit-open changes a cell's engine, billing, and identity surface — it
+    must be VISIBLE beyond a local log file, or a silent auto-swap-to-stable
+    can mask frontier-engine degradation indefinitely. Opt-in via
+    --notify-peer <peer>: POSTs a mesh DM through the same gateway machinery
+    as --dm-wake.
+
+    FIXED-TEMPLATE discipline (same as the inject payload): `detail` is built
+    by the call sites from config-validated values only — no peer/inbox/
+    network-derived string is ever interpolated. Best-effort by construction:
+    a notify failure must never block or fail the recovery ladder.
+    """
+    peer = getattr(args, "notify_peer", None)
+    if not peer:
+        return
+    token = os.environ.get("MESH_GATEWAY_TOKEN")
+    if not token:
+        diag["notify_skipped"] = "no_token"
+        return
+    content = (
+        f"watchdog event={event} cell={role} {detail} "
+        f"(autonomous ladder action; watchdog log on host has the diag)"
+    )
+    diag["notify_peer"] = peer
+    diag["notify_sent"] = _dm_wake(args.gateway, role, peer, token, content)
+
+
+def _escalate_a2(
+    args: argparse.Namespace,
+    diag: dict,
+    log_path: Path,
+    role: str,
+    tmux_session: Optional[str],
+    marker: Path,
+    model_marker: Path,
+    a2_reason: str,
+    verbose: bool,
+) -> int:
+    """The SINGLE A2 escalation funnel. Every rung failure lands here
+    (model_rung_exhausted / a15_send_failed / a15_marker_unverified /
+    a15_thrash_circuit) — fail toward respawn, never toward re-inject.
+
+    Includes the C3 respawn circuit (drop seat-A): when BOTH engines are
+    degraded, each respawn lands on a crushed default model and the whole
+    ladder repeats across windows. >= max respawns within the window ⇒ STOP
+    respawning (circuit open, exit 6) and demand operator attention — a held
+    cell is recoverable; a respawn-churned one bleeds state every cycle.
+    """
+    _clear_a1_marker(marker)
+    _clear_a1_marker(model_marker)
+    diag["decision"] = f"a2_respawn_{a2_reason}"
+    if args.no_respawn:
+        diag["dry_run_skip"] = True
+        _log_event(log_path, "a2_dry_run", diag, verbose)
+        return 2
+    respawn_hist = _history_path(log_path, role, tmux_session, "a2-respawns")
+    now = _now()
+    recent = _load_recent_events(
+        respawn_hist,
+        getattr(args, "a2_respawn_window_sec", _DEFAULT_A2_RESPAWN_WINDOW_SEC),
+        now,
+    )
+    diag["a2_recent_respawns"] = len(recent)
+    if len(recent) >= getattr(args, "a2_max_respawns", _DEFAULT_A2_MAX_RESPAWNS):
+        diag["decision"] = "a2_circuit_open"
+        print(
+            f"[watchdog] A2 CIRCUIT OPEN for {role}: {len(recent)} respawns "
+            f"in window — refusing to respawn-churn; operator attention "
+            f"required (clear {respawn_hist} to reset).",
+            file=sys.stderr,
+        )
+        _notify_peer_event(
+            args, role, "a2_circuit_open",
+            f"reason={a2_reason} recent_respawns={len(recent)} — HELD, "
+            f"operator attention required", diag,
+        )
+        _log_event(log_path, "a2_circuit_open", diag, verbose)
+        return 6
+    _append_event(respawn_hist, now, recent)
+    spawn_ok = _spawn_via_swarph(role, tmux_session)
+    diag["spawn_ok"] = spawn_ok
+    _notify_peer_event(
+        args, role, "a2_respawn",
+        f"reason={a2_reason} spawn_ok={spawn_ok}", diag,
+    )
+    _log_event(log_path, "a2_respawn", diag, verbose)
+    return 2 if spawn_ok else 4
 
 
 def _log_event(log_path: Path, event: str, details: dict, verbose: bool = False) -> None:
@@ -1109,6 +1291,33 @@ def _run_local_check(args: argparse.Namespace) -> int:
         # fails toward respawn, never open toward unbounded /model re-inject.
         a2_reason = "model_rung_exhausted"
         if not _a1_already_fired_at(model_marker, cursor_mtime):
+            if pane_age is None:
+                # SAFETY 3b (drop seat-A C2): the slash-command rung requires
+                # READABLE pane state. A1's prose wake falls through harmlessly
+                # when tmux can't report pane_activity, but injecting `/model`
+                # into an unverifiable pane (ancient tmux, missing format) is
+                # actively harmful — skip the rung; this window behaves as
+                # --no-model-rung. A2 remains reachable via the dead-process /
+                # tmux-missing paths above.
+                diag["decision"] = "noop_a15_no_pane_state"
+                _log_event(log_path, "noop", diag, verbose)
+                return 0
+            # C1 thrash circuit (drop seat-A): a flapping cursor restarts the
+            # ladder every window, so the per-window bound alone lets A1.5
+            # fire forever while A2 never engages. Too many recent swaps ⇒
+            # the swap demonstrably isn't recovering the cell ⇒ escalate.
+            swap_hist = _history_path(log_path, role, tmux_session, "a15-swaps")
+            now = _now()
+            recent_swaps = _load_recent_events(
+                swap_hist, getattr(args, "a15_swap_window_sec",
+                                   _DEFAULT_A15_SWAP_WINDOW_SEC), now)
+            diag["a15_recent_swaps"] = len(recent_swaps)
+            if len(recent_swaps) >= getattr(
+                args, "a15_max_swaps", _DEFAULT_A15_MAX_SWAPS
+            ):
+                a2_reason = "a15_thrash_circuit"
+                return _escalate_a2(args, diag, log_path, role, tmux_session,
+                                    marker, model_marker, a2_reason, verbose)
             # A1.5 — autonomous engine-swap. A1 has exhausted but the model
             # swap has NOT yet been tried this window. Inject `/model <stable>`.
             #
@@ -1135,7 +1344,7 @@ def _run_local_check(args: argparse.Namespace) -> int:
                 f"{model_text} into {tmux_session}",
                 file=sys.stderr,
             )
-            sent = _tmux_send_keys(tmux_session, model_text)
+            sent = _tmux_send_keys(tmux_session, model_text, clear_input=True)
             diag["send_keys_ok"] = sent
             if not sent:
                 # BLOCK-1 fix: a FAILED inject (wedged / timing-out pane) is
@@ -1154,26 +1363,24 @@ def _run_local_check(args: argparse.Namespace) -> int:
                 else:
                     # Marker stamped AND verified: the NEXT tick (if the cursor
                     # still hasn't advanced) escalates to A2 rather than
-                    # re-injecting /model.
+                    # re-injecting /model. Record the swap in the cross-window
+                    # history so the C1 thrash circuit can count it.
+                    _append_event(swap_hist, now, recent_swaps)
                     diag["decision"] = "a15_model_swap"
+                    _notify_peer_event(
+                        args, role, "a15_model_swap",
+                        f"engine swapped via /model to {stable_model}", diag,
+                    )
                     _log_event(log_path, "a15_model_swap", diag, verbose)
                     return 5
 
-        # A2 — the single escalation path. Reached when the model-swap was
-        # already tried this window without the cursor advancing
-        # (model_rung_exhausted), OR same-tick when the rung's bounding
-        # mechanism itself failed (a15_send_failed / a15_marker_unverified).
-        _clear_a1_marker(marker)
-        _clear_a1_marker(model_marker)
-        diag["decision"] = f"a2_respawn_{a2_reason}"
-        if args.no_respawn:
-            diag["dry_run_skip"] = True
-            _log_event(log_path, "a2_dry_run", diag, verbose)
-            return 2
-        spawn_ok = _spawn_via_swarph(role, tmux_session)
-        diag["spawn_ok"] = spawn_ok
-        _log_event(log_path, "a2_respawn", diag, verbose)
-        return 2 if spawn_ok else 4
+        # A2 — the single escalation funnel (incl. the C3 respawn circuit).
+        # Reached when the model-swap was already tried this window without
+        # the cursor advancing (model_rung_exhausted), OR same-tick when the
+        # rung's bounding mechanism itself failed (a15_send_failed /
+        # a15_marker_unverified).
+        return _escalate_a2(args, diag, log_path, role, tmux_session,
+                            marker, model_marker, a2_reason, verbose)
 
     diag["decision"] = "a1_send_keys"
     wake_text = (
@@ -1254,6 +1461,20 @@ def run_install_service(args: argparse.Namespace) -> int:
       5  install error (file write failed / systemctl failed)
     """
     files = _bundled_systemd_files()
+    cell = args.cell
+
+    # v0.10.1: units are PER-CELL — swarph-watchdog-<cell>.{service,timer} +
+    # /etc/default/swarph-watchdog-<cell> — so a multi-cell host runs one
+    # watchdog instance per cell side-by-side. The 0.10.0 fixed names
+    # CLOBBERED the existing unit on any second-cell install, and the
+    # generated ExecStart carried no --cell at all (found arming
+    # science-claude's watchdog next to lab's, 2026-06-10). ExecStart now
+    # carries an explicit --cell so the unit's identity never depends on the
+    # env file alone. Pre-existing legacy single-cell `swarph-watchdog.*`
+    # units are left untouched (a migration note is printed if one exists).
+    service_name = f"swarph-watchdog-{cell}.service"
+    timer_name = f"swarph-watchdog-{cell}.timer"
+    default_name = f"swarph-watchdog-{cell}"
 
     # v0.7.4: substitute the bundled service template's ExecStart placeholder
     # with the actual swarph binary path on this host. Fixes the v0.7.3 hardcode
@@ -1261,34 +1482,65 @@ def run_install_service(args: argparse.Namespace) -> int:
     # /usr/local/bin/swarph). Pipx is the recommended install path on droplet
     # + lab, so the hardcode bit BOTH peers on first install attempt today.
     swarph_bin = _resolve_swarph_bin()
-    service_content = files[_SYSTEMD_UNIT_NAMES[0]].replace(
-        f"ExecStart={_SWARPH_BIN_PLACEHOLDER}",
-        f"ExecStart={swarph_bin}",
+    service_content = (
+        files[_SYSTEMD_UNIT_NAMES[0]]
+        .replace(
+            f"ExecStart={_SWARPH_BIN_PLACEHOLDER}",
+            f"ExecStart={swarph_bin}",
+            1,
+        )
+        .replace("watchdog --check", f"watchdog --check --cell {cell}", 1)
+        .replace(
+            "EnvironmentFile=-/etc/default/swarph-watchdog",
+            f"EnvironmentFile=-/etc/default/{default_name}",
+            1,
+        )
+        .replace(
+            "Swarph watchdog one-shot check",
+            f"Swarph watchdog one-shot check [{cell}]",
+            1,
+        )
+    )
+
+    timer_content = files[_SYSTEMD_UNIT_NAMES[1]].replace(
+        "Requires=swarph-watchdog.service",
+        f"Requires={service_name}",
         1,
     )
 
     # Template the default file with the requested role
     default_content = files["swarph-watchdog.default"].replace(
         "SWARPH_CELL=lab",
-        f"SWARPH_CELL={args.cell}",
+        f"SWARPH_CELL={cell}",
         1,
     )
 
     targets = [
-        (_SYSTEMD_UNIT_DIR / _SYSTEMD_UNIT_NAMES[0], service_content),
-        (_SYSTEMD_UNIT_DIR / _SYSTEMD_UNIT_NAMES[1], files[_SYSTEMD_UNIT_NAMES[1]]),
-        (_SYSTEMD_DEFAULT_DIR / _SYSTEMD_DEFAULT_NAME, default_content),
+        (_SYSTEMD_UNIT_DIR / service_name, service_content),
+        (_SYSTEMD_UNIT_DIR / timer_name, timer_content),
+        (_SYSTEMD_DEFAULT_DIR / default_name, default_content),
     ]
 
+    legacy_unit = _SYSTEMD_UNIT_DIR / _SYSTEMD_UNIT_NAMES[0]
+    legacy_note = (
+        f"# NOTE: legacy single-cell unit {legacy_unit} exists; it is NOT "
+        f"touched by this per-cell install. Migrate it to "
+        f"swarph-watchdog-<cell>.* at your convenience."
+        if legacy_unit.exists()
+        else None
+    )
+
     if args.dry_run:
-        print(f"# DRY RUN — cell={args.cell} swarph_bin={swarph_bin}", file=sys.stderr)
+        print(f"# DRY RUN — cell={cell} swarph_bin={swarph_bin}", file=sys.stderr)
         for path, content in targets:
             print(f"\n# would write {path}:", file=sys.stderr)
             print(content, file=sys.stderr)
+        if legacy_note:
+            print(f"\n{legacy_note}", file=sys.stderr)
         print(
             "\n# would then run:\n"
             "#   sudo systemctl daemon-reload\n"
-            "#   sudo systemctl enable --now swarph-watchdog.timer",
+            f"#   sudo systemctl enable --now {timer_name}",
             file=sys.stderr,
         )
         return 0
@@ -1312,19 +1564,21 @@ def run_install_service(args: argparse.Namespace) -> int:
     try:
         subprocess.run(["systemctl", "daemon-reload"], check=True)
         subprocess.run(
-            ["systemctl", "enable", "--now", "swarph-watchdog.timer"],
+            ["systemctl", "enable", "--now", timer_name],
             check=True,
         )
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         print(f"ERROR: systemctl failed: {exc}", file=sys.stderr)
         return 5
 
+    if legacy_note:
+        print(legacy_note, file=sys.stderr)
     print(
-        f"\nswarph-watchdog.timer installed + enabled for cell={args.cell}.\n"
-        f"  status:  systemctl status swarph-watchdog.timer\n"
-        f"  logs:    journalctl -u swarph-watchdog.service -f\n"
+        f"\n{timer_name} installed + enabled for cell={cell}.\n"
+        f"  status:  systemctl status {timer_name}\n"
+        f"  logs:    journalctl -u {service_name} -f\n"
         f"           OR /var/log/swarph-watchdog.log\n"
-        f"  next:    systemctl list-timers swarph-watchdog.timer",
+        f"  next:    systemctl list-timers {timer_name}",
         file=sys.stderr,
     )
     return 0
@@ -1361,6 +1615,31 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tmux-session", default=None)
     p.add_argument("--peer", default=None)
     p.add_argument("--no-respawn", action="store_true")
+    p.add_argument(
+        "--a15-max-swaps", type=int, default=_DEFAULT_A15_MAX_SWAPS,
+        help="C1 thrash circuit: max A1.5 /model swaps within the swap window "
+             "before the ladder escalates to A2 instead of swapping again.",
+    )
+    p.add_argument(
+        "--a15-swap-window-sec", type=int, default=_DEFAULT_A15_SWAP_WINDOW_SEC,
+        help="C1 thrash circuit window (seconds).",
+    )
+    p.add_argument(
+        "--a2-max-respawns", type=int, default=_DEFAULT_A2_MAX_RESPAWNS,
+        help="C3 respawn circuit: max A2 respawns within the respawn window "
+             "before the watchdog HOLDS (circuit open, exit 6) instead of "
+             "respawn-churning the cell.",
+    )
+    p.add_argument(
+        "--a2-respawn-window-sec", type=int, default=_DEFAULT_A2_RESPAWN_WINDOW_SEC,
+        help="C3 respawn circuit window (seconds).",
+    )
+    p.add_argument(
+        "--notify-peer", default=None,
+        help="N1 observability: mesh peer to DM (fixed-template, via the "
+             "--dm-wake gateway machinery) on a15_model_swap / a2_respawn / "
+             "a2_circuit_open. Requires MESH_GATEWAY_TOKEN. Default OFF.",
+    )
     p.add_argument(
         "--stable-model",
         default=_DEFAULT_STABLE_MODEL,
