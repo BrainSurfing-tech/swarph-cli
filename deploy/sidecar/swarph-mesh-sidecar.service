@@ -1,0 +1,38 @@
+# swarph mesh sidecar — production deployment unit (systemd USER service).
+#
+# Drains this peer's mesh-gateway inbox (peer-token-direct, post-C5) and wakes
+# a live claude in a pinned tmux session on new mail. Replaces the shared-token
+# `swarph daemon`. Source: swarph_cli/commands/mesh.py (`swarph mesh sidecar`).
+#
+# Install (no root):
+#   1. substitute the <PLACEHOLDERS> below
+#   2. cp to ~/.config/systemd/user/swarph-mesh-sidecar.service
+#   3. systemctl --user daemon-reload && systemctl --user enable --now swarph-mesh-sidecar.service
+#
+# Placeholders:
+#   <PEER>       this peer's mesh name           e.g. gpu-wsl
+#   <HOME>       operator home dir               e.g. /home/darw007d
+#   <GATEWAY>    mesh-gateway base URL           e.g. http://lab-ovh:8788
+#   <TMUX>       wake target tmux session/pane   e.g. claude  (see claude-tmux.service)
+#
+# CRITICAL — TOKEN-LESS ENV BY DESIGN: do NOT set MESH_GATEWAY_TOKEN and do NOT
+# add an EnvironmentFile that sets it. With no token in env, mesh._resolve_token
+# falls through to the peer-token file ~/.config/swarph/<PEER>.peer_token (0600).
+# Setting MESH_GATEWAY_TOKEN here re-introduces the retired shared-token coupling
+# (#1783). Gateway is passed via --gateway, so no env is needed at all.
+
+[Unit]
+Description=swarph mesh sidecar (<PEER>) — peer-token-direct DM drain + tmux-wake
+Documentation=https://github.com/darw007d/swarph-cli
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=SWARPH_SELF=<PEER>
+ExecStart=<HOME>/.local/bin/swarph mesh sidecar --as <PEER> --gateway <GATEWAY> --state-dir <HOME>/swarph_state/<PEER> --tmux-target <TMUX> --poll-seconds 30
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
