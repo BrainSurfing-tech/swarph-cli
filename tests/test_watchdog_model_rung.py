@@ -120,13 +120,13 @@ def test_a1_exhausted_cursor_stale_fires_model_rung(isolated_state, stale_cursor
         rc1 = run_watchdog(argv=[
             "--check", "--cell", "lab",
             "--cursor", str(stale_cursor),
-            "--threshold", "60", "--log", str(log_path),
+            "--threshold", "60", "--log", str(log_path), "--model-rung",
         ])
         # Tick 2 → A1.5 model-swap (A1 already fired this window)
         rc2 = run_watchdog(argv=[
             "--check", "--cell", "lab",
             "--cursor", str(stale_cursor),
-            "--threshold", "60", "--log", str(log_path),
+            "--threshold", "60", "--log", str(log_path), "--model-rung",
         ])
     assert rc1 == 1   # A1
     assert rc2 == 5   # A1.5 model-swap
@@ -150,7 +150,7 @@ def test_model_rung_exhausted_escalates_to_a2(isolated_state, stale_cursor):
             rc = run_watchdog(argv=[
                 "--check", "--cell", "lab",
                 "--cursor", str(stale_cursor),
-                "--threshold", "60", "--log", str(log_path),
+                "--threshold", "60", "--log", str(log_path), "--model-rung",
             ])
     assert rc == 2  # A2 on the third tick
     spawn_mock.assert_called_once()
@@ -171,12 +171,12 @@ def test_cursor_advance_after_model_rung_deescalates(isolated_state, stale_curso
         # Tick 1 → A1
         run_watchdog(argv=[
             "--check", "--cell", "lab", "--cursor", str(stale_cursor),
-            "--threshold", "60", "--log", str(log_path),
+            "--threshold", "60", "--log", str(log_path), "--model-rung",
         ])
         # Tick 2 → A1.5 model-swap
         run_watchdog(argv=[
             "--check", "--cell", "lab", "--cursor", str(stale_cursor),
-            "--threshold", "60", "--log", str(log_path),
+            "--threshold", "60", "--log", str(log_path), "--model-rung",
         ])
         # Cursor advances (recovered) — still stale vs 60s threshold but a NEW window.
         new_mtime = time.time() - 480
@@ -184,7 +184,7 @@ def test_cursor_advance_after_model_rung_deescalates(isolated_state, stale_curso
         # Tick 3 → must NOT be A2; the new window starts the ladder over at A1.
         rc3 = run_watchdog(argv=[
             "--check", "--cell", "lab", "--cursor", str(stale_cursor),
-            "--threshold", "60", "--log", str(log_path),
+            "--threshold", "60", "--log", str(log_path), "--model-rung",
         ])
     assert rc3 == 1  # back to A1 (fresh window), NOT A2
     spawn_mock.assert_not_called()
@@ -206,7 +206,7 @@ def test_injected_payload_is_exactly_fixed_template(isolated_state, stale_cursor
         for _ in range(2):
             run_watchdog(argv=[
                 "--check", "--cell", "lab", "--cursor", str(stale_cursor),
-                "--threshold", "60", "--log", str(log_path),
+                "--threshold", "60", "--log", str(log_path), "--model-rung",
             ])
     model_calls = [
         c for c in send_mock.call_args_list if c[0][1].startswith("/model")
@@ -237,7 +237,7 @@ def test_peer_message_content_cannot_reach_injection(isolated_state, stale_curso
         for _ in range(2):
             run_watchdog(argv=[
                 "--check", "--cell", "lab", "--cursor", str(stale_cursor),
-                "--threshold", "60", "--log", str(log_path),
+                "--threshold", "60", "--log", str(log_path), "--model-rung",
             ])
     model_calls = [
         c for c in send_mock.call_args_list if "/model" in c[0][1]
@@ -303,7 +303,7 @@ def test_stable_model_flag_overrides_default(isolated_state, stale_cursor):
             run_watchdog(argv=[
                 "--check", "--cell", "lab", "--cursor", str(stale_cursor),
                 "--threshold", "60", "--stable-model", "claude-haiku-4-6",
-                "--log", str(log_path),
+                "--log", str(log_path), "--model-rung",
             ])
     model_calls = [c for c in send_mock.call_args_list if c[0][1].startswith("/model")]
     assert len(model_calls) == 1
@@ -336,6 +336,25 @@ def test_no_model_rung_falls_straight_a1_to_a2(isolated_state, stale_cursor):
     assert all(not c[0][1].startswith("/model") for c in send_mock.call_args_list)
 
 
+def test_default_no_model_rung_idle_but_live_noops(isolated_state, stale_cursor):
+    """REGRESSION (2026-06-11): an idle-but-LIVE cell (alive process, stale
+    cursor, unread DMs, A1 already fired, pane not recently active) must NOT
+    get a /model injection under the DEFAULT config — the rung is opt-in. This
+    is the exact false-fire that restarted 5 live cells. Fail-safe to inaction."""
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
+        # Tick 1 → A1 (prose wake). Tick 2 (cursor unchanged ⇒ A1 exhausted):
+        # WITHOUT --model-rung the rung must NOT fire — plain same-window noop.
+        rc1 = run_watchdog(argv=["--check", "--cell", "lab", "--cursor", str(stale_cursor), "--threshold", "60"])
+        rc2 = run_watchdog(argv=["--check", "--cell", "lab", "--cursor", str(stale_cursor), "--threshold", "60"])
+    assert rc1 == 1   # A1 wake (harmless prose) still fires
+    assert rc2 == 0   # NOOP — not 5 (A1.5 model-swap)
+    assert all(not c[0][1].startswith("/model") for c in send_mock.call_args_list)
+
+
 # ---------------------------------------------------------------------------
 # SAFETY 4 — fail-safe-to-A2 (drop seat-A BLOCK-1 / BLOCK-2, PR #58 review)
 # A failure in the rung's BOUNDING mechanism must fail toward respawn,
@@ -361,11 +380,11 @@ def test_send_failure_escalates_to_a2_same_tick(isolated_state, stale_cursor):
          patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True) as spawn_mock:
         rc1 = run_watchdog(argv=[
             "--check", "--cell", "lab", "--cursor", str(stale_cursor),
-            "--threshold", "60", "--log", str(log_path),
+            "--threshold", "60", "--log", str(log_path), "--model-rung",
         ])
         rc2 = run_watchdog(argv=[
             "--check", "--cell", "lab", "--cursor", str(stale_cursor),
-            "--threshold", "60", "--log", str(log_path),
+            "--threshold", "60", "--log", str(log_path), "--model-rung",
         ])
     assert rc1 == 1   # A1
     assert rc2 == 2   # A2 — same tick as the failed inject, NOT rc=4 re-loop
@@ -400,11 +419,11 @@ def test_marker_write_failure_escalates_to_a2(isolated_state, stale_cursor):
          patch("swarph_cli.commands.watchdog._spawn_via_swarph", return_value=True) as spawn_mock:
         rc1 = run_watchdog(argv=[
             "--check", "--cell", "lab", "--cursor", str(stale_cursor),
-            "--threshold", "60", "--log", str(log_path),
+            "--threshold", "60", "--log", str(log_path), "--model-rung",
         ])
         rc2 = run_watchdog(argv=[
             "--check", "--cell", "lab", "--cursor", str(stale_cursor),
-            "--threshold", "60", "--log", str(log_path),
+            "--threshold", "60", "--log", str(log_path), "--model-rung",
         ])
     assert rc1 == 1
     assert rc2 == 2   # verify-after-write failed -> A2 same tick, NOT rc=5
@@ -425,7 +444,7 @@ def test_marker_oserror_real_path_escalates_to_a2(isolated_state, stale_cursor):
     state_dir.mkdir()
     log_path = state_dir / "wd.log"
     common = ["--check", "--cell", "lab", "--cursor", str(stale_cursor),
-              "--threshold", "60", "--log", str(log_path)]
+              "--threshold", "60", "--log", str(log_path), "--model-rung"]
     try:
         with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
              patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
@@ -460,7 +479,7 @@ def test_malformed_stable_model_falls_back_to_default(isolated_state, stale_curs
         for _ in range(2):
             run_watchdog(argv=[
                 "--check", "--cell", "lab", "--cursor", str(stale_cursor),
-                "--threshold", "60", "--log", str(log_path),
+                "--threshold", "60", "--log", str(log_path), "--model-rung",
                 "--stable-model", "evil; rm -rf /",
             ])
     model_calls = [c for c in send_mock.call_args_list if c[0][1].startswith("/model")]
@@ -511,7 +530,7 @@ def test_a15_send_includes_clear_input(isolated_state, stale_cursor):
         for _ in range(2):
             run_watchdog(argv=[
                 "--check", "--cell", "lab", "--cursor", str(stale_cursor),
-                "--threshold", "60", "--log", str(log_path),
+                "--threshold", "60", "--log", str(log_path), "--model-rung",
             ])
     model_calls = [
         c for c in send_mock.call_args_list if c[0][1].startswith("/model")
@@ -604,7 +623,7 @@ def test_send_keys_targets_resolved_pane():
 def _tick(cursor, log_path, *extra):
     return run_watchdog(argv=[
         "--check", "--cell", "lab", "--cursor", str(cursor),
-        "--threshold", "60", "--log", str(log_path), *extra,
+        "--threshold", "60", "--log", str(log_path), "--model-rung", *extra,
     ])
 
 
