@@ -1,0 +1,33 @@
+# Durable in-tmux cell — systemd USER service.
+#
+# Ensures a detached tmux session (the sidecar/watchdog wake target) exists at
+# boot AND hosts a LIVE claude (not a bare shell), so `tmux send-keys` wakes
+# actually reach an agent. Without this, the sidecar/watchdog wake a dead shell.
+#
+# Idempotent: only (re)creates the session if absent. The launch wrapper
+# (launch-cell.sh) exec's `swarph spawn <PEER>`, which resumes the cell's
+# pinned session-id — so the tmux pane hosts the same agent across reboots.
+#
+# ONE-CLAUDE-PER-UUID DISCIPLINE: never run a second console claude resuming the
+# same session-id while this in-tmux one is live — two resumes of one UUID kill
+# the tmux server (double-resume footgun). Pick ONE launch path: in-tmux (this)
+# OR console, not both.
+#
+# Placeholders: <PEER> <HOME> <TMUX>  (see swarph-mesh-sidecar.service)
+# Wrapper path assumes launch-cell.sh installed at <HOME>/.config/swarph/launch-<PEER>.sh
+
+[Unit]
+Description=Durable in-tmux <PEER> cell — tmux session '<TMUX>' hosting a live claude at boot
+After=default.target
+
+[Service]
+Type=forking
+Environment=TERM=xterm-256color
+ExecStart=/bin/sh -c '/usr/bin/tmux has-session -t <TMUX> 2>/dev/null || /usr/bin/tmux new-session -d -s <TMUX> <HOME>/.config/swarph/launch-<PEER>.sh'
+ExecStop=/usr/bin/tmux kill-session -t <TMUX>
+RemainAfterExit=yes
+# Don't let unit stop/exit tear down the long-lived tmux server.
+KillMode=none
+
+[Install]
+WantedBy=default.target
