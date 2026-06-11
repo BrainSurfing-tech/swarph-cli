@@ -50,3 +50,32 @@ def idempotent(first_pass: str, second_pass: str, tol: float = 0.05) -> bool:
         return True
     shrink = (len(first_pass) - len(second_pass)) / len(first_pass)
     return shrink <= tol
+
+
+import json as _json
+
+VERIFY_EXPAND_SYSTEM = (
+    "You are an adversarial fact-checker. Given ORIGINAL and COMPRESSED text, "
+    "enumerate atomic factual claims in ORIGINAL and check each is recoverable "
+    "from COMPRESSED. Default to FAILURE: list every claim NOT recoverable. "
+    'Respond ONLY as JSON: {"dropped_facts": ["...", ...]}. Empty list = pass.'
+)
+
+
+async def verify_expand(source: str, compressed: str, *, chat=None) -> bool:
+    """Adversarial semantic check (shorthand only). Independent model hunts for a
+    fact in source not recoverable from compressed. One dropped fact -> False."""
+    if chat is None:
+        from swarph_mesh import ChatMessage, SwarphCall
+        sc = SwarphCall(provider="claude", caller="swarph-compress-verify")
+        async def chat(messages, system_prompt=None, **kw):
+            return await sc.chat(messages=messages, system_prompt=system_prompt, **kw)
+        msgs = [ChatMessage(role="user", content=f"ORIGINAL:\n{source}\n\nCOMPRESSED:\n{compressed}")]
+    else:
+        msgs = [{"role": "user", "content": f"ORIGINAL:\n{source}\n\nCOMPRESSED:\n{compressed}"}]
+    resp = await chat(msgs, system_prompt=VERIFY_EXPAND_SYSTEM, temperature=0.0, max_tokens=2000)
+    try:
+        dropped = _json.loads(resp.text).get("dropped_facts", ["<unparseable>"])
+    except Exception:
+        return False  # unparseable verifier output -> fail safe
+    return len(dropped) == 0

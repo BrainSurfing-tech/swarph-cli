@@ -16,3 +16,23 @@ def test_archival_refuse_no_boundary():
     src = "# Manual\njust live content, no cold tail\n"
     r = archival_split(src, boundary=r"^## Session", archive_name="LOG.md")
     assert r is None                              # no boundary -> refuse (leave)
+
+
+import asyncio
+from swarph_cli.compress.levers import shorthand
+
+
+class _FakeResp:
+    def __init__(self, text):
+        self.text = text
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cost_usd = 0.0
+
+
+def test_shorthand_calls_model_and_returns_text():
+    src = "- [a](a.md) — verbose hook with redundant prose here\n"
+    async def fake_chat(messages, system_prompt=None, **kw):
+        return _FakeResp("- [a](a.md) — terse hook\n")
+    out = asyncio.run(shorthand(src, system_prompt="x", chat=fake_chat))
+    assert out == "- [a](a.md) — terse hook\n"
