@@ -313,6 +313,58 @@ Pong!
 # 3+26t  $0.0000  0.73s  caller=cli.oneshot.ubuntu  provider=gemini
 ```
 
+### `swarph compress` (v0.11 — context-surface compression)
+
+Compress a **machine-read context surface** (memory index, manual, agent brief) to
+reclaim always-loaded space/tokens. The principle: fluent natural language carries
+redundancy a model infers for free — *the decompressor is the model itself*. Proven
+by hand on the OMEGA swarm: `MEMORY.md` 37→16KB (58%), `CLAUDE.md` 241→21KB
+always-loaded (91%, archival).
+
+**Opt-in by marker (fails safe).** A file is compressible only if it carries an
+explicit marker; unmarked files are left untouched. The model's judgment is spent
+once, in-session, authoring the marker — runtime is pure-Python marker parsing, no
+model in the hot path.
+
+```
+<!-- swarph:compress lever=archival boundary="^## Session" -->
+<!-- swarph:compress lever=shorthand pointer="](*.md)" floor=0.45 -->
+```
+
+**Two levers, different risk classes:**
+
+| Lever | What | Loss class | Model? |
+|---|---|---|---|
+| `archival` | relocate the cold tail below `boundary` to `<file>.archive.<ext>` + leave a pointer | **lossless** (nothing destroyed) | no — pure Python, zero tokens |
+| `shorthand` | rewrite a pointer-bearing INDEX to telegraphic shorthand | lossy, **bounded to index-over-preserved-source** (recoverable by construction) | yes (`claude -p` subscription path) |
+
+Shorthand is gated: redundancy-floor (refuse if already dense), links-superset
+(every `[]()` survives), index-over-source (every entry keeps a resolvable
+pointer), and an **adversarial verify-expand** (an independent model hunts for a
+dropped fact; one found → abort).
+
+```bash
+swarph compress MEMORY.md                      # dry-run: classify, propose, report savings
+swarph compress MEMORY.md --apply              # write (atomic tempfile→mv + .bak + verify-gate)
+swarph compress MEMORY.md --verify-idempotent  # assert compress(compress(x)) ≈ noop
+```
+
+Dry-run is the default — nothing mutates without `--apply`. Cron-friendly exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | analyzed/savings-reported (or applied clean) |
+| `2` | no such file |
+| `3` | refused — unmarked (leave breathing) |
+| `4` | refused — archival: no boundary line matched |
+| `5` | refused — shorthand: below redundancy floor (already dense) |
+| `6` | refused — shorthand dropped a link / lost a pointer-to-source |
+| `7` | refused — adversarial verify-expand found a dropped fact |
+| `8` | refused — not idempotent (second pass kept cutting; signal-eating alarm) |
+
+Design spec: `docs/superpowers/specs/2026-06-11-swarph-context-compressor-design.md`
+(in the hedge-fund-mcp repo).
+
 ### `--json` mode semantics
 
 `--json` is a **harness trigger**, not a strict-validation gate. When set, swarph routes the response through the swarph-mesh JSON harness:
