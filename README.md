@@ -120,7 +120,7 @@ Detects stranded Claude sessions (API throttle / harness death) via cursor-mtime
 */5 * * * * swarph watchdog --check --cell lab >> ~/.local/log/swarph-watchdog.log 2>&1
 ```
 
-**Systemd timer install (v0.7.3+ — closes ev_6954f748 substrate-component-installation-gap):**
+**Systemd timer install (v0.7.3+):**
 
 ```bash
 # Preview without writing (any user):
@@ -220,24 +220,24 @@ Onboarding splits into a **mechanics phase** (`swarph onboard`) that automates t
 
 ```bash
 # New peer self-onboards
-$ swarph onboard razorpeter
-[1/6] validate_node_name('razorpeter')          ok
+$ swarph onboard newpeer
+[1/6] validate_node_name('newpeer')          ok
 [2/6] prepare peer-registry row                 ok
 [3/6] resolve MESH_GATEWAY_TOKEN                ok
 [4/6] POST .../peers/register                   ok (registered_unratified=true)
 [5/6] verify_subscription_setup()               ok
-[6/6] scaffold ~/swarph_state/razorpeter/       ok
+[6/6] scaffold ~/swarph_state/newpeer/       ok
 
-[manual] handshake template at /tmp/razorpeter-handshake.md
+[manual] handshake template at /tmp/newpeer-handshake.md
   Edit each section in your own words, then send to your witness peer.
 
 # After peer composes + sends handshake, witness ratifies
-$ SWARPH_WITNESS=alice swarph ratify razorpeter \
+$ SWARPH_WITNESS=alice swarph ratify newpeer \
     --reason "handshake covers all four invariants in own words"
-[1/6] validate_node_name('razorpeter')          ok
+[1/6] validate_node_name('newpeer')          ok
 [2/6] verify witness 'alice' is ratified        ok
-[3/6] verify 'razorpeter' is registered_unratified  ok
-[4/6] PATCH .../peers/razorpeter                ok
+[3/6] verify 'newpeer' is registered_unratified  ok
+[4/6] PATCH .../peers/newpeer                ok
 [5/6] verify peer_ratifications audit row       ok (id=N reason='...')
 [6/6] invalidate local TTL cache                ok
 ```
