@@ -290,6 +290,45 @@ def _session_state_exists(session_id: str) -> bool:
     return False
 
 
+def _base_pin_uuid(role: str) -> Optional[str]:
+    """Read the base role's pinned UUID (the mitosis parent_session_id)."""
+    from swarph_cli.cell import _read_session_sidecar, session_state_path
+    uuid_str, _cwd = _read_session_sidecar(session_state_path(role))
+    return uuid_str
+
+
+def _record_mitosis_safe(
+    cell: Cell,
+    *,
+    sidecar_role: str,
+    effective_role: Optional[str],
+    session_id: Optional[str],
+    was_generated: bool,
+) -> None:
+    """Append a mitosis lineage record for a freshly-minted sibling.
+
+    Spec §6: a true sibling is `was_generated and effective_role != sidecar_role`
+    (base slot reuse has effective_role == sidecar_role). NEVER raises — capture
+    partial-fail must not block the claude exec (spec §7); log + degrade.
+    """
+    if not (was_generated and effective_role and effective_role != sidecar_role):
+        return
+    try:
+        from swarph_cli.capture import lineage
+        cursor_path = cell.extra.get("cursor_path") if cell.extra else None
+        lineage.record_mitosis(
+            cell,
+            child_role=effective_role,
+            parent_role=sidecar_role,
+            child_session_id=session_id,
+            parent_session_id=_base_pin_uuid(sidecar_role),
+            cursor_path=cursor_path,
+        )
+    except Exception as exc:  # never block the exec
+        print(f"swarph spawn: mitosis lineage record failed (non-fatal): {exc}",
+              file=sys.stderr)
+
+
 def _build_claude_argv(
     cell: Cell,
     session_id: str,
@@ -968,6 +1007,14 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                 "then re-run with --new-instance to mint a true sibling.",
                 file=sys.stderr,
             )
+
+        _record_mitosis_safe(
+            cell,
+            sidecar_role=sidecar_role,
+            effective_role=effective_role,
+            session_id=session_id,
+            was_generated=was_generated,
+        )
     elif cell.provider == "antigravity":
         session_id = "(fresh-session-per-spawn, no pinned id)"
         was_generated = True
