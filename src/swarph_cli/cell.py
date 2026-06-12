@@ -338,6 +338,23 @@ def load_or_create_session_id(
     sidecar persistence — NOT ``cell.role`` (which stays the BASE role
     for shared cell-context: cwd, starter prompt, lineage, provider).
     """
+    # SECURITY (PR #67, drop seat-A): charset-gate ``role`` at function ENTRY so
+    # the pinned-session_id early-return below ALSO routes through the name-gate.
+    # The non-pinned branches reach session_state_path(role) (PEER_NAME_RE-gated
+    # since #66), but the pinned branch returns ``role`` directly — a cell.yaml
+    # with a clean internal role FIELD + a pinned session_id would otherwise hand
+    # an unvalidated requested_role (the CLI positional) straight to
+    # ``claude --name`` / ``tmux new-session -s <name>``. Gating here makes #66's
+    # "covers every caller" actually universal. (Not exploitable — every sink is
+    # list-argv, no shell — but a real regression of the name-gate invariant +
+    # degraded watchdog supervisability for a metachar name.)
+    if not PEER_NAME_RE.match(role):
+        raise CellError(
+            f"load_or_create_session_id: unsafe role {role!r} — must be a "
+            f"kebab-case, mesh-addressable cell name matching "
+            f"{PEER_NAME_RE.pattern} (no path separators, no shell metacharacters)."
+        )
+
     if cell.session_id:
         return cell.session_id, False, role
 
