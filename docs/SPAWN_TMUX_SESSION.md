@@ -96,6 +96,34 @@ Linux box to validate):
 - Decide the "already inside tmux" policy uniformly (current: in-place exec — the
   loop-breaker — which is correct for the `tmux new` → `swarph spawn` workflow).
 
+### ✅ DONE — generalized to all-OS (lab, 2026-06-12)
+
+All four points above shipped. `_launch_via_tmux` is now the single-command UX on
+every OS:
+
+- **win32 guard dropped.** The `$TMUX` loop-breaker + `SWARPH_SPAWN` guard +
+  tmux-on-PATH check stay (all OS-agnostic).
+- **Per-OS attach.** POSIX (Linux/mac) → `os.execv` (true in-place replace);
+  Windows → the blocking `subprocess.run` (lc's `c86beb5`, now the Windows branch
+  of a two-branch split).
+- **Create command confirmed on a Linux box.** Live on lab-ovh (**tmux 3.5a**):
+  the `new-session -d -s -c -e CMD` argv returns rc 0, has-session +
+  exact-match `=` prefix behave, and the `-e SWARPH_SPAWN` env **actually lands
+  in the pane** (the loop-breaker mechanism, verified on real tmux). Graceful
+  degradation if a peer's tmux predates `-e` (< 3.0): create fails → return
+  False → fall back to the standard launch, no half-state.
+- **In-tmux policy is uniform + composes with capture-at-birth.** `$TMUX` set →
+  exec in place (never re-create), so the `claude-tmux@.service` template's inner
+  `swarph spawn %i` falls straight through.
+
+**Validation:** 822 tests green (all-OS decision matrix incl. win32-vs-POSIX
+attach, the test harness now mocks `os.execv` with a sentinel so the POSIX path
+can never fire a real exec) + the live lab-ovh tmux smoke above. **Residual
+(named):** the interactive `os.execv` attach on POSIX is the one path not
+live-tested — it needs an interactive TTY (a non-interactive shell/CI can't
+provide one) — but it's unit-covered and a stdlib primitive; same "validate on
+metal" class lc closed for Windows.
+
 ## Open items (NOT blockers for this branch)
 
 - **Mouse-tracking leak** — under psmux, claude's SGR-1006 mouse codes leak/mangle
