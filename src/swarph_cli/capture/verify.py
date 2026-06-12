@@ -1,0 +1,97 @@
+# src/swarph_cli/capture/verify.py
+"""`swarph cell verify` gate logic (spec §4.4b / §5 / §10).
+
+Fail-LOUD pre-spawn gate, run from claude-tmux@.service ExecStart BEFORE spawn.
+Two checks:
+  (a) cwd-drift — the pinned session's .jsonl must live under cell.cwd's project
+      dir, else `claude --resume` would die with "No conversation found" (the
+      droplet re-seat incident). A pin whose .jsonl exists under a DIFFERENT
+      project dir → REFUSE (code 3). A pin with NO .jsonl yet (unstarted) or no
+      pin at all → OK (fresh genesis; spawn will mint/create).
+  (b) per-UUID liveness — PROBE the manifest's live_pin_holder. ALIVE → REFUSE
+      (code 4, a real double-resume). DEAD → the flag is a stale poison-pin
+      (holder crashed without clearing it); clear it + ALLOW. Refusing on the
+      stale flag would turn the durability fix into a durability TRAP (droplet).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+from swarph_shared.cell import Cell, CellError
+
+from swarph_cli.cell import _read_session_sidecar, load_cell, resolve_cell_path, session_state_path
+from swarph_cli.capture import manifest
+from swarph_cli.capture.liveness import probe_holder_liveness
+
+
+@dataclass
+class VerifyResult:
+    ok: bool
+    code: int
+    reason: str
+
+
+def expected_project_dir(cwd: Path) -> str:
+    """Claude Code's projects/<sanitized-cwd>/ dir name: '/' → '-'."""
+    return str(cwd).replace("/", "-")
+
+
+def locate_session_jsonl(session_id: str) -> List[Path]:
+    """All ~/.claude/projects/*/<session_id>.jsonl paths (across project dirs)."""
+    projects = Path.home() / ".claude" / "projects"
+    if not projects.exists():
+        return []
+    return list(projects.glob(f"*/{session_id}.jsonl"))
+
+
+# Indirection seams so tests patch without a real cell.yaml / pin store.
+def _resolve_cell(role: str) -> Cell:
+    return load_cell(resolve_cell_path(role))
+
+
+def _read_pin(role: str) -> Tuple[Optional[str], Optional[str]]:
+    return _read_session_sidecar(session_state_path(role))
+
+
+def verify_cell(role: str) -> VerifyResult:
+    try:
+        cell = _resolve_cell(role)
+    except CellError as exc:
+        return VerifyResult(False, 2, f"cell.yaml unresolved: {exc}")
+
+    session_id, _recorded_cwd = _read_pin(role)
+    if not session_id:
+        return VerifyResult(True, 0, "no pin yet — fresh genesis, spawn will mint")
+
+    # (a) cwd-drift gate
+    jsonls = locate_session_jsonl(session_id)
+    if jsonls:
+        want = expected_project_dir(cell.cwd)
+        if not any(p.parent.name == want for p in jsonls):
+            found = ", ".join(sorted({p.parent.name for p in jsonls}))
+            return VerifyResult(
+                False, 3,
+                f"cwd-drift: pin {session_id} lives under [{found}] but cell.cwd "
+                f"resolves to project dir {want!r} — `claude --resume` from here "
+                f"would die with 'No conversation found'. Re-pin or fix cell.cwd.",
+            )
+    # jsonls == [] → pin minted but session never ran; spawn will create it. OK.
+
+    # (b) liveness probe
+    m = manifest.read_manifest(role)
+    holder = (m or {}).get("head", {}).get("live_pin_holder")
+    if holder:
+        if probe_holder_liveness(holder):
+            return VerifyResult(
+                False, 4,
+                f"double-resume refused: pin {session_id} is already LIVE under "
+                f"holder {holder!r} (tmux session + live pane). Attach via "
+                f"`tmux attach -t {holder}`, never a second --resume.",
+            )
+        # poison-pin: holder dead → clear stale flag + allow
+        manifest.clear_live_pin(role)
+        return VerifyResult(True, 0, f"cleared stale live-pin (dead holder {holder!r}) — allow")
+
+    return VerifyResult(True, 0, "ok")
