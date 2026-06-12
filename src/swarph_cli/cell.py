@@ -98,7 +98,20 @@ def session_state_path(role: str) -> Path:
     sibling instances: ``<role>.session-id`` is slot 1; ``<role>-2``,
     ``<role>-3`` etc. are siblings minted via ``--new-instance``.
     See ``next_free_slot_role()`` for the slot allocation policy.
+
+    SECURITY (PR #65 fast-follow): charset-gate ``role`` to PEER_NAME_RE here —
+    this is the one role→path builder + the entry (spawn's ``requested_role``
+    CLI arg) that the capture-layer ``validate_role`` did NOT cover (drop
+    seat-A's residual). Gating the builder itself covers every caller — the
+    CLI requested_role, cell.role, and slot roles — in one choke point, so a
+    traversal/metachar role can never form a ``.session-id`` write path.
     """
+    if not PEER_NAME_RE.match(role):
+        raise CellError(
+            f"session_state_path: unsafe role {role!r} — must be a kebab-case, "
+            f"mesh-addressable cell name matching {PEER_NAME_RE.pattern} (no path "
+            f"separators, no shell metacharacters)."
+        )
     return _state_root() / "swarph" / "sessions" / f"{role}.session-id"
 
 
