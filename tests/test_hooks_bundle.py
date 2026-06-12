@@ -13,9 +13,15 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+_POSIX_HOOK_SKIP = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bundled cell-resilience hook is POSIX /bin/sh; Windows cell-hook execution is a separate product gap (needs a cross-platform hook)",
+)
 
 from swarph_cli.commands.hooks import (
     BUILTIN_HOOKS,
@@ -135,6 +141,7 @@ def _read_idle(state_swarph: Path) -> dict:
     return json.loads(idle.read_text(encoding="utf-8"))
 
 
+@_POSIX_HOOK_SKIP
 def test_functional_throttle_payload(tmp_path):
     payload = (
         '{"session_id":"abc","hook_event_name":"StopFailure",'
@@ -146,6 +153,7 @@ def test_functional_throttle_payload(tmp_path):
     assert data["session"] == "abc"
 
 
+@_POSIX_HOOK_SKIP
 def test_functional_normal_payload(tmp_path):
     payload = '{"session_id":"abc","hook_event_name":"Stop"}'
     state_swarph = _run_hook(tmp_path, payload)
@@ -154,6 +162,7 @@ def test_functional_normal_payload(tmp_path):
     assert data["session"] == "abc"
 
 
+@_POSIX_HOOK_SKIP
 def test_functional_without_jq(tmp_path, monkeypatch):
     """Force the no-jq fallback by giving a PATH with no jq on it."""
     # Build a sandbox bin dir containing only the binaries the script needs

@@ -8,6 +8,8 @@ against the deployed mesh-gateway PR A) lives in
 from __future__ import annotations
 
 import json
+import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,6 +36,7 @@ def test_resolve_token_from_secrets_file(monkeypatch, tmp_path):
     assert onboard._resolve_token(str(secrets)) == "from-file-tok"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-mode bits not representable on Windows; chmod(0o644) is a no-op so the loose-mode warning never fires")
 def test_resolve_token_warns_on_loose_mode(monkeypatch, tmp_path, capsys):
     monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
     secrets = tmp_path / "secrets.toml"
@@ -139,10 +142,11 @@ def test_run_onboard_happy_path(monkeypatch, tmp_path, capsys):
     assert (peer_dir / ".env.example").exists()
     daemon = peer_dir / "run-daemon.sh"
     assert daemon.exists()
-    assert oct(daemon.stat().st_mode & 0o777) == "0o755"
+    if sys.platform != "win32":  # POSIX file-mode bits not representable on Windows
+        assert oct(daemon.stat().st_mode & 0o777) == "0o755"
 
     # Handshake template
-    handshake = Path("/tmp/test-peer-handshake.md")
+    handshake = Path(tempfile.gettempdir()) / "test-peer-handshake.md"
     assert handshake.exists()
     body = handshake.read_text()
     assert "DM SEMANTICS" in body
@@ -179,7 +183,7 @@ def test_run_onboard_resolves_alias(monkeypatch, tmp_path, capsys):
     assert "alias" in err.lower()
     # Posted body uses the canonical name
     assert captured[0]["body"]["name"] == "lab-ovh"
-    Path("/tmp/lab-ovh-handshake.md").unlink(missing_ok=True)
+    (Path(tempfile.gettempdir()) / "lab-ovh-handshake.md").unlink(missing_ok=True)
 
 
 def test_run_onboard_rejects_bad_name(monkeypatch, capsys):
@@ -229,7 +233,7 @@ def test_run_onboard_subscription_check_failure_is_warning_not_fatal(
     assert rc == 0  # warning, not fatal
     err = capsys.readouterr().err
     assert "WARN" in err
-    Path("/tmp/non-claude-peer-handshake.md").unlink(missing_ok=True)
+    (Path(tempfile.gettempdir()) / "non-claude-peer-handshake.md").unlink(missing_ok=True)
 
 
 def test_run_onboard_capability_override(monkeypatch, tmp_path):
@@ -256,7 +260,7 @@ def test_run_onboard_capability_override(monkeypatch, tmp_path):
     assert rc == 0
     caps = captured[0]["body"]["capabilities"]
     assert caps == {"can_claim_tasks": False, "role": "witness"}
-    Path("/tmp/cap-peer-handshake.md").unlink(missing_ok=True)
+    (Path(tempfile.gettempdir()) / "cap-peer-handshake.md").unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------

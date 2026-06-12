@@ -1,4 +1,5 @@
 # tests/test_cell_harden.py
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,8 @@ def test_harden_emits_kit_without_installing(tmp_path, monkeypatch):
     launch = Path(res.launch_script)
     assert launch.exists()
     assert "swarph spawn droplet" in launch.read_text()
-    assert launch.stat().st_mode & 0o100  # owner-exec bit set
+    if sys.platform != "win32":  # POSIX file-mode bits not representable on Windows
+        assert launch.stat().st_mode & 0o100  # owner-exec bit set
     # manifest written with the cursor + service ref
     m = manifest.read_manifest("droplet")
     assert m["service"] == "claude-tmux@droplet.service"

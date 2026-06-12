@@ -8,12 +8,18 @@ A1/A2 escalation paths, and dry-run --no-respawn safety mode.
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Iterator
 from unittest.mock import patch
 
 import pytest
+
+_POSIX_WATCHDOG_SKIP = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="watchdog targets systemd units + /proc — POSIX-only",
+)
 
 from swarph_cli.commands.watchdog import (
     _DEFAULT_THRESHOLD_SEC,
@@ -578,6 +584,7 @@ def test_watchdog_log_appends_across_invocations(isolated_state, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@_POSIX_WATCHDOG_SKIP
 def test_install_service_dry_run_writes_no_files(isolated_state, capsys):
     """--dry-run prints what would be written without touching the filesystem."""
     rc = run_watchdog(argv=["--install-service", "--cell", "droplet", "--dry-run"])
@@ -636,6 +643,7 @@ def test_install_service_dry_run_default_cell_is_lab(isolated_state, capsys):
     assert "SWARPH_CELL=lab" in captured.err
 
 
+@_POSIX_WATCHDOG_SKIP
 def test_install_service_without_sudo_returns_4(isolated_state, capsys, monkeypatch):
     """Non-root install (no --dry-run) refuses with helpful message + exit 4."""
     monkeypatch.setattr("os.geteuid", lambda: 1000)
@@ -677,6 +685,7 @@ def test_bundled_systemd_files_readable():
 # and substitutes into the bundled service template.
 
 
+@_POSIX_WATCHDOG_SKIP
 def test_resolve_swarph_bin_absolute_argv0_wins(monkeypatch):
     """If sys.argv[0] is absolute, it's the most reliable signal — use it."""
     from swarph_cli.commands.watchdog import _resolve_swarph_bin
@@ -707,6 +716,7 @@ def test_resolve_swarph_bin_falls_back_to_placeholder_if_unresolvable(monkeypatc
     assert _resolve_swarph_bin() == _SWARPH_BIN_PLACEHOLDER
 
 
+@_POSIX_WATCHDOG_SKIP
 def test_install_service_dry_run_substitutes_swarph_bin(isolated_state, capsys, monkeypatch):
     """Dry-run preview shows resolved swarph path in ExecStart, not hardcoded
     /usr/local/bin/swarph (when the host actually has swarph elsewhere)."""
@@ -723,6 +733,7 @@ def test_install_service_dry_run_substitutes_swarph_bin(isolated_state, capsys, 
     assert "ExecStart=/usr/local/bin/swarph watchdog --check" not in captured.err
 
 
+@_POSIX_WATCHDOG_SKIP
 def test_install_service_dry_run_preserves_default_path_when_absolute(isolated_state, capsys, monkeypatch):
     """When sys.argv[0] IS /usr/local/bin/swarph (the v0.7.3 default path),
     the substitution still happens but produces the same line — no diff vs
@@ -734,6 +745,7 @@ def test_install_service_dry_run_preserves_default_path_when_absolute(isolated_s
     assert "ExecStart=/usr/local/bin/swarph watchdog --check" in captured.err
 
 
+@_POSIX_WATCHDOG_SKIP
 def test_resolve_swarph_bin_relative_with_slash_resolves_to_absolute(tmp_path, monkeypatch):
     """Relative path with slash (e.g. editable install's venv/bin/swarph)
     must be absolutized — systemd ExecStart needs absolute. Regression guard
@@ -782,6 +794,7 @@ def _fake_run_factory(panes_rc, panes_out, pgrep_rc, pgrep_out, sessions_rc=0):
     return fake_run
 
 
+@_POSIX_WATCHDOG_SKIP
 def test_pid_under_walks_proc_ancestry():
     pid = os.getpid()
     assert _wd._pid_under(pid, {pid}) is True            # self

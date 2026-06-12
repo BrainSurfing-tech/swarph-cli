@@ -21,8 +21,15 @@ from swarph_cli.commands.install_hook import (
 
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch) -> Iterator[Path]:
-    """Isolate $HOME so `~/.claude/settings.json` writes land in tmp_path."""
+    """Isolate $HOME so `~/.claude/settings.json` writes land in tmp_path.
+
+    Path.home() reads HOME on POSIX but USERPROFILE (then HOMEDRIVE+HOMEPATH)
+    on Windows, so set all of them to keep the isolation effective cross-platform.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOMEDRIVE", tmp_path.drive)
+    monkeypatch.setenv("HOMEPATH", str(tmp_path)[len(tmp_path.drive):])
     yield tmp_path
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import stat
+import sys
 from pathlib import Path
 
 from swarph_cli.commands import mesh
@@ -172,7 +173,8 @@ def test_mesh_register_mints_token_file_mode_600(monkeypatch, tmp_path, capsys):
     }
     token_file = tmp_path / ".config" / "swarph" / "gpt-ops.peer_token"
     assert token_file.read_text().strip() == "minted-secret-token"
-    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+    if sys.platform != "win32":  # POSIX file-mode bits not representable on Windows
+        assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
     out = capsys.readouterr().out
     assert "registered gpt-ops" in out
     assert str(token_file) in out

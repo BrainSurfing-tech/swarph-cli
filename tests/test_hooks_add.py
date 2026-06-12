@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -49,7 +50,8 @@ def test_add_builtin_writes_script_and_merges_bindings(tmp_path):
     script = hooks_home / "cell-resilience.sh"
     assert script.exists()
     # executable bit set
-    assert os.stat(script).st_mode & 0o111
+    if sys.platform != "win32":  # POSIX file-mode bits not representable on Windows
+        assert os.stat(script).st_mode & 0o111
 
     expected_command = str(script.resolve())
 
@@ -274,7 +276,8 @@ def test_local_installs_with_assume_yes(tmp_path):
     assert rc == 0
     script = hooks_home / "myhook.sh"
     assert script.exists()
-    assert os.stat(script).st_mode & 0o111
+    if sys.platform != "win32":  # POSIX file-mode bits not representable on Windows
+        assert os.stat(script).st_mode & 0o111
 
     settings = _load_settings(settings_path)
     assert "PostToolUse" in settings["hooks"]

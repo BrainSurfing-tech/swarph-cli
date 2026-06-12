@@ -38,8 +38,13 @@ class VerifyResult:
 
 
 def expected_project_dir(cwd: Path) -> str:
-    """Claude Code's projects/<sanitized-cwd>/ dir name: '/' → '-'."""
-    return str(cwd).replace("/", "-")
+    """Claude Code's projects/<sanitized-cwd>/ dir name: path separators → '-'.
+
+    Cross-platform: replace '/', '\\' AND ':' so Windows paths (which
+    str(Path(...)) renders with backslashes + a drive-letter colon) sanitize
+    to the same shape Claude Code's projects dir uses. No-ops on POSIX '/' paths.
+    """
+    return str(cwd).replace("/", "-").replace("\\", "-").replace(":", "-")
 
 
 def locate_session_jsonl(session_id: str) -> List[Path]:
