@@ -59,9 +59,28 @@ jobs:
       - name: Install (editable + dev extras)
         run: python -m pip install --upgrade pip && pip install -e ".[dev]"
 
-      # Primary gate: the full suite. No continue-on-error — red == real fail.
-      - name: Full test suite
-        run: pytest -q
+      # Primary gate + §5.3 verdict re-derivation in ONE step: run the suite to a
+      # junit record, then RE-DERIVE the verdict from per-test records (not the
+      # bare exit code) — assert zero failures/errors AND that a host-known
+      # minimum of tests actually RAN (anti collect-FORGED: a forged "0-ran-but-
+      # green" can't pass). No continue-on-error — red == real fail. This replaces
+      # the old `pytest --collect-only | grep -c "::"` count, which was fragile
+      # under bash `pipefail` on windows-latest (empty COUNT -> test -ge errored).
+      - name: Full suite + junit verdict re-derivation
+        run: |
+          pytest -q --junit-xml=junit.xml
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("junit.xml").getroot()
+          suites = root.findall("testsuite") or ([root] if root.tag == "testsuite" else [])
+          tests  = sum(int(s.get("tests", "0")) for s in suites)
+          skips  = sum(int(s.get("skipped", "0")) for s in suites)
+          bad    = sum(int(s.get("failures", "0")) + int(s.get("errors", "0")) for s in suites)
+          ran = tests - skips
+          print(f"tests={tests} ran={ran} skipped={skips} failures+errors={bad}")
+          assert bad == 0, f"{bad} failures/errors in junit"
+          assert ran >= 600, f"collect-suspect: only {ran} tests ran (floor 600)"
+          PY
 
       # §5.3c required-node-id floor: these win32-only paths CANNOT be exercised
       # on the Linux build host, so they are the whole point of this runner. If a
@@ -77,11 +96,3 @@ jobs:
           pytest -v --no-header \
             tests/test_spawn_windows_relaunch.py \
             "tests/test_cell_loader.py::test_session_sidecar_different_cwd_mints_fresh_and_repins"
-
-      # §5.3 verdict re-derivation: distrust a bare green; assert a host-known
-      # minimum test count actually ran (a forged "0 ran but exit 0" can't pass).
-      - name: Collected-count floor (anti collect-FORGED)
-        run: |
-          COUNT=$(pytest --collect-only -q 2>/dev/null | grep -c "::")
-          echo "collected $COUNT tests"
-          test "$COUNT" -ge 700 || { echo "FAIL: only $COUNT tests collected (floor 700) — collect-suspect"; exit 1; }
