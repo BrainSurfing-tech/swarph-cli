@@ -1,0 +1,82 @@
+# windows.yml — EnvironmentMembrane RFC §1.1 Trigger-1: the Windows-CI gap-closer.
+#
+# The swarph build host is Linux, so Windows-specific code has only ever been
+# validated by hand on workstation-lc: the 0.9.5 `_console_is_genuine_wt` ctypes
+# `CreateToolhelp32Snapshot` ancestry walk (the source flags it "cannot be
+# exercised" off-Windows), the PR #46 / 0.9.4 cwd-repin, and the win32 branch of
+# the spawn->tmux launch (0.12.0). On windows-latest those paths execute against
+# REAL Win32 API. This is the recursive first job: the membrane's gap-closer
+# tests the very fixes that motivated it. ZERO membrane abstraction (a plain CI
+# file) — the membrane primitive (Trigger 2) waits for a 2nd consumer (RFC §1.1).
+#
+# Trust-oracle discipline (RFC §5.3): a prompt-injected guest forges a green by
+# shaping the process, not escaping it. So:
+#  - HOST-PINNED HARNESS: this workflow IS the harness, on a reviewed ref; the
+#    agent supplies code-under-test, never the runner spec.
+#  - NO `continue-on-error` / `|| true` anywhere — a real failure stays red.
+#  - REQUIRED-NODE-ID FLOOR (§5.3c): the win32 ctypes walk + the cwd-repin + the
+#    spawn->tmux tests MUST appear in the executed set; pytest exits 5 on
+#    no-tests-collected, so a conftest that deselects them turns the floor step
+#    red (collect-FORGED), never silent-green.
+#  - LEAST-PRIVILEGE TOKEN (§5.4): contents:read only; id-token never write; no
+#    secrets; pull_request (NOT pull_request_target).
+# This is honest own-reviewed-code CI (§5.4 honor-system gate = reviewed-ref-only),
+# NOT a hostile-code containment claim — that bar binds only at Trigger 2.
+
+name: windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  windows-tests:
+    name: pytest on windows-latest (py${{ matrix.python-version }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout (host-pinned harness ref)
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install (editable + dev extras)
+        run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+
+      # Primary gate: the full suite. No continue-on-error — red == real fail.
+      - name: Full test suite
+        run: pytest -q
+
+      # §5.3c required-node-id floor: these win32-only paths CANNOT be exercised
+      # on the Linux build host, so they are the whole point of this runner. If a
+      # collection hook deselects any, pytest collects 0 here and exits 5 -> red.
+      - name: Node-id floor (win32 paths that must actually run)
+        run: |
+          pytest -v --no-header \
+            tests/test_spawn_windows_relaunch.py \
+            tests/test_spawn_tmux_session.py \
+            "tests/test_cell_loader.py::test_session_sidecar_different_cwd_mints_fresh_and_repins"
+
+      # §5.3 verdict re-derivation: distrust a bare green; assert a host-known
+      # minimum test count actually ran (a forged "0 ran but exit 0" can't pass).
+      - name: Collected-count floor (anti collect-FORGED)
+        run: |
+          COUNT=$(pytest --collect-only -q 2>/dev/null | grep -c "::")
+          echo "collected $COUNT tests"
+          test "$COUNT" -ge 700 || { echo "FAIL: only $COUNT tests collected (floor 700) — collect-suspect"; exit 1; }
