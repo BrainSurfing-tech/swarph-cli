@@ -747,15 +747,17 @@ def _tmux_has_session(tmux: str, name: str) -> bool:
 def _launch_via_tmux(
     binary: str, argv: list[str], cwd: Path, session_name: str,
 ) -> bool:
-    """Run the claude cell inside a named tmux session instead of the bare console.
+    """Run the claude cell inside a named tmux session — the single-command UX on
+    EVERY OS (``swarph spawn <name>`` → create-or-attach the session, hand off).
 
     tmux provides its own PTY with correct VT-input handling, so claude's Ink TUI
-    works inside a tmux pane exactly as it does in Windows Terminal — and UNLIKE
-    raw conhost, where the SGR ``m`` terminator leaks into stdin (Enter inserts a
-    literal ``m``). Running the cell in a *named* session also makes it durable and
-    supervisable: the sidecar/watchdog wake it via ``tmux send-keys -t <session>``,
-    and any popup window is just a viewport (``tmux attach``) onto a session that
-    survives every window close.
+    renders correctly inside a pane on every platform — and on Windows
+    specifically this also dodges the conhost/PowerShell ``Enter``-inserts-``m``
+    bug (the SGR ``m`` terminator leaking into stdin) that bites claude run
+    directly in a PowerShell console. Running the cell in a *named* session makes
+    it durable and supervisable on every OS: the sidecar/watchdog wake it via
+    ``tmux send-keys -t <session>``, and any window is just a viewport
+    (``tmux attach``) onto a session that survives every window close.
 
     Strategy (only reached in the OUTER, not-yet-in-tmux context):
       * session already exists  → attach a viewport (interactive only) and hand off;
@@ -764,27 +766,37 @@ def _launch_via_tmux(
         starter-injection logic runs once inside the pane), then attach a viewport
         for an interactive operator.
 
-    Loop safety: the session command re-enters ``swarph spawn <name>``, but that
-    inner process runs with ``$TMUX`` set (tmux exports it into every pane), so it
-    hits the ``$TMUX`` guard below AND the new ``$TMUX`` guard in
-    ``_relaunch_in_windows_terminal`` — it neither re-decides tmux launch nor
-    escapes to a WT window; it falls straight through to ``launch()``'s in-place
-    ``execve``. No recursion is possible.
+    Loop safety (OS-agnostic): the session command re-enters ``swarph spawn
+    <name>``, but that inner process runs with ``$TMUX`` set (tmux exports it into
+    every pane), so it hits the ``$TMUX`` guard below — it neither re-decides tmux
+    launch nor (on Windows) escapes to a WT window; it falls straight through to
+    ``launch()``'s in-place ``execve``. No recursion is possible. This is also why
+    the capture-at-birth ``claude-tmux@.service`` template
+    (``tmux new-session "swarph spawn %i"``) composes cleanly: its inner spawn
+    sees ``$TMUX`` and execs in place rather than re-creating.
+
+    Attach mechanism is per-OS:
+      * **POSIX (Linux/mac):** ``os.execv`` — a TRUE in-place replace, so this
+        process *becomes* ``tmux attach`` (no intermediate process); on detach
+        tmux exits and the shell returns. Never returns on success.
+      * **Windows:** a BLOCKING ``subprocess.run`` — Windows ``os.exec*`` is
+        emulated as spawn-and-exit (not a real replace), which would let the
+        parent PowerShell regain the console and fight the attaching tmux for it
+        (garbled input/render, observed on workstation-lc). A blocking child keeps
+        ONE shared console; it returns True once the operator detaches.
 
     Returns True when it took over the launch (caller short-circuits ``run_spawn``
-    with exit 0); False to fall through to the next strategy (WT relaunch, then
-    in-place exec).
+    with exit 0); False to fall through to the next strategy (on Windows: WT
+    relaunch; everywhere: in-place exec).
 
     No-op (returns False) when:
-      * not win32 — Linux/mac peers keep their existing launch path untouched;
       * we are ALREADY inside a tmux pane (``$TMUX`` set) — the cell belongs in THIS
         pane; let ``launch()`` exec claude in place. Primary loop-breaker;
       * we are inside a session WE spawned (``SWARPH_SPAWN`` set) — belt-and-
         suspenders loop-guard on top of ``$TMUX``;
-      * ``tmux`` is not on PATH — fall through to the Windows Terminal rescue.
+      * ``tmux`` is not on PATH (real tmux on Linux/mac; psmux on Windows) —
+        fall back to the standard launch (Windows: the WT rescue first).
     """
-    if sys.platform != "win32":
-        return False
     if os.environ.get("TMUX"):
         return False
     if os.environ.get("SWARPH_SPAWN"):
@@ -813,37 +825,40 @@ def _launch_via_tmux(
         except (OSError, subprocess.CalledProcessError) as exc:
             print(
                 f"swarph spawn: tmux session create failed ({exc}); falling "
-                "through to the Windows Terminal relaunch.",
+                "back to the standard launch.",
                 file=sys.stderr,
             )
             return False
 
-    # Interactive operator launch: attach the session IN THIS console — the admin
-    # PowerShell window the operator launched from. tmux's own PTY answers the
-    # Ink TUI's terminal queries, so the Enter-inserts-'m' bug (which only bites
-    # claude run DIRECTLY in a PowerShell console) never reaches it — verified on
-    # workstation-lc: claude-in-tmux renders correctly from PowerShell. We reuse
-    # this window rather than popping a fresh cmd console because PowerShell
-    # renders the TUI's UTF-8 better than cmd (which has cp1252 codepage tidbits).
-    # Blocks until the operator detaches; then run_spawn returns 0.
+    # Interactive operator launch: attach the session IN THIS console as a
+    # viewport. tmux's own PTY answers the Ink TUI's terminal queries on every OS
+    # (and on Windows dodges the PowerShell Enter-inserts-'m' bug). The attach
+    # mechanism is per-OS (see docstring): os.execv true-replace on POSIX, blocking
+    # subprocess.run on Windows.
     #
     # A headless caller (watchdog A2 respawn, CI, piped stdout) leaves the session
     # running detached — the sidecar/watchdog reach it via send-keys, no attach.
     if interactive:
-        # Hand the console to `tmux attach` as a BLOCKING CHILD. This path is
-        # win32-only (the function returns False off win32), so we must NOT use
-        # os.execv: on Windows os.exec* is emulated as spawn-and-exit, which lets
-        # the parent PowerShell regain the console and fight the attaching tmux
-        # for it — garbled input/render, observed on workstation-lc. A blocking
-        # subprocess.run keeps ONE console shared down parent->child, exactly like
-        # the operator typing `tmux attach` by hand. Blocks until the operator
-        # detaches; then run_spawn returns 0.
-        try:
-            subprocess.run([tmux, "attach", "-t", session_name])
-            return True
-        except OSError as exc:
-            print(f"swarph spawn: tmux attach failed ({exc}); ", file=sys.stderr)
-            # fall through to the detached note
+        if sys.platform == "win32":
+            # Blocking child: Windows os.exec* is spawn-and-exit, so a true
+            # in-place replace is unavailable — the blocking run keeps ONE shared
+            # console (parent PowerShell -> swarph -> tmux). Returns True once the
+            # operator detaches; then run_spawn returns 0.
+            try:
+                subprocess.run([tmux, "attach", "-t", session_name])
+                return True
+            except OSError as exc:
+                print(f"swarph spawn: tmux attach failed ({exc}); ", file=sys.stderr)
+                # fall through to the detached note
+        else:
+            # POSIX: true in-place replace — this process BECOMES `tmux attach`,
+            # the console IS the viewport, no intermediate process. Never returns
+            # on success; only an exec failure falls through to the detached note.
+            try:
+                os.execv(tmux, [tmux, "attach", "-t", session_name])
+            except OSError as exc:
+                print(f"swarph spawn: tmux attach failed ({exc}); ", file=sys.stderr)
+                # fall through to the detached note
 
     print(
         f"swarph spawn: cell running detached in tmux session '{session_name}' "

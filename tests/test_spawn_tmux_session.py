@@ -1,23 +1,24 @@
-"""Tests for `swarph spawn`'s Windows tmux-session launch (`_launch_via_tmux`).
+"""Tests for `swarph spawn`'s tmux-session launch (`_launch_via_tmux`), ALL-OS.
 
-On Windows, the preferred launch path runs the claude cell inside a NAMED tmux
-session rather than the bare console. tmux provides its own PTY with correct
-VT-input handling, so claude's Ink TUI works inside a pane exactly as in Windows
-Terminal — and UNLIKE raw conhost / a PowerShell console, where the SGR 'm'
-terminator leaks into stdin (Enter inserts a literal 'm'). A named session is
-also durable + supervisable: the sidecar/watchdog wake it via `tmux send-keys
--t <session>`.
+The preferred launch path runs the claude cell inside a NAMED tmux session
+rather than the bare console — on EVERY OS (`swarph spawn <name>` → create-or-
+attach). tmux provides its own PTY with correct VT-input handling, so claude's
+Ink TUI renders correctly inside a pane on every platform — and on Windows
+specifically this also dodges the conhost/PowerShell Enter-inserts-'m' bug. A
+named session is durable + supervisable everywhere: the sidecar/watchdog wake it
+via `tmux send-keys -t <session>`.
 
-The interactive attach is a BLOCKING `subprocess.run([tmux, "attach"])`, NOT
-`os.execv`: this path is win32-only, and on Windows os.exec* is emulated as
-spawn-and-exit, which lets the parent PowerShell regain the console and fight the
-attaching tmux for it (garbled render, observed on workstation-lc). A blocking
-child shares one console down parent->child, exactly like the operator typing
-`tmux attach` by hand.
+The interactive attach is per-OS:
+  * POSIX (Linux/mac): `os.execv` — a TRUE in-place replace (the process becomes
+    `tmux attach`); never returns on success.
+  * Windows: a BLOCKING `subprocess.run([tmux, "attach"])` — Windows os.exec* is
+    spawn-and-exit, so a real replace is unavailable and a blocking child keeps
+    ONE shared console.
 
-The ACTUAL tmux calls need a real native-Windows box; these tests pin the
-DECISION logic (create vs attach vs skip, interactive vs headless) by mocking
-subprocess, so they run on any platform.
+The ACTUAL tmux calls need a real multiplexer (real tmux on Linux/mac, psmux on
+Windows); these tests pin the DECISION logic (create vs attach vs skip,
+interactive vs headless, win32 vs POSIX attach mechanism) by mocking subprocess
+AND os.execv, so they run on any platform without ever firing a real exec.
 """
 from __future__ import annotations
 
@@ -25,6 +26,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import subprocess
+
+import pytest
 
 from swarph_cli.commands import spawn
 
@@ -34,6 +37,16 @@ CWD = Path("/home/ubuntu/lab")
 SESSION = "lab"
 TMUX = "/usr/bin/tmux"
 WT = "C:\\Windows\\wt.exe"
+
+# Sentinel returned by _drive when the POSIX os.execv attach fired (in reality
+# os.execv never returns; the mock raises _ExecvReplaced to simulate that).
+_EXECV = object()
+
+
+class _ExecvReplaced(BaseException):
+    """Mock side-effect for os.execv: real execv replaces the process and never
+    returns, so we halt _launch_via_tmux here. BaseException (not Exception) so
+    the function's `except OSError` around execv never swallows it."""
 
 
 class _FakeStdout:
@@ -47,12 +60,15 @@ class _FakeStdout:
 def _drive(monkeypatch, *, platform="win32", tmux=TMUX, wt=WT, in_tmux=None,
            spawn_marker=None, isatty=True, session_exists=False,
            new_session_exc=None):
-    """Drive `_launch_via_tmux` with tmux/subprocess mocked.
+    """Drive `_launch_via_tmux` with tmux/subprocess/execv mocked.
 
     `run` dispatches on the subcommand: `has-session` returns rc 0/1 per
     `session_exists`; `new-session` returns rc 0 (or raises `new_session_exc`);
-    `attach` returns rc 0. Every tmux invocation goes through subprocess.run
-    (including the interactive attach — a blocking child, NOT os.execv).
+    `attach` (Windows path only) returns rc 0. The POSIX attach is os.execv,
+    mocked to raise `_ExecvReplaced` (simulating its never-returns replace).
+
+    Returns `(result, run, execv)`. `result` is the function's bool, or the
+    `_EXECV` sentinel when the POSIX execv attach took over.
     """
     monkeypatch.setattr(spawn.sys, "platform", platform)
     monkeypatch.setattr(spawn.sys, "stdout", _FakeStdout(isatty))
@@ -76,8 +92,15 @@ def _drive(monkeypatch, *, platform="win32", tmux=TMUX, wt=WT, in_tmux=None,
 
     run = MagicMock(side_effect=_run)
     monkeypatch.setattr(spawn.subprocess, "run", run)
-    result = spawn._launch_via_tmux(BIN, ARGV, CWD, SESSION)
-    return result, run
+
+    execv = MagicMock(side_effect=_ExecvReplaced())
+    monkeypatch.setattr(spawn.os, "execv", execv)
+
+    try:
+        result = spawn._launch_via_tmux(BIN, ARGV, CWD, SESSION)
+    except _ExecvReplaced:
+        result = _EXECV
+    return result, run, execv
 
 
 def _cmds(run):
@@ -85,57 +108,82 @@ def _cmds(run):
     return [c.args[0] for c in run.call_args_list]
 
 
-def _attached(run):
+def _attached_via_run(run):
+    """True if the Windows blocking-subprocess.run attach fired."""
     return [TMUX, "attach", "-t", SESSION] in _cmds(run)
 
 
-# --- gates that skip tmux entirely ---------------------------------------
+def _attached_via_execv(execv):
+    """True if the POSIX os.execv attach fired with the right argv."""
+    return execv.call_args is not None and execv.call_args.args == (
+        TMUX, [TMUX, "attach", "-t", SESSION]
+    )
 
 
-def test_non_windows_never_uses_tmux(monkeypatch):
-    r, run = _drive(monkeypatch, platform="linux")
-    assert r is False
-    run.assert_not_called()
+# --- gates that skip tmux entirely (OS-agnostic) -------------------------
 
 
-def test_inside_tmux_skips_is_the_loop_breaker(monkeypatch):
+@pytest.mark.parametrize("platform", ["win32", "linux", "darwin"])
+def test_inside_tmux_skips_is_the_loop_breaker(monkeypatch, platform):
     # $TMUX set => the inner `swarph spawn <name>` re-entry runs INSIDE the pane.
     # It must NOT re-decide attach-or-create (that's the infinite loop); it falls
-    # through to launch()'s in-place exec. This is the primary loop-breaker.
-    r, run = _drive(monkeypatch, in_tmux="/tmp/tmux-1000/default,9,0")
+    # through to launch()'s in-place exec. Primary loop-breaker, on EVERY OS —
+    # this is what makes the claude-tmux@.service template compose cleanly.
+    r, run, execv = _drive(monkeypatch, platform=platform,
+                           in_tmux="/tmp/tmux-1000/default,9,0")
     assert r is False
     run.assert_not_called()
+    execv.assert_not_called()
 
 
-def test_spawn_marker_skips_belt_and_suspenders(monkeypatch):
+@pytest.mark.parametrize("platform", ["win32", "linux", "darwin"])
+def test_spawn_marker_skips_belt_and_suspenders(monkeypatch, platform):
     # SWARPH_SPAWN set => inside a session we already spawned. Secondary guard.
-    r, run = _drive(monkeypatch, spawn_marker="1")
+    r, run, execv = _drive(monkeypatch, platform=platform, spawn_marker="1")
     assert r is False
     run.assert_not_called()
+    execv.assert_not_called()
 
 
-def test_no_tmux_on_path_falls_through(monkeypatch):
-    # tmux absent => return False so the caller drops to the WT relaunch rescue.
-    r, run = _drive(monkeypatch, tmux=None)
+@pytest.mark.parametrize("platform", ["win32", "linux", "darwin"])
+def test_no_tmux_on_path_falls_through(monkeypatch, platform):
+    # tmux/psmux absent => return False so the caller drops to the standard launch
+    # (Windows: the WT relaunch rescue first).
+    r, run, execv = _drive(monkeypatch, platform=platform, tmux=None)
     assert r is False
+    execv.assert_not_called()
 
 
-# --- attach vs create -----------------------------------------------------
+# --- attach vs create: per-OS attach mechanism ---------------------------
 
 
-def test_existing_session_attaches_in_place_no_create(monkeypatch):
-    # Session already exists + interactive => attach IN PLACE (this console, as a
-    # blocking child), DON'T create a second cell. claude is already in session.
-    r, run = _drive(monkeypatch, session_exists=True)
+def test_existing_session_attaches_no_create_windows(monkeypatch):
+    # Windows: session exists + interactive => attach via BLOCKING subprocess.run
+    # IN THIS console; DON'T create a second cell.
+    r, run, execv = _drive(monkeypatch, platform="win32", session_exists=True)
     assert r is True
     cmds = _cmds(run)
     assert any("has-session" in c for c in cmds)
-    assert not any("new-session" in c for c in cmds)  # no second cell
-    assert _attached(run)  # blocking subprocess.run attach
+    assert not any("new-session" in c for c in cmds)
+    assert _attached_via_run(run)
+    execv.assert_not_called()  # Windows never uses os.execv
 
 
-def test_absent_session_creates_then_attaches_in_place(monkeypatch):
-    r, run = _drive(monkeypatch, session_exists=False)
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_existing_session_attaches_no_create_posix(monkeypatch, platform):
+    # POSIX: session exists + interactive => attach via os.execv TRUE replace;
+    # DON'T create a second cell.
+    r, run, execv = _drive(monkeypatch, platform=platform, session_exists=True)
+    assert r is _EXECV  # execv took over (never-returns)
+    cmds = _cmds(run)
+    assert any("has-session" in c for c in cmds)
+    assert not any("new-session" in c for c in cmds)
+    assert _attached_via_execv(execv)
+    assert not _attached_via_run(run)  # POSIX attach is execv, not subprocess.run
+
+
+def test_absent_session_creates_then_attaches_windows(monkeypatch):
+    r, run, execv = _drive(monkeypatch, platform="win32", session_exists=False)
     assert r is True
     cmds = _cmds(run)
     create = next(c for c in cmds if "new-session" in c)
@@ -144,42 +192,70 @@ def test_absent_session_creates_then_attaches_in_place(monkeypatch):
     assert create[:5] == [TMUX, "new-session", "-d", "-s", SESSION]
     assert "-e" in create and "SWARPH_SPAWN=1" in create
     assert create[-3:] == ["swarph", "spawn", SESSION]
-    assert _attached(run)  # then attach in place
+    assert _attached_via_run(run)  # then blocking-subprocess.run attach
+    execv.assert_not_called()
 
 
-def test_absent_session_headless_creates_detached_no_attach(monkeypatch):
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_absent_session_creates_then_attaches_posix(monkeypatch, platform):
+    # The single-command Linux/mac UX the generalization unlocks: create the
+    # session (via subprocess.run) then attach via os.execv true-replace.
+    r, run, execv = _drive(monkeypatch, platform=platform, session_exists=False)
+    assert r is _EXECV
+    cmds = _cmds(run)
+    create = next(c for c in cmds if "new-session" in c)
+    assert create[:5] == [TMUX, "new-session", "-d", "-s", SESSION]
+    assert "-e" in create and "SWARPH_SPAWN=1" in create
+    assert create[-3:] == ["swarph", "spawn", SESSION]
+    assert _attached_via_execv(execv)  # os.execv attach
+    assert not _attached_via_run(run)
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux", "darwin"])
+def test_absent_session_headless_creates_detached_no_attach(monkeypatch, platform):
     # Non-interactive (watchdog A2 respawn / CI): create the session detached but
-    # DO NOT attach. The watchdog/sidecar reach it via send-keys.
-    r, run = _drive(monkeypatch, session_exists=False, isatty=False)
+    # DO NOT attach — on ANY OS. The watchdog/sidecar reach it via send-keys.
+    r, run, execv = _drive(monkeypatch, platform=platform,
+                           session_exists=False, isatty=False)
     assert r is True
     assert any("new-session" in c for c in _cmds(run))
-    assert not _attached(run)  # detached, no attach
+    assert not _attached_via_run(run)
+    execv.assert_not_called()  # headless never attaches
 
 
-def test_existing_session_headless_is_a_noop_handoff(monkeypatch):
+@pytest.mark.parametrize("platform", ["win32", "linux", "darwin"])
+def test_existing_session_headless_is_a_noop_handoff(monkeypatch, platform):
     # Session exists + headless => nothing to do but claim the launch (True) so
     # run_spawn short-circuits; no create, no attach.
-    r, run = _drive(monkeypatch, session_exists=True, isatty=False)
+    r, run, execv = _drive(monkeypatch, platform=platform,
+                           session_exists=True, isatty=False)
     assert r is True
     assert not any("new-session" in c for c in _cmds(run))
-    assert not _attached(run)
+    assert not _attached_via_run(run)
+    execv.assert_not_called()
 
 
-# --- failure handling -----------------------------------------------------
+# --- failure handling (OS-agnostic) --------------------------------------
 
 
-def test_create_failure_falls_through(monkeypatch):
-    # tmux new-session errors => return False so the caller drops to WT relaunch;
-    # never attach a half-created session.
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_create_failure_falls_through(monkeypatch, platform):
+    # tmux new-session errors => return False so the caller drops to the standard
+    # launch; never attach a half-created session.
     boom = subprocess.CalledProcessError(1, "tmux")
-    r, run = _drive(monkeypatch, session_exists=False, new_session_exc=boom)
+    r, run, execv = _drive(monkeypatch, platform=platform,
+                           session_exists=False, new_session_exc=boom)
     assert r is False
-    assert not _attached(run)
+    assert not _attached_via_run(run)
+    execv.assert_not_called()
 
 
-def test_create_oserror_falls_through(monkeypatch):
-    r, run = _drive(
-        monkeypatch, session_exists=False, new_session_exc=OSError("no tmux")
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_create_oserror_falls_through(monkeypatch, platform):
+    r, run, execv = _drive(
+        monkeypatch, platform=platform, session_exists=False,
+        new_session_exc=OSError("no tmux"),
     )
     assert r is False
-    assert not _attached(run)
+    assert not _attached_via_run(run)
+    execv.assert_not_called()
