@@ -830,21 +830,26 @@ def _launch_via_tmux(
     # A headless caller (watchdog A2 respawn, CI, piped stdout) leaves the session
     # running detached — the sidecar/watchdog reach it via send-keys, no attach.
     if interactive:
+        # Hand the console to `tmux attach` as a BLOCKING CHILD. This path is
+        # win32-only (the function returns False off win32), so we must NOT use
+        # os.execv: on Windows os.exec* is emulated as spawn-and-exit, which lets
+        # the parent PowerShell regain the console and fight the attaching tmux
+        # for it — garbled input/render, observed on workstation-lc. A blocking
+        # subprocess.run keeps ONE console shared down parent->child, exactly like
+        # the operator typing `tmux attach` by hand. Blocks until the operator
+        # detaches; then run_spawn returns 0.
         try:
             subprocess.run([tmux, "attach", "-t", session_name])
+            return True
         except OSError as exc:
-            print(
-                f"swarph spawn: tmux attach failed ({exc}); session "
-                f"'{session_name}' is running detached — attach manually with "
-                f"`tmux attach -t {session_name}`.",
-                file=sys.stderr,
-            )
-    else:
-        print(
-            f"swarph spawn: cell running detached in tmux session "
-            f"'{session_name}' — attach with `tmux attach -t {session_name}`.",
-            file=sys.stderr,
-        )
+            print(f"swarph spawn: tmux attach failed ({exc}); ", file=sys.stderr)
+            # fall through to the detached note
+
+    print(
+        f"swarph spawn: cell running detached in tmux session '{session_name}' "
+        f"— attach with `tmux attach -t {session_name}`.",
+        file=sys.stderr,
+    )
     return True
 
 
