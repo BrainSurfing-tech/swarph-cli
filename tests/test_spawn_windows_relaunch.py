@@ -39,17 +39,20 @@ class _FakeStdout:
 
 def _call(monkeypatch, *, platform="win32", genuine_wt=False, wt_session=None,
           win_ack=None, spawn_marker=None, force_wt=None, isatty=True,
-          wt_path=WT, popen=None):
+          wt_path=WT, popen=None, tmux=None):
     """Drive `_relaunch_in_windows_terminal` with the genuine-WT detector mocked.
 
     `genuine_wt` patches `_console_is_genuine_wt` directly (True/False) so we test
     the DECISION matrix without touching ctypes. `wt_session` is still settable in
-    the env to prove the new logic IGNORES it (the headline bug fix).
+    the env to prove the new logic IGNORES it (the headline bug fix). `tmux` sets
+    $TMUX to prove the new in-tmux guard skips the WT rescue (tmux's PTY already
+    handles VT-input, so bouncing to WT would escape the supervised pane).
     """
     monkeypatch.setattr(spawn.sys, "platform", platform)
     monkeypatch.setattr(spawn.sys, "stdout", _FakeStdout(isatty))
     for var, val in (("WT_SESSION", wt_session), ("SWARPH_WIN_ACK", win_ack),
-                     ("SWARPH_SPAWN", spawn_marker), ("SWARPH_FORCE_WT", force_wt)):
+                     ("SWARPH_SPAWN", spawn_marker), ("SWARPH_FORCE_WT", force_wt),
+                     ("TMUX", tmux)):
         if val is None:
             monkeypatch.delenv(var, raising=False)
         else:
@@ -122,6 +125,15 @@ def test_already_spawned_skips_relaunch(monkeypatch):
     # #6 SWARPH_SPAWN set => inside a session we already spawned. Reliable
     # loop-guard, independent of everything else — never re-relaunch.
     r, pop = _call(monkeypatch, genuine_wt=False, spawn_marker="1")
+    assert r is False
+    pop.assert_not_called()
+
+
+def test_inside_tmux_skips_relaunch(monkeypatch):
+    # $TMUX set => inside a tmux pane. tmux's own PTY handles VT-input correctly,
+    # so the Ink TUI works; bouncing to a fresh WT window would ESCAPE the
+    # supervised pane. Must NOT relaunch even on a conhost (genuine_wt=False).
+    r, pop = _call(monkeypatch, genuine_wt=False, tmux="/tmp/tmux-1000/default,9,0")
     assert r is False
     pop.assert_not_called()
 
