@@ -9,6 +9,10 @@
 # Shape below is the USER-unit form (swarph at ~/.local/bin, WantedBy=default.target).
 # ROOT/system cell: swarph at /usr/local/bin, WantedBy=multi-user.target,
 #   After=network-online.target. Adjust the two binary paths + the [Install] target.
+#   The system shape is for cells whose claude state lives under /root — `swarph
+#   cell verify` resolves ~/.claude relative to the RUNNING user, so a root unit
+#   managing a non-root cell would silently skip the cwd-drift gate. Non-root
+#   cells use the user shape + enable-linger, never a root unit.
 #
 # AI² fix (science-claude): KillMode=mixed + an explicit ExecStop kill-session —
 #   the old `none` KillMode is deprecated (systemd warns). mixed = SIGTERM the main process,
@@ -26,9 +30,12 @@ After=default.target
 [Service]
 Type=forking
 Environment=TERM=xterm-256color
-ExecStart=/bin/sh -lc '%h/.local/bin/swarph cell verify %i \
-  && (/usr/bin/tmux has-session -t %i 2>/dev/null \
-      || /usr/bin/tmux new-session -d -s %i "%h/.local/bin/swarph spawn %i")'
+# %i is expanded once by systemd into the shell-var assignment; every later
+# reference is the properly-double-quoted "$n", which sidesteps the
+# nested-quote ambiguity of interpolating %i inside the sh -lc string.
+ExecStart=/bin/sh -lc 'n=%i; %h/.local/bin/swarph cell verify "$n" \
+  && (/usr/bin/tmux has-session -t "$n" 2>/dev/null \
+      || /usr/bin/tmux new-session -d -s "$n" "%h/.local/bin/swarph spawn $n")'
 ExecStop=/usr/bin/tmux kill-session -t %i
 KillMode=mixed
 RemainAfterExit=yes

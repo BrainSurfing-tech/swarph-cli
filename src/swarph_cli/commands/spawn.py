@@ -1048,13 +1048,6 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
             )
 
-        _record_mitosis_safe(
-            cell,
-            sidecar_role=sidecar_role,
-            effective_role=effective_role,
-            session_id=session_id,
-            was_generated=was_generated,
-        )
     elif cell.provider == "antigravity":
         session_id = "(fresh-session-per-spawn, no pinned id)"
         was_generated = True
@@ -1137,10 +1130,18 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         except Exception as exc:
             print(f"swarph spawn: restore failed: {exc}", file=sys.stderr)
 
-    # Record this tmux session as the pin's live holder (feeds the verify
-    # gate's double-resume probe). After dry-run/print-id so a dry-run never
-    # mutates state; before exec so the flag exists while claude is live.
+    # Capture hooks — AFTER the dry-run/print-id returns so a dry-run never
+    # writes lineage or live-pin state, BEFORE exec so both exist while
+    # claude is live. Lineage is a provenance claim about a real birth event;
+    # a dry-run --new-instance must not fabricate one.
     if membrane.uses_pinned_session():
+        _record_mitosis_safe(
+            cell,
+            sidecar_role=sidecar_role,
+            effective_role=effective_role,
+            session_id=session_id,
+            was_generated=was_generated,
+        )
         _set_live_pin_safe(effective_role if effective_role else cell.role)
 
     # exec-replace so the spawned provider session owns stdio +

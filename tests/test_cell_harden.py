@@ -52,3 +52,18 @@ def test_harden_is_idempotent_no_duplicate_genesis(tmp_path, monkeypatch):
     harden.harden_cell("droplet")
     rows = paths.lineage_path("droplet").read_text().splitlines()
     assert len(rows) == 1  # genesis recorded once, not twice
+
+
+def test_reharden_preserves_live_pin(tmp_path, monkeypatch):
+    # Review fix: re-harden on a LIVE cell must not clobber its live-pin —
+    # write_manifest is a full overwrite, and a clobbered holder blinds the
+    # verify gate's double-resume probe.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    cell = _cell(tmp_path)
+    monkeypatch.setattr(harden, "_resolve_cell", lambda role: cell)
+    monkeypatch.setattr(harden, "_read_pin_uuid", lambda role: "uuid-1")
+    harden.harden_cell("droplet")
+    manifest.set_live_pin("droplet", "droplet")  # cell goes live
+    harden.harden_cell("droplet")  # e.g. recipe-path refresh while running
+    assert manifest.read_manifest("droplet")["head"]["live_pin_holder"] == "droplet"

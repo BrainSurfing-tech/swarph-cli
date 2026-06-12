@@ -72,6 +72,12 @@ def harden_cell(role: str) -> HardenResult:
     launch = _write_launch_wrapper(role)
     pin_uuid = _read_pin_uuid(role)
 
+    # Re-harden on a LIVE cell must not clobber its live-pin: write_manifest
+    # is a full overwrite, and a None holder here would blind the verify
+    # gate's double-resume probe (the exact footgun this primitive prevents).
+    existing = manifest.read_manifest(role)
+    existing_holder = (existing or {}).get("head", {}).get("live_pin_holder")
+
     manifest.write_manifest(
         role,
         recipe=str(cell.source_path) if cell.source_path else str(cells_dir() / f"{role}.yaml"),
@@ -79,7 +85,7 @@ def harden_cell(role: str) -> HardenResult:
         service=service,
         lineage=str(paths.lineage_path(role)),
         session_id=pin_uuid,
-        live_pin_holder=None,
+        live_pin_holder=existing_holder,
     )
 
     if not lineage.lineage_exists(role) and pin_uuid:

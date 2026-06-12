@@ -16,13 +16,18 @@ def test_killmode_is_mixed_not_deprecated_none():
 
 def test_execstart_is_gated_on_verify_before_spawn():
     text = TEMPLATE.read_text()
+    execstart = next(l for l_no, l in enumerate(text.splitlines())
+                     if l.startswith("ExecStart="))
+    # %i is expanded ONCE into a shell var; later refs are quoted "$n"
+    # (review fix: sidesteps nested-quote ambiguity in sh -lc)
+    assert "n=%i" in execstart
     # droplet BLOCKING fix: per-UUID verify gates the per-name has-session
-    assert "swarph cell verify %i" in text
-    verify_at = text.index("swarph cell verify %i")
-    spawn_at = text.index("swarph spawn %i")
+    assert 'swarph cell verify "$n"' in text
+    verify_at = text.index('swarph cell verify "$n"')
+    spawn_at = text.index("swarph spawn $n")
     assert verify_at < spawn_at  # verify must run BEFORE spawn
-    assert "tmux has-session -t %i" in text
-    assert "tmux new-session -d -s %i" in text
+    assert 'tmux has-session -t "$n"' in text
+    assert 'tmux new-session -d -s "$n"' in text
 
 
 def test_has_explicit_execstop_kill_session():
