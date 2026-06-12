@@ -9,15 +9,15 @@ swarph --version
 
 **What it is:** a multi-provider LLM command line. Run one-shot prompts or an interactive REPL against any supported provider; spawn long-lived agent *cells* that persist across restarts and coordinate over a mesh; install hooks, MCP servers, and skills by content-addressed URI. An open, inspectable substrate — not a closed orchestration platform.
 
-**Who it's for:** builders running more than one LLM who want them to *cooperate* instead of sitting in separate tabs — multi-agent systems across vendors, agnostic by design. A thin client over the [`swarph-mesh`](https://github.com/darw007d/swarph-mesh) substrate library.
+**Who it's for:** builders running more than one LLM who want them to *cooperate* instead of sitting in separate tabs — multi-agent systems across vendors, agnostic by design. A thin client over the [`swarph-mesh`](https://github.com/BrainSurfing-tech/swarph-mesh) substrate library.
 
 This is one of three repos in the v0.3.x architecture:
 
 | Repo | Role |
 |---|---|
-| [`swarph-mesh`](https://github.com/darw007d/swarph-mesh) | Substrate Python package — Protocol + adapters + SwarphCall + MeshClient. Pure library, no CLI |
-| [`swarph-cli`](https://github.com/darw007d/swarph-cli) | This repo — the `swarph` binary |
-| [`swarph-meshlm`](https://github.com/darw007d/swarph-meshlm) | Simon Willison `llm` plugin |
+| [`swarph-mesh`](https://github.com/BrainSurfing-tech/swarph-mesh) | Substrate Python package — Protocol + adapters + SwarphCall + MeshClient. Pure library, no CLI |
+| [`swarph-cli`](https://github.com/BrainSurfing-tech/swarph-cli) | This repo — the `swarph` binary |
+| [`swarph-meshlm`](https://github.com/BrainSurfing-tech/swarph-meshlm) | Simon Willison `llm` plugin |
 
 ## Commands
 
@@ -388,12 +388,12 @@ Design spec: `docs/superpowers/specs/2026-06-11-swarph-context-compressor-design
 
 ## Why split CLI from substrate
 
-The [`swarph-mesh`](https://github.com/darw007d/swarph-mesh) library is imported by any program that wants to drive the mesh against the Protocol directly — orchestrators, judges, automation. Those callers don't need the CLI surface or the console-script entry point. Keeping the CLI in a separate repo means library users `pip install swarph-mesh` without pulling argparse + REPL plumbing they'll never run, while `pip install swarph-cli` gives you the standalone `swarph` binary.
+The [`swarph-mesh`](https://github.com/BrainSurfing-tech/swarph-mesh) library is imported by any program that wants to drive the mesh against the Protocol directly — orchestrators, judges, automation. Those callers don't need the CLI surface or the console-script entry point. Keeping the CLI in a separate repo means library users `pip install swarph-mesh` without pulling argparse + REPL plumbing they'll never run, while `pip install swarph-cli` gives you the standalone `swarph` binary.
 
 ## Install (dev)
 
 ```bash
-git clone https://github.com/darw007d/swarph-cli
+git clone https://github.com/BrainSurfing-tech/swarph-cli
 cd swarph-cli
 python -m venv venv && source venv/bin/activate
 pip install -e ".[dev]"
