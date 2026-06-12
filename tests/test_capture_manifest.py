@@ -43,3 +43,35 @@ def test_clear_live_pin(tmp_path, monkeypatch):
 def test_clear_live_pin_noop_when_no_manifest(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     manifest.clear_live_pin("ghost")  # must not raise
+
+
+def test_set_live_pin_roundtrip_and_noop_when_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    manifest.set_live_pin("ghost", "tmux-x")  # no manifest → no-op, no raise
+    assert manifest.read_manifest("ghost") is None
+    manifest.write_manifest("droplet", recipe="r", pin="p", service="s",
+                            lineage="l", session_id="uuid-1")
+    manifest.set_live_pin("droplet", "droplet")
+    assert manifest.read_manifest("droplet")["head"]["live_pin_holder"] == "droplet"
+
+
+def test_find_pin_holders_sweeps_across_roles(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    # the renamed-cell incident: two roles pinning ONE uuid
+    manifest.write_manifest("drop-mother", recipe="r", pin="p", service="s",
+                            lineage="l", session_id="uuid-1",
+                            live_pin_holder="drop-mother")
+    manifest.write_manifest("droplet", recipe="r", pin="p", service="s",
+                            lineage="l", session_id="uuid-1")
+    manifest.write_manifest("other", recipe="r", pin="p", service="s",
+                            lineage="l", session_id="uuid-9",
+                            live_pin_holder="other")
+    holders = manifest.find_pin_holders("uuid-1")
+    assert holders == [("drop-mother", "drop-mother")]
+
+
+def test_find_pin_holders_skips_corrupt_manifest(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    paths.captures_dir().mkdir(parents=True, exist_ok=True)
+    (paths.captures_dir() / "broken.json").write_text("{not json")
+    assert manifest.find_pin_holders("uuid-1") == []

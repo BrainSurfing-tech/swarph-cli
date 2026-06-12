@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from swarph_cli.capture import paths
 
@@ -56,6 +56,41 @@ def clear_live_pin(role: str) -> None:
         return
     m.setdefault("head", {})["live_pin_holder"] = None
     _atomic_write_json(role, m)
+
+
+def set_live_pin(role: str, holder: str) -> None:
+    """Record `holder` (a tmux session name) as the live resumer of this
+    cell's pinned UUID. No-op if the manifest is absent — un-hardened cells
+    are untracked by design (harden is the opt-in)."""
+    m = read_manifest(role)
+    if m is None:
+        return
+    m.setdefault("head", {})["live_pin_holder"] = holder
+    _atomic_write_json(role, m)
+
+
+def find_pin_holders(session_id: str) -> List[Tuple[str, str]]:
+    """All (role, holder) pairs across captures/*.json whose head.session_id
+    matches AND carry a non-null live_pin_holder.
+
+    The cross-NAME sweep behind the double-resume gate: the footgun is
+    per-UUID, not per-role — two cell names pinning one UUID each show a
+    clean own-manifest, so verify must scan EVERY manifest (the renamed-cell
+    incident, spec §4.3 blocking fix)."""
+    results: List[Tuple[str, str]] = []
+    cdir = paths.captures_dir()
+    if not cdir.exists():
+        return results
+    for path in sorted(cdir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        head = data.get("head") or {}
+        holder = head.get("live_pin_holder")
+        if head.get("session_id") == session_id and holder:
+            results.append((data.get("cell", path.stem), holder))
+    return results
 
 
 def _atomic_write_json(role: str, data: dict) -> None:

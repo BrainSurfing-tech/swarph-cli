@@ -8,10 +8,13 @@ Two checks:
       droplet re-seat incident). A pin whose .jsonl exists under a DIFFERENT
       project dir → REFUSE (code 3). A pin with NO .jsonl yet (unstarted) or no
       pin at all → OK (fresh genesis; spawn will mint/create).
-  (b) per-UUID liveness — PROBE the manifest's live_pin_holder. ALIVE → REFUSE
-      (code 4, a real double-resume). DEAD → the flag is a stale poison-pin
-      (holder crashed without clearing it); clear it + ALLOW. Refusing on the
-      stale flag would turn the durability fix into a durability TRAP (droplet).
+  (b) per-UUID liveness — sweep EVERY capture manifest for this pinned UUID
+      (cross-NAME: the footgun is per-UUID, not per-role — the renamed-cell
+      incident had two roles pinning one UUID, each with a clean own-manifest)
+      and PROBE each recorded live_pin_holder. Any ALIVE → REFUSE (code 4, a
+      real double-resume). DEAD → that flag is a stale poison-pin (holder
+      crashed without clearing it); clear it + ALLOW. Refusing on the stale
+      flag would turn the durability fix into a durability TRAP (droplet).
 """
 from __future__ import annotations
 
@@ -79,19 +82,26 @@ def verify_cell(role: str) -> VerifyResult:
             )
     # jsonls == [] → pin minted but session never ran; spawn will create it. OK.
 
-    # (b) liveness probe
-    m = manifest.read_manifest(role)
-    holder = (m or {}).get("head", {}).get("live_pin_holder")
-    if holder:
+    # (b) liveness probe — cross-NAME sweep over every manifest pinning this
+    # UUID, not just this role's own (spec §4.3 blocking fix: two roles
+    # pinning one UUID both look clean per-role).
+    cleared = []
+    for holder_role, holder in manifest.find_pin_holders(session_id):
         if probe_holder_liveness(holder):
             return VerifyResult(
                 False, 4,
                 f"double-resume refused: pin {session_id} is already LIVE under "
-                f"holder {holder!r} (tmux session + live pane). Attach via "
-                f"`tmux attach -t {holder}`, never a second --resume.",
+                f"holder {holder!r} (cell {holder_role!r} — tmux session + live "
+                f"pane). Attach via `tmux attach -t {holder}`, never a second "
+                f"--resume.",
             )
-        # poison-pin: holder dead → clear stale flag + allow
-        manifest.clear_live_pin(role)
-        return VerifyResult(True, 0, f"cleared stale live-pin (dead holder {holder!r}) — allow")
+        # poison-pin: holder dead → clear stale flag + keep sweeping
+        manifest.clear_live_pin(holder_role)
+        cleared.append(f"{holder_role!r}:{holder!r}")
 
+    if cleared:
+        return VerifyResult(
+            True, 0,
+            f"cleared stale live-pin(s) ({', '.join(cleared)}) — allow",
+        )
     return VerifyResult(True, 0, "ok")

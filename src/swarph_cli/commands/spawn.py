@@ -329,6 +329,46 @@ def _record_mitosis_safe(
               file=sys.stderr)
 
 
+def _current_tmux_session() -> Optional[str]:
+    """Name of the tmux session this process runs inside, or None.
+
+    $TMUX presence means we're in a pane; the session name comes from
+    `tmux display-message`. Console (non-tmux) spawns return None.
+    """
+    if not os.environ.get("TMUX"):
+        return None
+    try:
+        out = subprocess.run(
+            ["tmux", "display-message", "-p", "#S"],
+            capture_output=True, text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    name = out.stdout.strip()
+    return name or None
+
+
+def _set_live_pin_safe(role: str) -> None:
+    """Record this tmux session as the live holder of `role`'s pinned UUID.
+
+    Feeds `swarph cell verify`'s double-resume probe (spec §4.4b). Only fires
+    when spawning INSIDE tmux (the claude-tmux@.service path) — console
+    spawns are untracked, per the one-launch-path discipline. No-ops if the
+    cell was never hardened (no manifest). NEVER raises into the exec path.
+    """
+    try:
+        holder = _current_tmux_session()
+        if not holder:
+            return
+        from swarph_cli.capture import manifest
+        manifest.set_live_pin(role, holder)
+    except Exception as exc:  # never block the exec
+        print(f"swarph spawn: live-pin record failed (non-fatal): {exc}",
+              file=sys.stderr)
+
+
 def _build_claude_argv(
     cell: Cell,
     session_id: str,
@@ -1096,6 +1136,12 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                         agents_md.write_text(inject_text, encoding="utf-8")
         except Exception as exc:
             print(f"swarph spawn: restore failed: {exc}", file=sys.stderr)
+
+    # Record this tmux session as the pin's live holder (feeds the verify
+    # gate's double-resume probe). After dry-run/print-id so a dry-run never
+    # mutates state; before exec so the flag exists while claude is live.
+    if membrane.uses_pinned_session():
+        _set_live_pin_safe(effective_role if effective_role else cell.role)
 
     # exec-replace so the spawned provider session owns stdio +
     # signals cleanly. argv[0] is preserved for ps-grep. launch()

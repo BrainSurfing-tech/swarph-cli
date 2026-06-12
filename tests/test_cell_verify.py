@@ -79,3 +79,43 @@ def test_holder_alive_refuses_double_resume(tmp_path, monkeypatch):
     assert not r.ok and r.code == 4
     # a real live holder's pin is NOT cleared
     assert manifest.read_manifest("droplet")["head"]["live_pin_holder"] == "droplet"
+
+
+def test_cross_name_live_holder_refuses_renamed_cell_incident(tmp_path, monkeypatch):
+    # THE incident: drop-mother + droplet both pin uuid-1. drop-mother is live
+    # under its own tmux; verify of *droplet* must still refuse — the footgun
+    # is per-UUID, not per-role.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    cwd = tmp_path / "right"
+    cwd.mkdir()
+    monkeypatch.setattr(verify, "_resolve_cell", lambda role: _cell(cwd))
+    monkeypatch.setattr(verify, "_read_pin", lambda role: ("uuid-1", str(cwd)))
+    good = Path(".claude/projects") / verify.expected_project_dir(cwd) / "uuid-1.jsonl"
+    monkeypatch.setattr(verify, "locate_session_jsonl", lambda u: [good])
+    # droplet's OWN manifest is clean; drop-mother's holds the live pin
+    manifest.write_manifest("droplet", recipe="r", pin="p", service="s",
+                            lineage="l", session_id="uuid-1")
+    manifest.write_manifest("drop-mother", recipe="r", pin="p", service="s",
+                            lineage="l", session_id="uuid-1",
+                            live_pin_holder="drop-mother")
+    monkeypatch.setattr(verify, "probe_holder_liveness", lambda h: True)
+    r = verify.verify_cell("droplet")
+    assert not r.ok and r.code == 4
+    assert "drop-mother" in r.reason
+
+
+def test_cross_name_dead_holder_cleared_and_allowed(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    cwd = tmp_path / "right"
+    cwd.mkdir()
+    monkeypatch.setattr(verify, "_resolve_cell", lambda role: _cell(cwd))
+    monkeypatch.setattr(verify, "_read_pin", lambda role: ("uuid-1", str(cwd)))
+    monkeypatch.setattr(verify, "locate_session_jsonl", lambda u: [])
+    manifest.write_manifest("drop-mother", recipe="r", pin="p", service="s",
+                            lineage="l", session_id="uuid-1",
+                            live_pin_holder="drop-mother")
+    monkeypatch.setattr(verify, "probe_holder_liveness", lambda h: False)
+    r = verify.verify_cell("droplet")
+    assert r.ok and r.code == 0
+    # the OTHER role's stale poison-pin got cleared
+    assert manifest.read_manifest("drop-mother")["head"]["live_pin_holder"] is None
