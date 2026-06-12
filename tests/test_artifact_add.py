@@ -15,6 +15,7 @@ Exercises ``run_add`` / ``dispatch_add`` directly with tmp
 from __future__ import annotations
 
 import os
+import sys
 
 from swarph_cli.commands.add import dispatch_add, parse_uri, run_add
 from swarph_cli.commands.hooks import _load_settings
@@ -38,7 +39,8 @@ def test_builtin_hook_installs(tmp_path):
 
     script = hooks_home / "cell-resilience.sh"
     assert script.exists()
-    assert os.stat(script).st_mode & 0o111
+    if sys.platform != "win32":  # POSIX file-mode bits not representable on Windows
+        assert os.stat(script).st_mode & 0o111
 
     expected_command = str(script.resolve())
     settings = _load_settings(settings_path)

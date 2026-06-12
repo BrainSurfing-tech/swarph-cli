@@ -26,6 +26,7 @@ SAFETY (drop will trace these hardest):
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from typing import Iterator
@@ -434,6 +435,7 @@ def test_marker_write_failure_escalates_to_a2(isolated_state, stale_cursor):
     assert len(model_attempts) == 1  # the bound held despite the lost stamp
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="relies on POSIX chmod(0o555) read-only-dir to force the OSError-swallow path; Windows dir-mode bits don't block writes the same way")
 def test_marker_oserror_real_path_escalates_to_a2(isolated_state, stale_cursor):
     """BLOCK-2 end-to-end: drive the GENUINE _record_a1_fired OSError-swallow
     path (read-only state dir — no mocks on the marker helpers) and assert

@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from getpass import getpass
@@ -356,11 +357,17 @@ def run_onboard(argv: list[str]) -> int:
             f"exec swarph daemon --state-dir {peer_dir}\n",
             encoding="utf-8",
         )
-        daemon_sh.chmod(0o755)
+        try:
+            daemon_sh.chmod(0o755)
+        except OSError:
+            pass  # best-effort; Windows or fs without POSIX modes
     print(f"      ok (inbox.log, cursor.json, .env.example, run-daemon.sh)")
 
     # ── Step 7: handshake template (MANUAL) ──────────────────────────
-    tmp_path = Path(f"/tmp/{canonical}-handshake.md")
+    # tempfile.gettempdir() is the platform temp dir ('/tmp' on POSIX, the
+    # %TEMP% path on Windows) so the write doesn't land on a nonexistent
+    # '\tmp\' dir on Windows.
+    tmp_path = Path(tempfile.gettempdir()) / f"{canonical}-handshake.md"
     tmp_path.write_text(
         _HANDSHAKE_TEMPLATE.format(
             peer=canonical, witness="science-claude", tmp_path=tmp_path
