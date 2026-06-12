@@ -23,7 +23,7 @@
 
 [Unit]
 Description=swarph mesh sidecar (<PEER>) — peer-token-direct DM drain + tmux-wake
-Documentation=https://github.com/darw007d/swarph-cli
+Documentation=https://github.com/BrainSurfing-tech/swarph-cli
 After=network-online.target
 Wants=network-online.target
 

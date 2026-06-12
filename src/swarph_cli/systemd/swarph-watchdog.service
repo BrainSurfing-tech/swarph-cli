@@ -1,6 +1,6 @@
 [Unit]
 Description=Swarph watchdog one-shot check (stranded-session recovery)
-Documentation=https://github.com/darw007d/swarph-cli
+Documentation=https://github.com/BrainSurfing-tech/swarph-cli
 After=network-online.target
 Wants=network-online.target
 
