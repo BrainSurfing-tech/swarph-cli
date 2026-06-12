@@ -248,6 +248,18 @@ def load_cell(path: Path) -> Cell:
     # the swarph-cli operator-tooling concern.
     if not cell.cwd.is_dir():
         raise CellError(f"cell.yaml: 'cwd' is not a directory: {cell.cwd}")
+    # Charset-gate the `role` FIELD to the same kebab-case PEER_NAME_RE the
+    # `name` field already enforces. parse_cell_dict only checks role is a
+    # non-empty string — a `role: "../../../tmp/x"` (or shell metacharacters)
+    # would otherwise flow into session_state_path() + the capture path/launch
+    # sinks as a traversal/injection vector (the swarph-cli boundary defense;
+    # swarph-shared parse_cell_dict is the canonical home, a fast-follow).
+    if not PEER_NAME_RE.match(cell.role):
+        raise CellError(
+            f"cell.yaml: 'role' must be a kebab-case, mesh-addressable cell name "
+            f"matching {PEER_NAME_RE.pattern} (no path separators, no shell "
+            f"metacharacters); got {cell.role!r}"
+        )
     cell.source_path = path
     return cell
 

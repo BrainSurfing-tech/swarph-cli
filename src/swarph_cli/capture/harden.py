@@ -10,7 +10,7 @@ and prints (returns) the enable instructions for the claude-tmux@<role> unit.
 from __future__ import annotations
 
 import os
-import stat
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -26,6 +26,7 @@ from swarph_cli.cell import (
     _config_root,
 )
 from swarph_cli.capture import lineage, manifest, paths
+from swarph_cli.capture.paths import validate_role
 
 
 @dataclass
@@ -52,25 +53,54 @@ def _launch_dir() -> Path:
 
 
 def _write_launch_wrapper(role: str) -> Path:
-    target = _launch_dir() / f"launch-{role}.sh"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
+    # role is PEER_NAME_RE-validated upstream, so it can't carry a path
+    # separator or shell metacharacter — `exec swarph spawn <role>` is safe.
+    validate_role(role)
+    parent = _launch_dir()
+    parent.mkdir(parents=True, exist_ok=True)
+    target = parent / f"launch-{role}.sh"
+    body = (
         "#!/bin/bash -l\n"
         f"# Auto-emitted by `swarph cell harden {role}`. Runs as the tmux\n"
         "# session command; exec-replaces with the resumed cell session.\n"
-        f"exec swarph spawn {role}\n",
-        encoding="utf-8",
+        f"exec swarph spawn {role}\n"
     )
-    target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # Atomic + symlink-safe: write a fresh mkstemp file (no O_NOFOLLOW needed —
+    # mkstemp creates a brand-new name) at mode 0o700, then os.replace over any
+    # pre-planted target. The old write_text-then-chmod followed a planted
+    # symlink and left a world-exec (0o755+) wrapper — the file systemd execs.
+    fd, tmp = tempfile.mkstemp(prefix=f".launch-{role}.", suffix=".tmp", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            fp.write(body)
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.chmod(tmp, 0o700)
+        os.replace(tmp, target)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return target
 
 
 def harden_cell(role: str) -> HardenResult:
+    validate_role(role)  # CLI arg charset gate — before any fs/path build
     cell = _resolve_cell(role)  # raises CellError if recipe missing — fail loud
     service = f"claude-tmux@{role}.service"
 
     launch = _write_launch_wrapper(role)
     pin_uuid = _read_pin_uuid(role)
+
+    # Lineage is keyed by the CELL IDENTITY (cell.role), NOT the requested role
+    # arg. When they diverge (e.g. `harden drop-2` slot-strips to drop.yaml so
+    # cell.role=drop), record_genesis writes drop.jsonl — so the idempotency
+    # guard + the manifest pointer MUST also use cell.role, else every re-harden
+    # appends a DUPLICATE genesis and the manifest points at a phantom file.
+    lineage_role = cell.role
+    lineage_file = paths.lineage_path(lineage_role)
 
     # Re-harden on a LIVE cell must not clobber its live-pin: write_manifest
     # is a full overwrite, and a None holder here would blind the verify
@@ -83,12 +113,12 @@ def harden_cell(role: str) -> HardenResult:
         recipe=str(cell.source_path) if cell.source_path else str(cells_dir() / f"{role}.yaml"),
         pin=str(session_state_path(role)),
         service=service,
-        lineage=str(paths.lineage_path(role)),
+        lineage=str(lineage_file),
         session_id=pin_uuid,
         live_pin_holder=existing_holder,
     )
 
-    if not lineage.lineage_exists(role) and pin_uuid:
+    if not lineage.lineage_exists(lineage_role) and pin_uuid:
         cursor_path = cell.extra.get("cursor_path") if cell.extra else None
         lineage.record_genesis(cell, session_id=pin_uuid, cursor_path=cursor_path)
 
@@ -104,7 +134,7 @@ def harden_cell(role: str) -> HardenResult:
         role=role,
         launch_script=str(launch),
         manifest_path=str(paths.manifest_path(role)),
-        lineage_path=str(paths.lineage_path(role)),
+        lineage_path=str(lineage_file),  # the REAL lineage file (cell.role), not a phantom
         service=service,
         enable_instructions=instructions,
     )

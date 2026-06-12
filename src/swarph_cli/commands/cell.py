@@ -17,6 +17,7 @@ from swarph_shared.cell import CellError
 
 from swarph_cli.capture import harden as _harden
 from swarph_cli.capture import verify as _verify
+from swarph_cli.capture.paths import CaptureRoleError, validate_role
 
 _USAGE = """\
 Usage:
@@ -45,6 +46,11 @@ def _run_verify(rest: List[str]) -> int:
         print("swarph cell verify: missing <cell>", file=sys.stderr)
         return 2
     role = rest[0]
+    try:
+        validate_role(role)  # charset gate before any fs/shell reach
+    except CaptureRoleError as exc:
+        print(f"swarph cell verify: {exc}", file=sys.stderr)
+        return 2
     result = _verify.verify_cell(role)
     stream = sys.stdout if result.ok else sys.stderr
     print(f"[verify {role}] {'OK' if result.ok else 'REFUSE'}: {result.reason}", file=stream)
@@ -57,8 +63,13 @@ def _run_harden(rest: List[str]) -> int:
         return 2
     role = rest[0]
     try:
+        validate_role(role)  # charset gate before any fs/shell reach
+    except CaptureRoleError as exc:
+        print(f"swarph cell harden: {exc}", file=sys.stderr)
+        return 2
+    try:
         res = _harden.harden_cell(role)
-    except CellError as exc:
+    except (CellError, CaptureRoleError) as exc:
         print(f"swarph cell harden: {exc}", file=sys.stderr)
         return 1
     print(f"[harden {res.role}] revival kit emitted:")

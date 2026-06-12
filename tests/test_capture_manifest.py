@@ -66,12 +66,18 @@ def test_find_pin_holders_sweeps_across_roles(tmp_path, monkeypatch):
     manifest.write_manifest("other", recipe="r", pin="p", service="s",
                             lineage="l", session_id="uuid-9",
                             live_pin_holder="other")
-    holders = manifest.find_pin_holders("uuid-1")
+    holders, corrupt = manifest.find_pin_holders("uuid-1")
+    # clear_key is the on-disk filename stem (a safe role), not the cell field
     assert holders == [("drop-mother", "drop-mother")]
+    assert corrupt == []
 
 
-def test_find_pin_holders_skips_corrupt_manifest(tmp_path, monkeypatch):
+def test_find_pin_holders_reports_corrupt_manifest_fail_closed(tmp_path, monkeypatch):
+    # SECURITY (drop seat-A): a corrupt manifest must be REPORTED, not silently
+    # skipped — it could hide a live holder; verify fails closed on it.
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     paths.captures_dir().mkdir(parents=True, exist_ok=True)
     (paths.captures_dir() / "broken.json").write_text("{not json")
-    assert manifest.find_pin_holders("uuid-1") == []
+    holders, corrupt = manifest.find_pin_holders("uuid-1")
+    assert holders == []
+    assert corrupt == ["broken.json"]

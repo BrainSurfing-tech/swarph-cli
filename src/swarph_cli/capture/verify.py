@@ -27,6 +27,7 @@ from swarph_shared.cell import Cell, CellError
 from swarph_cli.cell import _read_session_sidecar, load_cell, resolve_cell_path, session_state_path
 from swarph_cli.capture import manifest
 from swarph_cli.capture.liveness import probe_holder_liveness
+from swarph_cli.capture.paths import CaptureRoleError, validate_role
 
 
 @dataclass
@@ -59,6 +60,13 @@ def _read_pin(role: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def verify_cell(role: str) -> VerifyResult:
+    # Charset gate FIRST — before the role touches the filesystem (pin read,
+    # jsonl glob) or a shell. A traversal/metachar role is refused, not resolved.
+    try:
+        validate_role(role)
+    except CaptureRoleError as exc:
+        return VerifyResult(False, 2, str(exc))
+
     try:
         cell = _resolve_cell(role)
     except CellError as exc:
@@ -85,19 +93,31 @@ def verify_cell(role: str) -> VerifyResult:
     # (b) liveness probe — cross-NAME sweep over every manifest pinning this
     # UUID, not just this role's own (spec §4.3 blocking fix: two roles
     # pinning one UUID both look clean per-role).
+    holders, corrupt = manifest.find_pin_holders(session_id)
+
+    # FAIL-CLOSED on a corrupt manifest: it could hide a live holder of this
+    # UUID, so we cannot prove no double-resume → REFUSE (never silently pass).
+    if corrupt:
+        return VerifyResult(
+            False, 5,
+            f"unparseable capture manifest(s) {corrupt} — cannot rule out a live "
+            f"holder of pin {session_id}; refusing fail-closed. Inspect/repair "
+            f"{', '.join(corrupt)} under the captures dir.",
+        )
+
     cleared = []
-    for holder_role, holder in manifest.find_pin_holders(session_id):
+    for clear_key, holder in holders:
         if probe_holder_liveness(holder):
             return VerifyResult(
                 False, 4,
                 f"double-resume refused: pin {session_id} is already LIVE under "
-                f"holder {holder!r} (cell {holder_role!r} — tmux session + live "
+                f"holder {holder!r} (manifest {clear_key!r} — tmux session + live "
                 f"pane). Attach via `tmux attach -t {holder}`, never a second "
                 f"--resume.",
             )
         # poison-pin: holder dead → clear stale flag + keep sweeping
-        manifest.clear_live_pin(holder_role)
-        cleared.append(f"{holder_role!r}:{holder!r}")
+        manifest.clear_live_pin(clear_key)
+        cleared.append(f"{clear_key!r}:{holder!r}")
 
     if cleared:
         return VerifyResult(

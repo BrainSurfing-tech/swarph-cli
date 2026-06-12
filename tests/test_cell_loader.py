@@ -605,3 +605,21 @@ def test_explicit_slot_yaml_takes_precedence_over_base_fallback(
     )
     # Explicit slot file wins
     assert resolve_cell_path("drop-2") == sib_yaml
+
+
+def test_load_cell_rejects_traversal_role_field(tmp_path):
+    """Poisoned cell.yaml `role` field (BLOCKER 1 vector) is rejected at load —
+    a valid `name` no longer lets a traversal/metachar `role` through."""
+    import yaml as _yaml
+    from swarph_cli.cell import load_cell, CellError
+    cwd = tmp_path / "work"; cwd.mkdir()
+    p = tmp_path / "evil.yaml"
+    p.write_text(_yaml.safe_dump({
+        "schema_version": "v1",
+        "name": "evil-cell",          # valid kebab name
+        "role": "../../../../tmp/x/forged",  # malicious role field
+        "cwd": str(cwd),
+        "provider": "claude",
+    }))
+    with pytest.raises(CellError):
+        load_cell(p)

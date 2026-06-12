@@ -69,28 +69,42 @@ def set_live_pin(role: str, holder: str) -> None:
     _atomic_write_json(role, m)
 
 
-def find_pin_holders(session_id: str) -> List[Tuple[str, str]]:
-    """All (role, holder) pairs across captures/*.json whose head.session_id
-    matches AND carry a non-null live_pin_holder.
+def find_pin_holders(session_id: str) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """Sweep captures/*.json for live holders of ``session_id``.
+
+    Returns ``(holders, corrupt)`` where:
+      * ``holders`` = ``(clear_key, display_holder)`` for every manifest whose
+        head.session_id matches AND carries a non-null live_pin_holder.
+        ``clear_key`` is the on-disk filename stem (a SAFE role for
+        clear_live_pin); ``display_holder`` is the recorded tmux-session name
+        (for the probe + the refuse message), NOT used to build any path.
+      * ``corrupt`` = filenames that could not be parsed.
 
     The cross-NAME sweep behind the double-resume gate: the footgun is
-    per-UUID, not per-role — two cell names pinning one UUID each show a
-    clean own-manifest, so verify must scan EVERY manifest (the renamed-cell
-    incident, spec §4.3 blocking fix)."""
-    results: List[Tuple[str, str]] = []
+    per-UUID, not per-role — two cell names pinning one UUID each show a clean
+    own-manifest, so verify must scan EVERY manifest (renamed-cell incident,
+    spec §4.3). FAIL-CLOSED on corruption: an unparseable manifest could be
+    hiding a live holder of this UUID, so verify must REFUSE rather than
+    silently pass (a silent fail-OPEN in the gate the spec exists to provide).
+    """
+    holders: List[Tuple[str, str]] = []
+    corrupt: List[str] = []
     cdir = paths.captures_dir()
     if not cdir.exists():
-        return results
+        return holders, corrupt
     for path in sorted(cdir.glob("*.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
+            corrupt.append(path.name)
             continue
-        head = data.get("head") or {}
+        head = (data.get("head") or {}) if isinstance(data, dict) else {}
         holder = head.get("live_pin_holder")
         if head.get("session_id") == session_id and holder:
-            results.append((data.get("cell", path.stem), holder))
-    return results
+            # clear_key = the filename stem (validated when re-built into a
+            # path), never the attacker-controllable "cell" field.
+            holders.append((path.stem, holder))
+    return holders, corrupt
 
 
 def _atomic_write_json(role: str, data: dict) -> None:
