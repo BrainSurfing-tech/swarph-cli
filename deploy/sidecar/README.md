@@ -26,6 +26,30 @@ post-C5 replacement for the shared-token `swarph daemon`.
 The sidecar is the doorbell; claude-tmux is who answers it; the watchdog is the
 backstop if the doorbell rings into a dark house.
 
+## `claude-tmux@.service` — the parameterized template
+
+`claude-tmux@.service` is the parameterized successor to the hand-authored
+`claude-tmux.service` above: one systemd TEMPLATE (`%i` = cell name) replaces N
+per-cell unit files. Its `ExecStart` is gated on `swarph cell verify %i` before
+the per-name `has-session` check (the per-UUID double-resume guard), and it
+ships the `KillMode=mixed` + explicit `ExecStop` teardown fixes.
+
+The file in this directory is the **user-unit** shape. The system-unit shape
+differs in exactly three places:
+
+| | user unit (as shipped) | system/root unit |
+|---|---|---|
+| swarph binary | `%h/.local/bin/swarph` (both ExecStart references) | `/usr/local/bin/swarph` |
+| `[Install]` target | `WantedBy=default.target` | `WantedBy=multi-user.target` (+ `After=network-online.target`) |
+| survives logout | needs `loginctl enable-linger $USER` | n/a (system units always run) |
+
+Keep both binary references in `ExecStart` pointing at the **same** swarph
+install — a verify from one path and a spawn from another would skew the gate.
+
+`swarph cell harden <cell>` emits the per-cell `launch-<cell>.sh` wrapper and
+**prints** these enable instructions — it never runs `systemctl`/`loginctl`.
+Install stays an operator action.
+
 ## Install (no root — systemd USER services)
 
 ```bash

@@ -1,0 +1,48 @@
+# deploy/sidecar/claude-tmux@.service
+# Durable in-tmux swarph cell — systemd TEMPLATE (%i = cell name).
+#
+# One template replaces N hand-authored per-cell units. Enable a cell with:
+#   systemctl --user enable --now claude-tmux@<cell>.service        (user cell)
+#   sudo systemctl enable --now claude-tmux@<cell>.service          (root cell)
+# Non-root user cells also need:  loginctl enable-linger $USER
+#
+# Shape below is the USER-unit form (swarph at ~/.local/bin, WantedBy=default.target).
+# ROOT/system cell: swarph at /usr/local/bin, WantedBy=multi-user.target,
+#   After=network-online.target. Adjust the two binary paths + the [Install] target.
+#   The system shape is for cells whose claude state lives under /root — `swarph
+#   cell verify` resolves ~/.claude relative to the RUNNING user, so a root unit
+#   managing a non-root cell would silently skip the cwd-drift gate. Non-root
+#   cells use the user shape + enable-linger, never a root unit.
+#
+# AI² fix (science-claude): KillMode=mixed + an explicit ExecStop kill-session —
+#   the old `none` KillMode is deprecated (systemd warns). mixed = SIGTERM the main process,
+#   SIGKILL the rest of the cgroup on stop; ExecStop owns the session teardown.
+# BLOCKING fix (droplet): ExecStart is gated on `swarph cell verify` BEFORE the
+#   per-name `has-session` check. The double-resume footgun is per-UUID, not per
+#   tmux-name (two cell names pinning one UUID both pass has-session → both resume →
+#   tmux-server death). verify refuses if the pinned UUID is already live under ANY
+#   holder, and clears a stale poison-pin if the holder is dead.
+# INJECTION fix (drop seat-A): %i (the instance name) is passed as a POSITIONAL
+#   PARAMETER ($1 → n="$1"), NOT interpolated into the sh -lc script text. systemd
+#   textually substitutes %i BEFORE /bin/sh parses, so an `n=%i` form let an
+#   instance name like `a$(touch X)` or `a;touch X` execute. As `$1`, the name is
+#   inert DATA in the outer shell; `swarph cell verify "$n"` then rejects any name
+#   that isn't PEER_NAME_RE (exiting non-zero → the && short-circuits → tmux/spawn
+#   never run), so the downstream `$n` is provably metacharacter-free.
+
+[Unit]
+Description=Durable in-tmux swarph cell %i — tmux session hosting a live claude
+After=default.target
+
+[Service]
+Type=forking
+Environment=TERM=xterm-256color
+ExecStart=/bin/sh -lc 'n="$1"; %h/.local/bin/swarph cell verify "$n" \
+  && (/usr/bin/tmux has-session -t "$n" 2>/dev/null \
+      || /usr/bin/tmux new-session -d -s "$n" "%h/.local/bin/swarph spawn $n")' sh %i
+ExecStop=/usr/bin/tmux kill-session -t %i
+KillMode=mixed
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

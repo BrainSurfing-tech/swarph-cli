@@ -290,6 +290,85 @@ def _session_state_exists(session_id: str) -> bool:
     return False
 
 
+def _base_pin_uuid(role: str) -> Optional[str]:
+    """Read the base role's pinned UUID (the mitosis parent_session_id)."""
+    from swarph_cli.cell import _read_session_sidecar, session_state_path
+    uuid_str, _cwd = _read_session_sidecar(session_state_path(role))
+    return uuid_str
+
+
+def _record_mitosis_safe(
+    cell: Cell,
+    *,
+    sidecar_role: str,
+    effective_role: Optional[str],
+    session_id: Optional[str],
+    was_generated: bool,
+) -> None:
+    """Append a mitosis lineage record for a freshly-minted sibling.
+
+    Spec §6: a true sibling is `was_generated and effective_role != sidecar_role`
+    (base slot reuse has effective_role == sidecar_role). NEVER raises — capture
+    partial-fail must not block the claude exec (spec §7); log + degrade.
+    """
+    if not (was_generated and effective_role and effective_role != sidecar_role):
+        return
+    try:
+        from swarph_cli.capture import lineage
+        cursor_path = cell.extra.get("cursor_path") if cell.extra else None
+        lineage.record_mitosis(
+            cell,
+            child_role=effective_role,
+            parent_role=sidecar_role,
+            child_session_id=session_id,
+            parent_session_id=_base_pin_uuid(sidecar_role),
+            cursor_path=cursor_path,
+        )
+    except Exception as exc:  # never block the exec
+        print(f"swarph spawn: mitosis lineage record failed (non-fatal): {exc}",
+              file=sys.stderr)
+
+
+def _current_tmux_session() -> Optional[str]:
+    """Name of the tmux session this process runs inside, or None.
+
+    $TMUX presence means we're in a pane; the session name comes from
+    `tmux display-message`. Console (non-tmux) spawns return None.
+    """
+    if not os.environ.get("TMUX"):
+        return None
+    try:
+        out = subprocess.run(
+            ["tmux", "display-message", "-p", "#S"],
+            capture_output=True, text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    name = out.stdout.strip()
+    return name or None
+
+
+def _set_live_pin_safe(role: str) -> None:
+    """Record this tmux session as the live holder of `role`'s pinned UUID.
+
+    Feeds `swarph cell verify`'s double-resume probe (spec §4.4b). Only fires
+    when spawning INSIDE tmux (the claude-tmux@.service path) — console
+    spawns are untracked, per the one-launch-path discipline. No-ops if the
+    cell was never hardened (no manifest). NEVER raises into the exec path.
+    """
+    try:
+        holder = _current_tmux_session()
+        if not holder:
+            return
+        from swarph_cli.capture import manifest
+        manifest.set_live_pin(role, holder)
+    except Exception as exc:  # never block the exec
+        print(f"swarph spawn: live-pin record failed (non-fatal): {exc}",
+              file=sys.stderr)
+
+
 def _build_claude_argv(
     cell: Cell,
     session_id: str,
@@ -968,6 +1047,7 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                 "then re-run with --new-instance to mint a true sibling.",
                 file=sys.stderr,
             )
+
     elif cell.provider == "antigravity":
         session_id = "(fresh-session-per-spawn, no pinned id)"
         was_generated = True
@@ -1049,6 +1129,20 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                         agents_md.write_text(inject_text, encoding="utf-8")
         except Exception as exc:
             print(f"swarph spawn: restore failed: {exc}", file=sys.stderr)
+
+    # Capture hooks — AFTER the dry-run/print-id returns so a dry-run never
+    # writes lineage or live-pin state, BEFORE exec so both exist while
+    # claude is live. Lineage is a provenance claim about a real birth event;
+    # a dry-run --new-instance must not fabricate one.
+    if membrane.uses_pinned_session():
+        _record_mitosis_safe(
+            cell,
+            sidecar_role=sidecar_role,
+            effective_role=effective_role,
+            session_id=session_id,
+            was_generated=was_generated,
+        )
+        _set_live_pin_safe(effective_role if effective_role else cell.role)
 
     # exec-replace so the spawned provider session owns stdio +
     # signals cleanly. argv[0] is preserved for ps-grep. launch()
