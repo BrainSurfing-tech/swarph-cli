@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.11.1"
+version = "0.12.0"
 description = "The `swarph` binary — multi-LLM CLI + mesh-gateway integration: multi-provider `swarph spawn` (claude/codex/antigravity per cell.provider via a ProviderMembrane + subprocess billing-scrub), interactive `swarph init`, `swarph mesh` (send/inbox/register) + inbox sidecar, `assisted_memory` (git-backed durable memory), session import, watchdog. v0.9.5: foolproof Windows auto-relaunch (genuine-WT detection via process ancestry, not WT_SESSION)."
 readme = "README.md"
 license = { text = "MIT" }

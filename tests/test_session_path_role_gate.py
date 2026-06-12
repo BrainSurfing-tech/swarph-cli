@@ -53,3 +53,30 @@ def test_spawn_metachar_requested_role_is_refused(tmp_path, monkeypatch, capsys)
     rc = spawn.run_spawn([evil_name, "--no-banner"])
     # cell.role is gated at load_cell too, but the point: no crash, fail-closed
     assert rc == 1
+
+
+def test_spawn_metachar_requested_role_refused_even_when_pinned(tmp_path, monkeypatch):
+    # PR #67 (drop seat-A): the PINNED-session_id early-return in
+    # load_or_create_session_id used to skip the #66 name-gate — it returns
+    # `role` (the CLI positional) directly without routing through
+    # session_state_path(). A cell.yaml with a CLEAN internal role FIELD (passes
+    # load_cell) + a pinned session_id would hand the unvalidated requested_role
+    # straight to claude --name / tmux -s <name>. The entry-gate in
+    # load_or_create_session_id must refuse it here too. (Without the fix this
+    # asserts rc==1 but gets rc==0 — the exact false-green the original test hid
+    # by omitting session_id.)
+    import yaml as _yaml
+    config_root = tmp_path / "config"
+    (config_root / "swarph" / "cells").mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    evil_name = "a$(touch X)"
+    (config_root / "swarph" / "cells" / f"{evil_name}.yaml").write_text(_yaml.safe_dump({
+        "schema_version": "v1", "name": "evil-cell", "role": "evil-cell",
+        "cwd": str(tmp_path), "provider": "claude",
+        # the load-cell-clean cell.yaml PINS a session_id → hits the pinned
+        # early-return branch that previously bypassed the name-gate.
+        "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    }))
+    rc = spawn.run_spawn([evil_name, "--no-banner"])
+    assert rc == 1  # pinned branch now gated too — fail-closed, no metachar to the sink
