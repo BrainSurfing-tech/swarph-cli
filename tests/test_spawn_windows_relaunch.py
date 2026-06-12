@@ -15,8 +15,11 @@ box; these tests pin the DECISION logic (relaunch vs warn vs proceed) by mocking
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from swarph_cli.commands import spawn
 
@@ -178,3 +181,23 @@ def test_console_is_genuine_wt_false_off_win32(monkeypatch):
     # touches ctypes — so it can't raise on this Linux box.
     monkeypatch.setattr(spawn.sys, "platform", "linux")
     assert spawn._console_is_genuine_wt() is False
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="exercises the REAL ctypes CreateToolhelp32Snapshot / PROCESSENTRY32 "
+    "ancestry walk — win32-only; on Linux the helper short-circuits to False "
+    "before any ctypes call, so it can't be exercised here",
+)
+def test_console_is_genuine_wt_real_ctypes_walk_returns_bool():
+    # drop seat-A #68 MEDIUM: every OTHER test mocks _console_is_genuine_wt or
+    # patches sys.platform=linux, so the actual Win32 ctypes path
+    # (spawn.py _console_is_genuine_wt: CreateToolhelp32Snapshot + the
+    # PROCESSENTRY32 struct + the parent-chain walk) NEVER ran on the runner —
+    # a ctypes argtypes/restype/struct-layout regression would pass CI green.
+    # This test calls it FOR REAL (no mock, no platform patch) on windows-latest,
+    # so a signature regression raises (caught by the helper's own try/except ->
+    # would change the return) or crashes. THIS is the gap-closer the RFC §1
+    # wants: the CI now genuinely exercises the fix that motivated it.
+    result = spawn._console_is_genuine_wt()
+    assert isinstance(result, bool)

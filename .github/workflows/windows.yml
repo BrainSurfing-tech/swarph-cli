@@ -9,6 +9,13 @@
 # tests the very fixes that motivated it. ZERO membrane abstraction (a plain CI
 # file) — the membrane primitive (Trigger 2) waits for a 2nd consumer (RFC §1.1).
 #
+# ctypes coverage is REAL, not mocked (drop seat-A #68 MEDIUM): every other test
+# mocks `_console_is_genuine_wt` / patches sys.platform, so the actual ctypes
+# CreateToolhelp32Snapshot walk would not run. The floor below RUNS the
+# unmocked `test_console_is_genuine_wt_real_ctypes_walk_returns_bool` on win32 and
+# the junit re-derivation ASSERTS it executed (not skipped) — so a ctypes
+# argtypes/restype/struct-layout regression turns this CI red.
+#
 # Trust-oracle discipline (RFC §5.3): a prompt-injected guest forges a green by
 # shaping the process, not escaping it. So:
 #  - HOST-PINNED HARNESS: this workflow IS the harness, on a reviewed ref; the
@@ -83,16 +90,29 @@ jobs:
           PY
 
       # §5.3c required-node-id floor: these win32-only paths CANNOT be exercised
-      # on the Linux build host, so they are the whole point of this runner. If a
-      # collection hook deselects any, pytest collects 0 here and exits 5 -> red.
-      # NOTE: a FIXED host-known list of the win32 tests ON MAIN — NOT
-      # auto-discovery (auto-discovery is the §5.3 anti-pattern: a renamed test
-      # silently drops). The spawn->tmux floor entry
-      # (tests/test_spawn_tmux_session.py) is added here DELIBERATELY once PR #67
-      # merges that file to main — this branch is off main, where it doesn't
-      # exist yet (referencing it = "file not found" -> exit 4).
+      # on the Linux build host, so they are the whole point of this runner.
+      # FIXED host-known list (NOT auto-discovery — that's the §5.3 anti-pattern:
+      # a renamed test would silently drop). spawn->tmux is now included (PR #67
+      # merged its file to main). The junit re-derivation below catches all THREE
+      # hollowing modes: deselect (exit 5), rename/missing file (exit 4), AND
+      # all-skipped (exit 0) — the last via the non-skipped-count + the explicit
+      # marquee-test-ran assertion (drop seat-A #68 LOW + MEDIUM).
       - name: Node-id floor (win32 paths that must actually run)
         run: |
-          pytest -v --no-header \
+          pytest -v --no-header --junit-xml=floor.xml \
             tests/test_spawn_windows_relaunch.py \
+            tests/test_spawn_tmux_session.py \
             "tests/test_cell_loader.py::test_session_sidecar_different_cwd_mints_fresh_and_repins"
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("floor.xml").getroot()
+          cases = [c for s in (root.findall("testsuite") or [root]) for c in s.findall("testcase")]
+          ran = [c for c in cases if c.find("skipped") is None]
+          ran_names = {c.get("name") for c in ran}
+          print(f"floor: {len(cases)} collected, {len(ran)} ran (non-skipped)")
+          # all-skip hollow guard (#68 LOW): the floor must not pass on zero runs
+          assert len(ran) >= 5, f"floor hollowed: only {len(ran)} non-skipped"
+          # the unmocked real-ctypes walk MUST have executed on win32 (#68 MEDIUM)
+          assert "test_console_is_genuine_wt_real_ctypes_walk_returns_bool" in ran_names, \
+              "the real-ctypes-walk test was skipped/absent — ctypes path NOT exercised"
+          PY
