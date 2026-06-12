@@ -1317,7 +1317,19 @@ def _run_local_check(args: argparse.Namespace) -> int:
     if _a1_already_fired_at(marker, cursor_mtime):
         model_marker = _model_swap_marker_path(log_path, role, tmux_session)
         diag["model_swap_marker"] = str(model_marker)
-        model_rung_enabled = not getattr(args, "no_model_rung", False)
+        # A1.5 FAIL-SAFE (2026-06-11 incident): the /model-swap rung is OPT-IN.
+        # A stale cursor on a LIVE process is an AMBIGUOUS signal — an idle cell
+        # waiting at a prompt is indistinguishable from a genuinely stalled one
+        # by cursor-mtime + pane-activity alone. Injecting /model on that
+        # ambiguity false-fired across 5 cells (lab / droplet / science-claude /
+        # gpu-wsl / drop-on-meta-edge), restarting live sessions. A disruptive
+        # action must never be the DEFAULT on an ambiguous signal — the recovery
+        # layer fails safe to inaction. The rung now requires explicit
+        # --model-rung; --no-model-rung still force-disables on top of that.
+        model_rung_enabled = (
+            getattr(args, "model_rung", False)
+            and not getattr(args, "no_model_rung", False)
+        )
         diag["model_rung_enabled"] = model_rung_enabled
 
         if not model_rung_enabled:
@@ -1695,9 +1707,18 @@ def _build_parser() -> argparse.ArgumentParser:
              "inbox / network data. Default: " + _DEFAULT_STABLE_MODEL + ".",
     )
     p.add_argument(
+        "--model-rung", action="store_true",
+        help="OPT-IN: enable the A1.5 `/model`-swap rung. OFF by default since "
+             "the 2026-06-11 false-fire incident — a stale cursor on a LIVE "
+             "process is ambiguous (idle vs stalled), and injecting /model on "
+             "that ambiguity restarted live sessions across 5 cells. Only "
+             "enable on a cell you've confirmed needs engine-swap recovery, "
+             "accepting that risk; otherwise the ladder is A1 → A2(dead-only).",
+    )
+    p.add_argument(
         "--no-model-rung", action="store_true",
-        help="Disable the A1.5 `/model`-swap rung; the ladder falls straight "
-             "A1 → A2 (legacy same-window F1 suppression on A1-exhaustion).",
+        help="Force-disable the A1.5 rung even if --model-rung is set "
+             "(belt-and-suspenders; the rung is already OFF by default).",
     )
     p.add_argument(
         "--peer-health-poll", action="store_true",
