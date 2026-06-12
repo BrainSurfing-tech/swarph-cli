@@ -1,6 +1,6 @@
 [Unit]
 Description=Run swarph watchdog every 5 minutes (stranded-session recovery)
-Documentation=https://github.com/darw007d/swarph-cli
+Documentation=https://github.com/BrainSurfing-tech/swarph-cli
 Requires=swarph-watchdog.service
 
 [Timer]
