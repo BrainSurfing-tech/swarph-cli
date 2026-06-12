@@ -1,7 +1,7 @@
 # Sidecar reference deployment
 
 Production-deployment reference for `swarph mesh sidecar` + its companions, as
-run on the **gpu-wsl** cell (the reference build lab tracked for the in-tmux-spawn
+run on a Linux/WSL cell (the reference build for the in-tmux-spawn
 pattern). The sidecar **source** is `src/swarph_cli/commands/mesh.py`
 (`swarph mesh sidecar`); this directory is the **operator wiring** — the systemd
 units + the discipline that make it a self-healing service, none of which lived
@@ -52,7 +52,7 @@ tmux_session: <TMUX>
 > ⚠️ **F4 gotcha:** put these at the **top level**, NOT under an `extra:` block.
 > The `Cell` schema's catch-all double-nests an explicit `extra:` map into
 > `Cell.extra['extra']`, so `extra.get('cursor_path')` resolves `None` and the
-> watchdog silently falls back to `/tmp/lab-claude-cursor.json` + `tmux=<role>`.
+> watchdog silently falls back to `/tmp/<cell>-cursor.json` + `tmux=<role>`.
 > (Fixed at the type layer in swarph-shared #11; top-level keys work on every
 > version.)
 
@@ -80,7 +80,7 @@ tmux_session: <TMUX>
 
 ## Provenance
 
-Authored from the gpu-wsl cell (WSL2/systemd, peer-token-direct) during the
+Authored from a WSL2/systemd cell (peer-token-direct) during the
 post-C5 sidecar migration + in-tmux-spawn proof. Shared so any Linux/systemd peer
 can stand up the same self-healing DM loop from a template instead of
 reverse-engineering it.

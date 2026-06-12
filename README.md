@@ -1,11 +1,15 @@
 # swarph-cli
 
-The `swarph` binary — multi-LLM CLI with mesh-gateway integration. Thin client over the [`swarph-mesh`](https://github.com/darw007d/swarph-mesh) substrate.
+**One CLI for every LLM.** Drive Claude, GPT, Gemini, DeepSeek, and Grok from a single binary — then connect them into a coordinating *mesh* where agents from different vendors talk to each other through a shared protocol, each staying itself.
 
 ```bash
 pip install swarph-cli
 swarph --version
 ```
+
+**What it is:** a multi-provider LLM command line. Run one-shot prompts or an interactive REPL against any supported provider; spawn long-lived agent *cells* that persist across restarts and coordinate over a mesh; install hooks, MCP servers, and skills by content-addressed URI. An open, inspectable substrate — not a closed orchestration platform.
+
+**Who it's for:** builders running more than one LLM who want them to *cooperate* instead of sitting in separate tabs — multi-agent systems across vendors, agnostic by design. A thin client over the [`swarph-mesh`](https://github.com/darw007d/swarph-mesh) substrate library.
 
 This is one of three repos in the v0.3.x architecture:
 
@@ -15,51 +19,53 @@ This is one of three repos in the v0.3.x architecture:
 | [`swarph-cli`](https://github.com/darw007d/swarph-cli) | This repo — the `swarph` binary |
 | [`swarph-meshlm`](https://github.com/darw007d/swarph-meshlm) | Simon Willison `llm` plugin |
 
-## Status
+## Commands
 
-**v0.6.0 — Phase 7 spawn ships.** Seven verbs total:
+```
+swarph "prompt"          one-shot against any provider (claude/openai/gemini/deepseek/grok)
+swarph chat              interactive REPL — multi-turn, slash commands, live provider switch
+swarph spawn <role>      launch a long-lived agent session as a named mesh cell
+swarph daemon            foreground inbox-drain loop (the mesh doorbell)
+swarph watchdog          detect + recover stranded agent sessions (cron- or systemd-driven)
+swarph add <uri>         install a hook / MCP server / skill by content-addressed URI
+swarph hooks             install Claude Code hooks as reusable artifacts
+swarph onboard / ratify  bring a new peer into the mesh (mechanics + witness ratification)
+swarph import <path>     port a session from another CLI into swarph-native format
+```
 
-1. `swarph "prompt"` — Phase 2 one-shot mode (any of five providers)
-2. `swarph chat` — Phase 5 interactive REPL with multi-turn history + slash commands
-3. `swarph spawn <role>` — **NEW** Phase 7 long-lived `claude` session as a named mesh cell (`--name`/`--session-id`/`--append-system-prompt` pinning per substrate-doc R7 §11.1.7 4-layer R2 stack)
-4. `swarph import <path>` — Phase 2.5 session import (Claude JSONL → swarph-native)
-5. `swarph onboard <peer-name>` — Phase 5.5 mechanics-phase onboarding (PLAN.md §15.4)
-6. `swarph ratify <peer-name>` — Phase 5.5 witness ratification (PLAN.md §15.4a)
-7. `swarph daemon` — Phase 5.6 foreground inbox drain (PLAN.md §16)
-
-Subsequent phases extend the CLI surface (`--ask <peer>`, REPL drain coroutine + `/inbox` + `/reply` slash commands in 5.6b; non-Claude `spawn` providers + S-G `mesh-gateway://` URL form in v0.7).
+Each verb is documented below.
 
 ### `swarph spawn` (Phase 7 — v0.6.0)
 
-Operator-tooling layer of substrate-doc R7 §11.1.7 4-layer R2 mechanism stack. Wraps `claude` with the three R5/R7 disambiguation flags:
+Wraps `claude` with three flags that make a session a stable, resumable named cell:
 
 * `--name <role>` — display name for `/resume` picker
-* `--session-id <uuid>` — pinned UUID, persisted to `$XDG_STATE_HOME/swarph/sessions/<role>.session-id` so re-spawns reuse the same session (the R5 fix at the operator-tooling layer)
-* `--append-system-prompt <text>` — starter prompt injected without manual paste (the R2 fix at the operator-tooling layer)
+* `--session-id <uuid>` — pinned UUID, persisted to `$XDG_STATE_HOME/swarph/sessions/<role>.session-id` so re-spawns reuse the same session
+* `--append-system-prompt <text>` — starter prompt injected without manual paste
 
 ```bash
 # 1. Author a cell.yaml (one-time per role)
-$ cat ~/.config/swarph/cells/lab.yaml
+$ cat ~/.config/swarph/cells/researcher.yaml
 schema_version: v1
-name: lab-ovh
-role: lab
-cwd: /home/ubuntu
+name: researcher
+role: researcher
+cwd: ~/work
 starter_prompt_path: ~/.claude/session_start_reminder.txt
 provider: claude
 
 # 2. Summon the cell (long-lived claude session, exec-replaced)
-$ swarph spawn lab
+$ swarph spawn researcher
       ╭───╮
       │ ◉ │
    ╭──┴───┴──╮
-   │  swarph │  v0.6.0
+   │  swarph │
    ╰──┬───┬──╯       spawn │ chat │ daemon
       │ ◉ │
       ╰───╯
-[claude session takes over the terminal — same flags as `claude --name lab --session-id <uuid> --append-system-prompt <starter>`]
+[claude session takes over the terminal — same flags as `claude --name researcher --session-id <uuid> --append-system-prompt <starter>`]
 
 # 3. Resume the same cell after exit — same UUID, same session
-$ swarph spawn lab     # picker shows ONE entry: "lab" (R5 disambiguation)
+$ swarph spawn researcher     # picker shows ONE entry: "researcher" (stable disambiguation)
 ```
 
 Resolution order for `swarph spawn <role-or-path>`:
@@ -92,16 +98,16 @@ ps aux | grep '[s]warph daemon'   # zero output = monitoring is down
 ```
 
 ```bash
-$ swarph daemon --state-dir ~/swarph_state/lab-ovh --self lab-ovh
-[swarph-daemon] starting: self=lab-ovh gateway=http://localhost:8788 poll=30s ...
-[2026-05-08T21:00:30Z] id=728 from=droplet kind=answer → 'Drop review on Phase 5.5 PRs A+B...'
-[2026-05-08T21:01:10Z] id=729 from=droplet kind=fyi → 'Both Phase 5.5 PRs merged...'
+$ swarph daemon --state-dir ~/swarph_state/researcher --self researcher
+[swarph-daemon] starting: self=researcher gateway=http://localhost:8788 poll=30s ...
+[2026-05-08T21:00:30Z] id=728 from=alice kind=answer → 'review on the two PRs looks good...'
+[2026-05-08T21:01:10Z] id=729 from=alice kind=fyi → 'both PRs merged...'
 ^C
 [swarph-daemon] signal 2 received — draining + flushing cursor
 [swarph-daemon] shutdown: iterations=12 dms_seen=2 cursor.last_msg_id=729
 ```
 
-Loud-on-down (PLAN §16.5): never silently exits. Cursor writes are atomic (write-and-rename — corrupted mid-flush leaves the previous cursor intact). Backoff: 60s after 5 consecutive empty polls; 300s after 5 min of consecutive 5xx. SIGINT/SIGTERM trigger clean drain + flush.
+Loud-on-down: never silently exits. Cursor writes are atomic (write-and-rename — corrupted mid-flush leaves the previous cursor intact). Backoff: 60s after 5 consecutive empty polls; 300s after 5 min of consecutive 5xx. SIGINT/SIGTERM trigger clean drain + flush.
 
 `--auto-act` flag is documented for v0.5.1+ when handler registration via `@swarph.on_dm(...)` lands; v0.5.0 ships surface-only mode (DMs printed + JSONL-logged to `inbox.log`, no automatic replies).
 
@@ -114,14 +120,14 @@ Detects stranded Claude sessions (API throttle / harness death) via cursor-mtime
 */5 * * * * swarph watchdog --check --cell lab >> ~/.local/log/swarph-watchdog.log 2>&1
 ```
 
-**Systemd timer install (v0.7.3+ — closes ev_6954f748 substrate-component-installation-gap):**
+**Systemd timer install (v0.7.3+):**
 
 ```bash
 # Preview without writing (any user):
-swarph watchdog --install-service --cell droplet --dry-run
+swarph watchdog --install-service --cell researcher --dry-run
 
 # Install + enable (requires root for /etc/systemd/system writes):
-sudo swarph watchdog --install-service --cell droplet
+sudo swarph watchdog --install-service --cell researcher
 ```
 
 This writes three files:
@@ -143,19 +149,19 @@ journalctl -u swarph-watchdog.service -f     # live log
 tail -f /var/log/swarph-watchdog.log         # append-log alternative
 ```
 
-Why this matters: pre-v0.7.3, swarph-cli shipped the watchdog code but no install path. Lab ran it via cron (manual setup); droplet never installed it at all. A real production silence-window (drop's ~24min mute 2026-05-14 08:38→09:02 UTC after an Anthropic API error) made the install-gap visible. v0.7.3 closes it for any peer with one command.
+Why this matters: a long-running agent session can go silent after an API throttle or a harness death, and you won't notice until you go looking. The watchdog turns that into a self-healing loop — and the systemd install path means any host gets it with one command instead of hand-rolled cron.
 
 **Cross-host throttle-recovery wake (`--dm-wake`, "mesh-monitor mode"):**
 
 A1 (local tmux send-keys) and A2 (respawn) can only recover a cell on the watchdog's *own* host. `--dm-wake` adds the cross-host complement: the watchdog also scans the gateway `/peers` list, finds peers whose `last_health` is stale (throttle-stranded sessions on *other* hosts), and sends each a wake DM (`kind="fyi"`) via the gateway `/messages`. The wake chain is **watchdog → wake DM → target peer's sidecar/inbox-watcher → `tmux send-keys` wakes that session**. Reuses the same `--gateway` URL + `MESH_GATEWAY_TOKEN` and the same `--threshold` staleness window as the local check.
 
 ```bash
-swarph watchdog --check --peer lab-ovh --gateway http://localhost:8788 --dm-wake --dm-wake-cooldown-sec 1800
+swarph watchdog --check --peer researcher --gateway http://localhost:8788 --dm-wake --dm-wake-cooldown-sec 1800
 ```
 
 - `--dm-wake-cooldown-sec SEC` (default `1800` / 30 min) — no-spam gate: each stale peer is DM-woken at most once per window, so a peer that stays stale across many ticks is woken once, not every tick. Per-peer cooldown state lives at `$XDG_STATE_HOME/swarph/dm_wake_state.json` (falls back to `~/.local/state/swarph/dm_wake_state.json`).
 
-**Scope honesty (v1):** the wake DM is *wake + re-drain* — the woken cell drains its inbox and resumes work; it does **not** resume the exact throttled in-flight task (per-cell task-checkpointing is future v2 scope).
+**Scope honesty (v1):** the wake DM is *wake + re-drain* — the woken cell drains its inbox and resumes work; it does **not** resume the exact throttled in-flight task (per-cell task-checkpointing is future scope).
 
 **Exit codes:**
 
@@ -168,7 +174,7 @@ swarph watchdog --check --peer lab-ovh --gateway http://localhost:8788 --dm-wake
 | `4` | configuration error (invalid args, no cell.yaml resolved); install needs sudo |
 | `5` | install error (file write failed / systemctl failed) |
 
-**Deploy (COMMANDER-GATED — lab does not self-publish/self-deploy):** now that `--dm-wake` ships, the lab + droplet watchdog crons can drop their placeholder note ("REMOVE when lab ships `swarph watchdog --dm-wake`"). The deploy step — described here, not an instruction to run — is: (a) publish the new swarph-cli, (b) add `--dm-wake` (and optionally `--dm-wake-cooldown-sec`) to the watchdog cron line on the always-on mesh-monitor host (lab), (c) drop the placeholder note from that cron entry.
+**Deploy:** run `--dm-wake` on whichever always-on host you want to act as the mesh monitor — it watches every peer's health, not just its own, so one monitor covers the mesh.
 
 ### `swarph hooks`
 
@@ -182,7 +188,7 @@ swarph hooks list                 # builtins + install status (installed|availab
 swarph hooks remove cell-resilience
 ```
 
-**Trust model.** Three tiers: `builtin` (trusted, bundled with swarph-cli — installs without a prompt), `local` (a bundle dir you point at — shown then confirmed before any write), and `published`/`@cell/name` (**fails closed in v1** — never installs another cell's unreviewed code). Signed-publisher identity plus a publish-time security gate is the v2 model (see the scope doc `research/architecture/swarph_hooks_installer_scope.md` §3.1 in the hedge-fund-mcp repo).
+**Trust model.** Three tiers: `builtin` (trusted, bundled with swarph-cli — installs without a prompt), `local` (a bundle dir you point at — shown then confirmed before any write), and `published`/`@cell/name` (**fails closed in v1** — never installs another cell's unreviewed code). Signed-publisher identity plus a publish-time security gate is the v2 model.
 
 **Bundled `cell-resilience`.** Binds `StopFailure`/`rate_limit` + `Stop`/`(all)` to a script that writes `$XDG_STATE_HOME/swarph/idle_since.json` (`{"session","reason","hook_event","ts"}`, `reason=throttle|normal`) — the push-side throttle detector the watchdog's `--dm-wake` can read instead of polling. Observational only: it never blocks the session and always exits 0 (jq if present, printf/sed fallback otherwise).
 
@@ -202,36 +208,36 @@ swarph add swarph://skill/swarph-builtin/swarph-intro     # install a builtin sk
 
 (`tool` is not yet implemented — it bridges to swarph-mesh's adapter registry as a follow-on.)
 
-**Trust model (v1).** Builtin publishers (`swarph-builtin`) install; **any other publisher fails closed** — a published/untrusted URI never installs another cell's unreviewed code. Signed-publisher identity plus a per-class publish-time security gate is the v2 model (scope `research/architecture/swarph_artifact_uri_scope.md` §4 and the hooks scope §3.1 in the hedge-fund-mcp repo). When a URI carries `#sha256`, the resolved artifact is hash-verified and **refused on mismatch** — nothing is written.
+**Trust model (v1).** Builtin publishers (`swarph-builtin`) install; **any other publisher fails closed** — a published/untrusted URI never installs another cell's unreviewed code. Signed-publisher identity plus a per-class publish-time security gate is the v2 model. When a URI carries `#sha256`, the resolved artifact is hash-verified and **refused on mismatch** — nothing is written.
 
-**Resolving from metaedge.surf.** A search result on metaedge hands back a `swarph://` URI; you `swarph add` it. The link resolves *to the swarph*, not to a particular server: the CLI fetches the artifact from the publishing cell/registry and hash-verifies it against `#sha256`, so the same artifact can be served from any cell. Today this is copy-paste; a `swarph://` OS protocol-handler for click-to-install — the way `magnet:` opens a torrent client — is a future UX layer.
+**Content-addressed, not host-addressed.** A `swarph://` URI resolves *to the artifact*, not to a particular server: the CLI fetches it from any cell or registry that publishes it and hash-verifies against `#sha256`, so the same artifact can be served from anywhere — the BitTorrent-magnet property. Today the URI is copy-paste; a `swarph://` OS protocol-handler for click-to-install — the way `magnet:` opens a torrent client — is a future UX layer.
 
 **Activation.** Like hooks, freshly-installed hooks and skills are not hot-loaded into the running session — reopen `/hooks` (or restart the session) once to pick them up.
 
 ### `swarph onboard` + `swarph ratify` (Phase 5.5)
 
-Per PLAN.md §15, onboarding splits into a **mechanics phase** (`swarph onboard`) that automates the boring parts (registry POST, scaffolding, token resolution) and a **manual contract phase** (the new peer composes the handshake DM in their own words). A witness peer judges the handshake and runs `swarph ratify <peer>` to flip `ratified=true`, gating `task_claim` server-side.
+Onboarding splits into a **mechanics phase** (`swarph onboard`) that automates the boring parts (registry POST, scaffolding, token resolution) and a **manual contract phase** (the new peer composes the handshake DM in their own words). A witness peer judges the handshake and runs `swarph ratify <peer>` to flip `ratified=true`, gating `task_claim` server-side.
 
 ```bash
 # New peer self-onboards
-$ swarph onboard razorpeter
-[1/6] validate_node_name('razorpeter')          ok
+$ swarph onboard newpeer
+[1/6] validate_node_name('newpeer')          ok
 [2/6] prepare peer-registry row                 ok
 [3/6] resolve MESH_GATEWAY_TOKEN                ok
 [4/6] POST .../peers/register                   ok (registered_unratified=true)
 [5/6] verify_subscription_setup()               ok
-[6/6] scaffold ~/swarph_state/razorpeter/       ok
+[6/6] scaffold ~/swarph_state/newpeer/       ok
 
-[manual] handshake template at /tmp/razorpeter-handshake.md
+[manual] handshake template at /tmp/newpeer-handshake.md
   Edit each section in your own words, then send to your witness peer.
 
 # After peer composes + sends handshake, witness ratifies
-$ SWARPH_WITNESS=lab-ovh swarph ratify razorpeter \
+$ SWARPH_WITNESS=alice swarph ratify newpeer \
     --reason "handshake covers all four invariants in own words"
-[1/6] validate_node_name('razorpeter')          ok
-[2/6] verify witness 'lab-ovh' is ratified      ok
-[3/6] verify 'razorpeter' is registered_unratified  ok
-[4/6] PATCH .../peers/razorpeter                ok
+[1/6] validate_node_name('newpeer')          ok
+[2/6] verify witness 'alice' is ratified        ok
+[3/6] verify 'newpeer' is registered_unratified  ok
+[4/6] PATCH .../peers/newpeer                ok
 [5/6] verify peer_ratifications audit row       ok (id=N reason='...')
 [6/6] invalidate local TTL cache                ok
 ```
@@ -279,7 +285,7 @@ Hi! How can I help...
 
 ### `swarph import`
 
-Per PLAN.md §17, session import is the **knowledge half of onboarding** — gives a memory-carrying peer (or human migrating CLIs) the substantive context they're bringing into the swarph, paired with §15's contract half (handshake DM acknowledging the four invariants).
+Session import is the **knowledge half of onboarding** — gives a memory-carrying peer (or a human migrating between CLIs) the substantive context they're bringing into the swarph, paired with the contract half (the handshake DM acknowledging the four invariants).
 
 ```bash
 # Inspect what would be imported (lossy → honest framing)
@@ -305,7 +311,7 @@ To proceed:
 
 **What's dropped:** attachments (would need re-upload), provider-side KV cache, conversation IDs, `cache_control` annotations.
 
-Honest framing per PLAN.md §17.3: **teleport is "import + continue", not "freeze and resume"** — the first turn after import on a new provider pays cold-cache cost. Phase 5+ adds `--continue` for live REPL integration.
+Honest framing: **teleport is "import + continue", not "freeze and resume"** — the first turn after import on a new provider pays cold-cache cost.
 
 ```bash
 $ swarph "say pong" --provider gemini
@@ -380,27 +386,9 @@ Design spec: `docs/superpowers/specs/2026-06-11-swarph-context-compressor-design
   ```
 - Pretty-printed parsed dict on stdout when parse succeeds; `error_class=malformed_json` shows up in the stderr attribution footer when it doesn't.
 
-## Spec
-
-→ [hedge-fund-mcp / research/swarph_cli/PLAN.md](https://github.com/darw007d/hedge-fund-mcp/blob/main/research/swarph_cli/PLAN.md)
-
-## Phase rollout
-
-| Phase | What lands |
-|---|---|
-| **0** | Scaffold — entry-point + status banner |
-| **2** (v0.1.0) | One-shot mode: `swarph "hello" --provider gemini` |
-| **2.5** (v0.2.0) | `swarph import` — Claude JSONL → swarph-native session format |
-| **5** (v0.3.0) | `swarph chat` interactive REPL — multi-turn against any of five adapters + slash commands |
-| **5.5** (v0.4.0) | `swarph onboard` + `swarph ratify` — six mechanics steps + handshake template + witness flip (PLAN.md §15) |
-| **5.6** (v0.5.0 — this release) | **`swarph daemon`** — foreground inbox drain loop with atomic cursor writes; retires the orphaned-tail-F class (PLAN.md §16) |
-| **5.6b** | REPL drain coroutine + `/inbox`/`/reply` slash commands + `@swarph.on_dm()` handler registration (mesh + cli) |
-| **3** | `--ask <peer>` mesh-aware one-shot via MeshClient |
-| **6** | (already done) PyPI publish |
-
 ## Why split CLI from substrate
 
-`swarph-mesh` (the library) is imported by `omega-boss`, Council judges, `lab-orchestrator`, and any future swarph peer that wants to write programs against the Protocol. Those callers don't need the CLI surface or the console-script entry point. Keeping the CLI in a separate repo means library users `pip install swarph-mesh` without pulling argparse + REPL plumbing they'll never run.
+The [`swarph-mesh`](https://github.com/darw007d/swarph-mesh) library is imported by any program that wants to drive the mesh against the Protocol directly — orchestrators, judges, automation. Those callers don't need the CLI surface or the console-script entry point. Keeping the CLI in a separate repo means library users `pip install swarph-mesh` without pulling argparse + REPL plumbing they'll never run, while `pip install swarph-cli` gives you the standalone `swarph` binary.
 
 ## Install (dev)
 
