@@ -7,6 +7,7 @@ tests ratified."""
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -99,6 +100,7 @@ def test_role_divergence_keys_lineage_off_cell_role(tmp_path, monkeypatch):
 
 # --- MEDIUM: launch wrapper mode + atomicity ---------------------------------
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-mode bits not representable on Windows")
 def test_launch_wrapper_is_not_world_writable_or_world_exec(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     target = harden._write_launch_wrapper("droplet")

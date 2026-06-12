@@ -167,6 +167,12 @@ def test_verb_handler_registered():
 
 
 def test_three_tools_registered_on_server():
+    # The MCP server object only exists when the optional ``swarph-cli[mcp]``
+    # SDK extra is installed (mcp_server.mcp is None otherwise — e.g. a CI job
+    # that doesn't install the [mcp] extra). Skip rather than AttributeError so
+    # the registration check still runs everywhere the SDK is present.
+    if mcp_server.mcp is None:
+        pytest.skip("mcp SDK extra (swarph-cli[mcp]) not installed; tool registration is unavailable")
     tools = asyncio.run(mcp_server.mcp.list_tools())
     names = {t.name for t in tools}
     assert {"swarph_search", "swarph_add", "swarph_describe"} <= names
