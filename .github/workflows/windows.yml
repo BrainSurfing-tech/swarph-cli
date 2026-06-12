@@ -66,11 +66,16 @@ jobs:
       # §5.3c required-node-id floor: these win32-only paths CANNOT be exercised
       # on the Linux build host, so they are the whole point of this runner. If a
       # collection hook deselects any, pytest collects 0 here and exits 5 -> red.
+      # NOTE: a FIXED host-known list of the win32 tests ON MAIN — NOT
+      # auto-discovery (auto-discovery is the §5.3 anti-pattern: a renamed test
+      # silently drops). The spawn->tmux floor entry
+      # (tests/test_spawn_tmux_session.py) is added here DELIBERATELY once PR #67
+      # merges that file to main — this branch is off main, where it doesn't
+      # exist yet (referencing it = "file not found" -> exit 4).
       - name: Node-id floor (win32 paths that must actually run)
         run: |
           pytest -v --no-header \
             tests/test_spawn_windows_relaunch.py \
-            tests/test_spawn_tmux_session.py \
             "tests/test_cell_loader.py::test_session_sidecar_different_cwd_mints_fresh_and_repins"
 
       # §5.3 verdict re-derivation: distrust a bare green; assert a host-known
