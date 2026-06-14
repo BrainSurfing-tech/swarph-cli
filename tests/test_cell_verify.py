@@ -168,3 +168,26 @@ def test_unstarted_pin_no_jsonl_does_not_warn(tmp_path, monkeypatch):
     r = verify.verify_cell("science-claude")
     assert r.ok and r.code == 0
     assert not r.warnings
+
+
+def test_corrupt_own_manifest_fails_closed_not_throws(tmp_path, monkeypatch):
+    # science-claude defensive co-review (mesh #2826): read_manifest RAISES on a
+    # corrupt manifest (json.loads). The un-hardened check must NOT parse — it
+    # runs in the @.service ExecStart gate, so a throw there = no spawn. A corrupt
+    # OWN manifest must route to the existing fail-CLOSED handling (code 5), never
+    # an unhandled exception, AND must not emit the "no manifest" warning (a
+    # manifest FILE exists — it's just damaged, not absent).
+    from swarph_cli.capture import paths as _paths
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    cwd = tmp_path / "right"
+    cwd.mkdir()
+    monkeypatch.setattr(verify, "_resolve_cell", lambda role: _cell(cwd))
+    monkeypatch.setattr(verify, "_read_pin", lambda role: ("uuid-1", str(cwd)))
+    good = Path(".claude/projects") / verify.expected_project_dir(cwd) / "uuid-1.jsonl"
+    monkeypatch.setattr(verify, "locate_session_jsonl", lambda u: [good])
+    mpath = _paths.manifest_path("science-claude")
+    mpath.parent.mkdir(parents=True, exist_ok=True)
+    mpath.write_text("{ this is not valid json", encoding="utf-8")
+    r = verify.verify_cell("science-claude")  # MUST NOT raise
+    assert not r.ok and r.code == 5
+    assert not any("no capture manifest" in w for w in r.warnings)
