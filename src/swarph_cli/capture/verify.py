@@ -27,7 +27,7 @@ from swarph_shared.cell import Cell, CellError
 from swarph_cli.cell import _read_session_sidecar, load_cell, resolve_cell_path, session_state_path
 from swarph_cli.capture import manifest
 from swarph_cli.capture.liveness import probe_holder_liveness
-from swarph_cli.capture.paths import CaptureRoleError, validate_role
+from swarph_cli.capture.paths import CaptureRoleError, manifest_path, validate_role
 
 
 @dataclass
@@ -106,12 +106,19 @@ def verify_cell(role: str) -> VerifyResult:
     # verify ALLOWS (no manifest = no proof of a double-resume) but must warn
     # loudly, never pass mute (its fail-LOUD contract). Gated on jsonls so a
     # minted-but-unstarted pin (benign fresh state) stays quiet.
+    #
+    # Existence check, NOT read_manifest(role) (science-claude #2826): read_manifest
+    # json.loads-RAISES on a corrupt manifest, and this runs in the @.service
+    # ExecStart gate — a throw here = no spawn. A manifest that EXISTS but is
+    # corrupt must route to find_pin_holders' fail-CLOSED (code 5) below, not throw
+    # here and not warn "no manifest" (the file is present, just damaged).
     warnings: List[str] = []
-    if jsonls and manifest.read_manifest(role) is None:
+    if jsonls and not manifest_path(role).exists():
         warnings.append(
-            f"no capture manifest for {role!r} — cell is UNPROTECTED against "
-            f"double-resume (the per-UUID liveness check has nothing to probe for "
-            f"it). Run `swarph cell harden {role}` to capture its revival kit."
+            f"no capture manifest for {role!r} — this cell is UNPROTECTED against "
+            f"double-resume whenever live (the per-UUID liveness check has nothing "
+            f"to probe for it). Run `swarph cell harden {role}` to capture its "
+            f"revival kit."
         )
 
     # (b) liveness probe — cross-NAME sweep over every manifest pinning this
