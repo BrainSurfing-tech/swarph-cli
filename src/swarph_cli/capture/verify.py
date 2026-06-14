@@ -18,7 +18,7 @@ Two checks:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -35,6 +35,10 @@ class VerifyResult:
     ok: bool
     code: int
     reason: str
+    # Non-fatal advisories surfaced loudly (stderr/journal) regardless of `ok`.
+    # The gate stays fail-LOUD even when it ALLOWS: an un-hardened live cell
+    # passes (no manifest = no proof of double-resume) but must NOT pass mute.
+    warnings: List[str] = field(default_factory=list)
 
 
 def expected_project_dir(cwd: Path) -> str:
@@ -95,6 +99,21 @@ def verify_cell(role: str) -> VerifyResult:
             )
     # jsonls == [] → pin minted but session never ran; spawn will create it. OK.
 
+    # Un-hardened-but-LIVE warning (science-claude co-review, mesh #2811): a
+    # hand-deployed cell with a real running session (pin + jsonl) but NO capture
+    # manifest of its own is UNPROTECTED — it isn't registered as a holder, so the
+    # per-UUID sweep below can't see it and a second spawn wouldn't be refused.
+    # verify ALLOWS (no manifest = no proof of a double-resume) but must warn
+    # loudly, never pass mute (its fail-LOUD contract). Gated on jsonls so a
+    # minted-but-unstarted pin (benign fresh state) stays quiet.
+    warnings: List[str] = []
+    if jsonls and manifest.read_manifest(role) is None:
+        warnings.append(
+            f"no capture manifest for {role!r} — cell is UNPROTECTED against "
+            f"double-resume (the per-UUID liveness check has nothing to probe for "
+            f"it). Run `swarph cell harden {role}` to capture its revival kit."
+        )
+
     # (b) liveness probe — cross-NAME sweep over every manifest pinning this
     # UUID, not just this role's own (spec §4.3 blocking fix: two roles
     # pinning one UUID both look clean per-role).
@@ -128,5 +147,6 @@ def verify_cell(role: str) -> VerifyResult:
         return VerifyResult(
             True, 0,
             f"cleared stale live-pin(s) ({', '.join(cleared)}) — allow",
+            warnings=warnings,
         )
-    return VerifyResult(True, 0, "ok")
+    return VerifyResult(True, 0, "ok", warnings=warnings)

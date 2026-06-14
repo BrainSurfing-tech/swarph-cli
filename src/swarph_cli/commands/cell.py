@@ -54,6 +54,10 @@ def _run_verify(rest: List[str]) -> int:
     result = _verify.verify_cell(role)
     stream = sys.stdout if result.ok else sys.stderr
     print(f"[verify {role}] {'OK' if result.ok else 'REFUSE'}: {result.reason}", file=stream)
+    # Warnings are always loud (stderr/journal) even on an OK verdict — the gate
+    # is fail-LOUD; a silent pass on an unprotected cell is the bug being fixed.
+    for w in result.warnings:
+        print(f"[verify {role}] WARN: {w}", file=sys.stderr)
     return result.code
 
 

@@ -119,3 +119,52 @@ def test_cross_name_dead_holder_cleared_and_allowed(tmp_path, monkeypatch):
     assert r.ok and r.code == 0
     # the OTHER role's stale poison-pin got cleared
     assert manifest.read_manifest("drop-mother")["head"]["live_pin_holder"] is None
+
+
+def test_live_unhardened_cell_warns_but_allows(tmp_path, monkeypatch):
+    # science-claude's co-review case (mesh #2811): a cell that is demonstrably
+    # alive but was hand-deployed (never `harden`ed) has NO capture manifest, so
+    # the per-UUID liveness sweep finds nothing to probe. The pin is untouched
+    # (good) but verify used to pass MUTE — violating its own fail-LOUD contract.
+    # It must ALLOW (no manifest = no proof of double-resume) yet WARN loudly.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    cwd = tmp_path / "right"
+    cwd.mkdir()
+    monkeypatch.setattr(verify, "_resolve_cell", lambda role: _cell(cwd))
+    monkeypatch.setattr(verify, "_read_pin", lambda role: ("uuid-1", str(cwd)))
+    good = Path(".claude/projects") / verify.expected_project_dir(cwd) / "uuid-1.jsonl"
+    monkeypatch.setattr(verify, "locate_session_jsonl", lambda u: [good])
+    # NO manifest written for this role -> un-hardened, unprotected
+    r = verify.verify_cell("science-claude")
+    assert r.ok and r.code == 0
+    assert r.warnings, "an un-hardened live cell must emit a loud warning, not pass mute"
+    assert any("harden" in w for w in r.warnings)
+
+
+def test_hardened_cell_emits_no_unprotected_warning(tmp_path, monkeypatch):
+    # The inverse: a cell WITH a manifest is protected -> no unprotected warning.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    cwd = tmp_path / "right"
+    cwd.mkdir()
+    monkeypatch.setattr(verify, "_resolve_cell", lambda role: _cell(cwd))
+    monkeypatch.setattr(verify, "_read_pin", lambda role: ("uuid-1", str(cwd)))
+    good = Path(".claude/projects") / verify.expected_project_dir(cwd) / "uuid-1.jsonl"
+    monkeypatch.setattr(verify, "locate_session_jsonl", lambda u: [good])
+    manifest.write_manifest("droplet", recipe="r", pin="p", service="s",
+                            lineage="l", session_id="uuid-1", live_pin_holder="droplet")
+    monkeypatch.setattr(verify, "probe_holder_liveness", lambda h: False)
+    r = verify.verify_cell("droplet")
+    assert r.ok and r.code == 0
+    assert not r.warnings
+
+
+def test_unstarted_pin_no_jsonl_does_not_warn(tmp_path, monkeypatch):
+    # A pin minted but never run (no jsonl) is benign fresh state, not an
+    # unprotected live cell -> no noise.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(verify, "_resolve_cell", lambda role: _cell(tmp_path))
+    monkeypatch.setattr(verify, "_read_pin", lambda role: ("uuid-1", str(tmp_path)))
+    monkeypatch.setattr(verify, "locate_session_jsonl", lambda u: [])
+    r = verify.verify_cell("science-claude")
+    assert r.ok and r.code == 0
+    assert not r.warnings
