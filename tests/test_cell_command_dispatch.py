@@ -54,3 +54,17 @@ def test_main_routes_cell_verb(monkeypatch):
     # `swarph cell verify droplet` dispatches through main._VERB_HANDLERS
     from swarph_cli import main
     assert "cell" in main._VERB_HANDLERS
+
+
+def test_verify_warnings_print_to_stderr(monkeypatch, capsys):
+    # The loud-warning render: an OK-with-warnings verdict must still surface the
+    # warning on stderr (journal-visible from the @.service ExecStart).
+    monkeypatch.setattr(
+        verify, "verify_cell",
+        lambda role: verify.VerifyResult(True, 0, "ok", warnings=[
+            "no capture manifest for 'science-claude' — run swarph cell harden"]),
+    )
+    rc = cell_cmd.run_cell(["verify", "science-claude"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "WARN" in err and "harden" in err
