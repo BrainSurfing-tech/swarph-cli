@@ -1012,3 +1012,57 @@ def test_run_spawn_codex_assisted_memory_injects_agents_md(tmp_path, isolated_xd
     assert len(exec_args) == 1
     argv = exec_args[0][1]
     assert "--prompt-interactive" not in argv
+
+
+# --- per-OS ClaudeMembrane.launch (v0.12.0 Windows fix) ------------------
+#
+# On Windows os.exec* is spawn-and-exit, NOT a true replace: inside a tmux/psmux
+# pane it collapses the pane (the root process exits) and orphans claude, so the
+# create path's inner `swarph spawn` produced "tmux created but no claude" and a
+# dropped auto-attach. launch() must BLOCK on Windows (subprocess.run, claude as
+# a child of a stable pane root) and only os.execve on POSIX (true in-place
+# replace). Mirrors the per-OS tmux attach split.
+
+
+def test_claude_launch_windows_blocks_not_execve(monkeypatch, tmp_path):
+    from swarph_cli.commands import spawn
+    monkeypatch.setattr(spawn.sys, "platform", "win32")
+    monkeypatch.setattr(spawn.os, "chdir", lambda p: None)
+
+    class _R:
+        returncode = 0
+
+    ran = []
+    monkeypatch.setattr(spawn.subprocess, "run",
+                        lambda cmd, **kw: ran.append((cmd, kw)) or _R())
+    execve_called = []
+    monkeypatch.setattr(spawn.os, "execve", lambda *a: execve_called.append(a))
+
+    cell = type("C", (), {"cwd": tmp_path})()
+    rc = spawn.ClaudeMembrane().launch(
+        cell, "/bin/claude", ["claude", "--name", "x", "--session-id", "u"])
+
+    assert rc == 0
+    assert not execve_called  # Windows must NOT execve (collapses the tmux pane)
+    assert ran and ran[0][0] == ["/bin/claude", "--name", "x", "--session-id", "u"]
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_claude_launch_posix_uses_execve(monkeypatch, tmp_path, platform):
+    from swarph_cli.commands import spawn
+    monkeypatch.setattr(spawn.sys, "platform", platform)
+    monkeypatch.setattr(spawn.os, "chdir", lambda p: None)
+
+    run_called = []
+    monkeypatch.setattr(spawn.subprocess, "run",
+                        lambda cmd, **kw: run_called.append(cmd))
+    execve_args = []
+    monkeypatch.setattr(spawn.os, "execve",
+                        lambda p, a, e: execve_args.append((p, a, e)))
+
+    cell = type("C", (), {"cwd": tmp_path})()
+    spawn.ClaudeMembrane().launch(cell, "/bin/claude", ["claude", "--name", "x"])
+
+    assert execve_args and execve_args[0][0] == "/bin/claude"
+    assert execve_args[0][1] == ["claude", "--name", "x"]  # full argv incl argv0
+    assert not run_called  # POSIX launch uses execve, not subprocess.run
