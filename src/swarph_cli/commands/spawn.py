@@ -1010,18 +1010,39 @@ class ClaudeMembrane(ProviderMembrane):
             print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
             return 1
 
-        # Exec with the billing-redirect-scrubbed env (NOT raw inherited env) so
-        # a parent-set ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN can't silently
-        # flip the spawned claude off subscription billing. SWARPH_SPAWN=1 (set
-        # in _claude_env) tells a `swarph install-hook` SessionStart hook the
-        # prompt was already injected via --append-system-prompt, so it skips
-        # double-injection. execve carries exactly this env to the child.
+        # Launch with the billing-redirect-scrubbed env (NOT raw inherited env) so
+        # a parent-set ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN can't silently flip
+        # the spawned claude off subscription billing. SWARPH_SPAWN=1 (set in
+        # _claude_env) tells a `swarph install-hook` SessionStart hook the prompt
+        # was already injected via --append-system-prompt, so it skips double-
+        # injection. The env carries to the child either way.
+        env = _claude_env()
+
+        # Per-OS launch mechanism — the SAME split as the tmux attach, for the
+        # SAME reason:
+        #  * POSIX: os.execve = a TRUE in-place replace. The claude session
+        #    inherits stdio/signals cleanly under the same PID, so when this IS a
+        #    tmux pane's root command tmux keeps the pane running claude.
+        #  * Windows: os.exec* is emulated as spawn-and-exit, NOT a replace — this
+        #    Python process exits and a NEW claude process is spawned. Inside a
+        #    tmux/psmux pane that COLLAPSES the pane (its root command exited),
+        #    orphaning claude => "tmux created but no claude" (the v0.12.0 Windows
+        #    breakage: the create path's inner `swarph spawn` reaches here). A
+        #    BLOCKING subprocess.run keeps THIS process alive as the pane root with
+        #    claude as its child, so the pane survives until claude exits. argv[0]
+        #    is the conventional "claude" argv0; the real exe is `binary`.
+        if sys.platform == "win32":
+            try:
+                return subprocess.run([binary, *argv[1:]], env=env).returncode
+            except OSError as exc:
+                print(f"swarph spawn: launch failed: {exc}", file=sys.stderr)
+                return 1
         try:
-            os.execve(binary, argv, _claude_env())
+            os.execve(binary, argv, env)
         except OSError as exc:
             print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
             return 1
-        return 0  # unreachable, keeps type checker happy
+        return 0  # unreachable on POSIX (execve replaces); keeps type checker happy
 
 
 class CodexMembrane(ProviderMembrane):
