@@ -491,15 +491,6 @@ def _scrubbed_codex_env() -> dict[str, str]:
 #: inside cwd)").
 _GROK_CELL_HOME_SUBDIR = ".grok-cell"
 
-#: Metered/redirect env vars popped from a grok cell so it can never be flipped
-#: off its $0 OIDC auth onto a metered or attacker-controlled endpoint. Derived
-#: from the REAL grok 0.2.54 env surface (binary symbol probe), NOT invented:
-#: the canonical scrub sweep already catches the ``*_API_KEY`` / ``*_BASE_URL``
-#: members (``XAI_API_KEY``, ``GROK_CODE_XAI_API_KEY``,
-#: ``GROK_CLI_CHAT_PROXY_BASE_URL``, ``GROK_MODELS_BASE_URL``); these are the
-#: real ones the suffix sweep MISSES — auth/endpoint redirects, the sharpest
-#: being ``GROK_AUTH_PROVIDER_COMMAND`` (runs a command to source auth) and
-#: ``GROK_ASKPASS``.
 #: Grok cell env: DENY-BY-DEFAULT for the grok/xai namespace. A cell has its own
 #: ISOLATED HOME + file-based config, so it must inherit NOTHING grok-specific
 #: from the operator's interactive env — every ``GROK_*``/``XAI_*`` var is a
@@ -524,12 +515,13 @@ def _scrub_grok_namespace(env: dict) -> None:
         env.pop(key, None)
 
 
-#: Default grok sandbox profile. Real BUILT-IN profiles: off, workspace,
-#: read-only, strict (``devbox`` is a custom-profile example, not a built-in).
-#: ``workspace`` confines filesystem writes to the cwd while keeping network
-#: (mesh) reachable — empirically: Landlock restrict_network=false for workspace
-#: (strict/read-only set restrict_network=true and would mute the cell). Override
-#: via top-level ``sandbox`` in cell.yaml (``sandbox: off`` disables).
+#: Default grok sandbox profile. Built-in profiles: off, workspace, devbox,
+#: read-only, strict. ``workspace`` confines filesystem writes to the cwd while
+#: keeping network (mesh) reachable — empirically Landlock restrict_network=false
+#: for workspace (strict/read-only request restrict_network=true, which blocks
+#: child network on kernels with Landlock V4+/full seccomp TCP filtering; on
+#: older kernels the seccomp-fallback localhost rules still let the mesh through).
+#: Override via top-level ``sandbox`` in cell.yaml (``sandbox: off`` disables).
 _GROK_DEFAULT_SANDBOX = "workspace"
 
 
@@ -647,8 +639,8 @@ def _build_grok_argv(
             argv.extend(["--system-prompt-override", starter])
 
     # cell.sandbox is the canonical field (codex uses it too); grok built-in
-    # profiles are off/workspace/read-only/strict (devbox = custom example).
-    # Default workspace (keeps mesh network; strict/read-only would mute it).
+    # profiles are off/workspace/devbox/read-only/strict. Default workspace
+    # (keeps mesh network; strict/read-only restrict it on Landlock V4+ kernels).
     sandbox = getattr(cell, "sandbox", None)
     if sandbox is None:
         sandbox = _GROK_DEFAULT_SANDBOX
