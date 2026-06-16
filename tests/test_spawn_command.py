@@ -1269,3 +1269,70 @@ def test_grok_launch_win32_blocks_posix_execve(monkeypatch, tmp_path):
     monkeypatch.setattr(spawn.sys, "platform", "linux")
     spawn.GrokMembrane().launch(cell, "/bin/grok", ["grok", "--cwd", "x"])
     assert execve_called and not run_called
+
+
+def test_grok_env_scrubs_grok_home_and_namespace(fake_grok_cell_yaml, monkeypatch):
+    # HIGH: GROK_HOME / GROK_AUTH_PATH override the isolated HOME entirely, so an
+    # inherited one bypasses the whole scheme. Deny-by-default scrubs the whole
+    # GROK_*/XAI_* namespace (subsumes the enumerated redirect vars).
+    from swarph_cli.commands.spawn import _grok_env
+
+    monkeypatch.setenv("GROK_HOME", "/home/ubuntu/.grok")       # the isolation bypass
+    monkeypatch.setenv("GROK_AUTH_PATH", "/home/ubuntu/.grok/auth.json")
+    monkeypatch.setenv("GROK_AUTH_PROVIDER_COMMAND", "/evil")
+    monkeypatch.setenv("GROK_MANAGED_CONFIG_URL", "https://evil")
+    monkeypatch.setenv("XAI_API_KEY", "k")
+    cell = load_cell(fake_grok_cell_yaml)
+
+    env = _grok_env(cell)
+    for leaked in ("GROK_HOME", "GROK_AUTH_PATH", "GROK_AUTH_PROVIDER_COMMAND",
+                   "GROK_MANAGED_CONFIG_URL", "XAI_API_KEY"):
+        assert leaked not in env, f"{leaked} leaked into grok cell env"
+    # HOME is the isolated cell HOME (and grok now honors it — GROK_HOME gone).
+    assert env["HOME"] == str(cell.cwd / ".grok-cell")
+
+
+def test_run_spawn_grok_assisted_memory_no_double_system_prompt(
+    tmp_path, isolated_xdg, monkeypatch
+):
+    # BLOCKER regression: a grok cell with BOTH a starter AND assisted_memory
+    # must NOT emit two --system-prompt-override (grok's clap rejects a repeated
+    # flag → cell never launches). The starter uses --system-prompt-override; the
+    # CURRENT_TASK restore uses --rules.
+    from swarph_cli.commands import spawn
+    from swarph_cli.commands.spawn import run_spawn
+    import swarph_cli.commands.memory_sync
+
+    starter = tmp_path / "starter.md"
+    starter.write_text("you are grok-researcher.")
+    payload = {
+        "schema_version": "v1",
+        "name": "grok-researcher",
+        "role": "grok-researcher",
+        "cwd": str(tmp_path),
+        "provider": "grok",
+        "starter_prompt_path": "starter.md",
+        "assisted_memory": {"enabled": True, "repo": "test-repo"},
+    }
+    (tmp_path / "cell.yaml").write_text(yaml.safe_dump(payload), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setattr(
+        swarph_cli.commands.memory_sync, "perform_restore", lambda c: "Active task body"
+    )
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/fake-grok")
+    # neutralize the named-tmux launch so we reach launch()/execve in-test
+    monkeypatch.setattr(spawn, "_launch_via_tmux", lambda *a, **k: False)
+
+    exec_args = []
+    monkeypatch.setattr("os.execve", lambda p, a, e: exec_args.append((p, a, e)))
+    monkeypatch.setattr("os.chdir", lambda p: None)
+
+    run_spawn([])
+
+    assert len(exec_args) == 1
+    argv = exec_args[0][1]
+    assert argv.count("--system-prompt-override") == 1  # starter only — NOT doubled
+    assert "you are grok-researcher." in argv[argv.index("--system-prompt-override") + 1]
+    assert "--rules" in argv  # CURRENT_TASK injected here, not as a 2nd override
+    assert "Active task body" in argv[argv.index("--rules") + 1]

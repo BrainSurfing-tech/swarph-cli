@@ -500,23 +500,36 @@ _GROK_CELL_HOME_SUBDIR = ".grok-cell"
 #: real ones the suffix sweep MISSES — auth/endpoint redirects, the sharpest
 #: being ``GROK_AUTH_PROVIDER_COMMAND`` (runs a command to source auth) and
 #: ``GROK_ASKPASS``.
-_GROK_EXTRA_LEAK_KEYS = (
-    "XAI_API_KEY",
-    "GROK_CODE_XAI_API_KEY",
-    "GROK_AUTH_PROVIDER_COMMAND",
-    "GROK_ASKPASS",
-    "GROK_GATEWAY_URL",
-    "GROK_OIDC_ISSUER",
-    "GROK_OIDC_CLIENT_ID",
-    "GROK_MODELS_BASE_URL",
-    "GROK_MODELS_LIST_URL",
-    "GROK_CLI_CHAT_PROXY_BASE_URL",
-    "GROK_DEPLOYMENT_KEY",
-)
+#: Grok cell env: DENY-BY-DEFAULT for the grok/xai namespace. A cell has its own
+#: ISOLATED HOME + file-based config, so it must inherit NOTHING grok-specific
+#: from the operator's interactive env — every ``GROK_*``/``XAI_*`` var is a
+#: potential redirect: ``GROK_HOME``/``GROK_AUTH_PATH``/``GROK_AUTH`` override the
+#: isolated HOME and auth path ENTIRELY (so an inherited one silently bypasses
+#: the whole isolation scheme — grok honors GROK_HOME over $HOME);
+#: ``GROK_AUTH_PROVIDER_COMMAND`` runs an arbitrary auth command;
+#: ``GROK_MANAGED_CONFIG_URL`` + the ``GROK_OAUTH2_*`` / ``*_URL`` family redirect
+#: endpoints. Enumerating them is whack-a-mole, so scrub the whole namespace and
+#: let grok fall back to its built-in xAI $0 defaults + the symlinked auth.json.
+#: Allowlist only a var the cell genuinely needs to RECEIVE from the parent —
+#: none today.
+_GROK_ENV_ALLOWLIST: frozenset = frozenset()
 
-#: Default grok sandbox profile (real values: off, workspace, devbox, read-only,
-#: strict). ``workspace`` confines filesystem writes to the cwd while keeping the
-#: cell functional; override via ``extra.sandbox`` ("off" disables).
+
+def _scrub_grok_namespace(env: dict) -> None:
+    for key in [
+        k for k in env
+        if (k.startswith("GROK_") or k.startswith("XAI_"))
+        and k not in _GROK_ENV_ALLOWLIST
+    ]:
+        env.pop(key, None)
+
+
+#: Default grok sandbox profile. Real BUILT-IN profiles: off, workspace,
+#: read-only, strict (``devbox`` is a custom-profile example, not a built-in).
+#: ``workspace`` confines filesystem writes to the cwd while keeping network
+#: (mesh) reachable — empirically: Landlock restrict_network=false for workspace
+#: (strict/read-only set restrict_network=true and would mute the cell). Override
+#: via top-level ``sandbox`` in cell.yaml (``sandbox: off`` disables).
 _GROK_DEFAULT_SANDBOX = "workspace"
 
 
@@ -524,9 +537,11 @@ def _grok_env(cell: Cell) -> dict[str, str]:
     """Subscription/OIDC env for a local ``grok`` CELL session ($0 path).
 
     On top of the canonical billing scrub:
-      * the explicit ``_GROK_EXTRA_LEAK_KEYS`` pop — real grok auth/endpoint
-        redirect vars the suffix sweep misses (incl ``GROK_AUTH_PROVIDER_COMMAND``),
-        keeping grok on its $0 OIDC auth.
+      * DENY-BY-DEFAULT scrub of the whole ``GROK_*``/``XAI_*`` namespace (see
+        ``_scrub_grok_namespace``) — closes the redirect class incl
+        ``GROK_HOME``/``GROK_AUTH_PATH`` (which would bypass the isolated HOME)
+        and ``GROK_AUTH_PROVIDER_COMMAND``; grok falls back to its built-in xAI
+        $0 defaults + the symlinked auth.json.
       * HOME → an ISOLATED dir inside the cell cwd, with the operator's
         ``~/.grok/auth.json`` symlinked to ``<HOME>/.grok/auth.json`` (grok reads
         auth at ``$HOME/.grok/auth.json`` — strace-verified; the link MUST be in
@@ -543,8 +558,7 @@ def _grok_env(cell: Cell) -> dict[str, str]:
     the cell on the mesh.)
     """
     env = scrub_env_for_subprocess()
-    for key in _GROK_EXTRA_LEAK_KEYS:
-        env.pop(key, None)
+    _scrub_grok_namespace(env)
     env["SWARPH_SPAWN"] = "1"
 
     cell_home = cell.cwd / _GROK_CELL_HOME_SUBDIR
@@ -618,9 +632,9 @@ def _build_grok_argv(
     - ``--sandbox <profile>`` confines the cell (default ``workspace``); the
       ONLY sibling that is both auto-approve AND unconfined is a security
       escalation, and ``--sandbox`` is an independent axis from approval. Set
-      ``extra.sandbox: off`` to disable.
+      top-level ``sandbox: off`` in cell.yaml to disable.
     - ``--always-approve`` (default on) is the unattended-cell autonomy posture;
-      opt out via ``extra.always_approve: false``.
+      opt out via top-level ``always_approve: false`` in cell.yaml.
     """
     argv = ["grok", "--cwd", str(cell.cwd)]
 
@@ -632,8 +646,9 @@ def _build_grok_argv(
         if starter:
             argv.extend(["--system-prompt-override", starter])
 
-    # cell.sandbox is the canonical field (codex uses it too); grok's valid
-    # profiles are off/workspace/devbox/read-only/strict. Default workspace.
+    # cell.sandbox is the canonical field (codex uses it too); grok built-in
+    # profiles are off/workspace/read-only/strict (devbox = custom example).
+    # Default workspace (keeps mesh network; strict/read-only would mute it).
     sandbox = getattr(cell, "sandbox", None)
     if sandbox is None:
         sandbox = _GROK_DEFAULT_SANDBOX
@@ -1577,7 +1592,13 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                 if cell.provider == "claude":
                     spawn_argv.extend(["--append-system-prompt", inject_text])
                 elif cell.provider == "grok":
-                    spawn_argv.extend(["--system-prompt-override", inject_text])
+                    # --rules (extra rules appended to the system prompt), NOT a
+                    # second --system-prompt-override: grok's clap REJECTS a
+                    # repeated flag, and _build_grok_argv may already have emitted
+                    # --system-prompt-override for the starter → a second one
+                    # would refuse to launch. (claude concatenates repeated
+                    # --append-system-prompt; grok rejects-on-repeat — the delta.)
+                    spawn_argv.extend(["--rules", inject_text])
                 elif cell.provider == "antigravity":
                     spawn_argv.extend(["--prompt-interactive", inject_text])
                 elif cell.provider == "codex":
