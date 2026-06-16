@@ -1098,7 +1098,10 @@ def test_membranes_lockstep_includes_grok():
     from swarph_cli.commands.spawn import MEMBRANES, GrokMembrane
     from swarph_shared.cell import VALID_PROVIDERS
 
-    assert set(MEMBRANES) == VALID_PROVIDERS
+    # Invariant is a SUBSET, not equality: every whitelisted provider has a
+    # membrane, but MEMBRANES may carry one ahead of the shared whitelist (grok
+    # ships here before swarph_shared whitelists it — must not crash import).
+    assert VALID_PROVIDERS <= set(MEMBRANES)
     assert isinstance(MEMBRANES["grok"], GrokMembrane)
     assert MEMBRANES["grok"].uses_pinned_session() is True
 

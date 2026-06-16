@@ -1296,15 +1296,25 @@ MEMBRANES: dict[str, ProviderMembrane] = {
     "grok": GrokMembrane(),
 }
 
-# Defensive coupling: MEMBRANES must stay in lockstep with the shared provider
-# whitelist. A future VALID_PROVIDERS entry without a matching membrane would
-# otherwise surface as a raw KeyError at spawn time — fail loud at import instead.
+# Defensive coupling: every shared-whitelisted provider MUST have a membrane,
+# else a `cell.provider` that load_cell accepts would surface as a raw KeyError
+# in run_spawn — fail loud at import instead. The invariant is a SUBSET
+# (VALID_PROVIDERS ⊆ MEMBRANES), NOT equality: MEMBRANES may legitimately carry
+# a membrane AHEAD of the shared whitelist (e.g. GrokMembrane shipping before a
+# swarph_shared release adds 'grok' to VALID_PROVIDERS). An extra membrane is
+# harmless — load_cell still gates which providers are actually spawnable — so
+# strict equality would needlessly couple this package's release to the shared
+# one. (Cross-pkg: grok cells only become spawnable once swarph_shared whitelists
+# 'grok'; until then load_cell rejects them cleanly with "queued for a future
+# release", and this guard does not crash.)
 from swarph_shared.cell import VALID_PROVIDERS as _VALID_PROVIDERS  # noqa: E402
 
-if set(MEMBRANES) != _VALID_PROVIDERS:
+_unmembraned = _VALID_PROVIDERS - set(MEMBRANES)
+if _unmembraned:
     raise RuntimeError(
-        f"MEMBRANES {sorted(MEMBRANES)} out of sync with VALID_PROVIDERS "
-        f"{sorted(_VALID_PROVIDERS)} — add the missing provider membrane."
+        f"VALID_PROVIDERS {sorted(_VALID_PROVIDERS)} has providers with no "
+        f"membrane: {sorted(_unmembraned)} (MEMBRANES: {sorted(MEMBRANES)}) — "
+        f"add the missing provider membrane."
     )
 
 
