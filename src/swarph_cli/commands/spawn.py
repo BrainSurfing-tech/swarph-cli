@@ -30,6 +30,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from swarph_cli import __version__
 from swarph_cli.cell import (
@@ -490,89 +491,165 @@ def _scrubbed_codex_env() -> dict[str, str]:
 #: inside cwd)").
 _GROK_CELL_HOME_SUBDIR = ".grok-cell"
 
-#: Metered xAI billing keys popped explicitly (belt-and-suspenders on top of the
-#: canonical ``*_API_KEY`` / ``*_BASE_URL`` suffix sweep) so a grok cell can
-#: never be flipped off its $0 OIDC auth onto a metered endpoint. The suffix
-#: sweep already catches ``XAI_API_KEY`` / ``GROK_API_KEY``; the ``*_API_BASE``
-#: / ``*_API_HOST`` variants do NOT match a suffix, so they live here.
-_GROK_EXTRA_LEAK_KEYS = (
-    "XAI_API_KEY",
-    "GROK_API_KEY",
-    "GROK_CODE_XAI_API_KEY",
-    "XAI_API_BASE",
-    "XAI_API_HOST",
-    "GROK_API_HOST",
-)
+#: Grok cell env: DENY-BY-DEFAULT for the grok/xai namespace. A cell has its own
+#: ISOLATED HOME + file-based config, so it must inherit NOTHING grok-specific
+#: from the operator's interactive env — every ``GROK_*``/``XAI_*`` var is a
+#: potential redirect: ``GROK_HOME``/``GROK_AUTH_PATH``/``GROK_AUTH`` override the
+#: isolated HOME and auth path ENTIRELY (so an inherited one silently bypasses
+#: the whole isolation scheme — grok honors GROK_HOME over $HOME);
+#: ``GROK_AUTH_PROVIDER_COMMAND`` runs an arbitrary auth command;
+#: ``GROK_MANAGED_CONFIG_URL`` + the ``GROK_OAUTH2_*`` / ``*_URL`` family redirect
+#: endpoints. Enumerating them is whack-a-mole, so scrub the whole namespace and
+#: let grok fall back to its built-in xAI $0 defaults + the symlinked auth.json.
+#: Allowlist only a var the cell genuinely needs to RECEIVE from the parent —
+#: none today.
+_GROK_ENV_ALLOWLIST: frozenset = frozenset()
+
+
+def _scrub_grok_namespace(env: dict) -> None:
+    for key in [
+        k for k in env
+        if (k.startswith("GROK_") or k.startswith("XAI_"))
+        and k not in _GROK_ENV_ALLOWLIST
+    ]:
+        env.pop(key, None)
+
+
+#: Default grok sandbox profile. Built-in profiles: off, workspace, devbox,
+#: read-only, strict. ``workspace`` confines filesystem writes to the cwd while
+#: keeping network (mesh) reachable — empirically Landlock restrict_network=false
+#: for workspace (strict/read-only request restrict_network=true, which blocks
+#: child network on kernels with Landlock V4+/full seccomp TCP filtering; on
+#: older kernels the seccomp-fallback localhost rules still let the mesh through).
+#: Override via top-level ``sandbox`` in cell.yaml (``sandbox: off`` disables).
+_GROK_DEFAULT_SANDBOX = "workspace"
 
 
 def _grok_env(cell: Cell) -> dict[str, str]:
     """Subscription/OIDC env for a local ``grok`` CELL session ($0 path).
 
     On top of the canonical billing scrub:
-      * the explicit ``_GROK_EXTRA_LEAK_KEYS`` pop (metered xAI endpoints the
-        suffix sweep misses), keeping grok on its $0 OIDC auth.
-      * MESH_GATEWAY_TOKEN popped — the per-cell auth CUTOVER: with the shared
-        token absent the swarph resolver loads the cell's per-peer token file
-        (symlinked into the isolated HOME at
-        ``.grok-cell/.config/swarph/grok-researcher.peer_token``) instead of the
-        cell riding the operator's shared token. (``_TOKEN`` is not a scrub
-        suffix, so this MUST be explicit — omitting it is the mint≠cutover gap.)
-      * HOME → an ISOLATED dir inside the cell cwd (created if absent), with the
-        operator's ``~/.grok/auth.json`` symlinked in for $0 OIDC, so the cell's
+      * DENY-BY-DEFAULT scrub of the whole ``GROK_*``/``XAI_*`` namespace (see
+        ``_scrub_grok_namespace``) — closes the redirect class incl
+        ``GROK_HOME``/``GROK_AUTH_PATH`` (which would bypass the isolated HOME)
+        and ``GROK_AUTH_PROVIDER_COMMAND``; grok falls back to its built-in xAI
+        $0 defaults + the symlinked auth.json.
+      * HOME → an ISOLATED dir inside the cell cwd, with the operator's
+        ``~/.grok/auth.json`` symlinked to ``<HOME>/.grok/auth.json`` (grok reads
+        auth at ``$HOME/.grok/auth.json`` — strace-verified; the link MUST be in
+        the ``.grok`` subdir, not at ``$HOME/auth.json``), so the cell's
         sessions/memory/auth never mix with the operator's personal ``~/.grok``.
       * SWARPH_SPAWN marker — the tmux re-entry loop-guard (see
         ``_launch_via_tmux``) and the install-hook double-inject guard.
+
+    MESH_GATEWAY_TOKEN is deliberately NOT popped — same as the claude/codex/agy
+    membranes, the cell inherits the gateway token so its mesh DMs work out of
+    the box. (A per-peer-token cutover is a separate, explicit feature: it
+    requires placing the per-peer token file in the cell HOME, which this
+    membrane does not do, so popping the shared token here would silently mute
+    the cell on the mesh.)
     """
     env = scrub_env_for_subprocess()
-    for key in _GROK_EXTRA_LEAK_KEYS:
-        env.pop(key, None)
-    env.pop("MESH_GATEWAY_TOKEN", None)
+    _scrub_grok_namespace(env)
     env["SWARPH_SPAWN"] = "1"
 
     cell_home = cell.cwd / _GROK_CELL_HOME_SUBDIR
-    cell_home.mkdir(parents=True, exist_ok=True)
-    try:
-        op_auth = Path.home() / ".grok" / "auth.json"
-        link = cell_home / "auth.json"
-        if op_auth.exists() and not link.exists():
-            link.symlink_to(op_auth)
-    except OSError:
-        # Best-effort: a pre-existing link / race / read-only HOME must not
-        # crash the spawn — grok will fall back to its own auth flow.
-        pass
+    grok_dir = cell_home / ".grok"
+    grok_dir.mkdir(parents=True, exist_ok=True)
+    _link_grok_auth(grok_dir / "auth.json")
     env["HOME"] = str(cell_home)
     return env
 
 
+def _link_grok_auth(link: Path) -> None:
+    """Symlink the operator's ``~/.grok/auth.json`` to ``link`` for $0 OIDC.
+
+    Robust + idempotent: skips when ``link`` already resolves to the operator
+    auth; replaces a STALE/foreign/dangling link (validated via ``is_symlink`` +
+    ``readlink``, which a dangling link's ``exists()`` reports False for);
+    never clobbers a real file; never crashes the spawn (best-effort — grok
+    falls back to its own auth flow on any failure).
+    """
+    op_auth = Path.home() / ".grok" / "auth.json"
+    if not op_auth.exists():
+        return
+    try:
+        if link.is_symlink():
+            if link.readlink() == op_auth:
+                return  # already correct
+            link.unlink()  # stale/foreign/dangling link → replace
+        elif link.exists():
+            return  # a real file is present — do not clobber
+        link.symlink_to(op_auth)
+    except OSError:
+        pass
+
+
+def _grok_session_exists(cell: Cell) -> bool:
+    """True if grok already has a session for this cell's (HOME, cwd).
+
+    grok keys sessions by url-encoded cwd under
+    ``$HOME/.grok/sessions/<quote(cwd)>/<uuid>/``. Used to decide genesis vs
+    continue: grok's ``--resume`` REQUIRES a pre-existing session (unlike claude
+    ``--session-id`` which MINTS one), so passing a swarph-minted UUID on genesis
+    errors "Session does not exist". Detecting a prior session lets us pass
+    ``--continue`` (resume most-recent for cwd) only when it's safe.
+    """
+    enc = quote(str(cell.cwd), safe="")
+    sdir = cell.cwd / _GROK_CELL_HOME_SUBDIR / ".grok" / "sessions" / enc
+    try:
+        return sdir.is_dir() and any(p.is_dir() for p in sdir.iterdir())
+    except OSError:
+        return False
+
+
 def _build_grok_argv(
     cell: Cell,
-    session_id: Optional[str],
-    effective_role: Optional[str],
+    no_starter: bool,
     passthrough: list[str],
 ) -> list[str]:
-    """``grok --cwd <cwd> [--resume <id>] [--agent <role>] --always-approve``.
+    """Build the ``grok`` cell argv. Grounded against real grok 0.2.54.
 
-    Pinned-session (R5): ``--resume <session_id>`` attaches grok's native
-    cwd-keyed session (``~/.grok/sessions/<encoded-cwd>/<uuid>``) so the cell
-    keeps its continuity + identity + inbox across respawns — the load-bearing
-    reason grok ``uses_pinned_session`` (not fresh-per-spawn). ``--agent`` gives
-    the cell its role identity. ``--always-approve`` is the cell autonomy
-    posture (a mesh cell runs unattended — the spawn-equivalent of codex ``-a``
-    / agy ``--sandbox``); opt out via ``extra.always_approve: false``.
-
-    No starter flag: grok's interactive mode has no system-prompt-override (the
-    real flags ``--prompt-file`` / ``-p`` are single-turn/headless), and the
-    cell's identity is carried by ``--agent`` + grok's own durable memory, so a
-    swarph starter is neither needed nor expressible here.
+    - ``--cwd <cwd>`` keys grok's cwd-scoped session + memory to the cell dir.
+    - ``--continue`` (resume most-recent session for the cwd) ONLY when a prior
+      grok session exists. grok mints + owns its own session UUIDs and
+      ``--resume`` REQUIRES an existing one, so on genesis we pass NO session
+      flag and let grok mint (a swarph-minted UUID would error "Session does not
+      exist"). grok's own durable cross-session memory carries identity either
+      way.
+    - ``--system-prompt-override <starter>`` carries the cell's swarph starter /
+      identity when one is configured (the real flag; NOT ``--agent``, which is
+      grok's agent-PROFILE selector — an unknown swarph role name is silently
+      ignored, giving the cell no identity).
+    - ``--sandbox <profile>`` confines the cell (default ``workspace``); the
+      ONLY sibling that is both auto-approve AND unconfined is a security
+      escalation, and ``--sandbox`` is an independent axis from approval. Set
+      top-level ``sandbox: off`` in cell.yaml to disable.
+    - ``--always-approve`` (default on) is the unattended-cell autonomy posture;
+      opt out via top-level ``always_approve: false`` in cell.yaml.
     """
     argv = ["grok", "--cwd", str(cell.cwd)]
-    if session_id:
-        argv.extend(["--resume", session_id])
-    role_value = effective_role if effective_role is not None else cell.role
-    if role_value:
-        argv.extend(["--agent", role_value])
+
+    if _grok_session_exists(cell):
+        argv.append("--continue")
+
+    if not no_starter and cell.starter_prompt_path:
+        starter = read_starter_prompt(cell)
+        if starter:
+            argv.extend(["--system-prompt-override", starter])
+
+    # cell.sandbox is the canonical field (codex uses it too); grok built-in
+    # profiles are off/workspace/devbox/read-only/strict. Default workspace
+    # (keeps mesh network; strict/read-only restrict it on Landlock V4+ kernels).
+    sandbox = getattr(cell, "sandbox", None)
+    if sandbox is None:
+        sandbox = _GROK_DEFAULT_SANDBOX
+    if sandbox and str(sandbox).lower() not in ("off", "false", "none"):
+        argv.extend(["--sandbox", str(sandbox)])
+
     if cell.extra.get("always_approve", True) is not False:
         argv.append("--always-approve")
+
     argv.extend(passthrough)
     return argv
 
@@ -1219,18 +1296,18 @@ class GrokMembrane(ProviderMembrane):
     claude cell) so it is durable + supervisable and lands in its OWN session,
     never a window of another cell's session.
 
-    Pinned-session (``uses_pinned_session`` True): grok exposes a native
-    cwd-keyed session model under ``~/.grok/sessions/`` and a ``--resume <id>``
-    verb, so the cell pins its session UUID via the R5 store (like claude) and
-    ``--resume``\\s it on every respawn — preserving the cell's continuity,
-    identity, and mesh inbox. (Continuity is the whole point of a persistent
-    cell; a fresh session each spawn would orphan grok's running identity.)
+    Session model (``uses_pinned_session`` False): grok mints and OWNS its own
+    cwd-keyed session UUIDs (``$HOME/.grok/sessions/<enc-cwd>/<uuid>``) and its
+    ``--resume`` REQUIRES a pre-existing one — unlike claude ``--session-id``,
+    which mints. So the cell does NOT carry a swarph-pinned UUID; it relies on
+    grok's own ``--continue`` (resume most-recent for the cwd) + grok's durable
+    cross-session memory for continuity, and lets grok mint on genesis.
     """
 
     name = "grok"
 
     def uses_pinned_session(self) -> bool:
-        return True
+        return False
 
     def build_argv(
         self,
@@ -1241,7 +1318,7 @@ class GrokMembrane(ProviderMembrane):
         passthrough: list[str],
         effective_role: Optional[str],
     ) -> list[str]:
-        return _build_grok_argv(cell, session_id, effective_role, passthrough)
+        return _build_grok_argv(cell, no_starter, passthrough)
 
     def resolve_binary(self) -> Optional[str]:
         provider_bin = shutil.which("grok")
@@ -1278,11 +1355,23 @@ class GrokMembrane(ProviderMembrane):
         except OSError as exc:
             print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
             return 1
-        # execve carries the isolated-HOME + billing-scrubbed env to grok
-        # without mutating this process's os.environ first (a failed exec leaves
-        # us intact).
+        # Isolated-HOME + billing-scrubbed env carried to grok without mutating
+        # this process's os.environ first (a failed exec leaves us intact).
+        env = _grok_env(cell)
+        # Per-OS launch — the SAME split as claude.launch (v0.12.1 fix): on
+        # Windows os.exec* is emulated as spawn-and-exit (not a real replace),
+        # which collapses the tmux pane (its root command exits, orphaning grok);
+        # a BLOCKING subprocess.run keeps THIS process as the pane root with grok
+        # as its child until grok exits. POSIX uses execve for a true in-place
+        # replace so the pane keeps running grok under the same PID.
+        if sys.platform == "win32":
+            try:
+                return subprocess.run([binary, *argv[1:]], env=env).returncode
+            except OSError as exc:
+                print(f"swarph spawn: launch failed: {exc}", file=sys.stderr)
+                return 1
         try:
-            os.execve(binary, argv, _grok_env(cell))
+            os.execve(binary, argv, env)
         except OSError as exc:
             print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
             return 1
@@ -1417,7 +1506,11 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
             )
 
-    elif cell.provider == "antigravity":
+    elif cell.provider in ("antigravity", "grok"):
+        # Fresh-session providers (no swarph-pinned UUID): grok mints + owns its
+        # own session ids (continuity via --continue + grok memory). Still want
+        # the operator-typed slot-role as effective_role for the named tmux
+        # session + future sibling slots.
         session_id = "(fresh-session-per-spawn, no pinned id)"
         was_generated = True
         sidecar_role = requested_role if requested_role else cell.role
@@ -1490,6 +1583,14 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                 inject_text = f"Your active task is in CURRENT_TASK.md — read it first:\n\n{current_task_text}"
                 if cell.provider == "claude":
                     spawn_argv.extend(["--append-system-prompt", inject_text])
+                elif cell.provider == "grok":
+                    # --rules (extra rules appended to the system prompt), NOT a
+                    # second --system-prompt-override: grok's clap REJECTS a
+                    # repeated flag, and _build_grok_argv may already have emitted
+                    # --system-prompt-override for the starter → a second one
+                    # would refuse to launch. (claude concatenates repeated
+                    # --append-system-prompt; grok rejects-on-repeat — the delta.)
+                    spawn_argv.extend(["--rules", inject_text])
                 elif cell.provider == "antigravity":
                     spawn_argv.extend(["--prompt-interactive", inject_text])
                 elif cell.provider == "codex":

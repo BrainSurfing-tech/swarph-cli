@@ -1071,7 +1071,10 @@ def test_claude_launch_posix_uses_execve(monkeypatch, tmp_path, platform):
 
 
 # ---------------------------------------------------------------------------
-# Grok membrane (local `grok` CLI as a durable PINNED cell — $0 OIDC)
+# Grok membrane (local `grok` CLI as a durable cell — $0 OIDC).
+# Corrected design (0.13.1): grok owns its own sessions (--continue/genesis,
+# not a swarph-pinned --resume); auth at $HOME/.grok/auth.json; sandbox default;
+# MESH_GATEWAY_TOKEN NOT popped; real grok redirect vars scrubbed.
 # ---------------------------------------------------------------------------
 
 
@@ -1090,123 +1093,124 @@ def fake_grok_cell_yaml(tmp_path):
     return p
 
 
+def _make_grok_session(cell_cwd):
+    """Create grok's on-disk session dir for cell_cwd so _grok_session_exists()
+    returns True (mirrors grok minting a session under $HOME/.grok/sessions/)."""
+    from urllib.parse import quote
+    enc = quote(str(cell_cwd), safe="")
+    sdir = cell_cwd / ".grok-cell" / ".grok" / "sessions" / enc / "deadbeef-uuid"
+    sdir.mkdir(parents=True, exist_ok=True)
+
+
 def test_membranes_lockstep_includes_grok():
-    # The import-time lockstep guard only passes if every VALID_PROVIDERS entry
-    # has a membrane. A bare import proves the guard did not raise; assert grok
-    # is wired + pinned (regression for the GrokMembrane-missing crash that
-    # bricked every `swarph spawn`, and for the pinned-session contract).
     from swarph_cli.commands.spawn import MEMBRANES, GrokMembrane
     from swarph_shared.cell import VALID_PROVIDERS
 
-    # Invariant is a SUBSET, not equality: every whitelisted provider has a
-    # membrane, but MEMBRANES may carry one ahead of the shared whitelist (grok
-    # ships here before swarph_shared whitelists it — must not crash import).
+    # Subset invariant (not equality) so a membrane may ship ahead of the shared
+    # whitelist without crashing import.
     assert VALID_PROVIDERS <= set(MEMBRANES)
     assert isinstance(MEMBRANES["grok"], GrokMembrane)
-    assert MEMBRANES["grok"].uses_pinned_session() is True
+    # grok mints + owns its own sessions — NOT a swarph-pinned UUID.
+    assert MEMBRANES["grok"].uses_pinned_session() is False
 
 
-def test_build_grok_argv_pinned(fake_grok_cell_yaml):
+def test_build_grok_argv_genesis_no_resume(fake_grok_cell_yaml):
+    # B3: on genesis (no prior grok session) pass NO session flag — grok mints
+    # its own. A swarph UUID via --resume would error "Session does not exist".
     from swarph_cli.commands.spawn import _build_grok_argv
 
     cell = load_cell(fake_grok_cell_yaml)
-    argv = _build_grok_argv(
-        cell,
-        "15f1f31c-5a59-4162-9e4f-ecbed9c48403",
-        "grok-researcher",
-        [],
-    )
-    assert argv == [
-        "grok",
-        "--cwd",
-        str(cell.cwd),
-        "--resume",
-        "15f1f31c-5a59-4162-9e4f-ecbed9c48403",
-        "--agent",
-        "grok-researcher",
-        "--always-approve",
-    ]
-
-
-def test_build_grok_argv_no_session_falls_back_to_role(fake_grok_cell_yaml):
-    from swarph_cli.commands.spawn import _build_grok_argv
-
-    cell = load_cell(fake_grok_cell_yaml)
-    # No pinned id yet (first genesis) → no --resume; effective_role None falls
-    # back to cell.role for --agent.
-    argv = _build_grok_argv(cell, None, None, [])
+    argv = _build_grok_argv(cell, no_starter=False, passthrough=[])
     assert "--resume" not in argv
-    assert argv == [
-        "grok",
-        "--cwd",
-        str(cell.cwd),
-        "--agent",
-        "grok-researcher",
-        "--always-approve",
-    ]
+    assert "--continue" not in argv
+    assert argv[:3] == ["grok", "--cwd", str(cell.cwd)]
+    assert "--always-approve" in argv
 
 
-def test_build_grok_argv_effective_role_and_passthrough(fake_grok_cell_yaml):
+def test_build_grok_argv_continue_when_session_exists(fake_grok_cell_yaml):
+    # B3: a prior grok session for the cwd → --continue (resume most-recent),
+    # never a swarph-minted --resume <uuid>.
     from swarph_cli.commands.spawn import _build_grok_argv
 
     cell = load_cell(fake_grok_cell_yaml)
-    argv = _build_grok_argv(cell, "abc", "grok-researcher-2", ["--no-subagents"])
-    # effective_role (sibling slot) wins for --agent; passthrough is appended
-    # AFTER --always-approve.
-    assert argv[argv.index("--agent") + 1] == "grok-researcher-2"
-    assert argv[-1] == "--no-subagents"
-    assert argv.index("--no-subagents") > argv.index("--always-approve")
+    _make_grok_session(cell.cwd)
+    argv = _build_grok_argv(cell, no_starter=False, passthrough=[])
+    assert "--continue" in argv
+    assert "--resume" not in argv
+
+
+def test_build_grok_argv_sandbox_default_and_optout(fake_grok_cell_yaml):
+    # H4: default --sandbox workspace (confined); opt out via extra.sandbox: off.
+    from swarph_cli.commands.spawn import _build_grok_argv
+
+    cell = load_cell(fake_grok_cell_yaml)
+    argv = _build_grok_argv(cell, no_starter=False, passthrough=[])
+    assert argv[argv.index("--sandbox") + 1] == "workspace"
+
+    payload = yaml.safe_load(fake_grok_cell_yaml.read_text())
+    payload["sandbox"] = "off"
+    fake_grok_cell_yaml.write_text(yaml.safe_dump(payload))
+    cell_off = load_cell(fake_grok_cell_yaml)
+    assert "--sandbox" not in _build_grok_argv(cell_off, no_starter=False, passthrough=[])
+
+
+def test_build_grok_argv_starter_via_system_prompt_override(fake_grok_cell_yaml, tmp_path):
+    # M2: the starter is carried by --system-prompt-override (the REAL grok
+    # flag), NOT --agent (a profile selector that silently ignores unknown roles).
+    from swarph_cli.commands.spawn import _build_grok_argv
+
+    starter = tmp_path / "starter.md"
+    starter.write_text("you are grok-researcher; act AI-to-AI.")
+    payload = yaml.safe_load(fake_grok_cell_yaml.read_text())
+    payload["starter_prompt_path"] = "starter.md"
+    fake_grok_cell_yaml.write_text(yaml.safe_dump(payload))
+    cell = load_cell(fake_grok_cell_yaml)
+
+    argv = _build_grok_argv(cell, no_starter=False, passthrough=[])
+    assert "--system-prompt-override" in argv
+    assert "AI-to-AI" in argv[argv.index("--system-prompt-override") + 1]
+    assert "--agent" not in argv  # the role is NOT passed as a fake agent name
 
 
 def test_build_grok_argv_always_approve_optout(fake_grok_cell_yaml):
     from swarph_cli.commands.spawn import _build_grok_argv
 
-    # Extra fields live at TOP LEVEL of cell.yaml; load_cell collects leftover
-    # keys into cell.extra. (A nested `extra:` block lands as cell.extra['extra']
-    # and would NOT be read here — top-level is the convention, matching agy's
-    # cell.extra.get('sandbox').)
     payload = yaml.safe_load(fake_grok_cell_yaml.read_text())
     payload["always_approve"] = False
     fake_grok_cell_yaml.write_text(yaml.safe_dump(payload))
     cell = load_cell(fake_grok_cell_yaml)
-
-    argv = _build_grok_argv(cell, None, None, [])
-    assert "--always-approve" not in argv
+    assert "--always-approve" not in _build_grok_argv(cell, no_starter=False, passthrough=[])
 
 
-def test_grok_env_isolates_home_scrubs_billing_and_token(
+def test_grok_env_scrubs_real_redirect_vars_and_keeps_mesh_token(
     fake_grok_cell_yaml, monkeypatch
 ):
+    # H3: the REAL grok redirect vars are scrubbed (incl the sharp
+    # GROK_AUTH_PROVIDER_COMMAND). H2: MESH_GATEWAY_TOKEN is NOT popped (matches
+    # claude/codex/agy; popping without placing the per-peer file mutes the cell).
     from swarph_cli.commands.spawn import _grok_env
 
-    # Metered xAI keys + the shared mesh token in the parent env must NOT reach
-    # the spawned grok cell.
-    monkeypatch.setenv("XAI_API_KEY", "sk-xai-LEAK")
-    monkeypatch.setenv("XAI_API_BASE", "https://metered.example")
+    monkeypatch.setenv("XAI_API_KEY", "k")
+    monkeypatch.setenv("GROK_AUTH_PROVIDER_COMMAND", "/evil/cmd")
+    monkeypatch.setenv("GROK_GATEWAY_URL", "https://evil")
+    monkeypatch.setenv("GROK_OIDC_ISSUER", "https://evil")
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "shared-token")
     cell = load_cell(fake_grok_cell_yaml)
 
     env = _grok_env(cell)
-
-    # Isolated HOME inside the cell cwd (created), so the cell's grok state never
-    # mixes with the operator's personal ~/.grok.
-    assert env["HOME"] == str(cell.cwd / ".grok-cell")
-    assert (cell.cwd / ".grok-cell").is_dir()
-    # $0 OIDC preserved: metered endpoints scrubbed (incl the *_API_BASE the
-    # suffix sweep misses).
     assert "XAI_API_KEY" not in env
-    assert "XAI_API_BASE" not in env
-    # Per-peer token CUTOVER: shared mesh token popped so the resolver loads the
-    # cell's per-peer token file (the mint!=cutover fix the /tmp draft omitted).
-    assert "MESH_GATEWAY_TOKEN" not in env
-    # tmux re-entry / hook loop-guard marker.
+    assert "GROK_AUTH_PROVIDER_COMMAND" not in env
+    assert "GROK_GATEWAY_URL" not in env
+    assert "GROK_OIDC_ISSUER" not in env
+    assert env.get("MESH_GATEWAY_TOKEN") == "shared-token"  # KEPT
     assert env["SWARPH_SPAWN"] == "1"
 
 
-def test_grok_env_symlinks_operator_auth(fake_grok_cell_yaml, monkeypatch, tmp_path):
+def test_grok_env_symlinks_auth_into_dot_grok(fake_grok_cell_yaml, monkeypatch, tmp_path):
+    # B2: grok reads $HOME/.grok/auth.json — the link MUST be in the .grok subdir,
+    # not at $HOME/auth.json (strace-verified). HOME is isolated to the cell.
     from swarph_cli.commands.spawn import _grok_env
 
-    # Operator ~/.grok/auth.json gets symlinked into the cell HOME for $0 OIDC.
     fake_home = tmp_path / "ophome"
     (fake_home / ".grok").mkdir(parents=True)
     (fake_home / ".grok" / "auth.json").write_text("{}")
@@ -1214,20 +1218,121 @@ def test_grok_env_symlinks_operator_auth(fake_grok_cell_yaml, monkeypatch, tmp_p
     cell = load_cell(fake_grok_cell_yaml)
 
     env = _grok_env(cell)
-    link = Path(env["HOME"]) / "auth.json"
+    assert env["HOME"] == str(cell.cwd / ".grok-cell")
+    link = Path(env["HOME"]) / ".grok" / "auth.json"
+    assert link.is_symlink()
+    assert link.resolve() == (fake_home / ".grok" / "auth.json")
+    assert not (Path(env["HOME"]) / "auth.json").exists()  # NOT one level too high
+
+
+def test_grok_env_replaces_stale_auth_symlink(fake_grok_cell_yaml, monkeypatch, tmp_path):
+    # M3: a stale/foreign link is replaced (not silently kept); a dangling link's
+    # exists() reports False, so the naive guard would leave it — validate via
+    # is_symlink + readlink.
+    from swarph_cli.commands.spawn import _grok_env
+
+    fake_home = tmp_path / "ophome"
+    (fake_home / ".grok").mkdir(parents=True)
+    (fake_home / ".grok" / "auth.json").write_text("{}")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    cell = load_cell(fake_grok_cell_yaml)
+
+    grok_dir = cell.cwd / ".grok-cell" / ".grok"
+    grok_dir.mkdir(parents=True)
+    (grok_dir / "auth.json").symlink_to(tmp_path / "does-not-exist")  # dangling
+
+    _grok_env(cell)
+    link = grok_dir / "auth.json"
     assert link.is_symlink()
     assert link.resolve() == (fake_home / ".grok" / "auth.json")
 
 
-def test_grok_dry_run_emits_pinned_resume(
-    fake_grok_cell_yaml, isolated_xdg, monkeypatch, capsys
+def test_grok_launch_win32_blocks_posix_execve(monkeypatch, tmp_path):
+    # H1: GrokMembrane.launch must branch subprocess.run on win32 (pane-collapse
+    # fix), execve on POSIX — same split claude.launch got in 0.12.1.
+    from swarph_cli.commands import spawn
+
+    cell = type("C", (), {"cwd": tmp_path})()
+    monkeypatch.setattr(spawn, "_grok_env", lambda c: {"HOME": str(tmp_path)})
+    monkeypatch.setattr(spawn.os, "chdir", lambda p: None)
+
+    run_called, execve_called = [], []
+    monkeypatch.setattr(spawn.subprocess, "run",
+                        lambda cmd, **kw: run_called.append(cmd) or type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(spawn.os, "execve", lambda p, a, e: execve_called.append((p, a)))
+
+    monkeypatch.setattr(spawn.sys, "platform", "win32")
+    spawn.GrokMembrane().launch(cell, "/bin/grok", ["grok", "--cwd", "x"])
+    assert run_called and not execve_called
+
+    run_called.clear(); execve_called.clear()
+    monkeypatch.setattr(spawn.sys, "platform", "linux")
+    spawn.GrokMembrane().launch(cell, "/bin/grok", ["grok", "--cwd", "x"])
+    assert execve_called and not run_called
+
+
+def test_grok_env_scrubs_grok_home_and_namespace(fake_grok_cell_yaml, monkeypatch):
+    # HIGH: GROK_HOME / GROK_AUTH_PATH override the isolated HOME entirely, so an
+    # inherited one bypasses the whole scheme. Deny-by-default scrubs the whole
+    # GROK_*/XAI_* namespace (subsumes the enumerated redirect vars).
+    from swarph_cli.commands.spawn import _grok_env
+
+    monkeypatch.setenv("GROK_HOME", "/home/ubuntu/.grok")       # the isolation bypass
+    monkeypatch.setenv("GROK_AUTH_PATH", "/home/ubuntu/.grok/auth.json")
+    monkeypatch.setenv("GROK_AUTH_PROVIDER_COMMAND", "/evil")
+    monkeypatch.setenv("GROK_MANAGED_CONFIG_URL", "https://evil")
+    monkeypatch.setenv("XAI_API_KEY", "k")
+    cell = load_cell(fake_grok_cell_yaml)
+
+    env = _grok_env(cell)
+    for leaked in ("GROK_HOME", "GROK_AUTH_PATH", "GROK_AUTH_PROVIDER_COMMAND",
+                   "GROK_MANAGED_CONFIG_URL", "XAI_API_KEY"):
+        assert leaked not in env, f"{leaked} leaked into grok cell env"
+    # HOME is the isolated cell HOME (and grok now honors it — GROK_HOME gone).
+    assert env["HOME"] == str(cell.cwd / ".grok-cell")
+
+
+def test_run_spawn_grok_assisted_memory_no_double_system_prompt(
+    tmp_path, isolated_xdg, monkeypatch
 ):
-    # `swarph spawn <grok-cell-path> --dry-run` prints grok with the pinned
-    # --resume (R5 store mints the id on first run), matching the validated
-    # manual launch.
-    rc = run_spawn(["--dry-run", "--no-banner", str(fake_grok_cell_yaml)])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert f"grok --cwd {fake_grok_cell_yaml.parent}" in out
-    assert "--resume" in out
-    assert "--agent grok-researcher --always-approve" in out
+    # BLOCKER regression: a grok cell with BOTH a starter AND assisted_memory
+    # must NOT emit two --system-prompt-override (grok's clap rejects a repeated
+    # flag → cell never launches). The starter uses --system-prompt-override; the
+    # CURRENT_TASK restore uses --rules.
+    from swarph_cli.commands import spawn
+    from swarph_cli.commands.spawn import run_spawn
+    import swarph_cli.commands.memory_sync
+
+    starter = tmp_path / "starter.md"
+    starter.write_text("you are grok-researcher.")
+    payload = {
+        "schema_version": "v1",
+        "name": "grok-researcher",
+        "role": "grok-researcher",
+        "cwd": str(tmp_path),
+        "provider": "grok",
+        "starter_prompt_path": "starter.md",
+        "assisted_memory": {"enabled": True, "repo": "test-repo"},
+    }
+    (tmp_path / "cell.yaml").write_text(yaml.safe_dump(payload), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setattr(
+        swarph_cli.commands.memory_sync, "perform_restore", lambda c: "Active task body"
+    )
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/fake-grok")
+    # neutralize the named-tmux launch so we reach launch()/execve in-test
+    monkeypatch.setattr(spawn, "_launch_via_tmux", lambda *a, **k: False)
+
+    exec_args = []
+    monkeypatch.setattr("os.execve", lambda p, a, e: exec_args.append((p, a, e)))
+    monkeypatch.setattr("os.chdir", lambda p: None)
+
+    run_spawn([])
+
+    assert len(exec_args) == 1
+    argv = exec_args[0][1]
+    assert argv.count("--system-prompt-override") == 1  # starter only — NOT doubled
+    assert "you are grok-researcher." in argv[argv.index("--system-prompt-override") + 1]
+    assert "--rules" in argv  # CURRENT_TASK injected here, not as a 2nd override
+    assert "Active task body" in argv[argv.index("--rules") + 1]
