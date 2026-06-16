@@ -484,6 +484,99 @@ def _scrubbed_codex_env() -> dict[str, str]:
     return env
 
 
+#: grok cell isolated-HOME subdir, created/used INSIDE the cell cwd so the
+#: cell's grok sessions + memory + auth.json symlink never mix with the
+#: operator's personal ``~/.grok`` (cell.yaml: "Separate HOME (~/.grok-cell
+#: inside cwd)").
+_GROK_CELL_HOME_SUBDIR = ".grok-cell"
+
+#: Metered xAI billing keys popped explicitly (belt-and-suspenders on top of the
+#: canonical ``*_API_KEY`` / ``*_BASE_URL`` suffix sweep) so a grok cell can
+#: never be flipped off its $0 OIDC auth onto a metered endpoint. The suffix
+#: sweep already catches ``XAI_API_KEY`` / ``GROK_API_KEY``; the ``*_API_BASE``
+#: / ``*_API_HOST`` variants do NOT match a suffix, so they live here.
+_GROK_EXTRA_LEAK_KEYS = (
+    "XAI_API_KEY",
+    "GROK_API_KEY",
+    "GROK_CODE_XAI_API_KEY",
+    "XAI_API_BASE",
+    "XAI_API_HOST",
+    "GROK_API_HOST",
+)
+
+
+def _grok_env(cell: Cell) -> dict[str, str]:
+    """Subscription/OIDC env for a local ``grok`` CELL session ($0 path).
+
+    On top of the canonical billing scrub:
+      * the explicit ``_GROK_EXTRA_LEAK_KEYS`` pop (metered xAI endpoints the
+        suffix sweep misses), keeping grok on its $0 OIDC auth.
+      * MESH_GATEWAY_TOKEN popped — the per-cell auth CUTOVER: with the shared
+        token absent the swarph resolver loads the cell's per-peer token file
+        (symlinked into the isolated HOME at
+        ``.grok-cell/.config/swarph/grok-researcher.peer_token``) instead of the
+        cell riding the operator's shared token. (``_TOKEN`` is not a scrub
+        suffix, so this MUST be explicit — omitting it is the mint≠cutover gap.)
+      * HOME → an ISOLATED dir inside the cell cwd (created if absent), with the
+        operator's ``~/.grok/auth.json`` symlinked in for $0 OIDC, so the cell's
+        sessions/memory/auth never mix with the operator's personal ``~/.grok``.
+      * SWARPH_SPAWN marker — the tmux re-entry loop-guard (see
+        ``_launch_via_tmux``) and the install-hook double-inject guard.
+    """
+    env = scrub_env_for_subprocess()
+    for key in _GROK_EXTRA_LEAK_KEYS:
+        env.pop(key, None)
+    env.pop("MESH_GATEWAY_TOKEN", None)
+    env["SWARPH_SPAWN"] = "1"
+
+    cell_home = cell.cwd / _GROK_CELL_HOME_SUBDIR
+    cell_home.mkdir(parents=True, exist_ok=True)
+    try:
+        op_auth = Path.home() / ".grok" / "auth.json"
+        link = cell_home / "auth.json"
+        if op_auth.exists() and not link.exists():
+            link.symlink_to(op_auth)
+    except OSError:
+        # Best-effort: a pre-existing link / race / read-only HOME must not
+        # crash the spawn — grok will fall back to its own auth flow.
+        pass
+    env["HOME"] = str(cell_home)
+    return env
+
+
+def _build_grok_argv(
+    cell: Cell,
+    session_id: Optional[str],
+    effective_role: Optional[str],
+    passthrough: list[str],
+) -> list[str]:
+    """``grok --cwd <cwd> [--resume <id>] [--agent <role>] --always-approve``.
+
+    Pinned-session (R5): ``--resume <session_id>`` attaches grok's native
+    cwd-keyed session (``~/.grok/sessions/<encoded-cwd>/<uuid>``) so the cell
+    keeps its continuity + identity + inbox across respawns — the load-bearing
+    reason grok ``uses_pinned_session`` (not fresh-per-spawn). ``--agent`` gives
+    the cell its role identity. ``--always-approve`` is the cell autonomy
+    posture (a mesh cell runs unattended — the spawn-equivalent of codex ``-a``
+    / agy ``--sandbox``); opt out via ``extra.always_approve: false``.
+
+    No starter flag: grok's interactive mode has no system-prompt-override (the
+    real flags ``--prompt-file`` / ``-p`` are single-turn/headless), and the
+    cell's identity is carried by ``--agent`` + grok's own durable memory, so a
+    swarph starter is neither needed nor expressible here.
+    """
+    argv = ["grok", "--cwd", str(cell.cwd)]
+    if session_id:
+        argv.extend(["--resume", session_id])
+    role_value = effective_role if effective_role is not None else cell.role
+    if role_value:
+        argv.extend(["--agent", role_value])
+    if cell.extra.get("always_approve", True) is not False:
+        argv.append("--always-approve")
+    argv.extend(passthrough)
+    return argv
+
+
 def _print_banner() -> None:
     sys.stderr.write(_BANNER.format(version=__version__))
     sys.stderr.flush()
@@ -1116,21 +1209,112 @@ class AntigravityMembrane(ProviderMembrane):
         return 0  # unreachable, keeps type checker happy
 
 
+class GrokMembrane(ProviderMembrane):
+    """Local ``grok`` CLI as a durable swarph CELL ($0 OIDC / subscription).
+
+    The CELL path — NOT the swarph-mesh ``--provider grok`` one-shot metered
+    lane: exec the local ``grok`` agent TUI with an ISOLATED HOME inside the
+    cell cwd (so the cell's sessions/memory/auth never mix with the operator's
+    personal grok), launched in a NAMED tmux session (same mechanism as the
+    claude cell) so it is durable + supervisable and lands in its OWN session,
+    never a window of another cell's session.
+
+    Pinned-session (``uses_pinned_session`` True): grok exposes a native
+    cwd-keyed session model under ``~/.grok/sessions/`` and a ``--resume <id>``
+    verb, so the cell pins its session UUID via the R5 store (like claude) and
+    ``--resume``\\s it on every respawn — preserving the cell's continuity,
+    identity, and mesh inbox. (Continuity is the whole point of a persistent
+    cell; a fresh session each spawn would orphan grok's running identity.)
+    """
+
+    name = "grok"
+
+    def uses_pinned_session(self) -> bool:
+        return True
+
+    def build_argv(
+        self,
+        cell: Cell,
+        *,
+        session_id: Optional[str],
+        no_starter: bool,
+        passthrough: list[str],
+        effective_role: Optional[str],
+    ) -> list[str]:
+        return _build_grok_argv(cell, session_id, effective_role, passthrough)
+
+    def resolve_binary(self) -> Optional[str]:
+        provider_bin = shutil.which("grok")
+        if provider_bin is None:
+            home_local = Path.home() / ".local" / "bin" / "grok"
+            if home_local.exists():
+                provider_bin = str(home_local)
+        return provider_bin
+
+    def binary_not_found_message(self) -> str:
+        return (
+            "swarph spawn: 'grok' binary not found on PATH. "
+            "Install the Grok CLI or set PATH explicitly."
+        )
+
+    def pre_launch(
+        self, cell: Cell, binary: str, argv: list[str], *, no_banner: bool,
+        session_name: Optional[str] = None,
+    ) -> Optional[int]:
+        # Durable named-tmux launch — identical mechanism to the claude cell, so
+        # the cell lands in its OWN tmux session (keyed on the operator-typed
+        # spawn name), never a window of another session. No-op (falls through
+        # to the in-place execve below) when already inside a tmux pane /
+        # SWARPH_SPAWN set / tmux absent. Unlike claude there is no
+        # Windows-Terminal relaunch fallback — grok's TUI has no conhost
+        # Enter-inserts-'m' bug.
+        if session_name and _launch_via_tmux(binary, argv, cell.cwd, session_name):
+            return 0
+        return None
+
+    def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
+        try:
+            os.chdir(cell.cwd)
+        except OSError as exc:
+            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
+            return 1
+        # execve carries the isolated-HOME + billing-scrubbed env to grok
+        # without mutating this process's os.environ first (a failed exec leaves
+        # us intact).
+        try:
+            os.execve(binary, argv, _grok_env(cell))
+        except OSError as exc:
+            print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
+            return 1
+        return 0  # unreachable on POSIX (execve replaces); keeps type checker happy
+
+
 MEMBRANES: dict[str, ProviderMembrane] = {
     "claude": ClaudeMembrane(),
     "codex": CodexMembrane(),
     "antigravity": AntigravityMembrane(),
+    "grok": GrokMembrane(),
 }
 
-# Defensive coupling: MEMBRANES must stay in lockstep with the shared provider
-# whitelist. A future VALID_PROVIDERS entry without a matching membrane would
-# otherwise surface as a raw KeyError at spawn time — fail loud at import instead.
+# Defensive coupling: every shared-whitelisted provider MUST have a membrane,
+# else a `cell.provider` that load_cell accepts would surface as a raw KeyError
+# in run_spawn — fail loud at import instead. The invariant is a SUBSET
+# (VALID_PROVIDERS ⊆ MEMBRANES), NOT equality: MEMBRANES may legitimately carry
+# a membrane AHEAD of the shared whitelist (e.g. GrokMembrane shipping before a
+# swarph_shared release adds 'grok' to VALID_PROVIDERS). An extra membrane is
+# harmless — load_cell still gates which providers are actually spawnable — so
+# strict equality would needlessly couple this package's release to the shared
+# one. (Cross-pkg: grok cells only become spawnable once swarph_shared whitelists
+# 'grok'; until then load_cell rejects them cleanly with "queued for a future
+# release", and this guard does not crash.)
 from swarph_shared.cell import VALID_PROVIDERS as _VALID_PROVIDERS  # noqa: E402
 
-if set(MEMBRANES) != _VALID_PROVIDERS:
+_unmembraned = _VALID_PROVIDERS - set(MEMBRANES)
+if _unmembraned:
     raise RuntimeError(
-        f"MEMBRANES {sorted(MEMBRANES)} out of sync with VALID_PROVIDERS "
-        f"{sorted(_VALID_PROVIDERS)} — add the missing provider membrane."
+        f"VALID_PROVIDERS {sorted(_VALID_PROVIDERS)} has providers with no "
+        f"membrane: {sorted(_unmembraned)} (MEMBRANES: {sorted(MEMBRANES)}) — "
+        f"add the missing provider membrane."
     )
 
 
