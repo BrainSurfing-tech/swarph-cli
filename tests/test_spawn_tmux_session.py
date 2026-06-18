@@ -59,19 +59,27 @@ class _FakeStdout:
 
 def _drive(monkeypatch, *, platform="win32", tmux=TMUX, wt=WT, in_tmux=None,
            spawn_marker=None, isatty=True, session_exists=False,
-           new_session_exc=None):
+           new_session_exc=None, create_succeeds=True, create_succeeds_after=1):
     """Drive `_launch_via_tmux` with tmux/subprocess/execv mocked.
 
-    `run` dispatches on the subcommand: `has-session` returns rc 0/1 per
-    `session_exists`; `new-session` returns rc 0 (or raises `new_session_exc`);
-    `attach` (Windows path only) returns rc 0. The POSIX attach is os.execv,
-    mocked to raise `_ExecvReplaced` (simulating its never-returns replace).
+    `run` dispatches on the subcommand and is STATEFUL to model reality after the
+    stale-registration fix: `has-session` returns rc 0 once the session exists —
+    either pre-existing (`session_exists`) OR after a `new-session` "takes".
+    `_tmux_create_session` clears a stale reg (`kill-session`, rc 0 here) then
+    creates + VERIFIES via `has-session`, retrying because psmux clears the stale
+    lock asynchronously. `create_succeeds_after` models that delay: the session
+    only materialises on the Nth `new-session` call (1 = first try, the happy
+    path). `create_succeeds=False` models a create that never materialises (e.g. a
+    stale lock that won't clear) → the loop exhausts and returns False.
+    `new-session` raises `new_session_exc` when set. `attach` (Windows) returns rc
+    0; POSIX attach is os.execv, mocked to raise `_ExecvReplaced`.
 
     Returns `(result, run, execv)`. `result` is the function's bool, or the
     `_EXECV` sentinel when the POSIX execv attach took over.
     """
     monkeypatch.setattr(spawn.sys, "platform", platform)
     monkeypatch.setattr(spawn.sys, "stdout", _FakeStdout(isatty))
+    monkeypatch.setattr(spawn.time, "sleep", lambda *_a, **_k: None)  # no real wait
     for var, val in (("TMUX", in_tmux), ("SWARPH_SPAWN", spawn_marker)):
         if val is None:
             monkeypatch.delenv(var, raising=False)
@@ -83,12 +91,20 @@ def _drive(monkeypatch, *, platform="win32", tmux=TMUX, wt=WT, in_tmux=None,
 
     monkeypatch.setattr(spawn.shutil, "which", _which)
 
+    state = {"new_calls": 0, "created": False}
+
     def _run(cmd, **kwargs):
         if "has-session" in cmd:
-            return MagicMock(returncode=0 if session_exists else 1)
-        if "new-session" in cmd and new_session_exc is not None:
-            raise new_session_exc
-        return MagicMock(returncode=0)
+            exists = session_exists or state["created"]
+            return MagicMock(returncode=0 if exists else 1)
+        if "new-session" in cmd:
+            if new_session_exc is not None:
+                raise new_session_exc
+            state["new_calls"] += 1
+            if create_succeeds and state["new_calls"] >= create_succeeds_after:
+                state["created"] = True
+            return MagicMock(returncode=0)
+        return MagicMock(returncode=0)  # kill-session, attach, ...
 
     run = MagicMock(side_effect=_run)
     monkeypatch.setattr(spawn.subprocess, "run", run)
@@ -106,6 +122,11 @@ def _drive(monkeypatch, *, platform="win32", tmux=TMUX, wt=WT, in_tmux=None,
 def _cmds(run):
     """The list of argv lists passed to subprocess.run."""
     return [c.args[0] for c in run.call_args_list]
+
+
+def _killed_stale(run):
+    """True if the stale-registration clear (`kill-session`) was issued."""
+    return any("kill-session" in c for c in _cmds(run))
 
 
 def _attached_via_run(run):
@@ -239,14 +260,30 @@ def test_existing_session_headless_is_a_noop_handoff(monkeypatch, platform):
 
 
 @pytest.mark.parametrize("platform", ["win32", "linux"])
-def test_create_failure_falls_through(monkeypatch, platform):
-    # tmux new-session errors => return False so the caller drops to the standard
-    # launch; never attach a half-created session.
-    boom = subprocess.CalledProcessError(1, "tmux")
+def test_create_never_materialises_falls_through(monkeypatch, platform):
+    # The session never appears (e.g. a psmux stale registration that won't clear:
+    # new-session returns rc 0 but creates nothing). The verify+retry loop exhausts
+    # => return False so the caller drops to the standard launch; never attach a
+    # phantom session. We also issued the stale-clear kill-session first.
     r, run, execv = _drive(monkeypatch, platform=platform,
-                           session_exists=False, new_session_exc=boom)
+                           session_exists=False, create_succeeds=False)
     assert r is False
+    assert _killed_stale(run)
     assert not _attached_via_run(run)
+    execv.assert_not_called()
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux", "darwin"])
+def test_stale_registration_cleared_then_create_retried(monkeypatch, platform):
+    # The poisoned-name recovery path: kill-session clears the stale reg, but psmux
+    # clears the lock async so the FIRST new-session is a silent no-op; the session
+    # only materialises on the 2nd attempt. The verify loop must retry and succeed.
+    r, run, execv = _drive(monkeypatch, platform=platform, session_exists=False,
+                           isatty=False, create_succeeds_after=2)
+    assert r is True                              # headless: created, claimed launch
+    assert _killed_stale(run)                     # stale reg cleared first
+    new_calls = [c for c in _cmds(run) if "new-session" in c]
+    assert len(new_calls) >= 2                    # retried past the silent no-op
     execv.assert_not_called()
 
 

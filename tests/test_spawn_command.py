@@ -1323,6 +1323,13 @@ def test_run_spawn_grok_assisted_memory_no_double_system_prompt(
     monkeypatch.setattr("shutil.which", lambda name: "/bin/fake-grok")
     # neutralize the named-tmux launch so we reach launch()/execve in-test
     monkeypatch.setattr(spawn, "_launch_via_tmux", lambda *a, **k: False)
+    # This asserts on the composed argv (no doubled --system-prompt-override),
+    # which is platform-independent. Pin to a POSIX platform so launch() takes the
+    # os.execve branch we mock below — otherwise on Windows it takes the
+    # subprocess.run branch (v0.12.1 pane-collapse fix), the execve mock never
+    # fires, and the real /bin/fake-grok exec fails (WinError 2). Matches the
+    # platform-pinning convention of the launch tests above.
+    monkeypatch.setattr(spawn.sys, "platform", "linux")
 
     exec_args = []
     monkeypatch.setattr("os.execve", lambda p, a, e: exec_args.append((p, a, e)))

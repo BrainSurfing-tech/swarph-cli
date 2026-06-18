@@ -28,6 +28,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -914,6 +915,54 @@ def _tmux_has_session(tmux: str, name: str) -> bool:
     return result.returncode == 0
 
 
+def _tmux_create_session(tmux: str, name: str, cwd: Path) -> bool:
+    """Create the durable detached session that runs ``swarph spawn <name>``.
+
+    Robust against a STALE session registration. When a multiplexer server dies
+    uncleanly (operator closed the owning console, ``kill``, a crash) it can leave
+    the session NAME registered with no live server behind it. On the native-Windows
+    psmux build (``marlocarlo.psmux``) this poisons re-creation: ``new-session``
+    becomes a SILENT no-op — it returns rc=0 but creates nothing — so the name can
+    never come back. That is the exact failure that strands a peer's cell ("the
+    session got killed and won't return"; verified on workstation-lc 2026-06-18).
+    Real tmux on Linux/mac does not hit this, and the extra steps are a harmless
+    no-op there (the create succeeds first try and the loop breaks immediately).
+
+    So: clear any stale registration first (``kill-session`` — a no-op if the name
+    is truly absent), then create. Because psmux clears the stale lock
+    ASYNCHRONOUSLY (~1s observed), do NOT trust the create's exit code (rc=0 even on
+    the silent no-op): VERIFY with ``has-session`` and retry until it actually
+    materialises. Returns True once the session exists, False if it never appears.
+    """
+    create_cmd = [
+        tmux, "new-session", "-d", "-s", name,
+        "-c", str(cwd), "-e", "SWARPH_SPAWN=1",
+        "swarph", "spawn", name,
+    ]
+    # Clear a stale (server-less) registration; harmless if the name is truly absent.
+    try:
+        subprocess.run(
+            [tmux, "kill-session", "-t", f"={name}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    for attempt in range(6):
+        try:
+            subprocess.run(
+                create_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        except OSError:
+            return False
+        if _tmux_has_session(tmux, name):
+            return True
+        time.sleep(0.4)  # let psmux's async stale-lock clear catch up, then retry
+    return False
+
+
 def _launch_via_tmux(
     binary: str, argv: list[str], cwd: Path, session_name: str,
 ) -> bool:
@@ -978,24 +1027,15 @@ def _launch_via_tmux(
     interactive = sys.stdout.isatty()
 
     if not _tmux_has_session(tmux, session_name):
-        # Create the durable session detached. The command re-enters spawn so
-        # the membrane env-scrub + starter injection apply inside the pane; the
-        # inherited $TMUX (and SWARPH_SPAWN below) stop it from re-deciding.
-        try:
-            subprocess.run(
-                [
-                    tmux, "new-session", "-d", "-s", session_name,
-                    "-c", str(cwd), "-e", "SWARPH_SPAWN=1",
-                    "swarph", "spawn", session_name,
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-        except (OSError, subprocess.CalledProcessError) as exc:
+        # Create the durable session detached. The command re-enters spawn so the
+        # membrane env-scrub + starter injection apply inside the pane; the inherited
+        # $TMUX (and SWARPH_SPAWN) stop it from re-deciding. _tmux_create_session
+        # also clears a stale (server-less) registration that would otherwise make
+        # psmux's new-session a silent no-op and strand the cell.
+        if not _tmux_create_session(tmux, session_name, cwd):
             print(
-                f"swarph spawn: tmux session create failed ({exc}); falling "
-                "back to the standard launch.",
+                "swarph spawn: tmux session create failed (stale registration "
+                "could not be cleared?); falling back to the standard launch.",
                 file=sys.stderr,
             )
             return False
