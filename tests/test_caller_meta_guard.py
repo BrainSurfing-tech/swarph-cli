@@ -78,3 +78,40 @@ def test_default_caller_producers_conform_happy_path(monkeypatch):
         except ValueError as e:
             raise AssertionError(
                 f"{fn.__module__}.{fn.__name__}() -> {val!r} violates the convention: {e}")
+
+
+def test_guard_catches_a_planted_bad_caller(monkeypatch):
+    """PIN the catch-property — a guard's catch must be COMMITTED, not remembered
+    (the very #80 lesson this PR generalizes; droplet review). Plant a hyphenated
+    `*_CALLER` on a real, discovered module and assert the guard both DISCOVERS it
+    and REJECTS it. monkeypatch auto-removes the plant so the real guard test stays
+    clean regardless of order."""
+    import pytest
+
+    import swarph_cli.compress.levers as lev
+    monkeypatch.setattr(lev, "PLANTED_BAD_CALLER", "swarph-bad-hyphen", raising=False)
+
+    # 1) introspection DISCOVERS the planted constant
+    found = {f"{m}.{a}": v for m, a, v in _iter_caller_constants()}
+    assert found.get("swarph_cli.compress.levers.PLANTED_BAD_CALLER") == "swarph-bad-hyphen", (
+        "the walk failed to discover a planted *_CALLER — discovery is broken")
+
+    # 2) the guard CATCHES it (fails loud, names the offending constant)
+    with pytest.raises(AssertionError, match="violates the convention"):
+        test_all_caller_constants_conform()
+
+
+def test_no_modules_skipped_by_the_walk():
+    """The guard resiliently SKIPS an unimportable submodule (so an unrelated optional-
+    dep import error can't break it) — but a silent skip could hide a bad caller in a
+    module that's importable in prod yet not in this env. Assert NONE are skipped here,
+    so the walk is exhaustive; if this ever fails in CI, run with full extras."""
+    skipped = []
+    for mod in pkgutil.walk_packages(swarph_cli.__path__, swarph_cli.__name__ + "."):
+        try:
+            importlib.import_module(mod.name)
+        except Exception as e:  # noqa: BLE001 — we want to surface ANY import failure
+            skipped.append((mod.name, repr(e)))
+    assert not skipped, (
+        f"caller meta-guard walk skipped modules (a bad caller in one could ship "
+        f"uncaught): {skipped}")
