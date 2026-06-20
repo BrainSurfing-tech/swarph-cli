@@ -35,7 +35,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
-from swarph_cli.caller import default_caller
+from swarph_cli.caller import _sanitize_username, default_caller
 
 
 _BANNER = """\
@@ -123,13 +123,17 @@ def _default_repl_caller() -> str:
     """``cli.repl.<user>`` — distinct from ``cli.oneshot.<user>`` so
     attribution rows distinguish REPL turns from one-shot calls.
 
-    Falls back to the caller-convention default if env-derived user
-    extraction fails."""
+    Reuses ``caller._sanitize_username`` (the SAME sanitizer ``default_caller``
+    uses) so the slug is guaranteed convention-valid: leading letter (``u_``
+    prefix if not), collapsed underscores, ``unknown`` on empty. The previous
+    inline slug omitted those guards, so a leading-digit username produced a
+    non-conforming ``cli.repl.3bob`` that crashed SwarphCall at runtime (#83).
+    Falls back to the caller-convention default if env-derived user extraction
+    fails."""
     user = os.environ.get("USER") or os.environ.get("LOGNAME")
     if not user:
         return default_caller()
-    user_slug = "".join(c if c.isalnum() else "_" for c in user.lower())
-    return f"cli.repl.{user_slug}"
+    return f"cli.repl.{_sanitize_username(user)}"
 
 
 def _print(msg: str = "", *, file=None) -> None:
