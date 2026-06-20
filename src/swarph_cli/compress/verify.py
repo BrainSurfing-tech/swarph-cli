@@ -4,6 +4,11 @@ from __future__ import annotations
 import gzip, re
 from pathlib import Path
 
+# Caller tag for the adversarial verify-expand model call. MUST satisfy
+# swarph_shared's dotted caller convention or SwarphCall raises at runtime.
+# See tests/test_compress_caller_convention.py.
+VERIFY_EXPAND_CALLER = "swarph.compress.verify"
+
 _LINK_RE = re.compile(r"\]\(([^)]+)\)")
 
 
@@ -67,7 +72,7 @@ async def verify_expand(source: str, compressed: str, *, chat=None) -> bool:
     fact in source not recoverable from compressed. One dropped fact -> False."""
     if chat is None:
         from swarph_mesh import ChatMessage, SwarphCall
-        sc = SwarphCall(provider="claude", caller="swarph-compress-verify")
+        sc = SwarphCall(provider="claude", caller=VERIFY_EXPAND_CALLER)
         async def chat(messages, system_prompt=None, **kw):
             return await sc.chat(messages=messages, system_prompt=system_prompt, **kw)
         msgs = [ChatMessage(role="user", content=f"ORIGINAL:\n{source}\n\nCOMPRESSED:\n{compressed}")]
