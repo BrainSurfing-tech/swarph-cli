@@ -4,6 +4,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+# Caller tag for the shorthand model call. MUST satisfy swarph_shared's
+# caller convention (^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$ — dotted, not
+# hyphenated), or SwarphCall(...) raises ValueError at runtime. See
+# tests/test_compress_caller_convention.py.
+SHORTHAND_CALLER = "swarph.compress"
+
 
 @dataclass
 class ArchivalResult:
@@ -41,7 +47,7 @@ async def shorthand(source: str, *, system_prompt: str = SHORTHAND_SYSTEM, chat=
     (messages, system_prompt, **kw)->resp with .text; defaults to swarph_mesh."""
     if chat is None:
         from swarph_mesh import ChatMessage, SwarphCall
-        sc = SwarphCall(provider="claude", caller="swarph-compress")
+        sc = SwarphCall(provider="claude", caller=SHORTHAND_CALLER)
         async def chat(messages, system_prompt=None, **kw):
             return await sc.chat(messages=messages, system_prompt=system_prompt, **kw)
         msgs = [ChatMessage(role="user", content=source)]
