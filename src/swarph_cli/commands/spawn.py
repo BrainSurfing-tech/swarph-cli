@@ -418,6 +418,13 @@ def _claude_env() -> dict[str, str]:
     """
     env = scrub_env_for_subprocess()
     env["SWARPH_SPAWN"] = "1"
+    # Disable the Claude Code in-session rating survey ("How is Claude doing this
+    # session?"). On a headless/automated cell it pops up as a modal that the
+    # wake-injector refuses to type into, so it stalls scheduled wakes
+    # indefinitely (a survey deferred the weekly newsletter 2+ hours — see
+    # feedback_modal_stalls_cell_wake). Suppresses ONLY the survey; does NOT
+    # touch telemetry / auto-update / error reporting.
+    env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] = "1"
     return env
 
 
