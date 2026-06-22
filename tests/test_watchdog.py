@@ -23,6 +23,7 @@ _POSIX_WATCHDOG_SKIP = pytest.mark.skipif(
 
 from swarph_cli.commands.watchdog import (
     _DEFAULT_THRESHOLD_SEC,
+    _resolve_activity_marker_path,
     _resolve_cursor_path,
     _resolve_log_path,
     run_watchdog,
@@ -871,3 +872,62 @@ def test_pane_activity_age_takes_most_recent(monkeypatch):
                         lambda cmd, **kw: _R(0, f"|{now - 500}|{now - 10}\n"))
     age = _wd._pane_activity_age_sec("lab")
     assert age is not None and age <= 20
+
+
+# ---------------------------------------------------------------------------
+# Liveness generalization — turn-activity marker as a second signal
+# (feedback_watchdog_liveness_proxy): the drain-cursor goes stale during active
+# non-draining work; the Stop-hook active.txt (touched every turn-end) rescues it.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_activity_marker_explicit_wins(isolated_state):
+    p = _resolve_activity_marker_path("lab", "/x/y.txt", "/cell/z.txt")
+    assert str(p) == "/x/y.txt"
+
+
+def test_resolve_activity_marker_cell_yaml_beats_default(isolated_state):
+    p = _resolve_activity_marker_path("lab", None, "/cell/z.txt")
+    assert str(p) == "/cell/z.txt"
+
+
+def test_resolve_activity_marker_default_is_role_active_in_tmpdir(isolated_state):
+    p = _resolve_activity_marker_path("lab", None, None)
+    assert p == isolated_state / "lab-claude-active.txt"
+
+
+def test_stale_cursor_but_fresh_activity_marker_returns_noop(isolated_state, stale_cursor):
+    # Drain-cursor is stale (1hr) BUT the Stop-hook turn-activity marker at the
+    # DEFAULT path is fresh → freshest-of-both is fresh → healthy noop, NO false A1.
+    marker = isolated_state / "lab-claude-active.txt"
+    marker.write_text("")  # current mtime
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None):
+        rc = run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(stale_cursor),
+            "--threshold", "60",
+        ])
+    assert rc == 0  # marker freshness rescues the stale cursor
+
+
+def test_stale_cursor_and_stale_marker_still_fires_a1(isolated_state, stale_cursor):
+    # Both stale → unchanged legacy behavior (A1). Absent/stale marker is harmless.
+    import os as _os
+    marker = isolated_state / "lab-claude-active.txt"
+    marker.write_text("")
+    one_hour_ago = time.time() - 3600
+    _os.utime(marker, (one_hour_ago, one_hour_ago))
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=None), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True):
+        rc = run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(stale_cursor),
+            "--threshold", "60",
+        ])
+    assert rc == 1  # both signals dark → A1 (unchanged)

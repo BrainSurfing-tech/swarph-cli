@@ -259,6 +259,31 @@ def _resolve_cursor_path(
     return Path("/tmp/lab-claude-cursor.json")
 
 
+def _resolve_activity_marker_path(
+    role: str,
+    explicit: Optional[str],
+    cell_yaml_value: Optional[str] = None,
+) -> Path:
+    """Resolve the turn-activity marker — the Stop-hook touches it every turn-end.
+
+    Precedence: ``--activity-marker`` > ``cell.yaml`` extra.activity_marker_path
+    > ``$TMPDIR/<role>-claude-active.txt``.
+
+    Unlike the cursor (often the inbox-DRAIN cursor, touched only on drain and so
+    STALE during active non-draining work → false-fire,
+    feedback_watchdog_liveness_proxy), this marker tracks real turn activity. The
+    watchdog uses the FRESHEST mtime of {cursor, marker} as the effective
+    last-activity, so a fresh marker rescues a stale drain-cursor and an absent
+    marker harmlessly falls back to the cursor.
+    """
+    if explicit:
+        return Path(explicit).expanduser()
+    if cell_yaml_value:
+        return Path(cell_yaml_value).expanduser()
+    tmpdir = os.environ.get("TMPDIR", "/tmp")
+    return Path(tmpdir) / f"{role}-claude-active.txt"
+
+
 def _resolve_tmux_session(
     role: str,
     explicit: Optional[str],
@@ -283,11 +308,14 @@ def _resolve_tmux_session(
     return role
 
 
-def _read_cell_yaml_pins(role: str) -> tuple[Optional[str], Optional[str]]:
-    """Best-effort read of cell.yaml extra.cursor_path + extra.tmux_session.
+def _read_cell_yaml_pins(
+    role: str,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Best-effort read of cell.yaml extra.cursor_path + extra.tmux_session +
+    extra.activity_marker_path.
 
     Tries the cwd-local ``./cell.yaml`` first (matches hook_output discovery),
-    falls back to ``<cells_dir>/<role>.yaml``. Returns (None, None) on any
+    falls back to ``<cells_dir>/<role>.yaml``. Returns (None, None, None) on any
     failure — F4 is additive non-breaking, malformed cell.yaml falls through
     to the legacy convention defaults.
 
@@ -311,19 +339,21 @@ def _read_cell_yaml_pins(role: str) -> tuple[Optional[str], Optional[str]]:
         if candidate.is_file():
             cell_path = candidate
     if cell_path is None:
-        return None, None
+        return None, None, None
 
     try:
         cell = load_cell(cell_path)
     except (CellError, OSError):
-        return None, None
+        return None, None, None
 
     extra = cell.extra or {}
     cursor_path = extra.get("cursor_path")
     tmux_session = extra.get("tmux_session")
+    activity_marker = extra.get("activity_marker_path")
     return (
         str(cursor_path) if cursor_path else None,
         str(tmux_session) if tmux_session else None,
+        str(activity_marker) if activity_marker else None,
     )
 
 
@@ -1158,7 +1188,7 @@ def _run_local_check(args: argparse.Namespace) -> int:
     # `extra.tmux_session` when --cell is provided; explicit CLI args still
     # win. Best-effort: malformed cell.yaml falls through to legacy
     # convention defaults (additive non-breaking).
-    cell_cursor, cell_tmux = _read_cell_yaml_pins(role)
+    cell_cursor, cell_tmux, cell_activity = _read_cell_yaml_pins(role)
     cursor = _resolve_cursor_path(role, args.cursor, cell_cursor)
     tmux_session = _resolve_tmux_session(role, args.tmux_session, cell_tmux)
     log_path = _resolve_log_path(args.log)
@@ -1180,10 +1210,22 @@ def _run_local_check(args: argparse.Namespace) -> int:
         "cell_yaml_pinned_tmux": cell_tmux is not None,
     }
 
-    # PRIMARY signal: cursor file mtime
-    cursor_mtime = _stat_mtime(cursor)
+    # PRIMARY signal: liveness = FRESHEST mtime of {drain-cursor, turn-activity
+    # marker}. The cursor is often the inbox-DRAIN cursor (touched only on drain)
+    # → it goes stale during active non-draining work and false-fires recovery
+    # (feedback_watchdog_liveness_proxy). The Stop-hook marker is touched every
+    # turn-end. A fresh marker rescues a stale cursor; an absent/unreadable marker
+    # harmlessly falls back to the cursor (no change for cells without it).
+    activity_marker = _resolve_activity_marker_path(
+        role, getattr(args, "activity_marker", None), cell_activity
+    )
+    diag["activity_marker"] = str(activity_marker)
+    _live_mtimes = [
+        m for m in (_stat_mtime(cursor), _stat_mtime(activity_marker)) if m is not None
+    ]
+    cursor_mtime = max(_live_mtimes) if _live_mtimes else None
     if cursor_mtime is None:
-        diag["error"] = f"cursor file unreadable: {cursor}"
+        diag["error"] = f"cursor file unreadable: {cursor} (and marker {activity_marker})"
         _log_event(log_path, "error", diag, verbose)
         return 3
     cursor_age = _now() - cursor_mtime
@@ -1660,6 +1702,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--cell", default=os.environ.get("SWARPH_CELL", "lab"))
     p.add_argument("--cursor", default=None)
+    p.add_argument(
+        "--activity-marker", default=None,
+        help="Turn-activity marker path (the Stop-hook touches it every "
+             "turn-end). The freshest mtime of {cursor, marker} is the "
+             "effective liveness, so an actively-working-but-not-draining cell "
+             "isn't false-judged dark. Default $TMPDIR/<role>-claude-active.txt; "
+             "cell.yaml extra.activity_marker_path also honored.",
+    )
     p.add_argument("--threshold", type=int, default=_DEFAULT_THRESHOLD_SEC)
     p.add_argument(
         "--pane-activity-threshold",
