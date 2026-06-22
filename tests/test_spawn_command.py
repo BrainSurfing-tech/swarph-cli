@@ -1343,3 +1343,15 @@ def test_run_spawn_grok_assisted_memory_no_double_system_prompt(
     assert "you are grok-researcher." in argv[argv.index("--system-prompt-override") + 1]
     assert "--rules" in argv  # CURRENT_TASK injected here, not as a 2nd override
     assert "Active task body" in argv[argv.index("--rules") + 1]
+
+
+def test_claude_env_disables_feedback_survey(monkeypatch):
+    """The Claude Code session-rating survey ("How is Claude doing this
+    session?") is a modal that stalls a headless cell's scheduled wake — the
+    wake-injector refuses to type into a modal, so a survey deferred the weekly
+    newsletter 2+ hours (feedback_modal_stalls_cell_wake). Spawned claude cells
+    disable it at the source via env."""
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    from swarph_cli.commands.spawn import _claude_env
+    env = _claude_env()
+    assert env.get("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY") == "1"
