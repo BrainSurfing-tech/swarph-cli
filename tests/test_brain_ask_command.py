@@ -102,3 +102,23 @@ def test_run_synth_path_prints_answer(capsys, monkeypatch):
         rc = ba.run_brain_ask(["what", "is", "X"])
     assert rc == 0
     assert "Answer: X is foo" in capsys.readouterr().out
+
+
+# --- endpoint resolution (0.14.1: SWARPH_BRAIN_MCP fallback + localhost default) ---
+
+def test_resolve_endpoint_prefers_gbrain_mcp_url(monkeypatch):
+    monkeypatch.setenv("GBRAIN_MCP_URL", "http://gb/mcp")
+    monkeypatch.setenv("SWARPH_BRAIN_MCP", "http://sb/mcp")
+    assert ba._resolve_endpoint() == "http://gb/mcp"
+
+
+def test_resolve_endpoint_falls_back_to_swarph_brain_mcp(monkeypatch):
+    monkeypatch.delenv("GBRAIN_MCP_URL", raising=False)
+    monkeypatch.setenv("SWARPH_BRAIN_MCP", "http://sb/mcp")
+    assert ba._resolve_endpoint() == "http://sb/mcp"
+
+
+def test_resolve_endpoint_default_is_localhost(monkeypatch):
+    monkeypatch.delenv("GBRAIN_MCP_URL", raising=False)
+    monkeypatch.delenv("SWARPH_BRAIN_MCP", raising=False)
+    assert ba._resolve_endpoint() == "http://127.0.0.1:8792/mcp"
