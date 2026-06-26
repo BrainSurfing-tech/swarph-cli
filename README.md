@@ -24,6 +24,7 @@ This is one of three repos in the v0.3.x architecture:
 ```
 swarph "prompt"          one-shot against any provider (claude/openai/gemini/deepseek/grok)
 swarph chat              interactive REPL — multi-turn, slash commands, live provider switch
+swarph brain-ask "<q>"   search the swarph-brain (gbrain) memory — $0 cited answer or raw chunks
 swarph spawn <role>      launch a long-lived agent session as a named mesh cell
 swarph daemon            foreground inbox-drain loop (the mesh doorbell)
 swarph watchdog          detect + recover stranded agent sessions (cron- or systemd-driven)
@@ -34,6 +35,20 @@ swarph import <path>     port a session from another CLI into swarph-native form
 ```
 
 Each verb is documented below.
+
+### `swarph brain-ask` (v0.14.0)
+
+Search the **swarph-brain** (gbrain) — the swarm's sovereign $0 semantic-retrieval memory — over MCP. The "does the swarm already know X?" reflex, as a one-shot.
+
+```bash
+# Cited $0 prose answer (retrieve -> facade synthesis), when SWARPH_FACADE is set:
+$ swarph brain-ask "what's the cross-vendor fallback order?"
+
+# Raw top-k memory chunks, no synthesis:
+$ swarph brain-ask --no-synth --limit 3 "cross-vendor fallback governor order"
+```
+
+Config is via env, mirroring `swarph mesh`'s token model: `GBRAIN_MCP_URL` (gbrain endpoint; defaults to the lab tailnet instance), and the read token resolved `--token-file` > `GBRAIN_TOKEN` > `SWARPH_BRAIN_TOKEN` > the mesh per-peer token (`~/.config/swarph/<self>.peer_token`) — so the mesh peer token doubles as the gbrain read token. Optional `SWARPH_FACADE` / `SWARPH_FACADE_TOKEN` enable the $0 cited-synthesis pass; without them, brain-ask prints the raw ranked chunks.
 
 ### `swarph spawn` (Phase 7 — v0.6.0)
 
