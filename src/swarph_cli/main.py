@@ -91,6 +91,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "mcp-server": "swarph_cli.commands.mcp_server.run_mcp_server",
     "compress": "swarph_cli.commands.compress.run_compress",
     "cell": "swarph_cli.commands.cell.run_cell",
+    "brain-ask": "swarph_cli.commands.brain_ask.run_brain_ask",
     # Future: "list-peers", "list-adapters", etc.
 }
 
