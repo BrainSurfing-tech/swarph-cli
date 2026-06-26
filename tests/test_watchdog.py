@@ -883,12 +883,12 @@ def test_pane_activity_age_takes_most_recent(monkeypatch):
 
 def test_resolve_activity_marker_explicit_wins(isolated_state):
     p = _resolve_activity_marker_path("lab", "/x/y.txt", "/cell/z.txt")
-    assert str(p) == "/x/y.txt"
+    assert p == Path("/x/y.txt")  # Path compare — OS-agnostic (Windows str() uses '\\')
 
 
 def test_resolve_activity_marker_cell_yaml_beats_default(isolated_state):
     p = _resolve_activity_marker_path("lab", None, "/cell/z.txt")
-    assert str(p) == "/cell/z.txt"
+    assert p == Path("/cell/z.txt")  # Path compare — OS-agnostic (Windows str() uses '\\')
 
 
 def test_resolve_activity_marker_default_is_role_active_in_tmpdir(isolated_state):
