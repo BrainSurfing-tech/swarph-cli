@@ -9,7 +9,8 @@ verb so any cell can search the swarm's shared memory the same way. Two modes:
 
 Stdlib-only. Config from the environment, mirroring ``swarph mesh``'s token model:
 
-  GBRAIN_MCP_URL        gbrain MCP endpoint (default the lab tailnet instance)
+  GBRAIN_MCP_URL        gbrain MCP endpoint; falls back to SWARPH_BRAIN_MCP, else
+    / SWARPH_BRAIN_MCP   http://127.0.0.1:8792/mcp
   GBRAIN_TOKEN          read token; falls back to SWARPH_BRAIN_TOKEN, then to the
     / SWARPH_BRAIN_TOKEN  mesh per-peer token (~/.config/swarph/<self>.peer_token).
     / peer-token file     Once gbrain accepts mesh peer tokens, the peer token IS
@@ -28,8 +29,20 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-_DEFAULT_GBRAIN = "http://100.107.222.72:8792/mcp"
+_DEFAULT_GBRAIN = "http://127.0.0.1:8792/mcp"
 _DEFAULT_TOPK = 6
+
+
+def _resolve_endpoint() -> str:
+    """Endpoint precedence: GBRAIN_MCP_URL > SWARPH_BRAIN_MCP > localhost default.
+
+    The SWARPH_BRAIN_MCP fallback keeps the verb config-compatible with the
+    standalone ``swarph-brain-ask`` script (which reads SWARPH_BRAIN_*), so one
+    env config works with both.
+    """
+    return (os.environ.get("GBRAIN_MCP_URL")
+            or os.environ.get("SWARPH_BRAIN_MCP")
+            or _DEFAULT_GBRAIN)
 
 
 def _build_query_request(question: str, limit: int = _DEFAULT_TOPK) -> dict:
@@ -139,8 +152,8 @@ def run_brain_ask(argv: list) -> int:
                         help="top-k chunks to retrieve (default 6)")
     parser.add_argument("--no-synth", action="store_true",
                         help="retrieval only — print raw chunks, skip prose synthesis")
-    parser.add_argument("--gateway", default=os.environ.get("GBRAIN_MCP_URL", _DEFAULT_GBRAIN),
-                        help="gbrain MCP endpoint")
+    parser.add_argument("--gateway", default=_resolve_endpoint(),
+                        help="gbrain MCP endpoint (env: GBRAIN_MCP_URL or SWARPH_BRAIN_MCP)")
     parser.add_argument("--token-file", default=None, help="explicit read-token file")
     args = parser.parse_args(argv)
     question = " ".join(args.question)

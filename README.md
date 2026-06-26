@@ -48,7 +48,7 @@ $ swarph brain-ask "what's the cross-vendor fallback order?"
 $ swarph brain-ask --no-synth --limit 3 "cross-vendor fallback governor order"
 ```
 
-Config is via env, mirroring `swarph mesh`'s token model: `GBRAIN_MCP_URL` (gbrain endpoint; defaults to the lab tailnet instance), and the read token resolved `--token-file` > `GBRAIN_TOKEN` > `SWARPH_BRAIN_TOKEN` > the mesh per-peer token (`~/.config/swarph/<self>.peer_token`) — so the mesh peer token doubles as the gbrain read token. Optional `SWARPH_FACADE` / `SWARPH_FACADE_TOKEN` enable the $0 cited-synthesis pass; without them, brain-ask prints the raw ranked chunks.
+Config is via env, mirroring `swarph mesh`'s token model: `GBRAIN_MCP_URL` or `SWARPH_BRAIN_MCP` (gbrain endpoint; defaults to `http://127.0.0.1:8792/mcp`), and the read token resolved `--token-file` > `GBRAIN_TOKEN` > `SWARPH_BRAIN_TOKEN` > the mesh per-peer token (`~/.config/swarph/<self>.peer_token`) — so the mesh peer token doubles as the gbrain read token. Optional `SWARPH_FACADE` / `SWARPH_FACADE_TOKEN` enable the $0 cited-synthesis pass; without them, brain-ask prints the raw ranked chunks.
 
 ### `swarph spawn` (Phase 7 — v0.6.0)
 
