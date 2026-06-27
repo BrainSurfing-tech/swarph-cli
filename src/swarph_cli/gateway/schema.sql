@@ -20,7 +20,15 @@ CREATE TABLE IF NOT EXISTS claude_peers (
   ratified INTEGER NOT NULL DEFAULT 0,   -- Phase 5.5: server-side §15 contract gate
   ratified_at TIMESTAMP,
   ratified_by TEXT,                      -- canonical witness peer name
-  ratification_reason TEXT
+  ratification_reason TEXT,
+  -- B2 login-scoped registry (META_EDGE_IDENTITY_CONTRACT.md): the Meta-Edge
+  -- canonical user id (`sub`) that OWNS this cell — the "node-in-your-tailnet"
+  -- relationship. NULLABLE + additive: lab peers (shared/per-peer token
+  -- registration) land owner=NULL and stay globally visible; only cells
+  -- registered via a Meta-Edge identity JWT or cell-join key carry an owner,
+  -- which scopes them to that user on GET /peers. Existing DBs get this column
+  -- via the idempotent ALTER in server.py:_init_db (existing peers → NULL).
+  owner TEXT
 );
 
 -- ─── THREADS — UUID ↔ readable thread name mapping ─────────────────
