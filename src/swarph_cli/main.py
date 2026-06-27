@@ -93,6 +93,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "cell": "swarph_cli.commands.cell.run_cell",
     "brain-ask": "swarph_cli.commands.brain_ask.run_brain_ask",
     "gateway": "swarph_cli.commands.gateway.run_gateway",
+    "highlight": "swarph_cli.commands.highlight.run_highlight",
     # Future: "list-peers", "list-adapters", etc.
 }
 

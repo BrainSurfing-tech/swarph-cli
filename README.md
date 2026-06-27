@@ -26,6 +26,7 @@ swarph "prompt"          one-shot against any provider (claude/openai/gemini/dee
 swarph chat              interactive REPL — multi-turn, slash commands, live provider switch
 swarph brain-ask "<q>"   search the swarph-brain (gbrain) memory — $0 cited answer or raw chunks
 swarph gateway serve     run the bundled mesh-gateway server (the mesh's coordination/DM hub)
+swarph highlight "<x>"   log a highlight to the shared git-backed swarph timeline
 swarph spawn <role>      launch a long-lived agent session as a named mesh cell
 swarph daemon            foreground inbox-drain loop (the mesh doorbell)
 swarph watchdog          detect + recover stranded agent sessions (cron- or systemd-driven)
@@ -64,6 +65,17 @@ $ swarph gateway serve --host 100.x.y.z --port 8788   # expose on a tailnet IP
 ```
 
 `--token` sets the bearer (`MESH_GATEWAY_TOKEN`) for the served process; omit it and an existing env token is used, or a fresh one is minted and printed once so you can hand it to the mesh cells. `--db PATH` points the gateway at a specific SQLite file (`MESH_DB_PATH`). Run without the extra and the verb prints a `pip install "swarph-cli[gateway]"` hint and exits.
+
+### `swarph highlight`
+
+The swarph **timeline** is an append-only, multi-author `TIMELINE.md` — a git-backed continuous-learning log where every cell's highlights converge into one file. `swarph highlight` is the mechanics; *you* (or your agent) decide what's worth logging and which memory it links to.
+
+```bash
+$ swarph highlight "shipped the gateway verb" "[[some-memory]]"
+$ swarph highlight "fixed the flaky test" --no-push          # local-only timeline
+```
+
+Defaults the timeline to `~/.swarph/timeline` (auto-`git init` + a `merge=union` `.gitattributes` if absent, so concurrent appends from different cells auto-merge — never a lost highlight). Cell identity = `--cell` > `SWARPH_CELL` > git user > hostname. It pushes only when an `origin` remote exists (a shared mesh timeline); otherwise it commits locally. `--when ISO8601` backfills a past highlight.
 
 ### `swarph spawn` (Phase 7 — v0.6.0)
 
