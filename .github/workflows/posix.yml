@@ -1,0 +1,96 @@
+# posix.yml — the cross-OS gap-closer for the POSIX side (companion to windows.yml).
+#
+# swarph's deployment targets are Linux (the mesh cells) and Windows (the
+# workstation). windows.yml owns the win32 ctypes/relaunch floor; this owns Linux.
+# The build host IS Linux, so until now the Linux pass was only ever validated by
+# hand here and NEVER RECORDED in CI — while `spawn` carries real `sys.platform`
+# branches (POSIX `execve` vs the win32 relaunch) and a cross-OS dry-run command
+# builder. This runs the full suite on ubuntu-latest so the POSIX spawn paths +
+# the rest of the suite are validated and recorded, completing the linux+windows
+# matrix. (macOS is not a swarph deployment target and the watchdog /proc-ancestry
+# tests are Linux-specific, so it is deliberately out of scope; the darwin spawn
+# branch is still covered by test_spawn_command's monkeypatched platform='darwin'
+# case, which runs here.)
+#
+# Same trust-oracle discipline as windows.yml (RFC §5.3): host-pinned harness on a
+# reviewed ref, NO `continue-on-error`/`|| true`, least-privilege token
+# (contents:read), pull_request (not pull_request_target). The verdict is
+# RE-DERIVED from the junit record (not the bare exit code), and a SPAWN node-id
+# floor asserts the cross-OS command-builder tests actually RAN (anti collect-
+# FORGED: if spawn's command tests were ever marked win32-only, this leg goes red
+# instead of silent-green). Extras [gateway,service] are installed so the FastAPI
+# apps — skipped on the dependency-light windows leg — are exercised here too.
+
+name: posix
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  posix-tests:
+    name: pytest on ${{ matrix.os }} (py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout (host-pinned harness ref)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install (editable + dev + server extras)
+        run: python -m pip install --upgrade pip && pip install -e ".[dev,gateway,service]"
+
+      # Primary gate + §5.3 verdict re-derivation: run the suite to a junit record,
+      # then RE-DERIVE the verdict from per-test records (not the bare exit code) —
+      # assert zero failures/errors AND that a host-known minimum actually RAN
+      # (anti collect-FORGED). No continue-on-error — red == real fail.
+      - name: Full suite + junit verdict re-derivation
+        run: |
+          pytest -q --junit-xml=junit.xml
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("junit.xml").getroot()
+          suites = root.findall("testsuite") or ([root] if root.tag == "testsuite" else [])
+          tests  = sum(int(s.get("tests", "0")) for s in suites)
+          skips  = sum(int(s.get("skipped", "0")) for s in suites)
+          bad    = sum(int(s.get("failures", "0")) + int(s.get("errors", "0")) for s in suites)
+          ran = tests - skips
+          print(f"tests={tests} ran={ran} skipped={skips} failures+errors={bad}")
+          assert bad == 0, f"{bad} failures/errors in junit"
+          assert ran >= 600, f"collect-suspect: only {ran} tests ran (floor 600)"
+          PY
+
+      # Cross-OS SPAWN floor: test_spawn_command.py exercises the provider command
+      # builder + dry-run for win32 AND posix branches (via monkeypatched
+      # sys.platform), so it runs natively on ubuntu/macos — the whole point of
+      # this leg. It must NOT skip out (anti-hollow #68 LOW): a floor of 60
+      # non-skipped (current ~68) turns red if these are ever win32-gated away.
+      - name: Spawn node-id floor (cross-OS command builder must run)
+        run: |
+          pytest -v --no-header --junit-xml=spawn.xml tests/test_spawn_command.py
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("spawn.xml").getroot()
+          cases = [c for s in (root.findall("testsuite") or [root]) for c in s.findall("testcase")]
+          ran = [c for c in cases if c.find("skipped") is None]
+          print(f"spawn floor: {len(cases)} collected, {len(ran)} ran (non-skipped)")
+          assert len(ran) >= 60, f"spawn floor hollowed: only {len(ran)} non-skipped"
+          PY
