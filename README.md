@@ -7,6 +7,8 @@ pip install swarph-cli
 swarph --version
 ```
 
+> **System requirement — a terminal multiplexer.** The session verbs (`spawn`, `cell`, `watchdog`) drive a `tmux`-compatible multiplexer. On **Linux/macOS** install `tmux` (`apt install tmux` / `brew install tmux`). On **Windows** there is no native tmux — install [**psmux**](https://github.com/psmux/psmux) (a Rust tmux-for-Windows, MIT) with `swarph install-multiplexer` (fetches the pinned, checksum-verified binary into `~/.swarph/bin`) or `winget install marlocarlo.psmux`.
+
 **What it is:** a multi-provider LLM command line. Run one-shot prompts or an interactive REPL against any supported provider; spawn long-lived agent *cells* that persist across restarts and coordinate over a mesh; install hooks, MCP servers, and skills by content-addressed URI. An open, inspectable substrate — not a closed orchestration platform.
 
 **Who it's for:** builders running more than one LLM who want them to *cooperate* instead of sitting in separate tabs — multi-agent systems across vendors, agnostic by design. A thin client over the [`swarph-mesh`](https://github.com/BrainSurfing-tech/swarph-mesh) substrate library.
@@ -35,6 +37,7 @@ swarph highlight "<x>"   log a highlight to the shared git-backed swarph timelin
 swarph spawn <role>      launch a long-lived agent session as a named mesh cell
 swarph daemon            foreground inbox-drain loop (the mesh doorbell)
 swarph watchdog          detect + recover stranded agent sessions (cron- or systemd-driven)
+swarph install-multiplexer   fetch the Windows tmux multiplexer (psmux) — pinned + checksum-verified
 swarph add <uri>         install a hook / MCP server / skill by content-addressed URI
 swarph hooks             install Claude Code hooks as reusable artifacts
 swarph onboard / ratify  bring a new peer into the mesh (mechanics + witness ratification)

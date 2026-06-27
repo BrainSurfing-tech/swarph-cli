@@ -1029,6 +1029,14 @@ def _launch_via_tmux(
         return False
     tmux = shutil.which("tmux")
     if not tmux:
+        # No tmux-compatible multiplexer on PATH — fall back (Windows: WT rescue
+        # / in-place). Surface a soft, actionable hint when interactive (Windows
+        # users typically need psmux); stay silent on headless/respawn paths so
+        # the watchdog/CI logs aren't spammed.
+        if sys.stdout.isatty():
+            from swarph_cli.multiplexer import find_multiplexer, multiplexer_hint
+            if find_multiplexer() is None:
+                print(f"swarph spawn: {multiplexer_hint()}", file=sys.stderr)
         return False
 
     interactive = sys.stdout.isatty()
