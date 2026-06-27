@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.17.0"
+version = "0.18.0"
 description = "The `swarph` binary — a multi-LLM CLI and mesh-gateway client + bundled server (`swarph gateway`): one-shot prompts across providers, interactive `chat`, multi-provider `spawn` (claude/codex/antigravity via a ProviderMembrane with subprocess billing-scrub), `mesh` send/inbox/register, `brain-ask` over the swarph-brain (gbrain) semantic memory, git-backed `assisted_memory`, session `import`, and a stranded-session `watchdog`."
 readme = "README.md"
 license = { text = "MIT" }
@@ -69,6 +69,15 @@ gateway = [
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "croniter>=6.2",
+]
+# `swarph service serve` stands up a $0 subscription-LLM HTTP lane. Same
+# FastAPI/uvicorn stack as the gateway, behind its own extra so the core
+# client paths stay dependency-light; the verb prints a
+# `pip install swarph-cli[service]` hint when these are absent.
+service = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
 ]
 
 [project.scripts]
