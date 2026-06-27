@@ -95,6 +95,9 @@ _VERB_HANDLERS: dict[str, str] = {
     "brain": "swarph_cli.commands.brain.run_brain",
     "gateway": "swarph_cli.commands.gateway.run_gateway",
     "service": "swarph_cli.commands.service.run_service",
+    "channel": "swarph_cli.commands.channel.run_channel",
+    "schedule": "swarph_cli.commands.schedule.run_schedule",
+    "lane": "swarph_cli.commands.lane.run_lane",
     "highlight": "swarph_cli.commands.highlight.run_highlight",
     # Future: "list-peers", "list-adapters", etc.
 }
