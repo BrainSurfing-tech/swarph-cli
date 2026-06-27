@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.14.1"
-description = "The `swarph` binary — a multi-LLM CLI and mesh-gateway client: one-shot prompts across providers, interactive `chat`, multi-provider `spawn` (claude/codex/antigravity via a ProviderMembrane with subprocess billing-scrub), `mesh` send/inbox/register, `brain-ask` over the swarph-brain (gbrain) semantic memory, git-backed `assisted_memory`, session `import`, and a stranded-session `watchdog`."
+version = "0.15.0"
+description = "The `swarph` binary — a multi-LLM CLI and mesh-gateway client + bundled server (`swarph gateway`): one-shot prompts across providers, interactive `chat`, multi-provider `spawn` (claude/codex/antigravity via a ProviderMembrane with subprocess billing-scrub), `mesh` send/inbox/register, `brain-ask` over the swarph-brain (gbrain) semantic memory, git-backed `assisted_memory`, session `import`, and a stranded-session `watchdog`."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -60,6 +60,16 @@ dev = ["pytest>=7.0"]
 # so the core one-shot/mesh paths don't pull it in; `swarph mcp-server`
 # prints a `pip install swarph-cli[mcp]` hint when it's absent.
 mcp = ["mcp>=1.0"]
+# `swarph gateway serve` runs the bundled mesh-gateway HTTP server. The
+# FastAPI/uvicorn stack is an extra so the core client paths stay
+# dependency-light; the verb prints a `pip install swarph-cli[gateway]`
+# hint when these are absent.
+gateway = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "croniter>=6.2",
+]
 
 [project.scripts]
 swarph = "swarph_cli.main:main"
@@ -72,6 +82,9 @@ where = ["src"]
 # `swarph watchdog --install-service` can read them via importlib.resources.
 # Closes ev_6954f748 substrate-component-installation-gap.
 swarph_cli = ["systemd/*.service", "systemd/*.timer", "systemd/*.default"]
+# v0.15: ship the bundled mesh-gateway schema so `swarph gateway serve`
+# can apply it at startup via MESH_SCHEMA_PATH (defaults next to server.py).
+"swarph_cli.gateway" = ["*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -25,6 +25,7 @@ This is one of three repos in the v0.3.x architecture:
 swarph "prompt"          one-shot against any provider (claude/openai/gemini/deepseek/grok)
 swarph chat              interactive REPL — multi-turn, slash commands, live provider switch
 swarph brain-ask "<q>"   search the swarph-brain (gbrain) memory — $0 cited answer or raw chunks
+swarph gateway serve     run the bundled mesh-gateway server (the mesh's coordination/DM hub)
 swarph spawn <role>      launch a long-lived agent session as a named mesh cell
 swarph daemon            foreground inbox-drain loop (the mesh doorbell)
 swarph watchdog          detect + recover stranded agent sessions (cron- or systemd-driven)
@@ -49,6 +50,20 @@ $ swarph brain-ask --no-synth --limit 3 "cross-vendor fallback governor order"
 ```
 
 Config is via env, mirroring `swarph mesh`'s token model: `GBRAIN_MCP_URL` or `SWARPH_BRAIN_MCP` (gbrain endpoint; defaults to `http://127.0.0.1:8792/mcp`), and the read token resolved `--token-file` > `GBRAIN_TOKEN` > `SWARPH_BRAIN_TOKEN` > the mesh per-peer token (`~/.config/swarph/<self>.peer_token`) — so the mesh peer token doubles as the gbrain read token. Optional `SWARPH_FACADE` / `SWARPH_FACADE_TOKEN` enable the $0 cited-synthesis pass; without them, brain-ask prints the raw ranked chunks.
+
+### `swarph gateway`
+
+The **mesh-gateway** is the coordination/DM server every other verb talks to — the peer registry, the DM inbox/outbox, feature aggregation with allowlist + caps, and lane/service control. It used to be a separate deployment; it's now bundled, so any host can stand one up with a single command. It pairs with the client verbs (`mesh`, `spawn`, `daemon`, `watchdog`) and with `brain-ask`/gbrain to form the mesh's coordination plane.
+
+The server stack (FastAPI/uvicorn) is an **optional extra** so the core client paths stay dependency-light:
+
+```bash
+$ pip install "swarph-cli[gateway]"
+$ swarph gateway serve                      # binds 127.0.0.1:8788
+$ swarph gateway serve --host 100.x.y.z --port 8788   # expose on a tailnet IP
+```
+
+`--token` sets the bearer (`MESH_GATEWAY_TOKEN`) for the served process; omit it and an existing env token is used, or a fresh one is minted and printed once so you can hand it to the mesh cells. `--db PATH` points the gateway at a specific SQLite file (`MESH_DB_PATH`). Run without the extra and the verb prints a `pip install "swarph-cli[gateway]"` hint and exits.
 
 ### `swarph spawn` (Phase 7 — v0.6.0)
 
