@@ -47,6 +47,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
+import jwt  # PyJWT — B1 Meta-Edge RS256 identity-token verification (gateway extra)
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -69,6 +70,14 @@ SCHEMA_PATH = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql"),
 )
 PORT = int(os.environ.get("PORT", "8788"))
+
+# B1 Meta-Edge identity (META_EDGE_IDENTITY_CONTRACT.md). Meta-Edge SSO ISSUES
+# RS256 JWTs; the gateway only ever TRUSTS them with Meta-Edge's PUBLIC key (it
+# can never forge one — the identity↔relay asymmetry). All three are read at
+# CALL time (via os.environ, see _meta_edge_public_key) NOT cached at import, so
+# the key can be rotated without a restart and monkeypatched directly in tests.
+META_EDGE_ISSUER_DEFAULT = "meta-edge"
+META_EDGE_AUDIENCE_DEFAULT = "swarph-gateway"
 
 VALID_KINDS = {"status", "question", "answer", "unblock", "fyi"}
 VALID_COUNCIL_ROLES = {
@@ -227,6 +236,25 @@ def _init_db() -> None:
                 _grandfather_pending = False
         else:
             _grandfather_pending = False
+
+        # B2 migration (Meta-Edge login-scoped registry,
+        # META_EDGE_IDENTITY_CONTRACT.md). Add the nullable `owner` column to
+        # claude_peers for EXISTING DBs BEFORE schema.sql executescript (same
+        # probe+ALTER pattern as the ratification ALTER above). Additive and
+        # NULLABLE — existing/lab peers land owner=NULL and stay globally
+        # visible; only Meta-Edge-registered cells carry an owner. On a fresh
+        # install claude_peers doesn't exist yet — the OperationalError is
+        # caught and skipped (schema.sql's CREATE includes `owner` directly).
+        try:
+            c.execute("SELECT owner FROM claude_peers LIMIT 1")
+        except sqlite3.OperationalError as e:
+            if "no such column: owner" in str(e):
+                log.info("migrating DB: adding owner column to claude_peers (B2 login-scoped registry)")
+                c.execute("ALTER TABLE claude_peers ADD COLUMN owner TEXT")
+            # else: "no such table" = fresh install → schema.sql creates it with
+            # the column; any other OperationalError is a real fault → re-raise.
+            elif "no such table: claude_peers" not in str(e):
+                raise
 
         # v9 migration (R1 C3-A — trust-epoch stamp). Add binding_regime to
         # peer_ratifications BEFORE schema.sql executescript, mirroring the v3
@@ -595,6 +623,79 @@ def _row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict]:
 # AUTH
 # =====================================================================
 
+def _meta_edge_public_key() -> Optional[str]:
+    """Return the configured Meta-Edge RS256 PUBLIC key PEM, or None if unset.
+
+    Read at CALL time (not cached at import) so the key can be rotated without a
+    restart and monkeypatched directly in tests. ``META_EDGE_PUBLIC_KEY`` (inline
+    PEM) takes precedence over ``META_EDGE_PUBLIC_KEY_FILE`` (path). A None return
+    means Meta-Edge verification is simply NOT enabled (the gateway runs in
+    lab-only mode); an unreadable key FILE also returns None (and logs) rather
+    than raising — the JWT branch is only entered when this returns a key.
+    """
+    pem = os.environ.get("META_EDGE_PUBLIC_KEY", "").strip()
+    if pem:
+        return pem
+    path = os.environ.get("META_EDGE_PUBLIC_KEY_FILE", "").strip()
+    if path:
+        try:
+            return Path(path).read_text().strip() or None
+        except OSError as e:
+            log.warning("META_EDGE_PUBLIC_KEY_FILE unreadable (%s); Meta-Edge auth disabled", e)
+            return None
+    return None
+
+
+def _looks_like_jwt(token: str) -> bool:
+    """A compact JWS/JWT is three non-empty '.'-separated base64url segments."""
+    parts = token.split(".")
+    return len(parts) == 3 and all(parts)
+
+
+def _verify_meta_edge_token(token: str) -> Optional[dict]:
+    """Verify a Meta-Edge RS256 identity/join JWT — FAIL-CLOSED (B1 security core).
+
+    Returns the verified claims dict on success, or None on ANY problem (the
+    gateway TRUSTS Meta-Edge's tokens but never partial-trusts). Returns None when
+    no Meta-Edge public key is configured (verification not enabled).
+
+    The algorithm is PINNED to RS256 explicitly (``algorithms=["RS256"]``) — this
+    single rule blocks BOTH ``alg:none`` (unsigned forgeries) AND the HS256
+    algorithm-confusion attack (a token HMAC-signed with the RSA *public* key
+    bytes as the shared secret). The token header NEVER picks the algorithm.
+    iss/aud/exp and the presence of exp/iss/aud/sub are all required and verified;
+    a 30s leeway absorbs clock skew only.
+    """
+    pem = _meta_edge_public_key()
+    if not pem:
+        return None
+    issuer = os.environ.get("META_EDGE_ISSUER", META_EDGE_ISSUER_DEFAULT)
+    audience = os.environ.get("META_EDGE_AUDIENCE", META_EDGE_AUDIENCE_DEFAULT)
+    try:
+        return jwt.decode(
+            token,
+            pem,
+            algorithms=["RS256"],
+            audience=audience,
+            issuer=issuer,
+            leeway=30,
+            options={
+                "require": ["exp", "iss", "aud", "sub"],
+                "verify_signature": True,
+                "verify_aud": True,
+                "verify_iss": True,
+                "verify_exp": True,
+            },
+        )
+    except Exception as e:
+        # Fail-closed on EVERYTHING: bad signature, alg mismatch (none/HS256),
+        # expired, wrong iss/aud, missing required claim, malformed token, or any
+        # unexpected error. A security verifier denies on doubt and never leaks
+        # which check failed to the caller (only logs server-side).
+        log.warning("Meta-Edge token rejected: %s: %s", type(e).__name__, e)
+        return None
+
+
 class AuthContext(NamedTuple):
     """Resolved identity of an authenticated caller (R1 C1).
 
@@ -614,10 +715,29 @@ class AuthContext(NamedTuple):
     C3-B (peer_ratify) and C2 (caller-binding) read it. Live behavior is
     unchanged: shared tokens authenticate exactly as before; per-peer resolution
     is additive and nothing enforces caller==peer yet.
+
+    B1/B2 (META_EDGE_IDENTITY_CONTRACT.md) adds a THIRD principal kind alongside
+    the two lab regimes, discriminated by ``kind`` (None for the lab regimes):
+      - kind='user_identity' : a verified Meta-Edge SSO login. user=<sub> (the
+                               canonical Meta-Edge user id / owner key),
+                               provider/login informational. Scopes GET /peers to
+                               owned cells; stamps owner=user on register.
+      - kind='cell_join'     : a verified Meta-Edge join-key (the `tailscale up
+                               --authkey` analog). owner=<owner claim>; a
+                               one-purpose registration credential — stamps
+                               owner on register, grants nothing else.
+    All NamedTuple fields carry defaults so the two existing keyword call sites
+    (shared_token / per_peer_token) are untouched and the identity branches
+    construct with only their own fields.
     """
-    peer: Optional[str]
-    regime: str
-    key_generation: Optional[int]
+    peer: Optional[str] = None
+    regime: str = "shared_token"
+    key_generation: Optional[int] = None
+    kind: Optional[str] = None
+    user: Optional[str] = None
+    provider: Optional[str] = None
+    login: Optional[str] = None
+    owner: Optional[str] = None
 
 
 def _is_revoked(c, peer, key_generation) -> bool:
@@ -647,6 +767,40 @@ def _authorize(authorization: Optional[str]) -> AuthContext:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "missing bearer token")
     token = authorization.removeprefix("Bearer ").strip()
+    # 0. Meta-Edge identity branch (B1/B2) — FIRST, and FAIL-CLOSED with NO
+    #    fall-through. If the bearer is JWT-shaped AND a Meta-Edge public key is
+    #    configured, it MUST be a valid Meta-Edge token: verification failure
+    #    raises 401 here and is NEVER re-interpreted against the shared/peer-token
+    #    paths (re-interpreting a forged/expired JWT would be a downgrade attack).
+    #    Non-JWT bearers (the lab's opaque tokens) skip this branch untouched.
+    if _looks_like_jwt(token) and _meta_edge_public_key():
+        claims = _verify_meta_edge_token(token)
+        if claims is None:
+            raise HTTPException(401, "invalid Meta-Edge token")
+        purpose = claims.get("purpose")
+        if purpose in (None, "identity"):
+            # Verified SSO login → read + owner-scope. sub is the canonical
+            # Meta-Edge user id (the owner key); provider/login are informational.
+            return AuthContext(
+                kind="user_identity",
+                user=claims.get("sub"),
+                provider=claims.get("provider"),
+                login=claims.get("login"),
+            )
+        if purpose == "cell-join":
+            # A one-purpose join-key (tailscale up --authkey analog). It MUST
+            # carry the owner it registers the cell under — a join-key without an
+            # owner claim is fail-closed (it would otherwise register an
+            # unowned/lab-visible cell, defeating the scoping it exists for).
+            owner = claims.get("owner")
+            if not owner:
+                log.warning("Meta-Edge cell-join token missing owner claim; rejected")
+                raise HTTPException(401, "invalid Meta-Edge token")
+            return AuthContext(kind="cell_join", owner=owner)
+        # A validly-signed token with an UNRECOGNIZED purpose is fail-closed —
+        # never default an unknown purpose into the privileged identity path.
+        log.warning("Meta-Edge token with unrecognized purpose=%r rejected", purpose)
+        raise HTTPException(401, "invalid Meta-Edge token")
     # 1. Shared-token branch FIRST — verbatim from pre-C1, constant-time
     #    compare_digest preserved, and resolved before any DB hit so the common
     #    path takes no extra latency. Shared tokens carry no peer identity.
@@ -875,7 +1029,19 @@ async def peers_register(req: PeerRegisterRequest,
     Called from each peer's systemd ExecStartPost or on-demand. Upserts on
     name. capabilities dict is the JSON snapshot from claude-service /health.
     """
-    _authorize(authorization)
+    ctx = _authorize(authorization)
+    # B2 owner-stamping (META_EDGE_IDENTITY_CONTRACT.md §Cell-join). A Meta-Edge
+    # principal ties the registered cell to its owner (the node-in-your-tailnet
+    # relationship); lab principals (shared/commander/per-peer token) leave owner
+    # NULL — unchanged behavior:
+    #   - cell_join     → owner = the join-key's owner claim (headless join).
+    #   - user_identity → owner = the verified user `sub` (interactive join: the
+    #                     user's app registers the cell on their behalf).
+    owner: Optional[str] = None
+    if ctx.kind == "cell_join":
+        owner = ctx.owner
+    elif ctx.kind == "user_identity":
+        owner = ctx.user
     now = _utcnow_iso()
     # R1 C1: mint-once per-peer token. Set only when a fresh token is minted
     # on this call; a re-register of a peer whose LIVE token still exists returns
@@ -899,13 +1065,17 @@ async def peers_register(req: PeerRegisterRequest,
         try:
             c.execute(
                 """INSERT INTO claude_peers
-                     (name, url, capabilities, registered_at, last_seen, ratified)
-                   VALUES (?, ?, ?, ?, ?, 0)
+                     (name, url, capabilities, registered_at, last_seen, ratified, owner)
+                   VALUES (?, ?, ?, ?, ?, 0, ?)
                    ON CONFLICT(name) DO UPDATE SET
                      url = excluded.url,
                      capabilities = excluded.capabilities,
-                     last_seen = excluded.last_seen""",
-                (req.name, req.url, json.dumps(req.capabilities), now, now),
+                     last_seen = excluded.last_seen,
+                     -- B2: a Meta-Edge register stamps/refreshes owner; a lab
+                     -- (owner-NULL) re-register PRESERVES an existing owner via
+                     -- COALESCE rather than clobbering it back to NULL.
+                     owner = COALESCE(excluded.owner, claude_peers.owner)""",
+                (req.name, req.url, json.dumps(req.capabilities), now, now, owner),
             )
             # R1 C4: mint-once becomes mint-or-rotate-past-a-revocation.
             #   - NO token row          → C1's gen=1 mint (first onboarding).
@@ -980,14 +1150,25 @@ async def peers_register(req: PeerRegisterRequest,
 @app.get("/peers")
 async def peers_list(authorization: Optional[str] = Header(None),
                       enabled_only: bool = Query(True)) -> dict:
-    _authorize(authorization)
-    where = "WHERE enabled = 1" if enabled_only else ""
+    ctx = _authorize(authorization)
+    clauses: list[str] = []
+    params: list = []
+    if enabled_only:
+        clauses.append("enabled = 1")
+    # B2 login-scoping: a Meta-Edge user_identity sees ONLY its OWN cells
+    # (owner == sub). Every other principal (shared/commander/per-peer token —
+    # the lab paths) is UNCHANGED and still sees all peers.
+    if ctx.kind == "user_identity":
+        clauses.append("owner = ?")
+        params.append(ctx.user)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     with _conn() as c:
         rows = c.execute(
             f"SELECT name, url, capabilities, registered_at, last_health, "
             f"last_seen, enabled, ratified, ratified_at, ratified_by, "
-            f"ratification_reason "
-            f"FROM claude_peers {where} ORDER BY name"
+            f"ratification_reason, owner "
+            f"FROM claude_peers {where} ORDER BY name",
+            params,
         ).fetchall()
     return {
         "peers": [
