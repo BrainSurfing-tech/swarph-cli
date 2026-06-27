@@ -25,6 +25,7 @@ This is one of three repos in the v0.3.x architecture:
 swarph "prompt"          one-shot against any provider (claude/openai/gemini/deepseek/grok)
 swarph chat              interactive REPL — multi-turn, slash commands, live provider switch
 swarph brain-ask "<q>"   search the swarph-brain (gbrain) memory — $0 cited answer or raw chunks
+swarph brain serve       run the gbrain HTTP brain server (the $0 semantic memory)
 swarph gateway serve     run the bundled mesh-gateway server (the mesh's coordination/DM hub)
 swarph highlight "<x>"   log a highlight to the shared git-backed swarph timeline
 swarph spawn <role>      launch a long-lived agent session as a named mesh cell
@@ -51,6 +52,18 @@ $ swarph brain-ask --no-synth --limit 3 "cross-vendor fallback governor order"
 ```
 
 Config is via env, mirroring `swarph mesh`'s token model: `GBRAIN_MCP_URL` or `SWARPH_BRAIN_MCP` (gbrain endpoint; defaults to `http://127.0.0.1:8792/mcp`), and the read token resolved `--token-file` > `GBRAIN_TOKEN` > `SWARPH_BRAIN_TOKEN` > the mesh per-peer token (`~/.config/swarph/<self>.peer_token`) — so the mesh peer token doubles as the gbrain read token. Optional `SWARPH_FACADE` / `SWARPH_FACADE_TOKEN` enable the $0 cited-synthesis pass; without them, brain-ask prints the raw ranked chunks.
+
+### `swarph brain serve`
+
+`brain-ask` *searches* a running brain; **`brain serve`** *runs* one. gbrain (the sovereign $0 semantic-memory server) is an external binary — this verb is a thin launcher that applies the swarph-blessed defaults and replaces itself with `gbrain serve`:
+
+```bash
+$ swarph brain serve                                 # 127.0.0.1:8792, 1-year token TTL
+$ swarph brain serve --bind 100.x.y.z --port 8792    # expose on a tailnet IP
+$ swarph brain serve --gbrain-bin /opt/gbrain        # explicit binary (else GBRAIN_BIN / PATH)
+```
+
+Defaults are loopback bind (expose a tailnet IP explicitly) and a **1-year token TTL** — a short TTL silently 401s long-lived mesh cells, a lesson learned the hard way. If `gbrain` isn't on `PATH` the verb prints an install hint and exits `2`; `brain-ask` still queries any already-running brain.
 
 ### `swarph gateway`
 
