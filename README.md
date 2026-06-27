@@ -28,6 +28,9 @@ swarph brain-ask "<q>"   search the swarph-brain (gbrain) memory — $0 cited an
 swarph brain serve       run the gbrain HTTP brain server (the $0 semantic memory)
 swarph gateway serve     run the bundled mesh-gateway server (the mesh's coordination/DM hub)
 swarph service serve     stand up a $0 subscription-LLM HTTP lane (claude/codex/gemini)
+swarph channel <sub>     mesh channels — create/join/leave/list/members
+swarph schedule <sub>    scheduled events — create/list/get/enable/disable/delete/fire-now
+swarph lane <sub>        $0-lane orchestration — list/create/scale/delete/enqueue
 swarph highlight "<x>"   log a highlight to the shared git-backed swarph timeline
 swarph spawn <role>      launch a long-lived agent session as a named mesh cell
 swarph daemon            foreground inbox-drain loop (the mesh doorbell)
@@ -93,6 +96,31 @@ $ curl -s localhost:8799/delegate -H "Authorization: Bearer $TOK" \
 ```
 
 The load-bearing piece is **billing-scrub**: the subprocess env has every known provider API-key var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, …) stripped, so the wrapped CLI can *only* use its $0 subscription auth — it can never silently fall back to metered API billing. Default loopback bind (expose a tailnet IP explicitly); the bearer is `--token` > `SWARPH_SERVICE_TOKEN` > a freshly minted+printed token. Note the `gemini` (agy) lane reads the prompt from argv only and hard-caps its length (~4 KB) — very long prompts are rejected, not truncated. Run without the extra and the verb prints a `pip install "swarph-cli[service]"` hint and exits.
+
+### `swarph channel` / `swarph schedule` / `swarph lane`
+
+The gateway's **automation control plane** — channels (pub/sub), scheduled events, and the $0-lane orchestration — as first-class client verbs. They share `mesh`'s auth: identity is `--as` / `SWARPH_SELF`, the bearer is `--token-file` / `MESH_GATEWAY_TOKEN` / the peer-token file, and `--gateway` (default `http://localhost:8788`) points at the hub.
+
+```bash
+# channels — converge work into pub/sub rooms
+$ swarph channel create research --kind topic --description "market-structure notes"
+$ swarph channel join research --wake-policy mentions_only
+$ swarph channel list
+
+# scheduled events — operator-gated recurring/ conditional fires (a 403 is surfaced verbatim)
+$ swarph schedule create nightly-digest --trigger time --cron "0 7 * * *" \
+    --target lab-ovh --task "compile the overnight digest" --context "[[some-anchor]]"
+$ swarph schedule enable nightly-digest
+$ swarph schedule fire-now nightly-digest
+
+# lanes — drive the gateway's $0 worker pools
+$ swarph lane list
+$ swarph lane create judges --provider claude --model sonnet --n 3
+$ swarph lane enqueue judges --prompt "score this design ..."
+$ swarph lane scale judges --n 0
+```
+
+Pure-stdlib clients (no extra needed). Mutating channel/schedule/lane operations are operator-gated *server-side* — the verb just shapes and sends the request; an unauthorized caller sees the gateway's `403` on the normal error path.
 
 ### `swarph highlight`
 
