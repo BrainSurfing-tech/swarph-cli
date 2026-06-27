@@ -116,3 +116,16 @@ jobs:
           assert "test_console_is_genuine_wt_real_ctypes_walk_returns_bool" in ran_names, \
               "the real-ctypes-walk test was skipped/absent — ctypes path NOT exercised"
           PY
+
+      # v0.20.0 — REAL psmux fetch on this Windows VM. The unit tests mock the
+      # download; this exercises the actual security-sensitive path for real:
+      # fetch -> GitHub-attested SHA-256 verify -> zip-slip-guarded extract, then
+      # confirm the extracted tmux.exe actually RUNS. --force guarantees the fetch
+      # even if the runner happens to ship a tmux. No continue-on-error: a broken
+      # fetcher (bad URL, checksum drift, extract bug) turns this Windows leg red.
+      - name: Real psmux install (validate the fetcher on a real Windows VM)
+        run: |
+          python -m swarph_cli.main install-multiplexer --force --dir "$RUNNER_TEMP/swmux"
+          test -f "$RUNNER_TEMP/swmux/tmux.exe" || { echo "FAIL: tmux.exe was not extracted"; exit 1; }
+          echo "psmux landed:"; ls -la "$RUNNER_TEMP/swmux"
+          "$RUNNER_TEMP/swmux/tmux.exe" -V
