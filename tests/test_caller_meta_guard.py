@@ -119,7 +119,7 @@ def test_no_modules_skipped_by_the_walk():
             # so it is always walked.)
             if (mod.name.startswith(("swarph_cli.gateway", "swarph_cli.service.app"))
                     and isinstance(e, ModuleNotFoundError)
-                    and getattr(e, "name", None) in ("fastapi", "uvicorn", "pydantic")):
+                    and getattr(e, "name", None) in ("fastapi", "uvicorn", "pydantic", "jwt")):
                 continue
             skipped.append((mod.name, repr(e)))
     assert not skipped, (

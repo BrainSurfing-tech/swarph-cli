@@ -69,6 +69,9 @@ gateway = [
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "croniter>=6.2",
+    # B1 Meta-Edge identity: verify RS256 SSO JWTs (the gateway TRUSTS, never
+    # signs). [crypto] pulls in `cryptography` for RSA signature verification.
+    "PyJWT[crypto]>=2.8",
 ]
 # `swarph service serve` stands up a $0 subscription-LLM HTTP lane. Same
 # FastAPI/uvicorn stack as the gateway, behind its own extra so the core
