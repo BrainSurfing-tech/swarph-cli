@@ -27,6 +27,7 @@ swarph chat              interactive REPL — multi-turn, slash commands, live p
 swarph brain-ask "<q>"   search the swarph-brain (gbrain) memory — $0 cited answer or raw chunks
 swarph brain serve       run the gbrain HTTP brain server (the $0 semantic memory)
 swarph gateway serve     run the bundled mesh-gateway server (the mesh's coordination/DM hub)
+swarph service serve     stand up a $0 subscription-LLM HTTP lane (claude/codex/gemini)
 swarph highlight "<x>"   log a highlight to the shared git-backed swarph timeline
 swarph spawn <role>      launch a long-lived agent session as a named mesh cell
 swarph daemon            foreground inbox-drain loop (the mesh doorbell)
@@ -78,6 +79,20 @@ $ swarph gateway serve --host 100.x.y.z --port 8788   # expose on a tailnet IP
 ```
 
 `--token` sets the bearer (`MESH_GATEWAY_TOKEN`) for the served process; omit it and an existing env token is used, or a fresh one is minted and printed once so you can hand it to the mesh cells. `--db PATH` points the gateway at a specific SQLite file (`MESH_DB_PATH`). Run without the extra and the verb prints a `pip install "swarph-cli[gateway]"` hint and exits.
+
+### `swarph service`
+
+Turn a *subscription* LLM CLI into a **$0 HTTP lane** the mesh can call — `swarph service serve --provider <claude|codex|gemini>` runs a small FastAPI app exposing `POST /delegate` (bearer-authed) + `GET /health`:
+
+```bash
+$ pip install "swarph-cli[service]"
+$ swarph service serve --provider claude               # 127.0.0.1:8799, mints+prints a token
+$ swarph service serve --provider gemini --host 100.x.y.z --port 8799   # expose on a tailnet IP
+$ curl -s localhost:8799/delegate -H "Authorization: Bearer $TOK" \
+    -d '{"prompt":"summarise this in one line: ..."}'   # -> {"text": "...", "cost_usd": 0.0}
+```
+
+The load-bearing piece is **billing-scrub**: the subprocess env has every known provider API-key var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, …) stripped, so the wrapped CLI can *only* use its $0 subscription auth — it can never silently fall back to metered API billing. Default loopback bind (expose a tailnet IP explicitly); the bearer is `--token` > `SWARPH_SERVICE_TOKEN` > a freshly minted+printed token. Note the `gemini` (agy) lane reads the prompt from argv only and hard-caps its length (~4 KB) — very long prompts are rejected, not truncated. Run without the extra and the verb prints a `pip install "swarph-cli[service]"` hint and exits.
 
 ### `swarph highlight`
 
