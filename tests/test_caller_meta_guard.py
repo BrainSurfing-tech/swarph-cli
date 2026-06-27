@@ -111,6 +111,14 @@ def test_no_modules_skipped_by_the_walk():
         try:
             importlib.import_module(mod.name)
         except Exception as e:  # noqa: BLE001 — we want to surface ANY import failure
+            # The gateway subpackage is a vendored FastAPI/uvicorn server behind the
+            # optional [gateway] extra and carries NO caller-convention surface, so it
+            # is legitimately skippable when that extra isn't installed (e.g. CI). A
+            # real bug in a gateway module (any other import error) still surfaces.
+            if (mod.name.startswith("swarph_cli.gateway")
+                    and isinstance(e, ModuleNotFoundError)
+                    and getattr(e, "name", None) in ("fastapi", "uvicorn")):
+                continue
             skipped.append((mod.name, repr(e)))
     assert not skipped, (
         f"caller meta-guard walk skipped modules (a bad caller in one could ship "
