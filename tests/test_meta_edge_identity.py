@@ -331,3 +331,50 @@ def test_shared_token_register_list_auth_unchanged(gw, client):
     with pytest.raises(gw.HTTPException) as e:
         gw._authorize("Bearer totally-wrong-token")
     assert e.value.status_code == 401
+
+
+# ══ 7. BLOCKER-B — a Meta-Edge login is NOT an operator ════════════════════
+#
+# The shipped _is_operator was `return auth.peer is None`. Both the SSO
+# identity context AND the cell-join context carry peer=None (only the genuine
+# shared/commander token does AND has kind=None), so every OAuth login resolved
+# to a full operator — an OAuth-driven operator factory. The genuine operator is
+# the shared token alone: peer is None AND kind is None.
+
+def test_is_operator_only_for_shared_token_not_meta_edge(gw):
+    """Unit: the precise close. Shared token = operator; user_identity and
+    cell_join (both peer=None) are NOT; a per-peer cell is NOT."""
+    shared = gw.AuthContext(peer=None, regime="shared_token", key_generation=None)
+    identity = gw.AuthContext(kind="user_identity", user="u-123",
+                              provider="github", login="octocat")
+    join = gw.AuthContext(kind="cell_join", owner="u-123")
+    cell = gw.AuthContext(peer="some-cell", regime="peer_token", key_generation=1)
+
+    assert gw._is_operator(shared) is True
+    assert gw._is_operator(identity) is False   # was True → the operator factory
+    assert gw._is_operator(join) is False        # the cell-join hole, closed too
+    assert gw._is_operator(cell) is False
+
+
+def test_user_identity_denied_at_operator_gated_route(gw, client, sign):
+    """Wiring: an SSO identity token is 403'd at an operator-gated route
+    (announce-channel create, B5). Pre-fix this created the channel (200) —
+    the catch must be COMMITTED, not just present on the helper."""
+    tok = sign(_base_claims())  # a valid user_identity token (purpose absent)
+    r = client.post(
+        "/channels",
+        json={"name": "sso-cannot-make-this", "kind": "announce",
+              "created_by": "u-123"},
+        headers=_bearer(tok),
+    )
+    assert r.status_code == 403, r.text
+    assert "operator-gated" in r.text
+
+    # control: the shared/commander token IS the operator and succeeds.
+    r2 = client.post(
+        "/channels",
+        json={"name": "operator-can", "kind": "announce",
+              "created_by": "commander"},
+        headers=_bearer(SHARED_TOKEN),
+    )
+    assert r2.status_code == 200, r2.text

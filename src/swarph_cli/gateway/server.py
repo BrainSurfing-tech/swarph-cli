@@ -2429,8 +2429,15 @@ def _is_operator(auth: AuthContext) -> bool:
     membership/broadcast authority of the FUTURE POST surface is likewise REAL
     only post-C5 (a cell can already create an announce channel + own
     allow_broadcast=1 on it). Mitigation now: pre-seed the reserved names via the
-    operator at deploy so the PK-409 protects the canonical names meanwhile."""
-    return auth.peer is None
+    operator at deploy so the PK-409 protects the canonical names meanwhile.
+
+    META-EDGE (B1/B2): a verified SSO login (kind='user_identity') and a
+    cell-join key (kind='cell_join') BOTH carry peer=None, so a bare
+    `peer is None` check made every OAuth login a full operator — an
+    OAuth-driven operator factory. The genuine operator is the shared/commander
+    token ALONE, which is the only context with BOTH peer=None AND kind=None.
+    A Meta-Edge context is owner-scoped, never operator."""
+    return auth.peer is None and auth.kind is None
 
 
 class ChannelCreateRequest(BaseModel):
