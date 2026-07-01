@@ -505,7 +505,9 @@ def _newest_codex_session_for_cwd(cwd, sessions_root=None):
         if not isinstance(pl, dict):
             continue
         if pl.get("cwd") in targets and pl.get("originator") != "codex_exec":
-            return pl.get("session_id") or pl.get("id")
+            sid = pl.get("session_id") or pl.get("id")
+            if sid:  # some older sessions record a null id — skip to the next-newest match
+                return sid
     return None
 
 

@@ -1465,6 +1465,18 @@ def test_newest_codex_session_same_day_newest_wins(tmp_path):
     assert _newest_codex_session_for_cwd(cwd, sessions_root=root) == "uuid-late"
 
 
+def test_newest_codex_session_skips_null_id(tmp_path):
+    # real codex data: some sessions record session_id/id = null. The newest MATCH with a
+    # null id must be skipped, falling through to the next-newest usable one (not returning None).
+    from swarph_cli.commands.spawn import _newest_codex_session_for_cwd
+    root = tmp_path / "sessions"; cwd = tmp_path / "c"; cwd.mkdir()
+    _write_codex_session(root, "2026/07/01", "rollout-2026-07-01T09-00-00-uOld.jsonl", "uuid-real", str(cwd))
+    d = root / "2026/07/02"; d.mkdir(parents=True)
+    (d / "rollout-2026-07-02T09-00-00-uNull.jsonl").write_text(json.dumps({"type":"session_meta","payload":{
+        "session_id": None, "id": None, "cwd": str(cwd), "originator": "codex-tui"}}) + "\n")
+    assert _newest_codex_session_for_cwd(cwd, sessions_root=root) == "uuid-real"
+
+
 def test_build_codex_argv_resumes_when_session_exists(monkeypatch, tmp_path):
     from swarph_cli.commands import spawn
     monkeypatch.setattr(spawn, "_newest_codex_session_for_cwd", lambda cwd, **k: "uuid-x")
