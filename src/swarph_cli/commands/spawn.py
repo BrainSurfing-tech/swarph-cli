@@ -24,6 +24,7 @@ for users (alpha #891 D2).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -464,6 +465,29 @@ def _build_agy_argv(
     
     argv.extend(passthrough)
     return argv
+
+
+def _newest_codex_session_for_cwd(cwd, sessions_root=None):
+    """Newest codex session_id recorded for this cwd (interactive, not codex_exec), or None.
+    Codex `--last` is global; swarph does the per-cwd selection. Never raises."""
+    import glob
+    root = Path(sessions_root) if sessions_root else (Path.home() / ".codex" / "sessions")
+    try:
+        files = sorted(glob.glob(str(root / "**" / "rollout-*.jsonl"), recursive=True))
+    except OSError:
+        return None
+    target = str(cwd)
+    best = None
+    for f in files:  # sorted ascending → last match is newest (date+ts in path)
+        try:
+            with open(f) as fh:
+                meta = json.loads(fh.readline())
+            pl = meta.get("payload", meta)
+            if pl.get("cwd") == target and pl.get("originator") != "codex_exec":
+                best = pl.get("session_id") or pl.get("id")
+        except (OSError, ValueError):
+            continue
+    return best
 
 
 def _build_codex_argv(cell: Cell, passthrough: list[str]) -> list[str]:

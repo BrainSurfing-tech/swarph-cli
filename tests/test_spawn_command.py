@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Iterator
 
@@ -1426,3 +1427,26 @@ def test_run_spawn_codex_launch_sets_git_identity(isolated_xdg, tmp_path, monkey
     assert captured["env"]["GIT_AUTHOR_NAME"] == "gpt-ops"
     assert captured["env"]["GIT_AUTHOR_EMAIL"] == "gpt-ops@brainsurfing.tech"
     assert captured["env"]["GIT_COMMITTER_NAME"] == "gpt-ops"
+
+
+def _write_codex_session(root, y_m_d, fname, session_id, cwd, originator="codex"):
+    d = root / y_m_d; d.mkdir(parents=True, exist_ok=True)
+    (d / fname).write_text(json.dumps({"type":"session_meta","payload":{
+        "session_id":session_id,"id":session_id,"cwd":cwd,"originator":originator}}) + "\n")
+
+
+def test_newest_codex_session_for_cwd(tmp_path):
+    from swarph_cli.commands.spawn import _newest_codex_session_for_cwd
+    root = tmp_path / "sessions"
+    cell_cwd = tmp_path / "cellcwd"; cell_cwd.mkdir()
+    _write_codex_session(root, "2026/07/01", "rollout-...-old.jsonl", "uuid-old", str(cell_cwd))
+    _write_codex_session(root, "2026/07/02", "rollout-...-new.jsonl", "uuid-new", str(cell_cwd))
+    _write_codex_session(root, "2026/07/02", "rollout-...-other.jsonl", "uuid-other", str(tmp_path/"elsewhere"))
+    _write_codex_session(root, "2026/07/02", "rollout-...-exec.jsonl", "uuid-exec", str(cell_cwd), originator="codex_exec")
+    (root/"2026/07/02"/"broken.jsonl").write_text("{not json")
+    assert _newest_codex_session_for_cwd(cell_cwd, sessions_root=root) == "uuid-new"
+
+
+def test_newest_codex_session_none_when_no_match(tmp_path):
+    from swarph_cli.commands.spawn import _newest_codex_session_for_cwd
+    assert _newest_codex_session_for_cwd(tmp_path/"x", sessions_root=tmp_path/"empty") is None
