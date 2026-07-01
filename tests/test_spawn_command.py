@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Iterator
 
@@ -855,6 +856,7 @@ def test_build_agy_argv_fresh(tmp_path):
     argv = _build_agy_argv(cell, no_starter=False, passthrough=["--extra"])
     assert argv == [
         "agy",
+        "--continue",
         "--sandbox",
         "--add-dir",
         str(tmp_path),
@@ -968,7 +970,7 @@ def test_run_spawn_antigravity_dry_run(tmp_path, isolated_xdg, capsys):
     os.chdir(tmp_path)
     run_spawn(["--dry-run"])
     captured = capsys.readouterr()
-    assert "agy --sandbox --add-dir" in captured.out
+    assert "agy --continue --sandbox --add-dir" in captured.out
     assert "provider:    antigravity" in captured.err
 
 def test_run_spawn_codex_assisted_memory_injects_agents_md(tmp_path, isolated_xdg, capsys, monkeypatch):
@@ -1426,3 +1428,76 @@ def test_run_spawn_codex_launch_sets_git_identity(isolated_xdg, tmp_path, monkey
     assert captured["env"]["GIT_AUTHOR_NAME"] == "gpt-ops"
     assert captured["env"]["GIT_AUTHOR_EMAIL"] == "gpt-ops@brainsurfing.tech"
     assert captured["env"]["GIT_COMMITTER_NAME"] == "gpt-ops"
+
+
+def _write_codex_session(root, y_m_d, fname, session_id, cwd, originator="codex"):
+    d = root / y_m_d; d.mkdir(parents=True, exist_ok=True)
+    (d / fname).write_text(json.dumps({"type":"session_meta","payload":{
+        "session_id":session_id,"id":session_id,"cwd":cwd,"originator":originator}}) + "\n")
+
+
+def test_newest_codex_session_for_cwd(tmp_path):
+    from swarph_cli.commands.spawn import _newest_codex_session_for_cwd
+    root = tmp_path / "sessions"
+    cell_cwd = tmp_path / "cellcwd"; cell_cwd.mkdir()
+    _write_codex_session(root, "2026/07/01", "rollout-...-old.jsonl", "uuid-old", str(cell_cwd))
+    _write_codex_session(root, "2026/07/02", "rollout-...-new.jsonl", "uuid-new", str(cell_cwd))
+    _write_codex_session(root, "2026/07/02", "rollout-...-other.jsonl", "uuid-other", str(tmp_path/"elsewhere"))
+    _write_codex_session(root, "2026/07/02", "rollout-...-exec.jsonl", "uuid-exec", str(cell_cwd), originator="codex_exec")
+    # malformed file that MATCHES the glob → actually exercises the ValueError catch
+    (root/"2026/07/02"/"rollout-broken-malformed.jsonl").write_text("{not json")
+    # a first line that is valid JSON but NOT a dict → must not raise (AttributeError guard)
+    (root/"2026/07/02"/"rollout-nondict.jsonl").write_text("123\n")
+    assert _newest_codex_session_for_cwd(cell_cwd, sessions_root=root) == "uuid-new"
+
+
+def test_newest_codex_session_none_when_no_match(tmp_path):
+    from swarph_cli.commands.spawn import _newest_codex_session_for_cwd
+    assert _newest_codex_session_for_cwd(tmp_path/"x", sessions_root=tmp_path/"empty") is None
+
+
+def test_newest_codex_session_same_day_newest_wins(tmp_path):
+    from swarph_cli.commands.spawn import _newest_codex_session_for_cwd
+    root = tmp_path / "sessions"; cwd = tmp_path / "c"; cwd.mkdir()
+    # two sessions the SAME calendar day → the sort must resolve on the ISO ts in the filename
+    _write_codex_session(root, "2026/07/02", "rollout-2026-07-02T10-00-00-uA.jsonl", "uuid-early", str(cwd))
+    _write_codex_session(root, "2026/07/02", "rollout-2026-07-02T11-00-00-uB.jsonl", "uuid-late", str(cwd))
+    assert _newest_codex_session_for_cwd(cwd, sessions_root=root) == "uuid-late"
+
+
+def test_newest_codex_session_skips_null_id(tmp_path):
+    # real codex data: some sessions record session_id/id = null. The newest MATCH with a
+    # null id must be skipped, falling through to the next-newest usable one (not returning None).
+    from swarph_cli.commands.spawn import _newest_codex_session_for_cwd
+    root = tmp_path / "sessions"; cwd = tmp_path / "c"; cwd.mkdir()
+    _write_codex_session(root, "2026/07/01", "rollout-2026-07-01T09-00-00-uOld.jsonl", "uuid-real", str(cwd))
+    d = root / "2026/07/02"; d.mkdir(parents=True)
+    (d / "rollout-2026-07-02T09-00-00-uNull.jsonl").write_text(json.dumps({"type":"session_meta","payload":{
+        "session_id": None, "id": None, "cwd": str(cwd), "originator": "codex-tui"}}) + "\n")
+    assert _newest_codex_session_for_cwd(cwd, sessions_root=root) == "uuid-real"
+
+
+def test_build_codex_argv_resumes_when_session_exists(monkeypatch, tmp_path):
+    from swarph_cli.commands import spawn
+    monkeypatch.setattr(spawn, "_newest_codex_session_for_cwd", lambda cwd, **k: "uuid-x")
+    cell = type("C", (), {"cwd": tmp_path, "extra": {}})()
+    argv = spawn._build_codex_argv(cell, [])
+    assert argv[:3] == ["codex", "resume", "uuid-x"]
+
+
+def test_build_codex_argv_fresh_when_no_session(monkeypatch, tmp_path):
+    from swarph_cli.commands import spawn
+    monkeypatch.setattr(spawn, "_newest_codex_session_for_cwd", lambda cwd, **k: None)
+    cell = type("C", (), {"cwd": tmp_path, "extra": {}})()
+    argv = spawn._build_codex_argv(cell, [])
+    assert "resume" not in argv and argv[0] == "codex"
+
+
+def test_build_agy_argv_always_continues(tmp_path):
+    # agy --continue is unconditional: it keys sessions internally by the full
+    # workspace path and starts fresh gracefully on first run (verified live), so
+    # swarph doesn't guard it or emulate the retired ~/.gemini/history/ path.
+    from swarph_cli.commands import spawn
+    cwd = tmp_path / "mycell"; cwd.mkdir()
+    cell = type("C", (), {"cwd": cwd, "extra": {}, "sandbox": None, "starter_prompt_path": None})()
+    assert "--continue" in spawn._build_agy_argv(cell, True, [])
