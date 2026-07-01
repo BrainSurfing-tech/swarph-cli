@@ -9,11 +9,14 @@ def test_sign_verify_roundtrip():
 
 def test_tampered_payload_rejected():
     t = sign_chain_token(SECRET, "chain-1", 0, "jti-abc")
-    body, sig = t.split(".")
+    _, sig = t.split(".")
     import base64, json
-    forged = json.dumps({"chain_id": "chain-1", "depth": 99, "jti": "jti-abc"}).encode()
+    # CANONICAL re-encode (same separators/sort_keys the signer uses) with ONLY depth
+    # changed → isolates that the HMAC catches the VALUE change, not a formatting diff.
+    forged = json.dumps({"chain_id": "chain-1", "depth": 99, "jti": "jti-abc"},
+                        separators=(",", ":"), sort_keys=True).encode()
     bad = base64.urlsafe_b64encode(forged).decode().rstrip("=") + "." + sig
-    assert verify_chain_token(SECRET, bad) is None   # forged well-formed payload, sig mismatch
+    assert verify_chain_token(SECRET, bad) is None   # depth 0→99, canonical form, sig mismatch
 
 def test_wrong_secret_rejected():
     t = sign_chain_token(SECRET, "c", 1, "j")

@@ -31,5 +31,8 @@ def verify_chain_token(secret: str, token: str) -> Optional[dict]:
         if not isinstance(d, dict) or {"chain_id", "depth", "jti"} - d.keys():
             return None
         return {"chain_id": d["chain_id"], "depth": int(d["depth"]), "jti": d["jti"]}
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError, Exception):
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        # the known malformed-input paths (split / b64 / json / int / dict). Fail
+        # safe to None. NOT a bare `Exception`: an unexpected error should surface
+        # as a bug, not silently masquerade as "invalid token".
         return None

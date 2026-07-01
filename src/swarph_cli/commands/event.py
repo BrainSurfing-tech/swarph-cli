@@ -70,9 +70,16 @@ def _post_channel(
     from .mesh import _DEFAULT_GATEWAY
 
     base = (gateway or _DEFAULT_GATEWAY).rstrip("/")
-    content: dict = {"event": event, "payload": payload}
-    if chain_token:
-        content["chain_token"] = chain_token
+    ev: dict = {"event": event, "payload": payload}
+    if chain_token is not None:  # carry an explicit "" through; only omit when unset
+        ev["chain_token"] = chain_token
+    # Sentinel-wrapped so P1's guard can UNAMBIGUOUSLY identify an event post: a
+    # normal channel message won't carry the top-level `swarph_event` key, so the
+    # guard keys off `content.swarph_event` — never a false-positive on a plain
+    # message whose content happens to hold an "event" field. kind stays "fyi"
+    # (gateway VALID_KINDS); P1 promotes this to a first-class kind/column when it
+    # touches the gateway.
+    content: dict = {"swarph_event": ev}
     body = {
         "from_node": name,
         "channel": channel,
