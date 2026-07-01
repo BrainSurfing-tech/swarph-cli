@@ -1450,3 +1450,19 @@ def test_newest_codex_session_for_cwd(tmp_path):
 def test_newest_codex_session_none_when_no_match(tmp_path):
     from swarph_cli.commands.spawn import _newest_codex_session_for_cwd
     assert _newest_codex_session_for_cwd(tmp_path/"x", sessions_root=tmp_path/"empty") is None
+
+
+def test_build_codex_argv_resumes_when_session_exists(monkeypatch, tmp_path):
+    from swarph_cli.commands import spawn
+    monkeypatch.setattr(spawn, "_newest_codex_session_for_cwd", lambda cwd, **k: "uuid-x")
+    cell = type("C", (), {"cwd": tmp_path, "extra": {}})()
+    argv = spawn._build_codex_argv(cell, [])
+    assert argv[:3] == ["codex", "resume", "uuid-x"]
+
+
+def test_build_codex_argv_fresh_when_no_session(monkeypatch, tmp_path):
+    from swarph_cli.commands import spawn
+    monkeypatch.setattr(spawn, "_newest_codex_session_for_cwd", lambda cwd, **k: None)
+    cell = type("C", (), {"cwd": tmp_path, "extra": {}})()
+    argv = spawn._build_codex_argv(cell, [])
+    assert "resume" not in argv and argv[0] == "codex"

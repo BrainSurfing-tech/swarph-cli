@@ -491,15 +491,19 @@ def _newest_codex_session_for_cwd(cwd, sessions_root=None):
 
 
 def _build_codex_argv(cell: Cell, passthrough: list[str]) -> list[str]:
-    argv = [
-        "codex",
+    sid = _newest_codex_session_for_cwd(cell.cwd)
+    if sid:
+        argv = ["codex", "resume", sid]
+    else:
+        argv = ["codex"]
+    argv.extend([
         "-C",
         str(cell.cwd),
         "-s",
         _codex_sandbox(cell),
         "-a",
         _CODEX_APPROVAL,
-    ]
+    ])
     argv.extend(passthrough)
     return argv
 
