@@ -1038,7 +1038,7 @@ def test_claude_launch_windows_blocks_not_execve(monkeypatch, tmp_path):
     execve_called = []
     monkeypatch.setattr(spawn.os, "execve", lambda *a: execve_called.append(a))
 
-    cell = type("C", (), {"cwd": tmp_path})()
+    cell = type("C", (), {"cwd": tmp_path, "name": "test-cell"})()
     rc = spawn.ClaudeMembrane().launch(
         cell, "/bin/claude", ["claude", "--name", "x", "--session-id", "u"])
 
@@ -1060,7 +1060,7 @@ def test_claude_launch_posix_uses_execve(monkeypatch, tmp_path, platform):
     monkeypatch.setattr(spawn.os, "execve",
                         lambda p, a, e: execve_args.append((p, a, e)))
 
-    cell = type("C", (), {"cwd": tmp_path})()
+    cell = type("C", (), {"cwd": tmp_path, "name": "test-cell"})()
     spawn.ClaudeMembrane().launch(cell, "/bin/claude", ["claude", "--name", "x"])
 
     assert execve_args and execve_args[0][0] == "/bin/claude"
@@ -1252,7 +1252,7 @@ def test_grok_launch_win32_blocks_posix_execve(monkeypatch, tmp_path):
     # fix), execve on POSIX — same split claude.launch got in 0.12.1.
     from swarph_cli.commands import spawn
 
-    cell = type("C", (), {"cwd": tmp_path})()
+    cell = type("C", (), {"cwd": tmp_path, "name": "test-cell"})()
     monkeypatch.setattr(spawn, "_grok_env", lambda c: {"HOME": str(tmp_path)})
     monkeypatch.setattr(spawn.os, "chdir", lambda p: None)
 
@@ -1355,3 +1355,74 @@ def test_claude_env_disables_feedback_survey(monkeypatch):
     from swarph_cli.commands.spawn import _claude_env
     env = _claude_env()
     assert env.get("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY") == "1"
+
+
+# ── per-cell git identity (RACI attribution) ────────────────────────────────────
+def test_git_identity_env_defaults_to_mesh_name(tmp_path):
+    """Default author = the cell's MESH name (cell.name), email <name>@brainsurfing.tech —
+    author AND committer, so `git log %an`/%cn both attribute to the cell."""
+    from swarph_cli.commands.spawn import _git_identity_env
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1, "name": "science-claude",
+        "role": "science", "cwd": str(tmp_path), "provider": "claude",
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    env = _git_identity_env(load_cell(p))
+    assert env["GIT_AUTHOR_NAME"] == "science-claude"
+    assert env["GIT_AUTHOR_EMAIL"] == "science-claude@brainsurfing.tech"
+    assert env["GIT_COMMITTER_NAME"] == "science-claude"
+    assert env["GIT_COMMITTER_EMAIL"] == "science-claude@brainsurfing.tech"
+
+
+def test_git_identity_env_yaml_override(tmp_path):
+    """An optional cell.yaml `git_identity: {name, email}` block (carried via
+    cell.extra, no schema change) overrides the defaults."""
+    from swarph_cli.commands.spawn import _git_identity_env
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1, "name": "droplet", "role": "droplet",
+        "cwd": str(tmp_path), "provider": "claude",
+        "git_identity": {"name": "droplet-mother", "email": "droplet@custom.example"},
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    env = _git_identity_env(load_cell(p))
+    assert env["GIT_AUTHOR_NAME"] == "droplet-mother"
+    assert env["GIT_AUTHOR_EMAIL"] == "droplet@custom.example"
+    assert env["GIT_COMMITTER_NAME"] == "droplet-mother"
+
+
+def test_git_identity_env_partial_override_keeps_default_email(tmp_path):
+    """name-only override → email still defaults from the given name."""
+    from swarph_cli.commands.spawn import _git_identity_env
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1, "name": "gpt-ops", "role": "codex",
+        "cwd": str(tmp_path), "provider": "codex",
+        "git_identity": {"name": "gpt-ops"},
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    env = _git_identity_env(load_cell(p))
+    assert env["GIT_AUTHOR_NAME"] == "gpt-ops"
+    assert env["GIT_AUTHOR_EMAIL"] == "gpt-ops@brainsurfing.tech"  # default, not overridden
+
+
+def test_run_spawn_codex_launch_sets_git_identity(isolated_xdg, tmp_path, monkeypatch):
+    """End-to-end: the env execve carries to the provider includes the cell's git
+    identity (proves every membrane's launch injects it — codex path here)."""
+    payload = {
+        "schema_version": SCHEMA_VERSION_V1, "name": "gpt-ops", "role": "gpt-ops",
+        "cwd": str(tmp_path), "provider": "codex", "sandbox": "read-only",
+    }
+    p = tmp_path / "cell.yaml"
+    p.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    monkeypatch.setattr(
+        "shutil.which", lambda name: "/usr/bin/codex" if name == "codex" else None
+    )
+    captured = {}
+    monkeypatch.setattr("os.execve", lambda path, argv, env: captured.update(env=env))
+    rc = run_spawn(argv=[str(p), "--no-banner"])
+    assert rc == 0
+    assert captured["env"]["GIT_AUTHOR_NAME"] == "gpt-ops"
+    assert captured["env"]["GIT_AUTHOR_EMAIL"] == "gpt-ops@brainsurfing.tech"
+    assert captured["env"]["GIT_COMMITTER_NAME"] == "gpt-ops"

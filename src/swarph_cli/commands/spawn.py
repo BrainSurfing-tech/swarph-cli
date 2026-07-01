@@ -569,6 +569,43 @@ def _grok_env(cell: Cell) -> dict[str, str]:
     return env
 
 
+def _git_identity_env(cell: Cell) -> dict[str, str]:
+    """Per-cell git author/committer identity for the spawned session.
+
+    So a cell's commits are attributable to IT — the RACI ownership reconcile key
+    — instead of folding into a shared global ``git config user.name`` (which is
+    why co-located cells were previously indistinguishable in git history). Every
+    membrane merges this into the child env before exec, so it works uniformly
+    across claude/codex/antigravity/grok.
+
+    Identity resolution:
+      * default ``GIT_AUTHOR_NAME`` = the cell's MESH name (``cell.name`` — e.g.
+        ``lab-ovh``/``science-claude``, NOT the spawn ``role``), email
+        ``<name>@brainsurfing.tech``;
+      * an optional ``git_identity: {name, email}`` block in the cell.yaml (carried
+        through ``cell.extra``, so no schema change) overrides either field.
+
+    The cell identity intentionally WINS over any inherited ``GIT_AUTHOR_*`` (the
+    cell is the author), so the membranes ``.update()`` the env with this last.
+    """
+    name = cell.name
+    email = f"{cell.name}@brainsurfing.tech"
+    extra = getattr(cell, "extra", None)
+    if isinstance(extra, dict):
+        gid = extra.get("git_identity")
+        if isinstance(gid, dict):
+            if gid.get("name"):
+                name = str(gid["name"])
+            if gid.get("email"):
+                email = str(gid["email"])
+    return {
+        "GIT_AUTHOR_NAME": name,
+        "GIT_AUTHOR_EMAIL": email,
+        "GIT_COMMITTER_NAME": name,
+        "GIT_COMMITTER_EMAIL": email,
+    }
+
+
 def _link_grok_auth(link: Path) -> None:
     """Symlink the operator's ``~/.grok/auth.json`` to ``link`` for $0 OIDC.
 
@@ -1242,6 +1279,7 @@ class ClaudeMembrane(ProviderMembrane):
         # was already injected via --append-system-prompt, so it skips double-
         # injection. The env carries to the child either way.
         env = _claude_env()
+        env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
 
         # Per-OS launch mechanism — the SAME split as the tmux attach, for the
         # SAME reason:
@@ -1294,8 +1332,10 @@ class CodexMembrane(ProviderMembrane):
         )
 
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
+        env = _scrubbed_codex_env()
+        env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
         try:
-            os.execve(binary, argv, _scrubbed_codex_env())
+            os.execve(binary, argv, env)
         except OSError as exc:
             print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
             return 1
@@ -1333,8 +1373,10 @@ class AntigravityMembrane(ProviderMembrane):
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
         # execve carries exactly the scrubbed env to the child without mutating
         # this process's os.environ first (so a failed exec leaves us intact).
+        env = _agy_env()
+        env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
         try:
-            os.execve(binary, argv, _agy_env())
+            os.execve(binary, argv, env)
         except OSError as exc:
             print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
             return 1
@@ -1413,6 +1455,7 @@ class GrokMembrane(ProviderMembrane):
         # Isolated-HOME + billing-scrubbed env carried to grok without mutating
         # this process's os.environ first (a failed exec leaves us intact).
         env = _grok_env(cell)
+        env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
         # Per-OS launch — the SAME split as claude.launch (v0.12.1 fix): on
         # Windows os.exec* is emulated as spawn-and-exit (not a real replace),
         # which collapses the tmux pane (its root command exits, orphaning grok);
