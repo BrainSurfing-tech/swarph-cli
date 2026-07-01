@@ -1466,3 +1466,20 @@ def test_build_codex_argv_fresh_when_no_session(monkeypatch, tmp_path):
     cell = type("C", (), {"cwd": tmp_path, "extra": {}})()
     argv = spawn._build_codex_argv(cell, [])
     assert "resume" not in argv and argv[0] == "codex"
+
+
+def test_build_agy_argv_continues_when_history_exists(monkeypatch, tmp_path):
+    from swarph_cli.commands import spawn
+    home = tmp_path / "home"; cwd = tmp_path / "mycell"; cwd.mkdir()
+    (home / ".gemini" / "history" / "mycell").mkdir(parents=True)
+    monkeypatch.setattr(spawn.Path, "home", staticmethod(lambda: home))
+    cell = type("C", (), {"cwd": cwd, "extra": {}, "sandbox": None, "starter_prompt_path": None})()
+    assert "--continue" in spawn._build_agy_argv(cell, True, [])
+
+
+def test_build_agy_argv_fresh_when_no_history(monkeypatch, tmp_path):
+    from swarph_cli.commands import spawn
+    home = tmp_path / "home"; cwd = tmp_path / "mycell2"; cwd.mkdir()
+    monkeypatch.setattr(spawn.Path, "home", staticmethod(lambda: home))
+    cell = type("C", (), {"cwd": cwd, "extra": {}, "sandbox": None, "starter_prompt_path": None})()
+    assert "--continue" not in spawn._build_agy_argv(cell, True, [])

@@ -446,7 +446,10 @@ def _build_agy_argv(
     cell: Cell, no_starter: bool, passthrough: list[str]
 ) -> list[str]:
     argv = ["agy"]
-    
+
+    if (Path.home() / ".gemini" / "history" / cell.cwd.name).is_dir():
+        argv.append("--continue")
+
     # codex is adding cell.sandbox; default ON, only off on explicit falsy
     sandbox_attr = getattr(cell, "sandbox", None)
     if sandbox_attr is not None:
