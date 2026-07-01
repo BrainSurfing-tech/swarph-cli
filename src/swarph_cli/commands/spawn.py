@@ -447,8 +447,11 @@ def _build_agy_argv(
 ) -> list[str]:
     argv = ["agy"]
 
-    if (Path.home() / ".gemini" / "history" / cell.cwd.name).is_dir():
-        argv.append("--continue")
+    # Resume THIS cwd's conversation. agy keys sessions internally by the full
+    # workspace path and starts FRESH gracefully when there's none (gemini-researcher
+    # verified live 2026-07-01), so --continue is unconditional — no guard, and NOT
+    # keyed on ~/.gemini/history/ (a retired gemini-cli path antigravity never writes).
+    argv.append("--continue")
 
     # codex is adding cell.sandbox; default ON, only off on explicit falsy
     sandbox_attr = getattr(cell, "sandbox", None)
@@ -464,8 +467,10 @@ def _build_agy_argv(
     argv.extend(["--add-dir", str(cell.cwd)])
     
     if not no_starter and cell.starter_prompt_path:
-        argv.extend(["--prompt-interactive", read_starter_prompt(cell)])
-    
+        starter = read_starter_prompt(cell)
+        if starter:  # skip an empty starter file (matches claude/grok membranes)
+            argv.extend(["--prompt-interactive", starter])
+
     argv.extend(passthrough)
     return argv
 
@@ -479,18 +484,29 @@ def _newest_codex_session_for_cwd(cwd, sessions_root=None):
         files = sorted(glob.glob(str(root / "**" / "rollout-*.jsonl"), recursive=True))
     except OSError:
         return None
-    target = str(cwd)
-    best = None
-    for f in files:  # sorted ascending → last match is newest (date+ts in path)
+    # codex records os.getcwd() (realpath-resolved) while cell.cwd may be a logical
+    # path — accept either so a symlinked cwd still matches (never a false fresh).
+    try:
+        targets = {str(cwd), str(Path(cwd).resolve())}
+    except OSError:
+        targets = {str(cwd)}
+    # sorted() is ascending (zero-padded YYYY/MM/DD + ISO-ts in the path), so walk
+    # from the NEWEST end and return the first cwd match — no need to read older
+    # files. isinstance guards keep "never raises" airtight for a non-dict first line.
+    for f in reversed(files):
         try:
             with open(f) as fh:
                 meta = json.loads(fh.readline())
-            pl = meta.get("payload", meta)
-            if pl.get("cwd") == target and pl.get("originator") != "codex_exec":
-                best = pl.get("session_id") or pl.get("id")
         except (OSError, ValueError):
             continue
-    return best
+        if not isinstance(meta, dict):
+            continue
+        pl = meta.get("payload", meta)
+        if not isinstance(pl, dict):
+            continue
+        if pl.get("cwd") in targets and pl.get("originator") != "codex_exec":
+            return pl.get("session_id") or pl.get("id")
+    return None
 
 
 def _build_codex_argv(cell: Cell, passthrough: list[str]) -> list[str]:
