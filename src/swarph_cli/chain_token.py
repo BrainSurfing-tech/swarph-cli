@@ -21,6 +21,10 @@ def sign_chain_token(secret: str, chain_id: str, depth: int, jti: str) -> str:
 
 
 def verify_chain_token(secret: str, token: str) -> Optional[dict]:
+    # token is opaque untrusted input (network / mesh DM); a non-str value has no
+    # .split and would AttributeError past the except below. Guard explicitly.
+    if not isinstance(token, str):
+        return None
     try:
         body_s, sig_s = token.split(".", 1)
         payload = _unb64(body_s)
@@ -31,8 +35,8 @@ def verify_chain_token(secret: str, token: str) -> Optional[dict]:
         if not isinstance(d, dict) or {"chain_id", "depth", "jti"} - d.keys():
             return None
         return {"chain_id": d["chain_id"], "depth": int(d["depth"]), "jti": d["jti"]}
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
-        # the known malformed-input paths (split / b64 / json / int / dict). Fail
-        # safe to None. NOT a bare `Exception`: an unexpected error should surface
-        # as a bug, not silently masquerade as "invalid token".
+    except (ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError):
+        # the known malformed-input paths (split / b64 / json / int / dict /
+        # non-str secret). Fail safe to None. NOT a bare `Exception`: an
+        # unexpected error should surface as a bug, not masquerade as "invalid".
         return None
