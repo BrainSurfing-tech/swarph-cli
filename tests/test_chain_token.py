@@ -25,3 +25,10 @@ def test_wrong_secret_rejected():
 def test_malformed_never_raises():
     for bad in ["", "nodot", "a.b.c", "!!.??", "x."]:
         assert verify_chain_token(SECRET, bad) is None
+
+def test_non_str_token_fails_safe_not_raises():
+    # opaque tokens arrive from untrusted input (network / mesh DM); a non-str
+    # value (None, bytes, int) must fail safe to None, never AttributeError out
+    # of the caller. Regression for the gateway-copy fix that lagged the CLI.
+    for bad in [None, 123, b"a.b", ["a", "b"], {"chain_id": "x"}]:
+        assert verify_chain_token(SECRET, bad) is None
