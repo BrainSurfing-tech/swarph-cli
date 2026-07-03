@@ -27,6 +27,7 @@ This is one of three repos in the v0.3.x architecture:
 swarph "prompt"          one-shot against any provider (claude/openai/gemini/deepseek/grok)
 swarph chat              interactive REPL — multi-turn, slash commands, live provider switch
 swarph brain-ask "<q>"   search the swarph-brain (gbrain) memory — $0 cited answer or raw chunks
+swarph codegraph "<q>"   structural code search — find where a symbol is defined / what calls it
 swarph brain serve       run the gbrain HTTP brain server (the $0 semantic memory)
 swarph gateway serve     run the bundled mesh-gateway server (the mesh's coordination/DM hub)
 swarph service serve     stand up a $0 subscription-LLM HTTP lane (claude/codex/gemini)
@@ -71,6 +72,19 @@ $ swarph brain serve --gbrain-bin /opt/gbrain        # explicit binary (else GBR
 ```
 
 Defaults are loopback bind (expose a tailnet IP explicitly) and a **1-year token TTL** — a short TTL silently 401s long-lived mesh cells, a lesson learned the hard way. If `gbrain` isn't on `PATH` the verb prints an install hint and exits `2`; `brain-ask` still queries any already-running brain.
+
+### `swarph codegraph` (v0.24.0)
+
+Structural code search over a local **CodeGraph** index — the *what-where* hemisphere of the swarph brain. Ask in natural language where a function/class/symbol is **defined** or what **calls** it; get ranked hits with file:line, signature, and caller count.
+
+```bash
+$ swarph codegraph "which function escapes special characters for HTML"
+$ swarph codegraph "cron expression validator" --json --limit 5
+```
+
+It queries a locally-built index at `~/.swarph/codegraph/index.db` (override with `--index` or `SWARPH_CODEGRAPH_INDEX`); the index is built out-of-band from your repos (tree-sitter → SQLite FTS5, BM25-ranked). If no index is present the verb simply returns no matches — it never touches the network and never reads code it wasn't pointed at. Results are scoped by an owner-allowlist gate (`--caller-cell` / `SWARPH_CELL`, default: your cell): public repos are always visible; private repos are visible to the owning cell.
+
+The same capability is exposed as an **MCP tool** — running `swarph mcp-server` publishes `swarph_codegraph_query` alongside `swarph_search`/`swarph_add`/`swarph_describe`, so any MCP host's agent auto-discovers it and can reach for code-structure lookups while reading, writing, or debugging code. (Why a tool and not an always-on retrieval lane? Because *intent* to consult code structure lives with the calling agent — which already knows it's working on code — not in a similarity score.)
 
 ### `swarph gateway`
 
