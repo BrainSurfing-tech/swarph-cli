@@ -149,7 +149,10 @@ def _local_allowlist(index_path: str, caller_cell: str) -> dict:
     Fail-safe: unreadable index -> empty allowlist (structural_query then
     returns [] via its own A8 gate)."""
     try:
-        con = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
+        # A2: bound the connect + wait so a locked db can never hang the
+        # default query path (mirrors _connect's busy_timeout guarantee).
+        con = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True, timeout=0.1)
+        con.execute("PRAGMA busy_timeout=100")
         repos = [r[0] for r in con.execute("SELECT name FROM repos")]
         con.close()
     except sqlite3.Error:
