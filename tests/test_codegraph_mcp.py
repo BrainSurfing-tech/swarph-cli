@@ -83,3 +83,16 @@ def test_codegraph_tool_registered_on_server():
     tools = asyncio.run(mcp_server.mcp.list_tools())
     names = {t.name for t in tools}
     assert "swarph_codegraph_query" in names
+
+
+def test_codegraph_query_never_raises_on_non_sqlite_exception(monkeypatch):
+    # A2 (the broad except): _codegraph_query must swallow ANY exception, not
+    # just sqlite3.Error — a row-shape drift or import error must degrade to []
+    # for the MCP host, never a transport exception.
+    from swarph_cli.commands import codegraph
+
+    def _boom(*a, **k):
+        raise ValueError("row shape drifted")
+
+    monkeypatch.setattr(codegraph, "structural_query", _boom)
+    assert mcp_server._codegraph_query("anything") == []
