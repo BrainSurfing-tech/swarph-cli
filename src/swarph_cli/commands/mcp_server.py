@@ -11,12 +11,14 @@ A host mounts it with a stdio server entry, e.g. in ``.mcp.json`` /
     {"mcpServers": {"swarph": {"command": "swarph",
                                "args": ["mcp-server"]}}}
 
-Three tools are exposed, each backed by a plain, unit-testable helper so the
+Four tools are exposed, each backed by a plain, unit-testable helper so the
 tool LOGIC is tested without spinning up the stdio transport:
 
-* ``swarph_search(query)`` → :func:`_search` — metaedge.surf semantic search.
-* ``swarph_add(uri)``      → :func:`_add`    — trust-gated + scanned install.
-* ``swarph_describe(uri)`` → :func:`_describe` — parse a URI, no install.
+* ``swarph_search(query)``           → :func:`_search` — metaedge.surf semantic search.
+* ``swarph_add(uri)``                → :func:`_add`    — trust-gated + scanned install.
+* ``swarph_describe(uri)``           → :func:`_describe` — parse a URI, no install.
+* ``swarph_codegraph_query(query)``  → :func:`_codegraph_query` — structural code
+  search (definitions + call sites) over the local codegraph index.
 
 The MCP Python SDK (``mcp``) is an OPTIONAL extra. :func:`run_mcp_server`
 fails gracefully with a ``pip install swarph-cli[mcp]`` hint when it's absent;
@@ -33,6 +35,7 @@ import urllib.error
 import urllib.request
 
 from swarph_cli.commands import add
+from swarph_cli.commands import codegraph
 
 # --------------------------------------------------------------------------- #
 # Config
@@ -46,6 +49,12 @@ _DEFAULT_METAEDGE_URL = "https://metaedge.surf"
 #: this from env / ``--metaedge-url`` before ``mcp.run()`` so a single source
 #: of truth feeds every ``swarph_search`` call.
 _METAEDGE_URL = os.environ.get("SWARPH_METAEDGE_URL", _DEFAULT_METAEDGE_URL)
+
+#: Module-level local codegraph index path the FastMCP tool wrapper reads.
+#: Overridable via ``SWARPH_CODEGRAPH_INDEX`` (mirrors ``codegraph.DEFAULT_INDEX``).
+_CODEGRAPH_INDEX = os.path.expanduser(
+    os.environ.get("SWARPH_CODEGRAPH_INDEX", "~/.swarph/codegraph/index.db")
+)
 
 
 def _metaedge_token() -> str | None:
@@ -131,6 +140,46 @@ def _describe(uri: str) -> dict:
     }
 
 
+def _codegraph_query(query: str, *, limit: int = 8) -> list[dict]:
+    """Structural code search over the local codegraph index (Task 1).
+
+    Delegates to :func:`codegraph.structural_query` against the module-level
+    ``_CODEGRAPH_INDEX`` path, using ``SWARPH_CELL`` (else
+    ``codegraph.DEFAULT_CALLER_CELL``) as the A8 caller identity and the
+    default operate-what-you-own allowlist (``allowlist=None``).
+
+    NEVER raises — any exception (missing index, corrupt db, bad query, or
+    anything else) is swallowed and returns ``[]`` so the MCP host always
+    gets a clean empty result rather than a transport error.
+
+    Returns COMPACT rows only — score/qualified_name/docstring are dropped
+    to keep the tool output tight for the calling agent.
+    """
+    try:
+        caller_cell = os.environ.get("SWARPH_CELL", codegraph.DEFAULT_CALLER_CELL)
+        rows = codegraph.structural_query(
+            query,
+            index_path=_CODEGRAPH_INDEX,
+            caller_cell=caller_cell,
+            limit=limit,
+            allowlist=None,
+        )
+        return [
+            {
+                "name": r["name"],
+                "kind": r["kind"],
+                "repo": r["repo"],
+                "file_path": r["file_path"],
+                "start_line": r["start_line"],
+                "signature": r["signature"],
+                "callers": r["callers"],
+            }
+            for r in rows
+        ]
+    except Exception:
+        return []
+
+
 # --------------------------------------------------------------------------- #
 # FastMCP server — thin @tool wrappers over the helpers above
 # --------------------------------------------------------------------------- #
@@ -160,6 +209,11 @@ try:
         """Parse a swarph:// URI and show what it points at, without installing."""
         return _describe(uri)
 
+    @mcp.tool()
+    def swarph_codegraph_query(query: str) -> list[dict]:
+        """Find where a function/class/method/symbol is DEFINED, or what CALLS it, across the indexed code repositories. Use this whenever you are reading, writing, debugging, or navigating code and need to locate a definition or trace call relationships by natural-language description (e.g. 'which function escapes HTML', 'where is the retry-parse helper defined', 'what calls the circuit breaker'). Returns ranked symbols with file path, line, signature, and caller count."""
+        return _codegraph_query(query)
+
 except ImportError:  # pragma: no cover - exercised only when SDK absent
     mcp = None
 
@@ -183,7 +237,8 @@ def run_mcp_server(argv) -> int:
         prog="swarph mcp-server",
         description=(
             "Run an MCP (stdio) server exposing swarph_search / swarph_add / "
-            "swarph_describe so any MCP host's AI gets the swarph toolbelt."
+            "swarph_describe / swarph_codegraph_query so any MCP host's AI "
+            "gets the swarph toolbelt."
         ),
     )
     parser.add_argument(
