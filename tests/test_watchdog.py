@@ -1039,3 +1039,8 @@ def test_parser_defaults_process_name_claude_liveness_cmd_none():
     ns = watchdog._build_parser().parse_args(["--check"])
     assert ns.process_name == "claude"
     assert ns.liveness_cmd is None
+
+
+def test_version_is_0_25_0():
+    import swarph_cli
+    assert swarph_cli.__version__ == "0.25.0"
