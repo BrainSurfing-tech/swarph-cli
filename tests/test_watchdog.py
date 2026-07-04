@@ -63,6 +63,32 @@ def test_process_alive_honors_process_name():
     assert pgrep_calls == [["pgrep", "-f", "grok"]]
 
 
+def _panes_run(stdout):
+    return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+
+def test_resolve_send_target_default_prefers_node_pane():
+    from swarph_cli.commands import watchdog
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               return_value=_panes_run("%1 bash\n%2 node\n")):
+        assert watchdog._resolve_send_target("sess") == "%2"
+
+
+def test_resolve_send_target_honors_process_name():
+    from swarph_cli.commands import watchdog
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               return_value=_panes_run("%1 bash\n%2 grok\n")):
+        assert watchdog._resolve_send_target("sess", process_name="grok") == "%2"
+
+
+def test_resolve_send_target_process_name_wins_over_fallback():
+    from swarph_cli.commands import watchdog
+    # both a node pane and a grok pane present; process_name='grok' must win.
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               return_value=_panes_run("%1 node\n%2 grok\n")):
+        assert watchdog._resolve_send_target("sess", process_name="grok") == "%2"
+
+
 @pytest.fixture
 def isolated_state(tmp_path, monkeypatch) -> Iterator[Path]:
     """Pin TMPDIR + XDG_STATE_HOME under tmp_path; clear MESH_GATEWAY_TOKEN."""

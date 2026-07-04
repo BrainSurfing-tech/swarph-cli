@@ -655,15 +655,15 @@ def _tmux_session_exists(name: str) -> bool:
         return False
 
 
-def _resolve_send_target(name: str) -> str:
-    """Resolve a session name to the pane actually running the claude TUI.
+def _resolve_send_target(name: str, process_name: str = "claude") -> str:
+    """Resolve a session name to the pane actually running the cell's agent.
 
     `send-keys -t <session>` lands on the session's ACTIVE pane — on a
-    multi-pane cell that can be a bash/log pane, where an injected
-    `/model ...` would execute as a SHELL command (drop seat-A N3). Prefer
-    the pane whose current command looks like the claude CLI (node/claude);
-    fall back to the session name unchanged when tmux is unavailable, the
-    listing fails, or no pane matches.
+    multi-pane cell that can be a bash/log pane, where an injected wake would
+    execute as a SHELL command. Prefer the pane whose current command matches
+    the cell's `process_name`; then fall back to the claude-CLI heuristic
+    (claude runs under node); then to the session name unchanged when tmux is
+    unavailable, the listing fails, or no pane matches.
     """
     try:
         result = subprocess.run(
@@ -673,8 +673,11 @@ def _resolve_send_target(name: str) -> str:
         )
         if result.returncode != 0:
             return name
-        for line in result.stdout.splitlines():
-            parts = line.split()
+        panes = [ln.split() for ln in result.stdout.splitlines()]
+        for parts in panes:                       # exact process_name match wins
+            if len(parts) >= 2 and parts[1] == process_name:
+                return parts[0]
+        for parts in panes:                       # claude-CLI fallback (node)
             if len(parts) >= 2 and parts[1] in ("claude", "node"):
                 return parts[0]
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -682,7 +685,9 @@ def _resolve_send_target(name: str) -> str:
     return name
 
 
-def _tmux_send_keys(name: str, text: str, clear_input: bool = False) -> bool:
+def _tmux_send_keys(
+    name: str, text: str, clear_input: bool = False, process_name: str = "claude"
+) -> bool:
     """Send `text` + Enter to a tmux target.
 
     The target is resolved to the claude-TUI pane first (_resolve_send_target,
@@ -694,7 +699,7 @@ def _tmux_send_keys(name: str, text: str, clear_input: bool = False) -> bool:
     text is noise, but `/model ...` merging into typed text submits a
     corrupted command.
     """
-    target = _resolve_send_target(name)
+    target = _resolve_send_target(name, process_name)
     keys = ["C-u", text, "Enter"] if clear_input else [text, "Enter"]
     try:
         result = subprocess.run(
@@ -1464,7 +1469,8 @@ def _run_local_check(args: argparse.Namespace) -> int:
                 f"{model_text} into {tmux_session}",
                 file=sys.stderr,
             )
-            sent = _tmux_send_keys(tmux_session, model_text, clear_input=True)
+            sent = _tmux_send_keys(tmux_session, model_text, clear_input=True,
+                                   process_name=args.process_name)
             diag["send_keys_ok"] = sent
             if not sent:
                 # BLOCK-1 fix: a FAILED inject (wedged / timing-out pane) is
@@ -1507,7 +1513,7 @@ def _run_local_check(args: argparse.Namespace) -> int:
         f"watchdog wake — cursor stale {cursor_age}s, "
         f"unread={unread}; please drain inbox"
     )
-    sent = _tmux_send_keys(tmux_session, wake_text)
+    sent = _tmux_send_keys(tmux_session, wake_text, process_name=args.process_name)
     diag["send_keys_ok"] = sent
     if sent:
         _record_a1_fired(marker, cursor_mtime)
