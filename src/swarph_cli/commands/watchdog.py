@@ -620,10 +620,10 @@ def _process_alive(tmux_session: str, process_name: str = "claude") -> bool:
             capture_output=True, text=True, timeout=5,
         )
         if pg.returncode != 0:
-            return False  # no claude process anywhere on the host
-        claude_pids = [int(p) for p in pg.stdout.split() if p.strip().isdigit()]
-        # Alive only if a claude process is a descendant of THIS session's panes.
-        return any(_pid_under(cpid, pane_pids) for cpid in claude_pids)
+            return False  # no matching process anywhere on the host
+        matched_pids = [int(p) for p in pg.stdout.split() if p.strip().isdigit()]
+        # Alive only if a matching process is a descendant of THIS session's panes.
+        return any(_pid_under(cpid, pane_pids) for cpid in matched_pids)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return True  # assume alive on detection error
 
