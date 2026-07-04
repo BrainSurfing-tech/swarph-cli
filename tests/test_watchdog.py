@@ -11,6 +11,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterator
 from unittest.mock import patch
 
@@ -28,6 +29,64 @@ from swarph_cli.commands.watchdog import (
     _resolve_log_path,
     run_watchdog,
 )
+
+
+def _fake_run_factory(calls, pgrep_rc=1):
+    """subprocess.run stub: records argv, answers the two calls _process_alive makes."""
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["tmux", "list-panes"]:
+            return SimpleNamespace(returncode=0, stdout="4242\n", stderr="")
+        if cmd and cmd[0] == "pgrep":
+            # rc != 0 → _process_alive returns False before _pid_under; we only
+            # assert the pgrep ARG here, not the liveness verdict.
+            return SimpleNamespace(returncode=pgrep_rc, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    return fake_run
+
+
+def test_process_alive_default_greps_claude():
+    from swarph_cli.commands import watchdog
+    calls = []
+    with patch("swarph_cli.commands.watchdog.subprocess.run", _fake_run_factory(calls)):
+        watchdog._process_alive("some-session")
+    pgrep_calls = [c for c in calls if c and c[0] == "pgrep"]
+    assert pgrep_calls == [["pgrep", "-f", "claude"]]
+
+
+def test_process_alive_honors_process_name():
+    from swarph_cli.commands import watchdog
+    calls = []
+    with patch("swarph_cli.commands.watchdog.subprocess.run", _fake_run_factory(calls)):
+        watchdog._process_alive("some-session", process_name="grok")
+    pgrep_calls = [c for c in calls if c and c[0] == "pgrep"]
+    assert pgrep_calls == [["pgrep", "-f", "grok"]]
+
+
+def _panes_run(stdout):
+    return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+
+def test_resolve_send_target_default_prefers_node_pane():
+    from swarph_cli.commands import watchdog
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               return_value=_panes_run("%1 bash\n%2 node\n")):
+        assert watchdog._resolve_send_target("sess") == "%2"
+
+
+def test_resolve_send_target_honors_process_name():
+    from swarph_cli.commands import watchdog
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               return_value=_panes_run("%1 bash\n%2 grok\n")):
+        assert watchdog._resolve_send_target("sess", process_name="grok") == "%2"
+
+
+def test_resolve_send_target_process_name_wins_over_fallback():
+    from swarph_cli.commands import watchdog
+    # both a node pane and a grok pane present; process_name='grok' must win.
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               return_value=_panes_run("%1 node\n%2 grok\n")):
+        assert watchdog._resolve_send_target("sess", process_name="grok") == "%2"
 
 
 @pytest.fixture
@@ -782,7 +841,7 @@ class _R:
         self.stdout = stdout
 
 
-def _fake_run_factory(panes_rc, panes_out, pgrep_rc, pgrep_out, sessions_rc=0):
+def _fake_run_factory_legacy(panes_rc, panes_out, pgrep_rc, pgrep_out, sessions_rc=0):
     """Mock subprocess.run distinguishing tmux list-panes vs list-sessions."""
     def fake_run(cmd, **kw):
         if cmd[0] == "tmux" and cmd[1] == "list-panes":
@@ -807,14 +866,14 @@ def test_process_alive_ignores_host_wide_claude(monkeypatch):
     """A claude process that is NOT a descendant of THIS session's panes must
     NOT count as alive (the old host-wide pgrep masked dead sessions)."""
     monkeypatch.setattr(_wd.subprocess, "run",
-                        _fake_run_factory(0, "1000\n", 0, "2000\n"))
+                        _fake_run_factory_legacy(0, "1000\n", 0, "2000\n"))
     monkeypatch.setattr(_wd, "_pid_under", lambda pid, anc, **k: False)
     assert _wd._process_alive("mysess") is False
 
 
 def test_process_alive_true_when_claude_under_session(monkeypatch):
     monkeypatch.setattr(_wd.subprocess, "run",
-                        _fake_run_factory(0, "1000\n", 0, "2000\n"))
+                        _fake_run_factory_legacy(0, "1000\n", 0, "2000\n"))
     monkeypatch.setattr(_wd, "_pid_under", lambda pid, anc, **k: True)
     assert _wd._process_alive("mysess") is True
 
@@ -822,7 +881,7 @@ def test_process_alive_true_when_claude_under_session(monkeypatch):
 def test_process_alive_false_when_session_absent_but_server_up(monkeypatch):
     """Server reachable + this session genuinely gone → dead (A2 may fire)."""
     monkeypatch.setattr(_wd.subprocess, "run",
-                        _fake_run_factory(1, "", 0, "2000\n", sessions_rc=0))
+                        _fake_run_factory_legacy(1, "", 0, "2000\n", sessions_rc=0))
     assert _wd._process_alive("ghost") is False
 
 
@@ -832,13 +891,13 @@ def test_process_alive_assumes_alive_when_no_tmux_server(monkeypatch):
     determine liveness via tmux, so must assume alive, NOT false-fire an A2
     respawn of a session that's actually alive under ubuntu's tmux."""
     monkeypatch.setattr(_wd.subprocess, "run",
-                        _fake_run_factory(1, "", 0, "2000\n", sessions_rc=1))
+                        _fake_run_factory_legacy(1, "", 0, "2000\n", sessions_rc=1))
     assert _wd._process_alive("lab") is True
 
 
 def test_process_alive_false_when_no_claude_anywhere(monkeypatch):
     monkeypatch.setattr(_wd.subprocess, "run",
-                        _fake_run_factory(0, "1000\n", 1, ""))
+                        _fake_run_factory_legacy(0, "1000\n", 1, ""))
     assert _wd._process_alive("mysess") is False
 
 
@@ -931,3 +990,57 @@ def test_stale_cursor_and_stale_marker_still_fires_a1(isolated_state, stale_curs
             "--threshold", "60",
         ])
     assert rc == 1  # both signals dark → A1 (unchanged)
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — _liveness_via_cmd escape hatch + mutual exclusion
+# ---------------------------------------------------------------------------
+
+
+def test_liveness_via_cmd_rc0_is_alive():
+    from swarph_cli.commands import watchdog
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
+        assert watchdog._liveness_via_cmd("true") is True
+
+
+def test_liveness_via_cmd_nonzero_is_dead():
+    from swarph_cli.commands import watchdog
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               return_value=SimpleNamespace(returncode=1, stdout="", stderr="")):
+        assert watchdog._liveness_via_cmd("false") is False
+
+
+def test_liveness_via_cmd_timeout_assumes_alive():
+    from swarph_cli.commands import watchdog
+    import subprocess as _sp
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               side_effect=_sp.TimeoutExpired(cmd="x", timeout=5)):
+        assert watchdog._liveness_via_cmd("sleep 99") is True
+
+
+def test_liveness_via_cmd_oserror_assumes_alive():
+    from swarph_cli.commands import watchdog
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               side_effect=OSError("boom")):
+        assert watchdog._liveness_via_cmd("bad") is True
+
+
+def test_process_name_and_liveness_cmd_are_mutually_exclusive():
+    from swarph_cli.commands import watchdog
+    parser = watchdog._build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--check", "--process-name", "grok",
+                           "--liveness-cmd", "pgrep -f grok"])
+
+
+def test_parser_defaults_process_name_claude_liveness_cmd_none():
+    from swarph_cli.commands import watchdog
+    ns = watchdog._build_parser().parse_args(["--check"])
+    assert ns.process_name == "claude"
+    assert ns.liveness_cmd is None
+
+
+def test_version_is_0_25_0():
+    import swarph_cli
+    assert swarph_cli.__version__ == "0.25.0"

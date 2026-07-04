@@ -216,7 +216,7 @@ def test_injected_payload_is_exactly_fixed_template(isolated_state, stale_cursor
     # clear_input=True is part of the fixed contract (drop C2): C-u precedes
     # the payload so it can never concatenate onto a half-typed buffer.
     assert model_calls[0] == call(
-        "lab", f"/model {_DEFAULT_STABLE_MODEL}", clear_input=True
+        "lab", f"/model {_DEFAULT_STABLE_MODEL}", clear_input=True, process_name="claude"
     )
 
 
