@@ -628,6 +628,22 @@ def _process_alive(tmux_session: str, process_name: str = "claude") -> bool:
         return True  # assume alive on detection error
 
 
+def _liveness_via_cmd(cmd: str) -> bool:
+    """Escape-hatch liveness probe: run `cmd`; exit 0 = alive, non-zero = dead.
+
+    For cells whose liveness a process name can't express. Bounded timeout;
+    on timeout / OSError assume ALIVE — a broken or slow probe must never
+    false-fire the destructive A2 respawn (same fail-safe as _process_alive).
+    """
+    try:
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return True
+
+
 def _tmux_session_exists(name: str) -> bool:
     try:
         result = subprocess.run(
@@ -1270,7 +1286,10 @@ def _run_local_check(args: argparse.Namespace) -> int:
             return 0
 
     # FALLBACK signal: pgrep claude (per mother #1021 AND-gate)
-    process_alive = _process_alive(tmux_session, args.process_name)
+    if args.liveness_cmd:
+        process_alive = _liveness_via_cmd(args.liveness_cmd)
+    else:
+        process_alive = _process_alive(tmux_session, args.process_name)
     diag["process_alive"] = process_alive
 
     # Check unread DM queue at gateway. If no unread DMs, no need to wake.
@@ -1731,6 +1750,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "pass 'node' for a codex cell, 'grok' for a grok cell so a "
              "non-Claude cell isn't mis-read as dead. Mutually exclusive with "
              "--liveness-cmd.",
+    )
+    liveness_group.add_argument(
+        "--liveness-cmd", default=None,
+        help="Escape hatch: shell command whose exit status is the liveness "
+             "verdict (0 = alive, non-zero = dead) instead of the pgrep gate. "
+             "On timeout/error the cell is assumed ALIVE (never false-fire the "
+             "destructive A2 respawn). Mutually exclusive with --process-name.",
     )
     p.add_argument("--no-respawn", action="store_true")
     p.add_argument(

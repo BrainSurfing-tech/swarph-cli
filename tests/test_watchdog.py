@@ -964,3 +964,52 @@ def test_stale_cursor_and_stale_marker_still_fires_a1(isolated_state, stale_curs
             "--threshold", "60",
         ])
     assert rc == 1  # both signals dark → A1 (unchanged)
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — _liveness_via_cmd escape hatch + mutual exclusion
+# ---------------------------------------------------------------------------
+
+
+def test_liveness_via_cmd_rc0_is_alive():
+    from swarph_cli.commands import watchdog
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
+        assert watchdog._liveness_via_cmd("true") is True
+
+
+def test_liveness_via_cmd_nonzero_is_dead():
+    from swarph_cli.commands import watchdog
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               return_value=SimpleNamespace(returncode=1, stdout="", stderr="")):
+        assert watchdog._liveness_via_cmd("false") is False
+
+
+def test_liveness_via_cmd_timeout_assumes_alive():
+    from swarph_cli.commands import watchdog
+    import subprocess as _sp
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               side_effect=_sp.TimeoutExpired(cmd="x", timeout=5)):
+        assert watchdog._liveness_via_cmd("sleep 99") is True
+
+
+def test_liveness_via_cmd_oserror_assumes_alive():
+    from swarph_cli.commands import watchdog
+    with patch("swarph_cli.commands.watchdog.subprocess.run",
+               side_effect=OSError("boom")):
+        assert watchdog._liveness_via_cmd("bad") is True
+
+
+def test_process_name_and_liveness_cmd_are_mutually_exclusive():
+    from swarph_cli.commands import watchdog
+    parser = watchdog._build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--check", "--process-name", "grok",
+                           "--liveness-cmd", "pgrep -f grok"])
+
+
+def test_parser_defaults_process_name_claude_liveness_cmd_none():
+    from swarph_cli.commands import watchdog
+    ns = watchdog._build_parser().parse_args(["--check"])
+    assert ns.process_name == "claude"
+    assert ns.liveness_cmd is None
