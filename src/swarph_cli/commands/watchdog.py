@@ -580,14 +580,15 @@ def _pid_under(pid: int, ancestors: set, _max_depth: int = 40) -> bool:
     return cur in ancestors
 
 
-def _process_alive(tmux_session: str) -> bool:
-    """Detect if a claude process is running INSIDE the named tmux session.
+def _process_alive(tmux_session: str, process_name: str = "claude") -> bool:
+    """Detect if a `process_name` process is running INSIDE the named tmux session.
 
-    Scopes to the session's pane PIDs (and their descendants) rather than a
-    host-wide ``pgrep claude``: on a multi-session host, an unrelated cell's
-    claude would otherwise mask THIS session's death and suppress the A2 alert
-    (adversarial-sweep MED). Best-effort; falls back to True (assume alive) on
-    detection error so a broken detector never false-fires A2.
+    `process_name` (default "claude") is the command the cell's agent runs —
+    node/codex cells pass "node", grok cells pass "grok". Scopes to the
+    session's pane PIDs (and descendants) rather than a host-wide pgrep: on a
+    multi-session host, an unrelated cell's process would otherwise mask THIS
+    session's death and suppress the A2 alert. Best-effort; falls back to True
+    (assume alive) on detection error so a broken detector never false-fires A2.
     """
     try:
         panes = subprocess.run(
@@ -615,16 +616,32 @@ def _process_alive(tmux_session: str) -> bool:
             return True  # ambiguous (session with no pane pids) → don't false-fire
 
         pg = subprocess.run(
-            ["pgrep", "-f", "claude"],
+            ["pgrep", "-f", process_name],
             capture_output=True, text=True, timeout=5,
         )
         if pg.returncode != 0:
-            return False  # no claude process anywhere on the host
-        claude_pids = [int(p) for p in pg.stdout.split() if p.strip().isdigit()]
-        # Alive only if a claude process is a descendant of THIS session's panes.
-        return any(_pid_under(cpid, pane_pids) for cpid in claude_pids)
+            return False  # no matching process anywhere on the host
+        matched_pids = [int(p) for p in pg.stdout.split() if p.strip().isdigit()]
+        # Alive only if a matching process is a descendant of THIS session's panes.
+        return any(_pid_under(cpid, pane_pids) for cpid in matched_pids)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return True  # assume alive on detection error
+
+
+def _liveness_via_cmd(cmd: str) -> bool:
+    """Escape-hatch liveness probe: run `cmd`; exit 0 = alive, non-zero = dead.
+
+    For cells whose liveness a process name can't express. Bounded timeout;
+    on timeout / OSError assume ALIVE — a broken or slow probe must never
+    false-fire the destructive A2 respawn (same fail-safe as _process_alive).
+    """
+    try:
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return True
 
 
 def _tmux_session_exists(name: str) -> bool:
@@ -638,15 +655,15 @@ def _tmux_session_exists(name: str) -> bool:
         return False
 
 
-def _resolve_send_target(name: str) -> str:
-    """Resolve a session name to the pane actually running the claude TUI.
+def _resolve_send_target(name: str, process_name: str = "claude") -> str:
+    """Resolve a session name to the pane actually running the cell's agent.
 
     `send-keys -t <session>` lands on the session's ACTIVE pane — on a
-    multi-pane cell that can be a bash/log pane, where an injected
-    `/model ...` would execute as a SHELL command (drop seat-A N3). Prefer
-    the pane whose current command looks like the claude CLI (node/claude);
-    fall back to the session name unchanged when tmux is unavailable, the
-    listing fails, or no pane matches.
+    multi-pane cell that can be a bash/log pane, where an injected wake would
+    execute as a SHELL command. Prefer the pane whose current command matches
+    the cell's `process_name`; then fall back to the claude-CLI heuristic
+    (claude runs under node); then to the session name unchanged when tmux is
+    unavailable, the listing fails, or no pane matches.
     """
     try:
         result = subprocess.run(
@@ -656,8 +673,11 @@ def _resolve_send_target(name: str) -> str:
         )
         if result.returncode != 0:
             return name
-        for line in result.stdout.splitlines():
-            parts = line.split()
+        panes = [ln.split() for ln in result.stdout.splitlines()]
+        for parts in panes:                       # exact process_name match wins
+            if len(parts) >= 2 and parts[1] == process_name:
+                return parts[0]
+        for parts in panes:                       # claude-CLI fallback (node)
             if len(parts) >= 2 and parts[1] in ("claude", "node"):
                 return parts[0]
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -665,7 +685,9 @@ def _resolve_send_target(name: str) -> str:
     return name
 
 
-def _tmux_send_keys(name: str, text: str, clear_input: bool = False) -> bool:
+def _tmux_send_keys(
+    name: str, text: str, clear_input: bool = False, process_name: str = "claude"
+) -> bool:
     """Send `text` + Enter to a tmux target.
 
     The target is resolved to the claude-TUI pane first (_resolve_send_target,
@@ -677,7 +699,7 @@ def _tmux_send_keys(name: str, text: str, clear_input: bool = False) -> bool:
     text is noise, but `/model ...` merging into typed text submits a
     corrupted command.
     """
-    target = _resolve_send_target(name)
+    target = _resolve_send_target(name, process_name)
     keys = ["C-u", text, "Enter"] if clear_input else [text, "Enter"]
     try:
         result = subprocess.run(
@@ -1269,7 +1291,10 @@ def _run_local_check(args: argparse.Namespace) -> int:
             return 0
 
     # FALLBACK signal: pgrep claude (per mother #1021 AND-gate)
-    process_alive = _process_alive(tmux_session)
+    if args.liveness_cmd:
+        process_alive = _liveness_via_cmd(args.liveness_cmd)
+    else:
+        process_alive = _process_alive(tmux_session, args.process_name)
     diag["process_alive"] = process_alive
 
     # Check unread DM queue at gateway. If no unread DMs, no need to wake.
@@ -1444,7 +1469,8 @@ def _run_local_check(args: argparse.Namespace) -> int:
                 f"{model_text} into {tmux_session}",
                 file=sys.stderr,
             )
-            sent = _tmux_send_keys(tmux_session, model_text, clear_input=True)
+            sent = _tmux_send_keys(tmux_session, model_text, clear_input=True,
+                                   process_name=args.process_name)
             diag["send_keys_ok"] = sent
             if not sent:
                 # BLOCK-1 fix: a FAILED inject (wedged / timing-out pane) is
@@ -1487,7 +1513,7 @@ def _run_local_check(args: argparse.Namespace) -> int:
         f"watchdog wake — cursor stale {cursor_age}s, "
         f"unread={unread}; please drain inbox"
     )
-    sent = _tmux_send_keys(tmux_session, wake_text)
+    sent = _tmux_send_keys(tmux_session, wake_text, process_name=args.process_name)
     diag["send_keys_ok"] = sent
     if sent:
         _record_a1_fired(marker, cursor_mtime)
@@ -1722,6 +1748,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gateway", default=_DEFAULT_GATEWAY_URL)
     p.add_argument("--tmux-session", default=None)
     p.add_argument("--peer", default=None)
+    liveness_group = p.add_mutually_exclusive_group()
+    liveness_group.add_argument(
+        "--process-name", default="claude",
+        help="Process the cell's agent runs, used by the liveness gate's "
+             "`pgrep -f` (scoped to the session's panes). Default 'claude'; "
+             "pass 'node' for a codex cell, 'grok' for a grok cell so a "
+             "non-Claude cell isn't mis-read as dead. Mutually exclusive with "
+             "--liveness-cmd.",
+    )
+    liveness_group.add_argument(
+        "--liveness-cmd", default=None,
+        help="Escape hatch: shell command whose exit status is the liveness "
+             "verdict (0 = alive, non-zero = dead) instead of the pgrep gate. "
+             "On timeout/error the cell is assumed ALIVE (never false-fire the "
+             "destructive A2 respawn). Mutually exclusive with --process-name.",
+    )
     p.add_argument("--no-respawn", action="store_true")
     p.add_argument(
         "--a15-max-swaps", type=int, default=_DEFAULT_A15_MAX_SWAPS,
