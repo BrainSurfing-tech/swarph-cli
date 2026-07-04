@@ -580,14 +580,15 @@ def _pid_under(pid: int, ancestors: set, _max_depth: int = 40) -> bool:
     return cur in ancestors
 
 
-def _process_alive(tmux_session: str) -> bool:
-    """Detect if a claude process is running INSIDE the named tmux session.
+def _process_alive(tmux_session: str, process_name: str = "claude") -> bool:
+    """Detect if a `process_name` process is running INSIDE the named tmux session.
 
-    Scopes to the session's pane PIDs (and their descendants) rather than a
-    host-wide ``pgrep claude``: on a multi-session host, an unrelated cell's
-    claude would otherwise mask THIS session's death and suppress the A2 alert
-    (adversarial-sweep MED). Best-effort; falls back to True (assume alive) on
-    detection error so a broken detector never false-fires A2.
+    `process_name` (default "claude") is the command the cell's agent runs —
+    node/codex cells pass "node", grok cells pass "grok". Scopes to the
+    session's pane PIDs (and descendants) rather than a host-wide pgrep: on a
+    multi-session host, an unrelated cell's process would otherwise mask THIS
+    session's death and suppress the A2 alert. Best-effort; falls back to True
+    (assume alive) on detection error so a broken detector never false-fires A2.
     """
     try:
         panes = subprocess.run(
@@ -615,7 +616,7 @@ def _process_alive(tmux_session: str) -> bool:
             return True  # ambiguous (session with no pane pids) → don't false-fire
 
         pg = subprocess.run(
-            ["pgrep", "-f", "claude"],
+            ["pgrep", "-f", process_name],
             capture_output=True, text=True, timeout=5,
         )
         if pg.returncode != 0:
@@ -1269,7 +1270,7 @@ def _run_local_check(args: argparse.Namespace) -> int:
             return 0
 
     # FALLBACK signal: pgrep claude (per mother #1021 AND-gate)
-    process_alive = _process_alive(tmux_session)
+    process_alive = _process_alive(tmux_session, args.process_name)
     diag["process_alive"] = process_alive
 
     # Check unread DM queue at gateway. If no unread DMs, no need to wake.
@@ -1722,6 +1723,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gateway", default=_DEFAULT_GATEWAY_URL)
     p.add_argument("--tmux-session", default=None)
     p.add_argument("--peer", default=None)
+    liveness_group = p.add_mutually_exclusive_group()
+    liveness_group.add_argument(
+        "--process-name", default="claude",
+        help="Process the cell's agent runs, used by the liveness gate's "
+             "`pgrep -f` (scoped to the session's panes). Default 'claude'; "
+             "pass 'node' for a codex cell, 'grok' for a grok cell so a "
+             "non-Claude cell isn't mis-read as dead. Mutually exclusive with "
+             "--liveness-cmd.",
+    )
     p.add_argument("--no-respawn", action="store_true")
     p.add_argument(
         "--a15-max-swaps", type=int, default=_DEFAULT_A15_MAX_SWAPS,
