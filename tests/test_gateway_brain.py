@@ -5,6 +5,13 @@ import tempfile
 import pytest
 from types import SimpleNamespace
 
+# The gateway server stack is an optional extra ([gateway]); its module top
+# does `import jwt` (PyJWT) + fastapi. Skip the whole file when those aren't
+# installed (e.g. Windows CI, which doesn't install the gateway extra) — same
+# guard the sibling gateway test tests/test_meta_edge_identity.py uses.
+pytest.importorskip("fastapi")
+pytest.importorskip("jwt")
+
 
 def _load_app(monkeypatch, *, gbrain_token="gbrain_hostheld", auth="tok_shared"):
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", auth)
