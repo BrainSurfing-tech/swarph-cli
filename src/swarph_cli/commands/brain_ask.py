@@ -15,6 +15,9 @@ Stdlib-only. Config from the environment, mirroring ``swarph mesh``'s token mode
     / SWARPH_BRAIN_TOKEN  mesh per-peer token (~/.config/swarph/<self>.peer_token).
     / peer-token file     Once gbrain accepts mesh peer tokens, the peer token IS
                           the read token — no separate secret to provision.
+  SWARPH_BRAIN_GATEWAY  when set, query the brain via the mesh gateway's
+                        /brain/query proxy using the cell's mesh peer token
+                        (no per-cell gbrain_ token). Unset = direct :8792.
   SWARPH_FACADE         optional synthesis endpoint (claude-service chat-completions)
   SWARPH_FACADE_TOKEN   bearer for the facade
 """
@@ -127,6 +130,15 @@ def _mcp_query(url: str, token: str, question: str, limit: int) -> list:
     return _parse_query_response(raw)
 
 
+def _gateway_query(gw_base: str, peer_token: str, question: str, limit: int) -> list:
+    """Query the brain via the mesh gateway's /brain/query proxy, authenticating
+    with the cell's MESH peer token. The gateway holds the gbrain token; we never do."""
+    url = gw_base.rstrip("/") + "/brain/query"
+    raw = _http_post(url, {"query": question, "limit": limit}, peer_token,
+                     accept="application/json")
+    return json.loads(raw).get("chunks", [])
+
+
 def _synthesize(facade_url: str, facade_token: str, question: str, chunks: list) -> str:
     """Ask the $0 facade to answer ONLY from the retrieved chunks, citing slugs."""
     context = _format_chunks(chunks)
@@ -158,19 +170,36 @@ def run_brain_ask(argv: list) -> int:
     args = parser.parse_args(argv)
     question = " ".join(args.question)
 
-    token = _resolve_token(args.token_file, _self_name())
-    if not token:
-        sys.stderr.write(
-            "swarph brain-ask: no gbrain read token "
-            "(set GBRAIN_TOKEN / SWARPH_BRAIN_TOKEN, pass --token-file, or place a "
-            "mesh peer token at ~/.config/swarph/<self>.peer_token)\n")
-        return 2
-
-    try:
-        chunks = _mcp_query(args.gateway, token, question, args.limit)
-    except Exception as exc:  # noqa: BLE001 — surface any transport/parse failure cleanly
-        sys.stderr.write(f"swarph brain-ask: gbrain query failed: {exc}\n")
-        return 1
+    gw = os.environ.get("SWARPH_BRAIN_GATEWAY")
+    if gw:
+        self_name = _self_name()
+        try:
+            peer_token = _peer_token_path(self_name).read_text(encoding="utf-8").strip()
+        except OSError:
+            peer_token = ""
+        if not peer_token:
+            sys.stderr.write(
+                f"swarph brain-ask: SWARPH_BRAIN_GATEWAY set but no mesh peer token at "
+                f"~/.config/swarph/{self_name}.peer_token\n")
+            return 2
+        try:
+            chunks = _gateway_query(gw, peer_token, question, args.limit)
+        except Exception as e:  # noqa: BLE001 — surface, don't swallow
+            sys.stderr.write(f"swarph brain-ask: gateway brain query failed: {e}\n")
+            return 1
+    else:
+        token = _resolve_token(args.token_file, _self_name())
+        if not token:
+            sys.stderr.write(
+                "swarph brain-ask: no gbrain read token "
+                "(set GBRAIN_TOKEN / SWARPH_BRAIN_TOKEN, pass --token-file, or place a "
+                "mesh peer token at ~/.config/swarph/<self>.peer_token)\n")
+            return 2
+        try:
+            chunks = _mcp_query(args.gateway, token, question, args.limit)
+        except Exception as exc:  # noqa: BLE001 — surface any transport/parse failure cleanly
+            sys.stderr.write(f"swarph brain-ask: gbrain query failed: {exc}\n")
+            return 1
 
     facade = os.environ.get("SWARPH_FACADE")
     if args.no_synth or not facade:
