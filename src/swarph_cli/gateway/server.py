@@ -41,6 +41,7 @@ import sqlite3
 import sys
 import time
 import unicodedata
+import urllib.request
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -52,6 +53,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from .feature_registry import aggregate_features, apply_allowlist, apply_caps
 
@@ -70,6 +72,12 @@ SCHEMA_PATH = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql"),
 )
 PORT = int(os.environ.get("PORT", "8788"))
+
+# Gateway-held gbrain proxy token (POST /brain/query). Cells authenticate to
+# THIS gateway with their mesh token; the gateway then presents ITS OWN
+# gbrain token upstream so cells never need a separate gbrain_ credential.
+GATEWAY_GBRAIN_URL = os.environ.get("GATEWAY_GBRAIN_URL", "http://100.107.222.72:8792/mcp")
+GATEWAY_GBRAIN_TOKEN = os.environ.get("GATEWAY_GBRAIN_TOKEN", "")
 
 # B1 Meta-Edge identity (META_EDGE_IDENTITY_CONTRACT.md). Meta-Edge SSO ISSUES
 # RS256 JWTs; the gateway only ever TRUSTS them with Meta-Edge's PUBLIC key (it
@@ -4194,6 +4202,59 @@ async def council_reclaim_stuck(req: CouncilReclaimStuckRequest,
         "older_than_min": req.older_than_min,
         "dry_run": req.dry_run,
     }
+
+
+# =====================================================================
+# BRAIN PROXY (POST /brain/query)
+# =====================================================================
+
+def _brain_query_upstream(question: str, limit: int) -> list:
+    """Proxy a READ-ONLY gbrain query. Builds the MCP `query` call itself (never
+    write/admin), POSTs to GATEWAY_GBRAIN_URL with the gateway-held token, returns
+    the chunk array. Raises on any upstream/parse failure (caller maps to 502)."""
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "query",
+                       "arguments": {"query": question, "limit": limit, "expand": False}}}
+    req = urllib.request.Request(
+        GATEWAY_GBRAIN_URL, data=json.dumps(body).encode("utf-8"), method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json, text/event-stream")
+    req.add_header("Authorization", f"Bearer {GATEWAY_GBRAIN_TOKEN}")
+    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 — fixed tailnet URL
+        raw = resp.read().decode("utf-8")
+    payload = raw
+    if "data:" in raw:
+        for line in raw.splitlines():
+            s = line.strip()
+            if s.startswith("data:"):
+                payload = s[len("data:"):].strip()
+                break
+    doc = json.loads(payload)
+    parsed = json.loads(doc["result"]["content"][0]["text"])
+    return parsed if isinstance(parsed, list) else []
+
+
+class BrainQueryRequest(BaseModel):
+    query: str
+    limit: int = 8
+
+
+@app.post("/brain/query")
+async def brain_query(req: BrainQueryRequest,
+                      authorization: Optional[str] = Header(None)) -> dict:
+    auth = _authorize(authorization)                      # 401 on bad mesh token
+    if not GATEWAY_GBRAIN_TOKEN:
+        raise HTTPException(503, "brain proxy not configured")
+    if not req.query.strip():
+        raise HTTPException(400, "query is required")
+    try:
+        chunks = await run_in_threadpool(_brain_query_upstream, req.query, req.limit)
+    except Exception as e:  # fail loud — never a swallowed empty result
+        log.warning("brain proxy upstream error for peer=%s: %s", auth.peer, e)
+        raise HTTPException(502, "brain upstream error")
+    log.info("brain query peer=%s regime=%s limit=%d chunks=%d",
+             auth.peer, auth.regime, req.limit, len(chunks))
+    return {"chunks": chunks}
 
 
 # =====================================================================
