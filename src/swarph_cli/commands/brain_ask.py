@@ -15,6 +15,9 @@ Stdlib-only. Config from the environment, mirroring ``swarph mesh``'s token mode
     / SWARPH_BRAIN_TOKEN  mesh per-peer token (~/.config/swarph/<self>.peer_token).
     / peer-token file     Once gbrain accepts mesh peer tokens, the peer token IS
                           the read token — no separate secret to provision.
+  SWARPH_BRAIN_GATEWAY  when set, query the brain via the mesh gateway's
+                        /brain/query proxy using the cell's mesh peer token
+                        (no per-cell gbrain_ token). Unset = direct :8792.
   SWARPH_FACADE         optional synthesis endpoint (claude-service chat-completions)
   SWARPH_FACADE_TOKEN   bearer for the facade
 """

@@ -13,6 +13,13 @@ from unittest.mock import patch
 from swarph_cli.commands import brain_ask as ba
 
 
+# --- version ---------------------------------------------------------------
+
+def test_version_is_0_26_0():
+    import swarph_cli
+    assert swarph_cli.__version__ == "0.26.0"
+
+
 # --- request / response plumbing -------------------------------------------
 
 def test_build_query_request_shape():
