@@ -27,7 +27,52 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from swarph_cli.commands.mesh import _post_json, _resolve_token
+
 _PUSH_RETRIES = 8
+
+
+def _resolve_gateway(arg: str | None) -> str:
+    """Gateway base URL for the peer-token ingest path. Reuses the mesh-wide
+    SWARPH_BRAIN_GATEWAY (already set on every cell from the brain-ask rollout)
+    as the final fallback, so `swarph highlight` goes peer-token-by-default with
+    ZERO new per-cell config. `--gateway` / `--local` override."""
+    return (arg
+            or os.environ.get("SWARPH_HIGHLIGHT_GATEWAY")
+            or os.environ.get("SWARPH_GATEWAY")
+            or os.environ.get("SWARPH_BRAIN_GATEWAY")
+            or "").strip()
+
+
+def _log_via_gateway(gateway: str, cell: str, highlight: str,
+                     memory: str, when: str, token_file: str | None) -> int:
+    """POST the highlight to the gateway `/highlights` — the gateway holds the git
+    push credential, so the cell needs only its mesh peer token (no GitHub PAT).
+    Fail-loud: a non-200 or connection error returns 1 (never a silent git double-write)."""
+    url = gateway.rstrip("/") + "/highlights"
+    body: dict = {"highlight": highlight, "cell": cell}
+    if memory:
+        body["memory"] = memory
+    if when:
+        body["when"] = when
+    try:
+        token = _resolve_token(cell, token_file)
+    except RuntimeError as exc:
+        print(f"swarph highlight: {exc}", file=sys.stderr)
+        return 1
+    status, resp = _post_json(url, body, token)
+    if status == 200:
+        ts = resp.get("ts", "")
+        print(f"logged -> TIMELINE.md @ {ts} (via gateway)"
+              + (f" -> {memory}" if memory else ""))
+        if resp.get("pushed") is False:
+            print("swarph highlight: committed at the gateway but NOT yet pushed "
+                  "(converges on a later push)", file=sys.stderr)
+        return 0
+    detail = resp.get("detail") if isinstance(resp, dict) else resp
+    where = f"HTTP {status}" if status else "connection failed"
+    print(f"swarph highlight: gateway POST failed ({where}): {detail}", file=sys.stderr)
+    return 1
 
 
 def _collapse(s: str) -> str:
@@ -120,14 +165,31 @@ def run_highlight(argv: list) -> int:
                    help="ISO8601 event time for a backfilled highlight; default now")
     p.add_argument("--no-push", action="store_true",
                    help="commit locally only, never push")
+    p.add_argument("--gateway", default=None,
+                   help="gateway base URL for the peer-token ingest path "
+                   "(else SWARPH_HIGHLIGHT_GATEWAY / SWARPH_GATEWAY / SWARPH_BRAIN_GATEWAY)")
+    p.add_argument("--token-file", default=None,
+                   help="explicit bearer token file (else MESH_GATEWAY_TOKEN / peer-token)")
+    p.add_argument("--local", action="store_true",
+                   help="force the local git path even if a gateway is configured")
     args = p.parse_args(argv)
 
     repo = _resolve_dir(args.timeline_dir)
     cell = _resolve_cell(args.cell, repo)
-    _ensure_timeline(repo, cell)
-    ts = _collapse(args.when) if args.when else _now_ts()
     highlight = _collapse(args.highlight)
     memory = _collapse(args.memory)
+    when = _collapse(args.when) if args.when else ""
+
+    # Peer-token path (default when a gateway is configured): the gateway holds the
+    # git credential, so a cell logs with only its mesh peer token — no GitHub PAT.
+    # `--local` forces the legacy git path; with no gateway configured it's the git
+    # path too, so existing solo/offline timelines are unaffected.
+    gateway = "" if args.local else _resolve_gateway(args.gateway)
+    if gateway:
+        return _log_via_gateway(gateway, cell, highlight, memory, when, args.token_file)
+
+    _ensure_timeline(repo, cell)
+    ts = when or _now_ts()
     branch = _current_branch(repo)
     pushing = (not args.no_push) and _has_remote(repo)
 
