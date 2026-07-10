@@ -42,6 +42,11 @@ def _build_parser() -> argparse.ArgumentParser:
     inbox.add_argument("--unread", action="store_true", help="only unread DMs")
     inbox.add_argument("--limit", type=int, default=20, help="max messages")
     inbox.add_argument("--json", action="store_true", help="print raw JSON")
+    inbox.add_argument(
+        "--peek",
+        action="store_true",
+        help="show the inbox WITHOUT marking anything read (default: reading consumes)",
+    )
     _add_common(inbox)
 
     register = sub.add_parser("register", help="self-register this peer")
@@ -251,6 +256,40 @@ def _run_send(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mark_read(gateway: str, token: str, messages: list) -> None:
+    """Mark every unread DM we just surfaced as read. Best-effort.
+
+    Reading your inbox consumes it — like any mail client. Without this, a peer's
+    request stays "unread" no matter how many times it is answered, and an agent
+    whose loop asks "is it still unread?" can never exit. That is not theoretical:
+    on 2026-07-10 grok-researcher answered one request 67 times (~410k tokens)
+    because the CLI never called the gateway's POST /messages/{id}/read.
+
+    A mark-read failure must NEVER fail the listing — the caller has already seen
+    the messages, and losing the read receipt is strictly less bad than losing them.
+    """
+    base = gateway.rstrip("/")
+    failed = []
+    for dm in messages:
+        if dm.get("read_at"):
+            continue
+        msg_id = dm.get("id")
+        if msg_id is None:
+            continue
+        try:
+            status, _ = _post_json(f"{base}/messages/{msg_id}/read", {}, token)
+            if status < 200 or status >= 300:
+                failed.append(msg_id)
+        except Exception:  # network, DNS, timeout — never break the listing
+            failed.append(msg_id)
+    if failed:
+        print(
+            f"swarph mesh inbox: mark-read failed for id(s) {failed} "
+            "(messages shown above; they will be re-listed as unread)",
+            file=sys.stderr,
+        )
+
+
 def _run_inbox(args: argparse.Namespace) -> int:
     self_name = _resolve_self_name(args.self_name)
     token = _resolve_token(self_name, args.token_file)
@@ -263,10 +302,12 @@ def _run_inbox(args: argparse.Namespace) -> int:
         detail = payload.get("detail", "<gateway error>")
         print(f"swarph mesh inbox: gateway {status}: {detail}", file=sys.stderr)
         return 1
+    messages = payload.get("messages", [])
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
+        if not getattr(args, "peek", False):
+            _mark_read(args.gateway, token, messages)
         return 0
-    messages = payload.get("messages", [])
     if not messages:
         print(f"inbox {self_name}: empty")
         return 0
@@ -277,6 +318,8 @@ def _run_inbox(args: argparse.Namespace) -> int:
             f"id={dm.get('id')} {read} from={dm.get('from_node')} "
             f"kind={dm.get('kind')} {content[:160]}"
         )
+    if not getattr(args, "peek", False):
+        _mark_read(args.gateway, token, messages)
     return 0
 
 
@@ -423,7 +466,11 @@ def _select_next_poll_seconds(state: MeshSidecarState) -> int:
 def _sidecar_iteration(state: MeshSidecarState) -> None:
     state.iterations += 1
     last_id = int(state.cursor.get("last_msg_id", 0))
-    params = {"to": state.self_name, "unread_only": "true", "limit": "50"}
+    # NO unread_only: novelty is the `id > last_msg_id` cursor below, not the read
+    # flag. Since `mesh inbox` now marks read (INCIDENT 2026-07-10), a DM read before
+    # the next poll would vanish from an unread-filtered query and the cell would
+    # never be woken. The two mechanisms must stay orthogonal.
+    params = {"to": state.self_name, "limit": "50"}
     url = f"{state.gateway}/messages?{urllib.parse.urlencode(params)}"
     status, body = _http_get_json(url, state.token)
     if status == 0:

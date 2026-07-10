@@ -59,7 +59,10 @@ def test_sidecar_wakes_on_new_mail_and_advances_cursor(tmp_path, monkeypatch):
     assert captured["token"] == "tok"
     assert "to=gpt-ops" in captured["url"]
     assert "to_node=" not in captured["url"]
-    assert "unread_only=true" in captured["url"]
+    # The sidecar must NOT filter on unread: novelty is the id>last_msg_id cursor.
+    # `mesh inbox` now marks messages read (INCIDENT 2026-07-10), so an unread-filtered
+    # poll would silently stop waking the cell for mail that was read first.
+    assert "unread_only" not in captured["url"]
     assert wakes == ["gpt-ops-pane"]
     assert state.wakes_sent == 1
     assert state.dms_seen == 2
