@@ -1073,7 +1073,51 @@ def _escalate_a2(
     return 2 if spawn_ok else 4
 
 
+# The last_health PRODUCER (mesh-hygiene #26). Set once per run by run_check when
+# --emit-health is passed; a callable `(decision:str) -> None` that POSTs the verdict
+# to the gateway. Process-scoped (the watchdog is a one-shot CLI invocation), so the
+# gateway TOKEN lives in this closure — never in the diag dict — and cannot leak into
+# the JSONL log. None = emit disabled (default, and every existing install).
+_HEALTH_EMITTER = None
+
+
+def _health_status_for(decision: str) -> str:
+    """Map a watchdog verdict to the coarse status the gateway/consumer thresholds on.
+    A healthy check or a no-op (ran, nothing to do) = 'healthy'; anything that took or
+    would take a recovery action, or couldn't verify, = 'degraded'."""
+    if decision.startswith("healthy") or decision.startswith("noop_no_unread") \
+            or decision.startswith("noop_pane_activity") or decision.startswith("noop_a1"):
+        return "healthy"
+    if decision.startswith("noop"):
+        # noop_unread_unknown = fail-closed couldn't-verify → not healthy, not action.
+        return "degraded"
+    return "degraded"
+
+
+def _emit_health(gateway: str, peer: str, token, decision: str) -> None:
+    """POST this cell's health verdict to the gateway. Best-effort: NEVER raises and
+    NEVER affects the check's exit code — observability must not break the watchdog."""
+    if not token:
+        return  # can't authenticate; silently skip
+    try:
+        _post_json(
+            f"{gateway.rstrip('/')}/peers/{peer}/health",
+            {"status": _health_status_for(decision), "detail": decision},
+            token,
+        )
+    except Exception:
+        pass
+
+
 def _log_event(log_path: Path, event: str, details: dict, verbose: bool = False) -> None:
+    # PRODUCER hook (#26): a decision-bearing event emits this cell's health, once per
+    # run (each check path logs exactly one terminal event). Guarded + swallowed so a
+    # broken emitter can never stop the log line from being written.
+    if _HEALTH_EMITTER is not None and details.get("decision"):
+        try:
+            _HEALTH_EMITTER(details["decision"])
+        except Exception:
+            pass
     log_path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "ts": _now(),
@@ -1196,8 +1240,16 @@ def run_check(args: argparse.Namespace) -> int:
     a pure no-op, so the 0/1/2 behavior is preserved exactly.
     """
     log_path = _resolve_log_path(args.log)
-    local_rc = _run_local_check(args)
-    wakes_fired = _dm_wake_scan(args, log_path)
+    global _HEALTH_EMITTER
+    if getattr(args, "emit_health", False):
+        _gw, _peer = args.gateway, (args.peer or args.cell)
+        _tok = os.environ.get("MESH_GATEWAY_TOKEN")
+        _HEALTH_EMITTER = lambda dec: _emit_health(_gw, _peer, _tok, dec)  # noqa: E731
+    try:
+        local_rc = _run_local_check(args)
+        wakes_fired = _dm_wake_scan(args, log_path)
+    finally:
+        _HEALTH_EMITTER = None
     if local_rc == 0 and wakes_fired > 0:
         return 3
     return local_rc
@@ -1748,6 +1800,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gateway", default=_DEFAULT_GATEWAY_URL)
     p.add_argument("--tmux-session", default=None)
     p.add_argument("--peer", default=None)
+    p.add_argument(
+        "--emit-health", action="store_true",
+        help="PRODUCER (#26): POST this cell's per-check verdict to the gateway's "
+             "POST /peers/<self>/health so a hung-but-alive cell becomes visible. "
+             "Best-effort, never affects the exit code. Default OFF (opt-in).",
+    )
     liveness_group = p.add_mutually_exclusive_group()
     liveness_group.add_argument(
         "--process-name", default="claude",
