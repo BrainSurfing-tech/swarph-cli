@@ -1627,6 +1627,65 @@ def _bundled_systemd_files() -> dict[str, str]:
     return out
 
 
+def _execstart_flags(args: argparse.Namespace) -> str:
+    """Build the flag suffix for the generated ExecStart (#28 footgun fix).
+
+    Two guarantees:
+      1. SAFE-BY-DEFAULT: the destructive A2 respawn is DISARMED (`--no-respawn`
+         baked in) unless the operator explicitly passes `--arm-respawn`. If both
+         are given, safety wins. The A1.5 model-rung is already opt-in, so it only
+         appears when the operator asked for it.
+      2. PROPAGATION: the operator's passed runtime flags are carried into the unit,
+         so the installed service does what the install command implied — the bug
+         was that they were silently dropped, so `--install-service --no-respawn`
+         installed an ARMED watchdog.
+    """
+    parts: list[str] = []
+
+    # (1) respawn — disarmed unless explicitly armed; safety beats --arm-respawn.
+    if getattr(args, "no_respawn", False) or not getattr(args, "arm_respawn", False):
+        parts.append("--no-respawn")
+
+    # (2) store_true flags — emit only when the operator set them.
+    for flag, attr in (
+        ("--model-rung", "model_rung"),
+        ("--no-model-rung", "no_model_rung"),
+        ("--emit-health", "emit_health"),
+        ("--peer-health-poll", "peer_health_poll"),
+        ("--dm-wake", "dm_wake"),
+    ):
+        if getattr(args, attr, False):
+            parts.append(flag)
+
+    # (3) value flags — emit when set / non-default. (val, default_or_None)
+    for flag, attr, default in (
+        ("--activity-marker", "activity_marker", None),
+        ("--cursor", "cursor", None),
+        ("--tmux-session", "tmux_session", None),
+        ("--peer", "peer", None),
+        ("--liveness-cmd", "liveness_cmd", None),
+        ("--notify-peer", "notify_peer", None),
+        ("--gateway", "gateway", _DEFAULT_GATEWAY_URL),
+        ("--threshold", "threshold", _DEFAULT_THRESHOLD_SEC),
+        ("--pane-activity-threshold", "pane_activity_threshold",
+         _DEFAULT_PANE_ACTIVITY_THRESHOLD_SEC),
+        ("--a2-max-respawns", "a2_max_respawns", _DEFAULT_A2_MAX_RESPAWNS),
+        ("--a2-respawn-window-sec", "a2_respawn_window_sec",
+         _DEFAULT_A2_RESPAWN_WINDOW_SEC),
+    ):
+        val = getattr(args, attr, default)
+        if val is not None and val != default:
+            parts.append(f"{flag} {val}")
+
+    # --process-name only when non-default (the default 'claude' needn't clutter);
+    # --liveness-cmd is mutually exclusive with it and handled above.
+    pname = getattr(args, "process_name", "claude")
+    if pname and pname != "claude" and not getattr(args, "liveness_cmd", None):
+        parts.append(f"--process-name {pname}")
+
+    return (" " + " ".join(parts)) if parts else ""
+
+
 def run_install_service(args: argparse.Namespace) -> int:
     """Install systemd timer + service for periodic watchdog --check.
 
@@ -1667,7 +1726,11 @@ def run_install_service(args: argparse.Namespace) -> int:
             f"ExecStart={swarph_bin}",
             1,
         )
-        .replace("watchdog --check", f"watchdog --check --cell {cell}", 1)
+        .replace(
+            "watchdog --check",
+            f"watchdog --check --cell {cell}{_execstart_flags(args)}",
+            1,
+        )
         .replace(
             "EnvironmentFile=-/etc/default/swarph-watchdog",
             f"EnvironmentFile=-/etc/default/{default_name}",
@@ -1823,6 +1886,14 @@ def _build_parser() -> argparse.ArgumentParser:
              "destructive A2 respawn). Mutually exclusive with --process-name.",
     )
     p.add_argument("--no-respawn", action="store_true")
+    p.add_argument(
+        "--arm-respawn", action="store_true",
+        help="With --install-service ONLY: opt IN to arming the destructive A2 "
+             "respawn in the generated unit. Without it, --install-service bakes "
+             "--no-respawn into ExecStart (safe-by-default — a recovery tool must "
+             "be the most conservative thing in the mesh; #28). If both --arm-respawn "
+             "and --no-respawn are given, safety wins.",
+    )
     p.add_argument(
         "--a15-max-swaps", type=int, default=_DEFAULT_A15_MAX_SWAPS,
         help="C1 thrash circuit: max A1.5 /model swaps within the swap window "
