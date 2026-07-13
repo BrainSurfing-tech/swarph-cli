@@ -69,16 +69,25 @@ def provider_command(provider: str, prompt: str) -> list:
 
 
 def run_provider(provider: str, prompt: str, timeout: int = _DEFAULT_TIMEOUT,
-                 base_env: dict | None = None) -> str:
-    """Run the provider's subscription CLI one-shot with a billing-scrubbed env.
+                 base_env: dict | None = None, home_root=None) -> str:
+    """Run the provider's subscription CLI one-shot under an ISOLATED HOME.
 
-    Returns stdout (stripped). Raises ``ValueError`` for an unknown provider and
+    The spawned CLI gets a disposable HOME carrying only this provider's own auth
+    (swarph_shared.agent_isolation), so it cannot read the operator's GitHub token
+    (GH_TOKEN / ~/.config/gh), git credentials, or ssh-agent socket (#2a). Returns
+    stdout (stripped). Raises ``ValueError`` for an unknown provider and
     ``RuntimeError`` on a non-zero exit (stderr head only — never echo the env).
     """
     import os
+    from pathlib import Path
+
+    from swarph_shared.agent_isolation import build_isolated_env, prepare_isolated_home
 
     argv = provider_command(provider, prompt)
-    env = scrub_billing_env(provider, os.environ if base_env is None else base_env)
+    root = Path(home_root) if home_root is not None else Path.home() / ".swarph" / "drone-homes"
+    home = prepare_isolated_home(provider, root)
+    source = os.environ if base_env is None else base_env
+    env = build_isolated_env(source, home, provider)
     proc = subprocess.run(argv, env=env, capture_output=True, text=True,
                           timeout=timeout)
     if proc.returncode != 0:
