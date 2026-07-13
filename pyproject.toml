@@ -40,7 +40,7 @@ dependencies = [
     # >=0.3.1 is load-bearing: 0.3.1 is the first release whose
     # scrub_env_for_subprocess closes the ANTHROPIC_AUTH_TOKEN/*_BASE_URL
     # billing-redirect class that the membrane env builders delegate to.
-    "swarph-shared>=0.3.3",
+    "swarph-shared>=0.4.0",
     # Phase 7 spawn — cell.yaml parser. PyYAML 6.x is the standard.
     # Stays a swarph-cli dep since file I/O is operator-tooling-layer
     # concern; swarph-shared cell module is pure-stdlib.
