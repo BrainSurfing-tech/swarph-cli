@@ -138,6 +138,23 @@ exit 0
 """
 
 
+# The bundled activity-marker script (#2). Delegates path resolution to
+# `swarph hooks touch-activity` (same resolver the watchdog uses → no drift). It
+# spawns swarph per tool call; the touch is best-effort and MUST NOT fail the turn
+# (every path exits 0). Latency: one swarph startup per tool call ≈ 200ms (measured
+# 2026-07-13). Correct baseline; a shell fast-path throttle (skip the spawn when the
+# marker is already fresh, fall through to the correct resolve otherwise) is a clean
+# follow-up if droplet's validation finds the per-call cost too high (spec §4).
+_ACTIVITY_MARKER_SH = r"""#!/bin/sh
+# activity-marker.sh — swarph bundled Claude Code hook (#2).
+# Touches THIS cell's watchdog liveness marker so a long autonomous turn (many tool
+# calls, no turn-end) stays fresh and the watchdog doesn't false-stall a working
+# session into an A1 wake. Never blocks: always exit 0.
+swarph hooks touch-activity >/dev/null 2>&1 || true
+exit 0
+"""
+
+
 BUILTIN_HOOKS: dict = {
     "cell-resilience": HookBundle(
         name="cell-resilience",
@@ -155,6 +172,23 @@ BUILTIN_HOOKS: dict = {
             HookBinding("Stop", ""),
         ),
     ),
+    "activity-marker": HookBundle(
+        name="activity-marker",
+        description=(
+            "Touches this cell's watchdog liveness marker on every tool call "
+            "(PreToolUse) + turn-end (Stop/StopFailure), so a long autonomous turn "
+            "stays fresh and the watchdog doesn't false-stall a working session (#2)."
+        ),
+        publisher="swarph-builtin",
+        trust="builtin",
+        script_name="activity-marker.sh",
+        script_body=_ACTIVITY_MARKER_SH,
+        bindings=(
+            HookBinding("PreToolUse", ""),   # every tool call — the long-turn fix
+            HookBinding("Stop", ""),
+            HookBinding("StopFailure", ""),
+        ),
+    ),
 }
 
 
@@ -162,6 +196,45 @@ BUILTIN_HOOKS: dict = {
 # hooks ``swarph hooks init`` installs in one shot. Today just cell-resilience
 # (the push-side throttle detector); add future builtins here, not at call sites.
 RECOMMENDED_HOOKS: tuple = ("cell-resilience",)
+
+
+def touch_activity(argv: list[str] | None = None) -> int:
+    """`swarph hooks touch-activity` — touch THIS cell's watchdog liveness marker (#2).
+
+    Bound (via the ``activity-marker`` bundle) to PreToolUse + Stop + StopFailure, so a
+    long autonomous turn (many tool calls, no turn-end) keeps the marker fresh and the
+    watchdog doesn't false-stall → A1-wake a working session.
+
+    Resolves the marker path with the SAME resolver the watchdog uses
+    (`_resolve_activity_marker_path`, keyed off the cwd's cell.yaml) → hook and watchdog
+    agree BY CONSTRUCTION; a mis-resolved marker would make a dead cell look alive, which
+    is worse than no fix (spec §3). cwd is per-cell-reliable even when SWARPH_CELL is
+    contaminated on a shared-user box (#20).
+
+    BEST-EFFORT: never raises, ALWAYS returns 0 — a liveness hook must not fail a turn.
+    """
+    try:
+        from swarph_cli.cell import discover_cell_in_cwd, load_cell
+        from swarph_cli.commands.watchdog import _resolve_activity_marker_path
+
+        role = os.environ.get("SWARPH_CELL", "lab")
+        cell_marker = None
+        cell_path = discover_cell_in_cwd()
+        if cell_path is not None:
+            try:
+                cell = load_cell(cell_path)
+                if cell.role:
+                    role = cell.role
+                cell_marker = (cell.extra or {}).get("activity_marker_path")
+            except Exception:
+                pass  # malformed cell.yaml → fall back to SWARPH_CELL default
+
+        marker = _resolve_activity_marker_path(role, None, cell_marker)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except Exception:
+        pass  # unwritable path / any error: never fail the turn
+    return 0
 
 
 def resolve_builtin(name: str) -> HookBundle:
@@ -695,6 +768,12 @@ def run_hooks(
 
     sub.add_parser("list", help="list builtin hooks and their install status")
 
+    sub.add_parser(
+        "touch-activity",
+        help="touch this cell's watchdog liveness marker (used by the "
+        "activity-marker bundle on PreToolUse/Stop; #2). Best-effort, always 0.",
+    )
+
     remove = sub.add_parser("remove", help="uninstall a builtin hook by name")
     remove.add_argument(
         "name",
@@ -705,6 +784,9 @@ def run_hooks(
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 0)
+
+    if args.action == "touch-activity":
+        return touch_activity([])
 
     if args.action == "init":
         try:
