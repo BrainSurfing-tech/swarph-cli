@@ -85,3 +85,10 @@ def test_project_ref_to_id_passthrough_and_slug():
     assert board._project_ref_to_id("federation-brain", projects) == 9  # slug lookup
     assert board._project_ref_to_id("nope", projects) is None  # unknown slug
     assert board._project_ref_to_id(None, projects) is None
+
+
+def test_format_card_strips_terminal_escapes():
+    card = {"id": 1, "stage": "idea", "project_id": 9, "title": "t\x1b[2Ktitle",
+            "body": "b\x1b[31mody", "links": {"k\x1b[0m": "v\x1b[1m"}}
+    out = board._format_card(card)
+    assert "\x1b" not in out, "peer-authored card content can't inject terminal escapes"
