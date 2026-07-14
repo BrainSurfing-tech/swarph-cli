@@ -1041,6 +1041,6 @@ def test_parser_defaults_process_name_claude_liveness_cmd_none():
     assert ns.liveness_cmd is None
 
 
-def test_version_is_0_29_1():
+def test_version_is_0_29_2():
     import swarph_cli
-    assert swarph_cli.__version__ == "0.29.1"
+    assert swarph_cli.__version__ == "0.29.2"
