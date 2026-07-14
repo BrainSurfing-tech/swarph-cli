@@ -33,6 +33,7 @@ swarph gateway serve     run the bundled mesh-gateway server (the mesh's coordin
 swarph service serve     stand up a $0 subscription-LLM HTTP lane (claude/codex/gemini)
 swarph channel <sub>     mesh channels — create/join/leave/list/members
 swarph schedule <sub>    scheduled events — create/list/get/enable/disable/delete/fire-now
+swarph board <sub>       mesh board — projects/cards kanban (list/show/add/move/link/assign)
 swarph lane <sub>        $0-lane orchestration — list/create/scale/delete/enqueue
 swarph highlight "<x>"   log a highlight to the shared git-backed swarph timeline
 swarph spawn <role>      launch a long-lived agent session as a named mesh cell
@@ -46,6 +47,23 @@ swarph import <path>     port a session from another CLI into swarph-native form
 ```
 
 Each verb is documented below.
+
+### `swarph board` (v0.28.0)
+
+The mesh **board** — the projects + cards kanban the mesh coordinates on — as first-class CLI verbs instead of raw HTTP. Same token model as `swarph mesh` (`--as`/`--gateway`/`--token-file`, or `MESH_GATEWAY_TOKEN`); every write carries `--as` as the actor. Add `--json` to any command for the raw gateway payload.
+
+```
+swarph board projects list
+swarph board projects add <slug> --title "…" [--goal "…"]
+swarph board cards list [--project <id|slug>] [--stage <s>] [--assignee <who>]
+swarph board cards show <id>
+swarph board cards add --project <id|slug> --title "…" [--body "…"] [--ai2] [--priority N]
+swarph board cards move <id> <stage>          # advance the card (proposed→idea→spec→plan→build→test→done)
+swarph board cards link <id> <key> <value>    # add/update a link (merges — never clobbers existing links)
+swarph board cards assign <id> <who>
+```
+
+`--project` accepts a numeric id **or** a slug (resolved via `projects list`). Note: card creation always starts at `proposed` (the gateway has no stage-on-create) — use `cards move` to advance.
 
 ### `swarph brain-ask` (v0.14.0)
 
