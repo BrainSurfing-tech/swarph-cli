@@ -15,6 +15,18 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from ._display import sanitize_terminal
+
+
+def _format_inbox_line(dm: dict) -> str:
+    """One inbox line, terminal-safe: peer-authored content/from_node/kind are
+    sanitized so a hostile DM can't inject terminal escapes on display (0.29.2)."""
+    read = "read" if dm.get("read_at") else "unread"
+    content = sanitize_terminal((dm.get("content") or "").replace("\n", " "))[:160]
+    who = sanitize_terminal(dm.get("from_node"))
+    kind = sanitize_terminal(dm.get("kind"))
+    return f"id={dm.get('id')} {read} from={who} kind={kind} {content}"
+
 
 _DEFAULT_GATEWAY = "http://localhost:8788"
 _DEFAULT_POLL_S = 30
@@ -312,12 +324,7 @@ def _run_inbox(args: argparse.Namespace) -> int:
         print(f"inbox {self_name}: empty")
         return 0
     for dm in messages:
-        read = "read" if dm.get("read_at") else "unread"
-        content = (dm.get("content") or "").replace("\n", " ")
-        print(
-            f"id={dm.get('id')} {read} from={dm.get('from_node')} "
-            f"kind={dm.get('kind')} {content[:160]}"
-        )
+        print(_format_inbox_line(dm))
     if not getattr(args, "peek", False):
         _mark_read(args.gateway, token, messages)
     return 0
