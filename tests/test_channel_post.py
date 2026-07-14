@@ -33,3 +33,11 @@ def test_format_channel_messages():
 
 def test_format_channel_messages_empty():
     assert "no messages" in channel._format_channel_messages({"messages": []}).lower()
+
+
+def test_format_channel_messages_strips_terminal_escapes():
+    payload = {"messages": [{"id": 1, "from_node": "evil\x1b[2K", "kind": "fyi",
+                             "content": "safe\x1b[1;31mINJECT\x1b[0m"}]}
+    out = channel._format_channel_messages(payload)
+    assert "\x1b" not in out, "no escape sequence reaches the terminal"
+    assert "safe" in out

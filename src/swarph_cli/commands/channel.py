@@ -8,6 +8,7 @@ import json
 import sys
 import urllib.parse
 
+from ._display import sanitize_terminal
 from ._gateway_client import (
     add_common_args,
     get_json,
@@ -86,10 +87,11 @@ def _format_channel_messages(payload) -> str:
         return "(no messages)"
     lines = []
     for m in msgs:
-        body = (m.get("content") or "").replace("\n", " ")
+        body = sanitize_terminal((m.get("content") or "").replace("\n", " "))
         if len(body) > 120:
             body = body[:117] + "..."
-        lines.append(f"[{m.get('id')}] {m.get('from_node')} ({m.get('kind')}): {body}")
+        who = sanitize_terminal(m.get("from_node"))
+        lines.append(f"[{m.get('id')}] {who} ({sanitize_terminal(m.get('kind'))}): {body}")
     return "\n".join(lines)
 
 
