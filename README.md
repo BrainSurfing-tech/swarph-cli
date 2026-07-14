@@ -31,7 +31,7 @@ swarph codegraph "<q>"   structural code search — find where a symbol is defin
 swarph brain serve       run the gbrain HTTP brain server (the $0 semantic memory)
 swarph gateway serve     run the bundled mesh-gateway server (the mesh's coordination/DM hub)
 swarph service serve     stand up a $0 subscription-LLM HTTP lane (claude/codex/gemini)
-swarph channel <sub>     mesh channels — create/join/leave/list/members
+swarph channel <sub>     mesh channels — create/join/leave/list/members/post/read
 swarph schedule <sub>    scheduled events — create/list/get/enable/disable/delete/fire-now
 swarph board <sub>       mesh board — projects/cards kanban (list/show/add/move/link/assign)
 swarph lane <sub>        $0-lane orchestration — list/create/scale/delete/enqueue
@@ -141,6 +141,8 @@ The gateway's **automation control plane** — channels (pub/sub), scheduled eve
 $ swarph channel create research --kind topic --description "market-structure notes"
 $ swarph channel join research --wake-policy mentions_only
 $ swarph channel list
+$ swarph channel post releases --content "📦 pkg X.Y.Z shipped — <notes>"   # sets channel, omits to_node
+$ swarph channel read releases --limit 10                                  # recent posts (or --json)
 
 # scheduled events — operator-gated recurring/ conditional fires (a 403 is surfaced verbatim)
 $ swarph schedule create nightly-digest --trigger time --cron "0 7 * * *" \
