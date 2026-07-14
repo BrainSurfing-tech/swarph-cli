@@ -53,7 +53,44 @@ def _build_parser() -> argparse.ArgumentParser:
     members.add_argument("name", help="channel name")
     add_common_args(members)
 
+    post = sub.add_parser("post", help="post a message to a channel")
+    post.add_argument("name", help="channel name")
+    post.add_argument("--kind", default="fyi", help="message kind (default fyi)")
+    post.add_argument("--content", required=True, help="message body")
+    add_common_args(post)
+
+    read = sub.add_parser("read", help="read recent messages in a channel")
+    read.add_argument("name", help="channel name")
+    read.add_argument("--limit", type=int, default=20, help="max messages")
+    read.add_argument("--json", action="store_true", help="print raw JSON")
+    add_common_args(read)
+
     return p
+
+
+# ── pure helpers (unit-tested) ────────────────────────────────────────────────
+
+def _post_payload(self_name: str, channel: str, kind: str, content: str) -> dict:
+    """A channel post carries ``channel`` and NEVER ``to_node`` — the gateway
+    rejects a message with both ("exactly one of {to_node, channel} required")."""
+    return {"from_node": self_name, "channel": channel, "kind": kind, "content": content}
+
+
+def _read_url(base: str, channel: str, limit: int) -> str:
+    return f"{base.rstrip('/')}/messages?channel={urllib.parse.quote(channel, safe='')}&limit={int(limit)}"
+
+
+def _format_channel_messages(payload) -> str:
+    msgs = payload.get("messages", []) if isinstance(payload, dict) else (payload or [])
+    if not msgs:
+        return "(no messages)"
+    lines = []
+    for m in msgs:
+        body = (m.get("content") or "").replace("\n", " ")
+        if len(body) > 120:
+            body = body[:117] + "..."
+        lines.append(f"[{m.get('id')}] {m.get('from_node')} ({m.get('kind')}): {body}")
+    return "\n".join(lines)
 
 
 def _ctx(args: argparse.Namespace) -> tuple[str, str, str]:
@@ -130,6 +167,26 @@ def _run_members(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_post(args: argparse.Namespace) -> int:
+    self_name, token, base = _ctx(args)
+    status, payload = post_json(
+        f"{base}/messages", _post_payload(self_name, args.name, args.kind, args.content), token
+    )
+    if not _ok(status):
+        return _fail("post", status, payload)
+    print(f"posted to #{args.name} (msg {payload.get('id')})")
+    return 0
+
+
+def _run_read(args: argparse.Namespace) -> int:
+    _self, token, base = _ctx(args)
+    status, payload = get_json(_read_url(base, args.name, args.limit), token)
+    if not _ok(status):
+        return _fail("read", status, payload)
+    print(json.dumps(payload, indent=2) if args.json else _format_channel_messages(payload))
+    return 0
+
+
 def run_channel(argv: list) -> int:
     p = _build_parser()
     args = p.parse_args(argv)
@@ -147,6 +204,10 @@ def run_channel(argv: list) -> int:
             return _run_leave(args)
         if args.command == "members":
             return _run_members(args)
+        if args.command == "post":
+            return _run_post(args)
+        if args.command == "read":
+            return _run_read(args)
     except RuntimeError as e:
         print(f"swarph channel: {e}", file=sys.stderr)
         return 2
