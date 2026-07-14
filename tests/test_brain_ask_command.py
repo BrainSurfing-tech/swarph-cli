@@ -15,9 +15,9 @@ from swarph_cli.commands import brain_ask as ba
 
 # --- version ---------------------------------------------------------------
 
-def test_version_is_0_27_3():
+def test_version_is_0_28_0():
     import swarph_cli
-    assert swarph_cli.__version__ == "0.27.3"
+    assert swarph_cli.__version__ == "0.28.0"
 
 
 # --- request / response plumbing -------------------------------------------
