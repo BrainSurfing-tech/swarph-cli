@@ -18,6 +18,7 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 
+from swarph_cli.commands._display import sanitize_terminal as _s
 from swarph_cli.commands.mesh import (
     _add_common,
     _http_get_json,
@@ -107,23 +108,23 @@ def _format_cards(data) -> str:
     for c in rows:
         ai2 = "AI²" if c.get("ai2") else ""
         lines.append(f"{c.get('id',''):>4}  {c.get('stage',''):<9} "
-                     f"{c.get('project_id',''):>4} {ai2:<3} {c.get('title','')}")
+                     f"{c.get('project_id',''):>4} {ai2:<3} {_s(c.get('title'))}")
     return "\n".join(lines)
 
 
 def _format_card(card: dict) -> str:
     lines = [
         f"#{card.get('id')}  [{card.get('stage')}]  project={card.get('project_id')}"
-        f"  assignee={card.get('assignee') or '-'}  {'AI²' if card.get('ai2') else ''}",
-        f"  {card.get('title','')}",
+        f"  assignee={_s(card.get('assignee')) or '-'}  {'AI²' if card.get('ai2') else ''}",
+        f"  {_s(card.get('title'))}",
     ]
     if card.get("body"):
-        lines.append(f"\n{card['body']}")
+        lines.append(f"\n{_s(card['body'])}")
     links = card.get("links") or {}
     if links:
         lines.append("\nlinks:")
         for k, v in links.items():
-            lines.append(f"  {k}: {v}")
+            lines.append(f"  {_s(k)}: {_s(v)}")
     return "\n".join(lines)
 
 
@@ -133,7 +134,7 @@ def _format_projects(data) -> str:
         return "(no projects)"
     lines = [f"{'ID':>4}  {'SLUG':<22} TITLE"]
     for p in rows:
-        lines.append(f"{p.get('id',''):>4}  {p.get('slug',''):<22} {p.get('title') or ''}")
+        lines.append(f"{p.get('id',''):>4}  {_s(p.get('slug')):<22} {_s(p.get('title'))}")
     return "\n".join(lines)
 
 
