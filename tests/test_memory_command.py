@@ -2,6 +2,15 @@ import json
 from swarph_cli.commands import memory
 
 
+def test_memory_registered_in_dispatch():
+    """Test that the memory verb is registered in the CLI dispatch table."""
+    from swarph_cli import main as m
+    # the dispatch table maps the verb to the dotted run_ path
+    table = getattr(m, "_VERB_HANDLERS", None)
+    assert table is not None, "locate the dispatch dict in main.py and update this test's accessor"
+    assert table["memory"] == "swarph_cli.commands.memory.run_memory"
+
+
 def _fake_post(monkeypatch, captured, response_obj):
     """Stub brain_ask._http_post (the shared transport seam) to capture the
     outbound MCP request and return a canned MCP tools/call envelope."""
