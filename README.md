@@ -79,6 +79,32 @@ $ swarph brain-ask --no-synth --limit 3 "cross-vendor fallback governor order"
 
 Config is via env, mirroring `swarph mesh`'s token model: `GBRAIN_MCP_URL` or `SWARPH_BRAIN_MCP` (gbrain endpoint; defaults to `http://127.0.0.1:8792/mcp`), and the read token resolved `--token-file` > `GBRAIN_TOKEN` > `SWARPH_BRAIN_TOKEN` > the mesh per-peer token (`~/.config/swarph/<self>.peer_token`) — so the mesh peer token doubles as the gbrain read token. Optional `SWARPH_FACADE` / `SWARPH_FACADE_TOKEN` enable the $0 cited-synthesis pass; without them, brain-ask prints the raw ranked chunks.
 
+### `swarph memory` (v0.30.0)
+
+**Deterministic** OKF memory navigation over gbrain — the knowledge-hemisphere twin of `swarph codegraph`. When you want an EXACT canonical fact you can name, you invoke it; fuzzy recall stays with `swarph brain-ask`.
+
+```
+swarph memory get <slug>                 # read one page by exact slug
+swarph memory list [--tag T] [--type T]  # filter pages (deterministic — --tag is the reliable scope)
+swarph memory links <slug>               # a concept's forward [[wiki-links]]
+```
+
+Same token model as `swarph brain-ask` (`GBRAIN_MCP_URL`/`SWARPH_BRAIN_MCP` endpoint; `--token-file` > `GBRAIN_TOKEN` > `SWARPH_BRAIN_TOKEN` > mesh peer token). Add `--json` for the raw payload. Read-only. Also exposed to any MCP host as the `swarph_memory_navigate` tool.
+
+> Note: gbrain reclassifies its own page `type`, so `--tag` is more reliable than `--type` for scoping.
+
+#### The AI Router (why a tool, not a hook)
+
+The modern memory stack routes a request between **ambient semantic recall** (wide/fuzzy) and **deterministic canonical lookup** (exact). swarph's router is not a classifier box — it's the agent choosing, because intent lives with the caller:
+
+| path | when | swarph surface |
+|---|---|---|
+| **ambient / semantic** | "surface anything relevant" (you don't know the page) | the per-prompt retrieval hook + `swarph brain-ask` |
+| **deterministic / canonical** — code | "where is X defined / what calls it" | `swarph codegraph` / `swarph_codegraph_query` |
+| **deterministic / canonical** — knowledge | "the exact page for X / all `auth`-tagged / X's neighbours" | **`swarph memory` / `swarph_memory_navigate`** |
+
+Evidence (#33 LOCOMO benchmark): deterministic navigation is strongest for single-hop canonical lookup; relational/multi-hop recall is the weak spot `memory links` graph-traversal targets. Reach for semantic recall when you can't name the page yet.
+
 ### `swarph brain serve`
 
 `brain-ask` *searches* a running brain; **`brain serve`** *runs* one. gbrain (the sovereign $0 semantic-memory server) is an external binary — this verb is a thin launcher that applies the swarph-blessed defaults and replaces itself with `gbrain serve`:
