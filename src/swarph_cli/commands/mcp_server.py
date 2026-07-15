@@ -11,7 +11,7 @@ A host mounts it with a stdio server entry, e.g. in ``.mcp.json`` /
     {"mcpServers": {"swarph": {"command": "swarph",
                                "args": ["mcp-server"]}}}
 
-Four tools are exposed, each backed by a plain, unit-testable helper so the
+Five tools are exposed, each backed by a plain, unit-testable helper so the
 tool LOGIC is tested without spinning up the stdio transport:
 
 * ``swarph_search(query)``           → :func:`_search` — metaedge.surf semantic search.
@@ -19,6 +19,8 @@ tool LOGIC is tested without spinning up the stdio transport:
 * ``swarph_describe(uri)``           → :func:`_describe` — parse a URI, no install.
 * ``swarph_codegraph_query(query)``  → :func:`_codegraph_query` — structural code
   search (definitions + call sites) over the local codegraph index.
+* ``swarph_memory_navigate(op, ...)`` → :func:`_memory_navigate` — deterministic
+  OKF memory navigation (get/list/links) over gbrain.
 
 The MCP Python SDK (``mcp``) is an OPTIONAL extra. :func:`run_mcp_server`
 fails gracefully with a ``pip install swarph-cli[mcp]`` hint when it's absent;
@@ -36,6 +38,7 @@ import urllib.request
 
 from swarph_cli.commands import add
 from swarph_cli.commands import codegraph
+from swarph_cli.commands import brain_ask, memory
 
 # --------------------------------------------------------------------------- #
 # Config
@@ -180,6 +183,32 @@ def _codegraph_query(query: str, *, limit: int = 8) -> list[dict]:
         return []
 
 
+def _memory_navigate(op: str, slug: str | None = None, type: str | None = None,
+                     tag: str | None = None, limit: int = 20):
+    """Deterministic OKF memory navigation — the knowledge-hemisphere twin of
+    swarph_codegraph_query. Ops: 'get' (exact page by slug), 'list' (type/tag
+    filter — deterministic, NOT semantic), 'links' (a page's [[wiki-links]]).
+
+    Use this when you need an EXACT/canonical memory fact you can name; use the
+    ambient semantic recall (the retrieval hook / brain-ask) when you don't yet
+    know which page you need. (#33 LOCOMO: deterministic nav is strongest for
+    single-hop canonical lookup; 'links' targets the relational/multi-hop case.)
+
+    Fail-safe: any backend/parse error resolves to [] or {} — never raises."""
+    try:
+        url = brain_ask._resolve_endpoint()
+        token = brain_ask._resolve_token(None, brain_ask._self_name())
+        if op == "get" and slug:
+            return memory.get_page(url, token, slug)
+        if op == "list":
+            return memory.list_pages(url, token, type, tag, limit)
+        if op == "links" and slug:
+            return memory.links(url, token, slug)
+        return []
+    except Exception:
+        return []
+
+
 # --------------------------------------------------------------------------- #
 # FastMCP server — thin @tool wrappers over the helpers above
 # --------------------------------------------------------------------------- #
@@ -213,6 +242,16 @@ try:
     def swarph_codegraph_query(query: str) -> list[dict]:
         """Find where a function/class/method/symbol is DEFINED, or what CALLS it, across the indexed code repositories. Use this whenever you are reading, writing, debugging, or navigating code and need to locate a definition or trace call relationships by natural-language description (e.g. 'which function escapes HTML', 'where is the retry-parse helper defined', 'what calls the circuit breaker'). Returns ranked symbols with file path, line, signature, and caller count."""
         return _codegraph_query(query)
+
+    @mcp.tool()
+    def swarph_memory_navigate(op: str, slug: str = "", tag: str = "",
+                               type: str = "", limit: int = 20):
+        """Deterministic OKF memory navigation over gbrain: op='get'|'list'|'links'.
+        Exact canonical recall (a named page, a tag's pages, a concept's links) —
+        the counterpart to swarph_codegraph_query for the knowledge hemisphere.
+        For fuzzy recall use semantic search instead."""
+        return _memory_navigate(op, slug=slug or None, type=type or None,
+                                tag=tag or None, limit=limit)
 
 except ImportError:  # pragma: no cover - exercised only when SDK absent
     mcp = None
