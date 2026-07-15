@@ -114,3 +114,20 @@ def test_links_reads_page_then_extracts(monkeypatch):
     _fake_post(monkeypatch, captured, page)
     assert memory.links("http://x/mcp", "tok", "a") == ["b", "c"]
     assert captured["body"]["params"]["name"] == "get_page"
+
+
+def test_memory_navigate_dispatches_and_is_failsafe(monkeypatch):
+    from swarph_cli.commands import mcp_server
+    monkeypatch.setattr(mcp_server.brain_ask, "_resolve_endpoint", lambda: "http://x/mcp")
+    monkeypatch.setattr(mcp_server.brain_ask, "_resolve_token", lambda *a, **k: "tok")
+    monkeypatch.setattr(mcp_server.brain_ask, "_self_name", lambda: "lab-ovh")
+    monkeypatch.setattr(mcp_server.memory, "get_page", lambda u, t, s: {"slug": s, "content": "hi"})
+
+    assert mcp_server._memory_navigate("get", slug="foo")["slug"] == "foo"
+
+    # fail-safe: an unexpected op or an exploding backend NEVER raises
+    def boom(*a, **k):
+        raise RuntimeError("gbrain down")
+    monkeypatch.setattr(mcp_server.memory, "list_pages", boom)
+    assert mcp_server._memory_navigate("list", tag="auth") == []
+    assert mcp_server._memory_navigate("bogus") == []
