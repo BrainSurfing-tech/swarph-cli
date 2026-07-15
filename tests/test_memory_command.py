@@ -91,3 +91,17 @@ def test_list_pages_calls_list_pages_tool_with_filters(monkeypatch):
     assert [p["slug"] for p in result] == ["reference_swarph_mesh", "reference_okf_google"]
     assert captured["body"]["params"]["name"] == "list_pages"
     assert captured["body"]["params"]["arguments"] == {"type": "reference", "tag": "auth", "limit": 25}
+
+
+def test_parse_links_extracts_wiki_links_dedup_ordered():
+    body = ("See [[project_gbrain_shipped]] and [[reference_okf_google]].\n"
+            "Also [[project_gbrain_shipped]] again and a [markdown](path) link.")
+    assert memory.parse_links(body) == ["project_gbrain_shipped", "reference_okf_google"]
+
+
+def test_links_reads_page_then_extracts(monkeypatch):
+    captured = {}
+    page = {"slug": "a", "content": "links to [[b]] and [[c]]"}
+    _fake_post(monkeypatch, captured, page)
+    assert memory.links("http://x/mcp", "tok", "a") == ["b", "c"]
+    assert captured["body"]["params"]["name"] == "get_page"

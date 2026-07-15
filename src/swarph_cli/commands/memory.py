@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 
 from swarph_cli.commands import brain_ask
@@ -76,6 +77,24 @@ def list_pages(url: str, token: str, type_: str | None = None,
     return out if isinstance(out, list) else (out.get("pages", []) if isinstance(out, dict) else [])
 
 
+_WIKILINK = re.compile(r"\[\[([^\]|]+?)(?:\|[^\]]*)?\]\]")
+
+
+def parse_links(content: str) -> list:
+    """Extract ``[[slug]]`` wiki-links from a page body (forward links),
+    order-preserving de-dupe. Ignores standard ``[text](path)`` markdown links.
+    (gbrain's graph/backlinks are CLI-only, not over MCP, so v1 traverses the
+    body — the OKF memory format links concepts with [[name]].)"""
+    slugs = [m.group(1).strip() for m in _WIKILINK.finditer(content or "")]
+    return list(dict.fromkeys(slugs))
+
+
+def links(url: str, token: str, slug: str) -> list:
+    """Forward [[links]] out of a page (deterministic graph navigation)."""
+    page = get_page(url, token, slug)
+    return parse_links(page.get("content", "") if isinstance(page, dict) else "")
+
+
 def run_memory(argv: list) -> int:
     parser = argparse.ArgumentParser(
         prog="swarph memory",
@@ -96,6 +115,10 @@ def run_memory(argv: list) -> int:
     p_list.add_argument("--tag", default=None, help="tag filter (the reliable scope)")
     p_list.add_argument("-n", "--limit", type=int, default=50)
     p_list.add_argument("--json", action="store_true")
+
+    p_links = sub.add_parser("links", help="forward [[wiki-links]] out of a page")
+    p_links.add_argument("slug")
+    p_links.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
 
@@ -141,6 +164,19 @@ def run_memory(argv: list) -> int:
         else:
             for p in pages:
                 print(f"{p.get('slug','?'):40} {p.get('type','')}")
+        return 0
+
+    if args.subcommand == "links":
+        try:
+            out = links(url, token, args.slug)
+        except Exception as e:
+            print(f"swarph memory links: gbrain unreachable ({e})", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(out, indent=2))
+        else:
+            for s in out:
+                print(s)
         return 0
 
     parser.print_help()
