@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 
 from swarph_cli.commands import brain_ask
@@ -45,7 +44,7 @@ def _mcp_call(url: str, token: str, tool: str, arguments: dict):
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": tool, "arguments": arguments},
     }
-    raw = brain_ask._http_post(url, body, token, accept="application/json")
+    raw = brain_ask._http_post(url, body, token)
     envelope = json.loads(_strip_sse(raw))
     content = (envelope.get("result") or {}).get("content") or []
     for part in content:
@@ -78,8 +77,22 @@ def run_memory(argv: list) -> int:
     p_get.add_argument("--json", action="store_true", help="raw page JSON")
 
     args = parser.parse_args(argv)
-    url = brain_ask._resolve_endpoint()
-    token = brain_ask._resolve_token(args.token_file, brain_ask._self_name())
+
+    if not args.subcommand:
+        parser.print_help()
+        return 0
+
+    # Resolve endpoint + token only once a subcommand is confirmed, and only
+    # inside a try: a bad --token-file (missing/typo/permission) must never
+    # traceback at the CLI — same fail-safe contract as the get_page call
+    # below. get/list/links (added in later tasks) all share this guard.
+    try:
+        url = brain_ask._resolve_endpoint()
+        token = brain_ask._resolve_token(args.token_file, brain_ask._self_name())
+    except Exception as e:  # fail-safe: never traceback at the CLI
+        print(f"swarph memory: could not resolve gbrain endpoint/token ({e})",
+              file=sys.stderr)
+        return 1
 
     if args.subcommand == "get":
         try:
