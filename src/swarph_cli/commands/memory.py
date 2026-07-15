@@ -62,6 +62,20 @@ def get_page(url: str, token: str, slug: str) -> dict:
     return out if isinstance(out, dict) else {}
 
 
+def list_pages(url: str, token: str, type_: str | None = None,
+               tag: str | None = None, limit: int = 50) -> list:
+    """List pages filtered by metadata (type/tag) via ``list_pages`` — a
+    DETERMINISTIC filter, not semantic search. NOTE: gbrain reclassifies its
+    own page `type`, so `tag` is the reliable scope (see gbrain-api-notes)."""
+    args: dict = {"limit": limit}
+    if type_:
+        args["type"] = type_
+    if tag:
+        args["tag"] = tag
+    out = _mcp_call(url, token, "list_pages", args)
+    return out if isinstance(out, list) else (out.get("pages", []) if isinstance(out, dict) else [])
+
+
 def run_memory(argv: list) -> int:
     parser = argparse.ArgumentParser(
         prog="swarph memory",
@@ -75,6 +89,13 @@ def run_memory(argv: list) -> int:
     p_get = sub.add_parser("get", help="read one page by exact slug")
     p_get.add_argument("slug")
     p_get.add_argument("--json", action="store_true", help="raw page JSON")
+
+    p_list = sub.add_parser("list", help="filter pages by type/tag (deterministic, not semantic)")
+    p_list.add_argument("--type", dest="type_", default=None,
+                        help="page type filter (unreliable — gbrain reclassifies type; prefer --tag)")
+    p_list.add_argument("--tag", default=None, help="tag filter (the reliable scope)")
+    p_list.add_argument("-n", "--limit", type=int, default=50)
+    p_list.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
 
@@ -107,6 +128,19 @@ def run_memory(argv: list) -> int:
             print(json.dumps(page, indent=2))
         else:
             print(page.get("content", "") or json.dumps(page, indent=2))
+        return 0
+
+    if args.subcommand == "list":
+        try:
+            pages = list_pages(url, token, args.type_, args.tag, args.limit)
+        except Exception as e:  # fail-safe: never traceback at the CLI
+            print(f"swarph memory list: gbrain unreachable ({e})", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(pages, indent=2))
+        else:
+            for p in pages:
+                print(f"{p.get('slug','?'):40} {p.get('type','')}")
         return 0
 
     parser.print_help()

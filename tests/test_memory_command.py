@@ -78,3 +78,16 @@ def test_run_memory_get_json_output(monkeypatch, capsys):
     captured = capsys.readouterr()
     printed = json.loads(captured.out)
     assert printed == page
+
+
+def test_list_pages_calls_list_pages_tool_with_filters(monkeypatch):
+    captured = {}
+    pages = [{"slug": "reference_swarph_mesh", "type": "reference"},
+             {"slug": "reference_okf_google", "type": "reference"}]
+    _fake_post(monkeypatch, captured, pages)
+
+    result = memory.list_pages("http://x/mcp", "tok", type_="reference", tag="auth", limit=25)
+
+    assert [p["slug"] for p in result] == ["reference_swarph_mesh", "reference_okf_google"]
+    assert captured["body"]["params"]["name"] == "list_pages"
+    assert captured["body"]["params"]["arguments"] == {"type": "reference", "tag": "auth", "limit": 25}
