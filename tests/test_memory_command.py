@@ -116,6 +116,22 @@ def test_links_reads_page_then_extracts(monkeypatch):
     assert captured["body"]["params"]["name"] == "get_page"
 
 
+def test_parse_links_uses_shared_okf_grammar():
+    from swarph_cli.commands import memory, okf_links
+    # memory.parse_links must now BE the shared parser (single grammar, no drift)
+    assert memory.parse_links is okf_links.parse_okf_links
+    body = "see [[project_x|the X project]] and [[ref_y#section]] and ![[embed_z]] and [docs](guide.md)"
+    assert memory.parse_links(body) == ["project_x", "ref_y", "embed_z", "guide.md"]
+
+
+def test_links_resolves_alias_and_heading_via_shared_parser(monkeypatch):
+    from swarph_cli.commands import memory
+    page = {"slug": "hub", "content": "[[a|alias]] [[b#h]] ![[c]]"}
+    inner = __import__("json").dumps({"result": {"content": [{"type": "text", "text": __import__("json").dumps(page)}]}})
+    monkeypatch.setattr(memory.brain_ask, "_http_post", lambda *a, **k: inner)
+    assert memory.links("http://x/mcp", "tok", "hub") == ["a", "b", "c"]
+
+
 def test_memory_navigate_dispatches_and_is_failsafe(monkeypatch):
     from swarph_cli.commands import mcp_server
     monkeypatch.setattr(mcp_server.brain_ask, "_resolve_endpoint", lambda: "http://x/mcp")

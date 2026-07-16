@@ -20,10 +20,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 
-from swarph_cli.commands import brain_ask
+from swarph_cli.commands import brain_ask, okf_links
 
 
 def _strip_sse(raw: str) -> str:
@@ -77,22 +76,18 @@ def list_pages(url: str, token: str, type_: str | None = None,
     return out if isinstance(out, list) else (out.get("pages", []) if isinstance(out, dict) else [])
 
 
-_WIKILINK = re.compile(r"\[\[([^\]|]+?)(?:\|[^\]]*)?\]\]")
-
-
-def parse_links(content: str) -> list:
-    """Extract ``[[slug]]`` wiki-links from a page body (forward links),
-    order-preserving de-dupe. Ignores standard ``[text](path)`` markdown links.
-    (gbrain's graph/backlinks are CLI-only, not over MCP, so v1 traverses the
-    body — the OKF memory format links concepts with [[name]].)"""
-    slugs = [m.group(1).strip() for m in _WIKILINK.finditer(content or "")]
-    return list(dict.fromkeys(slugs))
+# The one true OKF link grammar lives in okf_links (pinned, tested). memory
+# used to carry a weaker wiki-only copy; that duplication is retired — this
+# alias keeps `memory.parse_links` importable for any existing caller.
+parse_links = okf_links.parse_okf_links
 
 
 def links(url: str, token: str, slug: str) -> list:
-    """Forward [[links]] out of a page (deterministic graph navigation)."""
+    """Forward [[links]] out of a page (deterministic single-hop navigation),
+    via the shared OKF grammar (okf_links)."""
     page = get_page(url, token, slug)
-    return parse_links(page.get("content", "") if isinstance(page, dict) else "")
+    content = page.get("content", "") if isinstance(page, dict) else ""
+    return okf_links.parse_okf_links(content)
 
 
 def run_memory(argv: list) -> int:
