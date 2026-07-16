@@ -18,24 +18,25 @@ from __future__ import annotations
 
 import re
 
-# ![[x]] or [[x]] — capture the target up to the first '#', '|', or ']'.
-_WIKI = re.compile(r"!?\[\[\s*([^\]|#]+?)\s*(?:[#|][^\]]*)?\]\]")
-# [text](path.md) — capture a .md path target (ignore http/images/other extensions).
-_MDLINK = re.compile(r"\[[^\]]*\]\(\s*([^)\s]+\.md)\s*\)")
+# Single pinned grammar, one compiled pattern, two named groups:
+#   'wiki' -> ![[x]] or [[x]], target up to the first '#', '|', or ']'.
+#   'md'   -> [text](path.md), a standard-markdown link to a .md file.
+# Kept as ONE regex (not two matched separately) so the grammar can never
+# drift between a "capture" copy and a "scan" copy — there is only one copy.
+_LINK = re.compile(
+    r"!?\[\[\s*(?P<wiki>[^\]|#]+?)\s*(?:[#|][^\]]*)?\]\]"
+    r"|\[[^\]]*\]\(\s*(?P<md>[^)\s]+\.md)\s*\)"
+)
 
 
-def parse_okf_links(text: str) -> list:
+def parse_okf_links(text: str) -> list[str]:
     """Extract OKF edge targets from `text`, in document order, de-duped."""
     if not text:
         return []
     hits = []
-    for m in re.finditer(r"!?\[\[\s*[^\]|#]+?\s*(?:[#|][^\]]*)?\]\]|\[[^\]]*\]\(\s*[^)\s]+\.md\s*\)", text):
-        frag = m.group(0)
-        w = _WIKI.match(frag)
-        if w:
-            hits.append(w.group(1).strip())
-            continue
-        d = _MDLINK.match(frag)
-        if d:
-            hits.append(d.group(1).strip())
+    for m in _LINK.finditer(text):
+        if m.lastgroup == "wiki":
+            hits.append(m.group("wiki").strip())
+        elif m.lastgroup == "md":
+            hits.append(m.group("md").strip())
     return list(dict.fromkeys(hits))

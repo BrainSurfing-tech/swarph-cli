@@ -9,6 +9,8 @@ def test_grammar_table():
     assert parse_okf_links("see [txt](notes/b.md)") == ["notes/b.md"]  # md link
     # combined, order-preserving dedupe, markdown non-.md links ignored
     assert parse_okf_links("[[a]] x [[a|z]] y [[c#h]] z [q](http://x)") == ["a", "c"]
+    # image/non-.md markdown links are ignored (only .md markdown links captured)
+    assert parse_okf_links("![alt](pic.png) and [x](http://y)") == []
 
 
 def test_empty_and_none():
