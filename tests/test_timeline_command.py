@@ -91,3 +91,4 @@ def test_json_emits_okf_node_edges(tmp_path, monkeypatch, capsys):
     assert rec["edges"] == [{"type": "link", "to": "feedback_y",
                              "to_hemisphere": "knowledge", "direction": "out"}]
     assert rec["cell"] == "gridiron"
+    assert rec["text"] == "reaper operational · → [[feedback_y]]"
