@@ -77,3 +77,17 @@ def test_around_full_iso_zero_window_is_exact_center(tmp_path, monkeypatch, caps
     assert "2026-07-13T04:24Z" in out
     assert "2026-07-15T08:51Z" not in out
     assert "2026-07-10T21:02Z" not in out
+
+
+def test_json_emits_okf_node_edges(tmp_path, monkeypatch, capsys):
+    import json
+    monkeypatch.setenv("SWARPH_TIMELINE", _write(tmp_path))
+    assert timeline.run_timeline(["since", "2026-07-14", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 1
+    rec = payload[0]
+    assert rec["node"] == {"id": "2026-07-15T08:51Z", "hemisphere": "time",
+                           "ts": "2026-07-15T08:51Z"}
+    assert rec["edges"] == [{"type": "link", "to": "feedback_y",
+                             "to_hemisphere": "knowledge", "direction": "out"}]
+    assert rec["cell"] == "gridiron"
