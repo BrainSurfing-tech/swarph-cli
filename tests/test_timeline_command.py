@@ -92,3 +92,8 @@ def test_json_emits_okf_node_edges(tmp_path, monkeypatch, capsys):
                              "to_hemisphere": "knowledge", "direction": "out"}]
     assert rec["cell"] == "gridiron"
     assert rec["text"] == "reaper operational · → [[feedback_y]]"
+
+
+def test_timeline_registered_in_dispatch():
+    from swarph_cli import main as m
+    assert m._VERB_HANDLERS["timeline"] == "swarph_cli.commands.timeline.run_timeline"
