@@ -97,3 +97,14 @@ def test_json_emits_okf_node_edges(tmp_path, monkeypatch, capsys):
 def test_timeline_registered_in_dispatch():
     from swarph_cli import main as m
     assert m._VERB_HANDLERS["timeline"] == "swarph_cli.commands.timeline.run_timeline"
+
+
+def test_timeline_navigate_failsafe(tmp_path, monkeypatch):
+    from swarph_cli.commands import mcp_server
+    monkeypatch.setenv("SWARPH_TIMELINE", _write(tmp_path))
+    got = mcp_server._timeline_navigate("since", date="2026-07-14")
+    assert got and got[0]["node"]["id"] == "2026-07-15T08:51Z"
+    # fail-safe: unknown op / bad input NEVER raises
+    assert mcp_server._timeline_navigate("bogus") == []
+    monkeypatch.setenv("SWARPH_TIMELINE", str(tmp_path / "nope.md"))
+    assert mcp_server._timeline_navigate("since", date="2026-07-01") == []
