@@ -82,12 +82,21 @@ def list_pages(url: str, token: str, type_: str | None = None,
 parse_links = okf_links.parse_okf_links
 
 
+def _page_body(page) -> str:
+    """The page BODY for link/graph extraction. gbrain's ``get_page`` returns the
+    body under ``compiled_truth`` — ``content`` is only ``put_page``'s INPUT field
+    and is absent from get_page output, so reading ``content`` yields "" against a
+    live brain. Fall back to ``content`` so older brains / test fixtures still resolve."""
+    if not isinstance(page, dict):
+        return ""
+    return page.get("compiled_truth") or page.get("content") or ""
+
+
 def links(url: str, token: str, slug: str) -> list:
     """Forward [[links]] out of a page (deterministic single-hop navigation),
     via the shared OKF grammar (okf_links)."""
     page = get_page(url, token, slug)
-    content = page.get("content", "") if isinstance(page, dict) else ""
-    return okf_links.parse_okf_links(content)
+    return okf_links.parse_okf_links(_page_body(page))
 
 
 DEPTH_CAP = 10  # mirrors gbrain's TRAVERSE_DEPTH_CAP — bounds a pathological walk
@@ -112,8 +121,7 @@ def _all_page_slugs(url: str, token: str) -> list:
 def _forward_targets(url: str, token: str, slug: str) -> list:
     """The [[links]] out of one page's body (shared OKF grammar)."""
     page = get_page(url, token, slug)
-    content = page.get("content", "") if isinstance(page, dict) else ""
-    return okf_links.parse_okf_links(content)
+    return okf_links.parse_okf_links(_page_body(page))
 
 
 def _reverse_index(url: str, token: str) -> dict:
@@ -253,7 +261,7 @@ def run_memory(argv: list) -> int:
         if args.json:
             print(json.dumps(page, indent=2))
         else:
-            print(page.get("content", "") or json.dumps(page, indent=2))
+            print(_page_body(page) or json.dumps(page, indent=2))
         return 0
 
     if args.subcommand == "list":
