@@ -212,9 +212,16 @@ def run_memory(argv: list) -> int:
     p_list.add_argument("-n", "--limit", type=int, default=50)
     p_list.add_argument("--json", action="store_true")
 
-    p_links = sub.add_parser("links", help="forward [[wiki-links]] out of a page")
+    p_links = sub.add_parser("links", help="graph links out of / into a page (file-native OKF traversal)")
     p_links.add_argument("slug")
-    p_links.add_argument("--json", action="store_true")
+    p_links.add_argument("--backlinks", action="store_true",
+                         help="incoming links (who links to this page) — sugar for --direction in")
+    p_links.add_argument("--depth", type=int, default=1,
+                         help="traversal hops (clamped to 1-10; default 1)")
+    p_links.add_argument("--direction", choices=["out", "in", "both"], default=None,
+                         help="traversal direction (default out)")
+    p_links.add_argument("--json", action="store_true",
+                         help="emit OKF edge records instead of plain slugs")
 
     args = parser.parse_args(argv)
 
@@ -263,16 +270,25 @@ def run_memory(argv: list) -> int:
         return 0
 
     if args.subcommand == "links":
+        if args.backlinks and args.direction is not None:
+            print("swarph memory links: --backlinks and --direction are "
+                  "mutually exclusive", file=sys.stderr)
+            return 2
+        direction = "in" if args.backlinks else (args.direction or "out")
         try:
-            out = links(url, token, args.slug)
-        except Exception as e:
+            edges = traverse(url, token, args.slug, args.depth, direction)
+        except Exception as e:  # fail-safe: never traceback at the CLI
             print(f"swarph memory links: gbrain unreachable ({e})", file=sys.stderr)
             return 1
         if args.json:
-            print(json.dumps(out, indent=2))
+            print(json.dumps([_as_okf_edge(f, t, d, h)
+                              for (f, t, h, d) in edges], indent=2))
         else:
-            for s in out:
-                print(s)
+            seen: list = []
+            for (f, t, h, d) in edges:
+                if t not in seen:
+                    seen.append(t)
+                    print(t)
         return 0
 
     parser.print_help()

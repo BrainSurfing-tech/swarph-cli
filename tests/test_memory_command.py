@@ -226,3 +226,66 @@ def test_as_okf_edge_schema():
         "type": "edge", "hemisphere": "knowledge", "from": "a", "to": "b",
         "rel": "links", "direction": "out", "hop": 2,
     }
+
+
+def test_links_default_output_unchanged(monkeypatch, capsys):
+    m = _fake_corpus(monkeypatch, {"a": "[[b]] [[c]]", "b": "", "c": ""})
+    monkeypatch.setattr(m.brain_ask, "_resolve_endpoint", lambda: "http://x/mcp")
+    monkeypatch.setattr(m.brain_ask, "_resolve_token", lambda *a, **k: "tok")
+    rc = m.run_memory(["links", "a"])
+    assert rc == 0
+    assert capsys.readouterr().out == "b\nc\n"
+
+
+def test_links_json_emits_okf_edges(monkeypatch, capsys):
+    m = _fake_corpus(monkeypatch, {"a": "[[b]]", "b": ""})
+    monkeypatch.setattr(m.brain_ask, "_resolve_endpoint", lambda: "http://x/mcp")
+    monkeypatch.setattr(m.brain_ask, "_resolve_token", lambda *a, **k: "tok")
+    rc = m.run_memory(["links", "a", "--json"])
+    assert rc == 0
+    out = __import__("json").loads(capsys.readouterr().out)
+    assert out == [{"type": "edge", "hemisphere": "knowledge", "from": "a",
+                    "to": "b", "rel": "links", "direction": "out", "hop": 1}]
+
+
+def test_links_backlinks_flag(monkeypatch, capsys):
+    m = _fake_corpus(monkeypatch, {"t": "", "x": "[[t]]"})
+    monkeypatch.setattr(m.brain_ask, "_resolve_endpoint", lambda: "http://x/mcp")
+    monkeypatch.setattr(m.brain_ask, "_resolve_token", lambda *a, **k: "tok")
+    rc = m.run_memory(["links", "t", "--backlinks"])
+    assert rc == 0
+    assert capsys.readouterr().out == "x\n"
+
+
+def test_links_backlinks_with_direction_is_exit_2(monkeypatch, capsys):
+    m = _fake_corpus(monkeypatch, {"t": ""})
+    monkeypatch.setattr(m.brain_ask, "_resolve_endpoint", lambda: "http://x/mcp")
+    monkeypatch.setattr(m.brain_ask, "_resolve_token", lambda *a, **k: "tok")
+    rc = m.run_memory(["links", "t", "--backlinks", "--direction", "in"])
+    assert rc == 2
+    assert "mutually exclusive" in capsys.readouterr().err
+
+
+def test_links_depth_direction_both(monkeypatch, capsys):
+    m = _fake_corpus(monkeypatch, {"hub": "[[o]]", "o": "", "s": "[[hub]]"})
+    monkeypatch.setattr(m.brain_ask, "_resolve_endpoint", lambda: "http://x/mcp")
+    monkeypatch.setattr(m.brain_ask, "_resolve_token", lambda *a, **k: "tok")
+    rc = m.run_memory(["links", "hub", "--direction", "both"])
+    assert rc == 0
+    assert capsys.readouterr().out == "o\ns\n"
+
+
+def test_links_root_unreachable_is_rc1_not_silent(monkeypatch, capsys):
+    """A transport error fetching the ROOT page must surface as rc 1 (like the
+    old `links`), NOT be swallowed into an empty rc-0 graph (silent failure)."""
+    from swarph_cli.commands import memory
+
+    def _boom(url, token, slug):
+        raise ConnectionError("gbrain down")
+
+    monkeypatch.setattr(memory, "get_page", _boom)
+    monkeypatch.setattr(memory.brain_ask, "_resolve_endpoint", lambda: "http://x/mcp")
+    monkeypatch.setattr(memory.brain_ask, "_resolve_token", lambda *a, **k: "tok")
+    rc = memory.run_memory(["links", "a"])
+    assert rc == 1
+    assert "unreachable" in capsys.readouterr().err
