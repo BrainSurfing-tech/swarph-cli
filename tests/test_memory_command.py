@@ -149,6 +149,36 @@ def test_memory_navigate_dispatches_and_is_failsafe(monkeypatch):
     assert mcp_server._memory_navigate("bogus") == []
 
 
+def test_memory_navigate_backlinks_op(monkeypatch):
+    from swarph_cli.commands import mcp_server, memory
+    monkeypatch.setattr(memory, "get_page",
+                        lambda u, t, s: {"slug": s, "content": {"x": "[[t]]", "t": ""}.get(s, "")})
+    monkeypatch.setattr(memory, "list_pages",
+                        lambda *a, **k: [{"slug": "x"}, {"slug": "t"}])
+    monkeypatch.setattr(mcp_server.brain_ask, "_resolve_endpoint", lambda: "http://x/mcp")
+    monkeypatch.setattr(mcp_server.brain_ask, "_resolve_token", lambda *a, **k: "tok")
+    assert mcp_server._memory_navigate("backlinks", slug="t") == ["x"]
+
+
+def test_memory_navigate_traverse_op_returns_okf_edges(monkeypatch):
+    from swarph_cli.commands import mcp_server, memory
+    monkeypatch.setattr(memory, "get_page",
+                        lambda u, t, s: {"slug": s, "content": {"a": "[[b]]"}.get(s, "")})
+    monkeypatch.setattr(memory, "list_pages", lambda *a, **k: [{"slug": "a"}, {"slug": "b"}])
+    monkeypatch.setattr(mcp_server.brain_ask, "_resolve_endpoint", lambda: "http://x/mcp")
+    monkeypatch.setattr(mcp_server.brain_ask, "_resolve_token", lambda *a, **k: "tok")
+    out = mcp_server._memory_navigate("traverse", slug="a", depth=1, direction="out")
+    assert out == [{"type": "edge", "hemisphere": "knowledge", "from": "a",
+                    "to": "b", "rel": "links", "direction": "out", "hop": 1}]
+
+
+def test_memory_navigate_unknown_op_is_empty(monkeypatch):
+    from swarph_cli.commands import mcp_server
+    monkeypatch.setattr(mcp_server.brain_ask, "_resolve_endpoint", lambda: "http://x/mcp")
+    monkeypatch.setattr(mcp_server.brain_ask, "_resolve_token", lambda *a, **k: "tok")
+    assert mcp_server._memory_navigate("bogus", slug="a") == []
+
+
 def _fake_corpus(monkeypatch, pages):
     """pages: {slug: body_str}. Stub memory.get_page/list_pages so the engine
     reads this in-memory graph instead of gbrain. No network."""

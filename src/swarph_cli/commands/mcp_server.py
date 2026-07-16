@@ -186,17 +186,14 @@ def _codegraph_query(query: str, *, limit: int = 8) -> list[dict]:
 
 
 def _memory_navigate(op: str, slug: str | None = None, type: str | None = None,
-                     tag: str | None = None, limit: int = 20):
+                     tag: str | None = None, limit: int = 20,
+                     depth: int = 1, direction: str = "out"):
     """Deterministic OKF memory navigation — the knowledge-hemisphere twin of
-    swarph_codegraph_query. Ops: 'get' (exact page by slug), 'list' (type/tag
-    filter — deterministic, NOT semantic), 'links' (a page's [[wiki-links]]).
+    swarph_codegraph_query. Ops: 'get', 'list', 'links', 'backlinks' (incoming),
+    'traverse' (multi-hop OKF edges via depth/direction). File-native graph.
 
-    Use this when you need an EXACT/canonical memory fact you can name; use the
-    ambient semantic recall (the retrieval hook / brain-ask) when you don't yet
-    know which page you need. (#33 LOCOMO: deterministic nav is strongest for
-    single-hop canonical lookup; 'links' targets the relational/multi-hop case.)
-
-    Fail-safe: any backend/parse error resolves to [] or {} — never raises."""
+    Fail-safe: any backend/parse error, or an unrecognised op, resolves to [] or
+    {} — never raises."""
     try:
         url = brain_ask._resolve_endpoint()
         token = brain_ask._resolve_token(None, brain_ask._self_name())
@@ -206,6 +203,11 @@ def _memory_navigate(op: str, slug: str | None = None, type: str | None = None,
             return memory.list_pages(url, token, type, tag, limit)
         if op == "links" and slug:
             return memory.links(url, token, slug)
+        if op == "backlinks" and slug:
+            return memory.backlinks(url, token, slug)
+        if op == "traverse" and slug:
+            return [memory._as_okf_edge(f, t, d, h)
+                    for (f, t, h, d) in memory.traverse(url, token, slug, depth, direction)]
         return []
     except Exception:
         return []
@@ -268,13 +270,15 @@ try:
 
     @mcp.tool()
     def swarph_memory_navigate(op: str, slug: str = "", tag: str = "",
-                               type: str = "", limit: int = 20):
-        """Deterministic OKF memory navigation over gbrain: op='get'|'list'|'links'.
-        Exact canonical recall (a named page, a tag's pages, a concept's links) —
-        the counterpart to swarph_codegraph_query for the knowledge hemisphere.
-        For fuzzy recall use semantic search instead."""
+                               type: str = "", limit: int = 20,
+                               depth: int = 1, direction: str = "out"):
+        """Deterministic OKF memory navigation over gbrain: op='get'|'list'|'links'|'backlinks'|'traverse'.
+        Exact canonical recall + file-native graph traversal (backlinks, multi-hop
+        --depth/--direction) — the knowledge-hemisphere counterpart to
+        swarph_codegraph_query. For fuzzy recall use semantic search instead."""
         return _memory_navigate(op, slug=slug or None, type=type or None,
-                                tag=tag or None, limit=limit)
+                                tag=tag or None, limit=limit,
+                                depth=depth, direction=direction)
 
     @mcp.tool()
     def swarph_timeline_navigate(op: str, start: str = "", end: str = "",
