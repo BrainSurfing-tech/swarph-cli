@@ -105,6 +105,18 @@ The modern memory stack routes a request between **ambient semantic recall** (wi
 
 Evidence (#33 LOCOMO benchmark): deterministic navigation is strongest for single-hop canonical lookup; relational/multi-hop recall is the weak spot `memory links` graph-traversal targets. Reach for semantic recall when you can't name the page yet.
 
+### `swarph timeline` (v0.31.0)
+
+**Deterministic, $0** temporal lookup over the git-backed swarph timeline — the temporal hemisphere of the OKF traversal brain (counterpart to `swarph codegraph` for code and `swarph memory` for knowledge). No model, no network — it parses the timeline file.
+
+```
+swarph timeline range <start> <end>          # entries between two dates (inclusive)
+swarph timeline around <date> [--window 3d]  # entries within a window of a date
+swarph timeline since <date>                 # entries on/after a date
+```
+
+Dates are `YYYY-MM-DD` (or a full ISO timestamp). Source is `~/swarph-timeline/TIMELINE.md` (override with `SWARPH_TIMELINE`). Add `--json` for the OKF node/edge payload (each entry is a dated node with `[[link]]` edges into knowledge). Also exposed to any MCP host as `swarph_timeline_navigate`.
+
 ### `swarph brain serve`
 
 `brain-ask` *searches* a running brain; **`brain serve`** *runs* one. gbrain (the sovereign $0 semantic-memory server) is an external binary — this verb is a thin launcher that applies the swarph-blessed defaults and replaces itself with `gbrain serve`:
