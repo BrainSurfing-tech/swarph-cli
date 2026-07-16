@@ -11,7 +11,7 @@ A host mounts it with a stdio server entry, e.g. in ``.mcp.json`` /
     {"mcpServers": {"swarph": {"command": "swarph",
                                "args": ["mcp-server"]}}}
 
-Five tools are exposed, each backed by a plain, unit-testable helper so the
+Six tools are exposed, each backed by a plain, unit-testable helper so the
 tool LOGIC is tested without spinning up the stdio transport:
 
 * ``swarph_search(query)``           → :func:`_search` — metaedge.surf semantic search.
@@ -21,6 +21,8 @@ tool LOGIC is tested without spinning up the stdio transport:
   search (definitions + call sites) over the local codegraph index.
 * ``swarph_memory_navigate(op, ...)`` → :func:`_memory_navigate` — deterministic
   OKF memory navigation (get/list/links) over gbrain.
+* ``swarph_timeline_navigate(op, ...)`` → :func:`_timeline_navigate` — deterministic
+  OKF temporal navigation (range/around/since) over the git-backed timeline.
 
 The MCP Python SDK (``mcp``) is an OPTIONAL extra. :func:`run_mcp_server`
 fails gracefully with a ``pip install swarph-cli[mcp]`` hint when it's absent;
@@ -38,7 +40,7 @@ import urllib.request
 
 from swarph_cli.commands import add
 from swarph_cli.commands import codegraph
-from swarph_cli.commands import brain_ask, memory
+from swarph_cli.commands import brain_ask, memory, timeline
 
 # --------------------------------------------------------------------------- #
 # Config
@@ -209,6 +211,27 @@ def _memory_navigate(op: str, slug: str | None = None, type: str | None = None,
         return []
 
 
+def _timeline_navigate(op: str, start: str = "", end: str = "", date: str = "",
+                       window: str = "3d"):
+    """Deterministic temporal lookup over the git timeline. op: 'range'|'around'|'since'.
+    Returns OKF node/edge records (list). Fail-safe: any bad input/op/read → [] (never raises).
+
+    Ops are explicitly whitelisted (mirrors ``_memory_navigate``): ``timeline._bounds``
+    falls through to ``(None, None)`` for an unrecognized subcommand, which would
+    otherwise match every entry unfiltered rather than yielding an empty result."""
+    try:
+        if op not in ("range", "around", "since"):
+            return []
+        ns = argparse.Namespace(subcommand=op, start=start, end=end, date=date,
+                                window=window)
+        lo, hi = timeline._bounds(ns)
+        entries = timeline.load_entries(timeline._timeline_path())
+        hits = [e for e in entries if (lo is None or e.ts >= lo) and (hi is None or e.ts <= hi)]
+        return [timeline._as_okf(e) for e in hits]
+    except Exception:
+        return []
+
+
 # --------------------------------------------------------------------------- #
 # FastMCP server — thin @tool wrappers over the helpers above
 # --------------------------------------------------------------------------- #
@@ -252,6 +275,14 @@ try:
         For fuzzy recall use semantic search instead."""
         return _memory_navigate(op, slug=slug or None, type=type or None,
                                 tag=tag or None, limit=limit)
+
+    @mcp.tool()
+    def swarph_timeline_navigate(op: str, start: str = "", end: str = "",
+                                 date: str = "", window: str = "3d"):
+        """Deterministic temporal lookup over the swarph timeline: op='range'|'around'|'since'.
+        The temporal hemisphere of the OKF traversal brain — entries are dated OKF nodes with
+        [[link]] edges into knowledge. Complements semantic recall; $0, no model."""
+        return _timeline_navigate(op, start=start, end=end, date=date, window=window)
 
 except ImportError:  # pragma: no cover - exercised only when SDK absent
     mcp = None
