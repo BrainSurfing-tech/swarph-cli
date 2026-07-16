@@ -20,10 +20,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 
-from swarph_cli.commands import brain_ask
+from swarph_cli.commands import brain_ask, okf_links
 
 
 def _strip_sse(raw: str) -> str:
@@ -77,22 +76,119 @@ def list_pages(url: str, token: str, type_: str | None = None,
     return out if isinstance(out, list) else (out.get("pages", []) if isinstance(out, dict) else [])
 
 
-_WIKILINK = re.compile(r"\[\[([^\]|]+?)(?:\|[^\]]*)?\]\]")
-
-
-def parse_links(content: str) -> list:
-    """Extract ``[[slug]]`` wiki-links from a page body (forward links),
-    order-preserving de-dupe. Ignores standard ``[text](path)`` markdown links.
-    (gbrain's graph/backlinks are CLI-only, not over MCP, so v1 traverses the
-    body — the OKF memory format links concepts with [[name]].)"""
-    slugs = [m.group(1).strip() for m in _WIKILINK.finditer(content or "")]
-    return list(dict.fromkeys(slugs))
+# The one true OKF link grammar lives in okf_links (pinned, tested). memory
+# used to carry a weaker wiki-only copy; that duplication is retired — this
+# alias keeps `memory.parse_links` importable for any existing caller.
+parse_links = okf_links.parse_okf_links
 
 
 def links(url: str, token: str, slug: str) -> list:
-    """Forward [[links]] out of a page (deterministic graph navigation)."""
+    """Forward [[links]] out of a page (deterministic single-hop navigation),
+    via the shared OKF grammar (okf_links)."""
     page = get_page(url, token, slug)
-    return parse_links(page.get("content", "") if isinstance(page, dict) else "")
+    content = page.get("content", "") if isinstance(page, dict) else ""
+    return okf_links.parse_okf_links(content)
+
+
+DEPTH_CAP = 10  # mirrors gbrain's TRAVERSE_DEPTH_CAP — bounds a pathological walk
+
+
+def _clamp_depth(depth) -> int:
+    """Coerce a requested depth into [1, DEPTH_CAP]; non-ints resolve to 1."""
+    try:
+        d = int(depth)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(d, DEPTH_CAP))
+
+
+def _all_page_slugs(url: str, token: str) -> list:
+    """Every page slug in the brain (one list_pages call, high limit)."""
+    pages = list_pages(url, token, limit=10000)
+    return [p.get("slug") for p in pages
+            if isinstance(p, dict) and p.get("slug")]
+
+
+def _forward_targets(url: str, token: str, slug: str) -> list:
+    """The [[links]] out of one page's body (shared OKF grammar)."""
+    page = get_page(url, token, slug)
+    content = page.get("content", "") if isinstance(page, dict) else ""
+    return okf_links.parse_okf_links(content)
+
+
+def _reverse_index(url: str, token: str) -> dict:
+    """Map each target slug -> pages whose body links to it. One full-corpus
+    scan; a page that fails to fetch/parse is SKIPPED (never aborts the scan)."""
+    rev: dict = {}
+    for src in _all_page_slugs(url, token):
+        try:
+            targets = _forward_targets(url, token, src)
+        except Exception:
+            continue  # unreadable/missing page — skip, keep scanning
+        for tgt in targets:
+            bucket = rev.setdefault(tgt, [])
+            if src not in bucket:
+                bucket.append(src)
+    return rev
+
+
+def traverse(url: str, token: str, slug: str, depth: int = 1,
+             direction: str = "out") -> list:
+    """File-native BFS over the OKF link graph. Returns ordered
+    (from, to, hop, edge_direction) tuples. direction: 'out' follows forward
+    [[links]]; 'in' follows the reverse index; 'both' = out-pass then in-pass.
+    Cycle-safe (per-pass visited set); depth clamped to [1, DEPTH_CAP]."""
+    depth = _clamp_depth(depth)
+    if direction not in ("out", "in", "both"):
+        direction = "out"
+    passes = ["out", "in"] if direction == "both" else [direction]
+
+    edges: list = []
+    rev = None
+    for edge_dir in passes:
+        if edge_dir == "in" and rev is None:
+            rev = _reverse_index(url, token)
+        visited = {slug}
+        frontier = [slug]
+        for hop in range(1, depth + 1):
+            nxt: list = []
+            for node in frontier:
+                if edge_dir == "out":
+                    if hop == 1:
+                        # ROOT node (frontier is just [slug] at hop 1): let a
+                        # transport error PROPAGATE so the CLI/MCP boundary can
+                        # report "gbrain unreachable" (rc 1 / []). Swallowing it
+                        # here would make a down brain look like an empty graph
+                        # — silent failure. Deeper nodes are skipped instead.
+                        neighbours = _forward_targets(url, token, node)
+                    else:
+                        try:
+                            neighbours = _forward_targets(url, token, node)
+                        except Exception:
+                            neighbours = []  # skip unreadable deep node, keep walking
+                else:
+                    neighbours = rev.get(node, []) if rev else []
+                for nbr in neighbours:
+                    edges.append((node, nbr, hop, edge_dir))
+                    if nbr not in visited:
+                        visited.add(nbr)
+                        nxt.append(nbr)
+            frontier = nxt
+            if not frontier:
+                break
+    return edges
+
+
+def backlinks(url: str, token: str, slug: str) -> list:
+    """Pages that link TO `slug` (single-hop incoming), order-preserving."""
+    rev = _reverse_index(url, token)
+    return list(dict.fromkeys(rev.get(slug, [])))
+
+
+def _as_okf_edge(frm: str, to: str, direction: str, hop: int) -> dict:
+    """OKF edge record — the knowledge-hemisphere edge shape the walker reads."""
+    return {"type": "edge", "hemisphere": "knowledge", "from": frm, "to": to,
+            "rel": "links", "direction": direction, "hop": hop}
 
 
 def run_memory(argv: list) -> int:
@@ -116,9 +212,16 @@ def run_memory(argv: list) -> int:
     p_list.add_argument("-n", "--limit", type=int, default=50)
     p_list.add_argument("--json", action="store_true")
 
-    p_links = sub.add_parser("links", help="forward [[wiki-links]] out of a page")
+    p_links = sub.add_parser("links", help="graph links out of / into a page (file-native OKF traversal)")
     p_links.add_argument("slug")
-    p_links.add_argument("--json", action="store_true")
+    p_links.add_argument("--backlinks", action="store_true",
+                         help="incoming links (who links to this page) — sugar for --direction in")
+    p_links.add_argument("--depth", type=int, default=1,
+                         help="traversal hops (clamped to 1-10; default 1)")
+    p_links.add_argument("--direction", choices=["out", "in", "both"], default=None,
+                         help="traversal direction (default out)")
+    p_links.add_argument("--json", action="store_true",
+                         help="emit OKF edge records instead of plain slugs")
 
     args = parser.parse_args(argv)
 
@@ -167,16 +270,25 @@ def run_memory(argv: list) -> int:
         return 0
 
     if args.subcommand == "links":
+        if args.backlinks and args.direction is not None:
+            print("swarph memory links: --backlinks and --direction are "
+                  "mutually exclusive", file=sys.stderr)
+            return 2
+        direction = "in" if args.backlinks else (args.direction or "out")
         try:
-            out = links(url, token, args.slug)
-        except Exception as e:
+            edges = traverse(url, token, args.slug, args.depth, direction)
+        except Exception as e:  # fail-safe: never traceback at the CLI
             print(f"swarph memory links: gbrain unreachable ({e})", file=sys.stderr)
             return 1
         if args.json:
-            print(json.dumps(out, indent=2))
+            print(json.dumps([_as_okf_edge(f, t, d, h)
+                              for (f, t, h, d) in edges], indent=2))
         else:
-            for s in out:
-                print(s)
+            seen: list = []
+            for (f, t, h, d) in edges:
+                if t not in seen:
+                    seen.append(t)
+                    print(t)
         return 0
 
     parser.print_help()
