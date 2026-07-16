@@ -116,6 +116,29 @@ def test_links_reads_page_then_extracts(monkeypatch):
     assert captured["body"]["params"]["name"] == "get_page"
 
 
+def test_links_reads_real_gbrain_body_field(monkeypatch):
+    """Regression: gbrain's get_page returns the body under `compiled_truth`,
+    NOT `content` (which is only put_page's INPUT field). memory must read the
+    real field or `links` returns [] against a live brain. This fixture uses the
+    REAL schema (no `content` key)."""
+    captured = {}
+    page = {"slug": "a", "type": "note",
+            "compiled_truth": "body links to [[b]] and [[c]]", "timeline": ""}
+    _fake_post(monkeypatch, captured, page)
+    assert memory.links("http://x/mcp", "tok", "a") == ["b", "c"]
+
+
+def test_page_body_prefers_compiled_truth_falls_back_to_content():
+    # real gbrain schema
+    assert memory._page_body({"compiled_truth": "[[x]]"}) == "[[x]]"
+    # back-compat: older/stub `content`-only pages still resolve
+    assert memory._page_body({"content": "[[y]]"}) == "[[y]]"
+    # compiled_truth wins when both present
+    assert memory._page_body({"compiled_truth": "[[a]]", "content": "[[b]]"}) == "[[a]]"
+    assert memory._page_body({}) == ""
+    assert memory._page_body("not-a-dict") == ""
+
+
 def test_parse_links_uses_shared_okf_grammar():
     from swarph_cli.commands import memory, okf_links
     # memory.parse_links must now BE the shared parser (single grammar, no drift)
@@ -187,7 +210,8 @@ def _fake_corpus(monkeypatch, pages):
     def _get_page(url, token, slug):
         if slug not in pages:
             raise RuntimeError(f"no page {slug}")   # simulate a 404/unreadable page
-        return {"slug": slug, "content": pages[slug]}
+        # REAL gbrain get_page schema: body under `compiled_truth`, no `content`.
+        return {"slug": slug, "compiled_truth": pages[slug], "timeline": ""}
 
     def _list_pages(url, token, type_=None, tag=None, limit=50):
         return [{"slug": s, "type": "note"} for s in pages]
