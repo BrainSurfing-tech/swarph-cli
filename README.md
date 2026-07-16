@@ -89,6 +89,18 @@ swarph memory list [--tag T] [--type T]  # filter pages (deterministic — --tag
 swarph memory links <slug>               # a concept's forward [[wiki-links]]
 ```
 
+- `swarph memory links <slug>` — links **out of** a page (forward `[[links]]`).
+  - `--backlinks` — links **into** the page (who links to it).
+  - `--depth N` — multi-hop traversal (1–10; default 1).
+  - `--direction out|in|both` — traversal direction (default `out`; `--backlinks` is sugar for `in`).
+  - `--json` — OKF edge records (`{type, hemisphere, from, to, rel, direction, hop}`).
+
+  The graph is **file-native**: edges are read from page bodies via the shared
+  OKF link grammar, so it works against any brain regardless of whether its edge
+  index is populated. Note: `--backlinks` / `--direction in|both` scan the whole
+  corpus (one `get_page` per page) — O(N), fine for today's brain; a future
+  gbrain edge-index will provide an O(1) indexed fast-path.
+
 Same token model as `swarph brain-ask` (`GBRAIN_MCP_URL`/`SWARPH_BRAIN_MCP` endpoint; `--token-file` > `GBRAIN_TOKEN` > `SWARPH_BRAIN_TOKEN` > mesh peer token). Add `--json` for the raw payload. Read-only. Also exposed to any MCP host as the `swarph_memory_navigate` tool.
 
 > Note: gbrain reclassifies its own page `type`, so `--tag` is more reliable than `--type` for scoping.
