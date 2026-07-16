@@ -43,3 +43,37 @@ def test_missing_file_is_fail_safe(tmp_path, monkeypatch, capsys):
     rc = timeline.run_timeline(["since", "2026-07-01"])
     assert rc == 1                       # non-zero, not a traceback
     assert "timeline" in capsys.readouterr().err.lower()
+
+
+def test_range_full_iso_end_is_exact_bound_no_eod(tmp_path, monkeypatch, capsys):
+    # entry exactly at the full-ISO end must be included; one minute later excluded.
+    sample = (
+        "# swarph timeline\n"
+        "- 2026-07-12T00:00Z · **lab-ovh** · start of window\n"
+        "- 2026-07-14T10:00Z · **lab-ovh** · exactly at end · [[a]]\n"
+        "- 2026-07-14T10:01Z · **lab-ovh** · one minute past end · [[b]]\n"
+    )
+    p = tmp_path / "TIMELINE.md"
+    p.write_text(sample, encoding="utf-8")
+    monkeypatch.setenv("SWARPH_TIMELINE", str(p))
+    assert timeline.run_timeline(["range", "2026-07-12", "2026-07-14T10:00Z"]) == 0
+    out = capsys.readouterr().out
+    assert "2026-07-14T10:00Z" in out
+    assert "2026-07-14T10:01Z" not in out
+
+
+def test_range_bare_date_end_still_gets_end_of_day(tmp_path, monkeypatch, capsys):
+    # bare-date end must still include an entry late on that day (unchanged behavior).
+    monkeypatch.setenv("SWARPH_TIMELINE", _write(tmp_path))
+    assert timeline.run_timeline(["range", "2026-07-14", "2026-07-15"]) == 0
+    out = capsys.readouterr().out
+    assert "2026-07-15T08:51Z" in out
+
+
+def test_around_full_iso_zero_window_is_exact_center(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SWARPH_TIMELINE", _write(tmp_path))
+    assert timeline.run_timeline(["around", "2026-07-13T04:24Z", "--window", "0h"]) == 0
+    out = capsys.readouterr().out
+    assert "2026-07-13T04:24Z" in out
+    assert "2026-07-15T08:51Z" not in out
+    assert "2026-07-10T21:02Z" not in out

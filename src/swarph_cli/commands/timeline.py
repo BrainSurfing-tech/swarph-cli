@@ -72,6 +72,17 @@ def _parse_arg_date(s: str) -> dt.datetime:
     raise ValueError(f"unparseable date {s!r} (use YYYY-MM-DD)")
 
 
+def _is_bare_date(s: str) -> bool:
+    """True if the CLI date arg is a bare ``YYYY-MM-DD`` (no time component).
+
+    A bare date has no ``T``/time part; a full ISO timestamp (``%Y-%m-%dT%H:%MZ``)
+    does. Used by ``_bounds`` to decide whether the end-of-day nudge applies —
+    it must NOT apply to an explicit timestamp, or the caller's exact bound
+    silently shifts by ~24h.
+    """
+    return "T" not in s
+
+
 def _fmt_human(e: Entry) -> str:
     ts = e.ts.strftime("%Y-%m-%dT%H:%MZ")
     links = ("  " + " ".join(f"[[{l}]]" for l in e.links)) if e.links else ""
@@ -126,15 +137,26 @@ def _parse_window(w: str) -> dt.timedelta:
 
 
 def _bounds(args):
-    """(lo, hi) datetime bounds for the chosen subcommand; end-of-day for bare dates."""
+    """(lo, hi) datetime bounds for the chosen subcommand; end-of-day for bare dates.
+
+    The end-of-day nudge only applies when the relevant arg is a bare
+    ``YYYY-MM-DD`` — a full ISO timestamp is an exact bound and must come
+    back unchanged (see ``_is_bare_date``).
+    """
     eod = dt.timedelta(hours=23, minutes=59)
     if args.subcommand == "range":
-        return _parse_arg_date(args.start), _parse_arg_date(args.end) + eod
+        hi = _parse_arg_date(args.end)
+        if _is_bare_date(args.end):
+            hi += eod
+        return _parse_arg_date(args.start), hi
     if args.subcommand == "since":
         return _parse_arg_date(args.date), None
     if args.subcommand == "around":
         c = _parse_arg_date(args.date); w = _parse_window(args.window)
-        return c - w, c + w + eod
+        hi = c + w
+        if _is_bare_date(args.date):
+            hi += eod
+        return c - w, hi
     return None, None
 
 
