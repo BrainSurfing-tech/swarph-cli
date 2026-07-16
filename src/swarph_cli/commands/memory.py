@@ -90,6 +90,107 @@ def links(url: str, token: str, slug: str) -> list:
     return okf_links.parse_okf_links(content)
 
 
+DEPTH_CAP = 10  # mirrors gbrain's TRAVERSE_DEPTH_CAP — bounds a pathological walk
+
+
+def _clamp_depth(depth) -> int:
+    """Coerce a requested depth into [1, DEPTH_CAP]; non-ints resolve to 1."""
+    try:
+        d = int(depth)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(d, DEPTH_CAP))
+
+
+def _all_page_slugs(url: str, token: str) -> list:
+    """Every page slug in the brain (one list_pages call, high limit)."""
+    pages = list_pages(url, token, limit=10000)
+    return [p.get("slug") for p in pages
+            if isinstance(p, dict) and p.get("slug")]
+
+
+def _forward_targets(url: str, token: str, slug: str) -> list:
+    """The [[links]] out of one page's body (shared OKF grammar)."""
+    page = get_page(url, token, slug)
+    content = page.get("content", "") if isinstance(page, dict) else ""
+    return okf_links.parse_okf_links(content)
+
+
+def _reverse_index(url: str, token: str) -> dict:
+    """Map each target slug -> pages whose body links to it. One full-corpus
+    scan; a page that fails to fetch/parse is SKIPPED (never aborts the scan)."""
+    rev: dict = {}
+    for src in _all_page_slugs(url, token):
+        try:
+            targets = _forward_targets(url, token, src)
+        except Exception:
+            continue  # unreadable/missing page — skip, keep scanning
+        for tgt in targets:
+            bucket = rev.setdefault(tgt, [])
+            if src not in bucket:
+                bucket.append(src)
+    return rev
+
+
+def traverse(url: str, token: str, slug: str, depth: int = 1,
+             direction: str = "out") -> list:
+    """File-native BFS over the OKF link graph. Returns ordered
+    (from, to, hop, edge_direction) tuples. direction: 'out' follows forward
+    [[links]]; 'in' follows the reverse index; 'both' = out-pass then in-pass.
+    Cycle-safe (per-pass visited set); depth clamped to [1, DEPTH_CAP]."""
+    depth = _clamp_depth(depth)
+    if direction not in ("out", "in", "both"):
+        direction = "out"
+    passes = ["out", "in"] if direction == "both" else [direction]
+
+    edges: list = []
+    rev = None
+    for edge_dir in passes:
+        if edge_dir == "in" and rev is None:
+            rev = _reverse_index(url, token)
+        visited = {slug}
+        frontier = [slug]
+        for hop in range(1, depth + 1):
+            nxt: list = []
+            for node in frontier:
+                if edge_dir == "out":
+                    if hop == 1:
+                        # ROOT node (frontier is just [slug] at hop 1): let a
+                        # transport error PROPAGATE so the CLI/MCP boundary can
+                        # report "gbrain unreachable" (rc 1 / []). Swallowing it
+                        # here would make a down brain look like an empty graph
+                        # — silent failure. Deeper nodes are skipped instead.
+                        neighbours = _forward_targets(url, token, node)
+                    else:
+                        try:
+                            neighbours = _forward_targets(url, token, node)
+                        except Exception:
+                            neighbours = []  # skip unreadable deep node, keep walking
+                else:
+                    neighbours = rev.get(node, []) if rev else []
+                for nbr in neighbours:
+                    edges.append((node, nbr, hop, edge_dir))
+                    if nbr not in visited:
+                        visited.add(nbr)
+                        nxt.append(nbr)
+            frontier = nxt
+            if not frontier:
+                break
+    return edges
+
+
+def backlinks(url: str, token: str, slug: str) -> list:
+    """Pages that link TO `slug` (single-hop incoming), order-preserving."""
+    rev = _reverse_index(url, token)
+    return list(dict.fromkeys(rev.get(slug, [])))
+
+
+def _as_okf_edge(frm: str, to: str, direction: str, hop: int) -> dict:
+    """OKF edge record — the knowledge-hemisphere edge shape the walker reads."""
+    return {"type": "edge", "hemisphere": "knowledge", "from": frm, "to": to,
+            "rel": "links", "direction": direction, "hop": hop}
+
+
 def run_memory(argv: list) -> int:
     parser = argparse.ArgumentParser(
         prog="swarph memory",

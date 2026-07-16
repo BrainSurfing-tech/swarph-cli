@@ -147,3 +147,82 @@ def test_memory_navigate_dispatches_and_is_failsafe(monkeypatch):
     monkeypatch.setattr(mcp_server.memory, "list_pages", boom)
     assert mcp_server._memory_navigate("list", tag="auth") == []
     assert mcp_server._memory_navigate("bogus") == []
+
+
+def _fake_corpus(monkeypatch, pages):
+    """pages: {slug: body_str}. Stub memory.get_page/list_pages so the engine
+    reads this in-memory graph instead of gbrain. No network."""
+    from swarph_cli.commands import memory
+
+    def _get_page(url, token, slug):
+        if slug not in pages:
+            raise RuntimeError(f"no page {slug}")   # simulate a 404/unreadable page
+        return {"slug": slug, "content": pages[slug]}
+
+    def _list_pages(url, token, type_=None, tag=None, limit=50):
+        return [{"slug": s, "type": "note"} for s in pages]
+
+    monkeypatch.setattr(memory, "get_page", _get_page)
+    monkeypatch.setattr(memory, "list_pages", _list_pages)
+    return memory
+
+
+def test_traverse_out_depth1_equals_forward_links(monkeypatch):
+    m = _fake_corpus(monkeypatch, {"a": "[[b]] [[c]]", "b": "", "c": ""})
+    edges = m.traverse("u", "t", "a", depth=1, direction="out")
+    assert edges == [("a", "b", 1, "out"), ("a", "c", 1, "out")]
+
+
+def test_traverse_out_depth2_follows_frontier(monkeypatch):
+    m = _fake_corpus(monkeypatch, {"a": "[[b]]", "b": "[[c]]", "c": ""})
+    edges = m.traverse("u", "t", "a", depth=2, direction="out")
+    assert ("a", "b", 1, "out") in edges
+    assert ("b", "c", 2, "out") in edges
+
+
+def test_traverse_is_cycle_safe(monkeypatch):
+    m = _fake_corpus(monkeypatch, {"a": "[[b]]", "b": "[[a]]"})
+    # a<->b cycle must terminate; each node visited once as a frontier
+    edges = m.traverse("u", "t", "a", depth=10, direction="out")
+    assert ("a", "b", 1, "out") in edges
+    assert ("b", "a", 2, "out") in edges
+    # 'a' is not re-expanded after being visited, so no hop-3 edge out of 'a'
+    assert all(hop <= 2 for (_, _, hop, _) in edges)
+
+
+def test_traverse_depth_clamped_to_cap(monkeypatch):
+    m = _fake_corpus(monkeypatch, {"a": ""})
+    assert m.DEPTH_CAP == 10
+    # depth far over the cap must not raise; empty graph → no edges
+    assert m.traverse("u", "t", "a", depth=9999, direction="out") == []
+    assert m._clamp_depth(9999) == 10
+    assert m._clamp_depth(0) == 1
+    assert m._clamp_depth("x") == 1
+
+
+def test_reverse_index_and_backlinks_skip_unreadable(monkeypatch):
+    # 'x' and 'y' both link to 't'; 'z' is listed but unreadable (get_page raises)
+    m = _fake_corpus(monkeypatch, {"t": "", "x": "[[t]]", "y": "[[t]]"})
+    # inject a listed-but-missing page to prove the scan skips, not aborts
+    orig = m.list_pages
+    monkeypatch.setattr(m, "list_pages",
+                        lambda *a, **k: orig(*a, **k) + [{"slug": "z", "type": "note"}])
+    assert sorted(m.backlinks("u", "t", "t")) == ["x", "y"]
+
+
+def test_traverse_both_is_out_then_in(monkeypatch):
+    m = _fake_corpus(monkeypatch, {"hub": "[[out1]]", "out1": "", "src": "[[hub]]"})
+    edges = m.traverse("u", "t", "hub", depth=1, direction="both")
+    assert ("hub", "out1", 1, "out") in edges
+    assert ("hub", "src", 1, "in") in edges
+    # ordering: all out edges precede all in edges
+    dirs = [d for (_, _, _, d) in edges]
+    assert dirs == sorted(dirs, key=lambda d: 0 if d == "out" else 1)
+
+
+def test_as_okf_edge_schema():
+    from swarph_cli.commands import memory
+    assert memory._as_okf_edge("a", "b", "out", 2) == {
+        "type": "edge", "hemisphere": "knowledge", "from": "a", "to": "b",
+        "rel": "links", "direction": "out", "hop": 2,
+    }
