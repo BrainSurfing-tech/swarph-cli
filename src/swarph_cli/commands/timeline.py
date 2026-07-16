@@ -8,8 +8,8 @@ its canonical id is its ISO timestamp; its edges are the ``[[links]]`` it names
 (into the knowledge hemisphere). Complements the semantic ``brain-ask`` and the
 structural ``codegraph``/``memory``.
 
-Filters by each entry's EMBEDDED ``@ <ISO-timestamp>`` (the swarph-highlight line
-format), never the git commit date — the entry's own date is canonical. Read-only;
+Filters by each entry's EMBEDDED ISO timestamp (the line format: ``- <ISO-ts> · **<cell>** · <text>``),
+never the git commit date — the entry's own date is canonical. Read-only;
 stdlib-only; fail-safe (a missing/unreadable file → stderr note + non-zero, never
 a traceback).
 """
@@ -85,8 +85,7 @@ def _is_bare_date(s: str) -> bool:
 
 def _fmt_human(e: Entry) -> str:
     ts = e.ts.strftime("%Y-%m-%dT%H:%MZ")
-    links = ("  " + " ".join(f"[[{l}]]" for l in e.links)) if e.links else ""
-    return f"{ts} · {e.cell} · {e.text}{links}"
+    return f"{ts} · {e.cell} · {e.text}"
 
 
 def run_timeline(argv: list) -> int:

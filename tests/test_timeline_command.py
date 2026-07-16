@@ -108,3 +108,12 @@ def test_timeline_navigate_failsafe(tmp_path, monkeypatch):
     assert mcp_server._timeline_navigate("bogus") == []
     monkeypatch.setenv("SWARPH_TIMELINE", str(tmp_path / "nope.md"))
     assert mcp_server._timeline_navigate("since", date="2026-07-01") == []
+
+
+def test_human_output_link_appears_once(tmp_path, monkeypatch, capsys):
+    # Regression test: verify human output shows memory pointer exactly once (not duplicated)
+    monkeypatch.setenv("SWARPH_TIMELINE", _write(tmp_path))
+    assert timeline.run_timeline(["since", "2026-07-14"]) == 0
+    out = capsys.readouterr().out
+    # Entry has embedded pointer "· → [[feedback_y]]" in text; should appear exactly once
+    assert out.count("[[feedback_y]]") == 1
