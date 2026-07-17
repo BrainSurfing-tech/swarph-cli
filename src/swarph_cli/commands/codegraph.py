@@ -81,13 +81,35 @@ def _visible_repos(con, caller_cell: str, allowlist: dict) -> set:
     return out
 
 
+def _load_allowlist_file(index_path: str):
+    """Load the owner-maintained ``allowlist.json`` beside the index
+    (``{repo: [cell,...]}``, default-deny per repo). Returns the dict if the
+    file is present, else ``None`` so the caller falls back to
+    operate-what-you-own. Fail-SAFE and fail-CLOSED: a present-but-malformed
+    file returns ``{}`` (deny-all-private, public still visible) and NEVER
+    raises — a broken access policy must fail closed, not open."""
+    p = os.path.join(os.path.dirname(os.path.expanduser(index_path)), "allowlist.json")
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 # --- query (ported verbatim from codegraph_index/query.py) ----------------
 
 def structural_query(term, *, index_path, caller_cell, limit=8, allowlist=None) -> list:
     """Ranked structural search. A8-gated, A2 fail-safe: any sqlite3.Error
     (missing index, corrupt db, malformed MATCH, locked db) -> []."""
     if allowlist is None:
-        allowlist = _local_allowlist(index_path, caller_cell)
+        # Prefer the owner-maintained allowlist.json (default-deny policy) when
+        # present; only fall back to operate-what-you-own if there's no policy file.
+        allowlist = _load_allowlist_file(index_path)
+        if allowlist is None:
+            allowlist = _local_allowlist(index_path, caller_cell)
     try:
         con = _connect(index_path)
     except sqlite3.Error:

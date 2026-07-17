@@ -84,6 +84,37 @@ def test_sanitize_query_empty_string(tmp_path):
     assert cg._sanitize_query("") == ""
 
 
+def test_allowlist_file_gates_private_repo_by_caller(tmp_path):
+    # When an owner-maintained allowlist.json exists next to the index, the A8
+    # gate uses it (default-deny) instead of operate-what-you-own: a caller NOT
+    # granted a private repo can't see its symbols; a granted caller can.
+    import json as _json
+    index_path = _tiny(tmp_path)
+    (tmp_path / "allowlist.json").write_text(_json.dumps({"beta": ["owner"]}))
+    stranger = cg.structural_query("secret op", index_path=index_path, caller_cell="stranger", limit=8)
+    assert "secretOp" not in [r["name"] for r in stranger]      # private, not granted → hidden
+    granted = cg.structural_query("secret op", index_path=index_path, caller_cell="owner", limit=8)
+    assert "secretOp" in [r["name"] for r in granted]           # granted → visible
+    pub = cg.structural_query("renders the thing", index_path=index_path, caller_cell="stranger", limit=8)
+    assert "renderThing" in [r["name"] for r in pub]            # public always visible
+
+
+def test_malformed_allowlist_file_fails_closed(tmp_path):
+    index_path = _tiny(tmp_path)
+    (tmp_path / "allowlist.json").write_text("{ not valid json")
+    rows = cg.structural_query("secret op", index_path=index_path, caller_cell="anyone", limit=8)
+    assert "secretOp" not in [r["name"] for r in rows]          # malformed policy → deny private
+    pub = cg.structural_query("renders the thing", index_path=index_path, caller_cell="anyone", limit=8)
+    assert "renderThing" in [r["name"] for r in pub]            # public still visible
+
+
+def test_no_allowlist_file_preserves_operate_what_you_own(tmp_path):
+    # Back-compat: absent allowlist.json → operate-what-you-own (caller sees private).
+    index_path = _tiny(tmp_path)
+    rows = cg.structural_query("secret op", index_path=index_path, caller_cell="local", limit=8)
+    assert "secretOp" in [r["name"] for r in rows]
+
+
 def test_format_human_no_matches():
     assert "No structural matches" in cg.format_human([], "x")
 
