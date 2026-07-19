@@ -615,6 +615,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import List
 
@@ -641,7 +642,17 @@ class DeliveryQueue:
                 raise ValueError("queue file is not a JSON object")
             self._pending = list(data.get("pending", []))
             self.deferred_ticks = int(data.get("deferred_ticks", 0))
-        except (FileNotFoundError, ValueError, OSError, TypeError, AttributeError):
+        except FileNotFoundError:
+            self._pending = []            # first run — no queue yet, not an error
+            self.deferred_ticks = 0
+        except (ValueError, OSError, TypeError, AttributeError) as exc:
+            # Corruption: reset to empty but LOG it — since the cursor advanced
+            # on drain, wiped entries won't be re-fetched, so a silent reset
+            # would lose DMs from the session (final-review finding #2; spec
+            # promised "treat as empty, log, continue").
+            print(f"[swarph-daemon] delivery queue unreadable at {self.path} "
+                  f"({type(exc).__name__}: {exc}); starting empty — any queued "
+                  f"DMs survive only in inbox.log", file=sys.stderr, flush=True)
             self._pending = []
             self.deferred_ticks = 0
 
@@ -1058,13 +1069,21 @@ def _route_to_handler(state: DaemonState, dm: dict) -> None:
 Add the renderer + the delivery orchestrator (place after `_route_to_handler`):
 
 ```python
+_MAX_CONTENT = 2000  # per-DM content cap in the injected block — bounds the
+# send-keys argv so an oversized DM can't fail inject (ARG_MAX) and silently
+# wedge the whole queue behind it (final-review finding #1).
+
+
 def _render_delivery_block(entries: list) -> str:
     """The compact block injected into the session — the resident model reads
     it as 'you have N mesh DM(s), act per DM SEMANTICS'."""
     lines = [f"📨 mesh delivery ({len(entries)} new):"]
     for e in entries:
+        c = e.get("content") or ""
+        if len(c) > _MAX_CONTENT:
+            c = c[:_MAX_CONTENT] + "…(truncated)"
         lines.append(
-            f"  · from={e.get('from')} kind={e.get('kind')}: {e.get('content','')}"
+            f"  · from={e.get('from')} kind={e.get('kind')}: {c}"
         )
     lines.append("(act per DM SEMANTICS — reply AI-to-AI via mesh-gateway; "
                  "loop human only across a privilege boundary)")
