@@ -776,6 +776,12 @@ def test_send_stall_alert_failsafe_on_error(monkeypatch):
         raise OSError("network down")
     monkeypatch.setattr(st.urllib.request, "urlopen", boom)
     assert st.send_stall_alert("http://gw", "tok", "cell", 6, 1) is False
+
+
+def test_send_stall_alert_failsafe_on_bad_gateway():
+    # a schemeless / misconfigured gateway must be caught at Request-build time,
+    # not raised (no monkeypatch — Request(...) itself raises ValueError).
+    assert st.send_stall_alert("not-a-valid-url", "tok", "cell", 6, 1) is False
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -822,13 +828,16 @@ def send_stall_alert(gateway: str, token: str, self_name: str,
                     f"(cell busy/never-idle). Undelivered DMs are queued, not "
                     f"lost; they inject on next idle."),
     }).encode("utf-8")
-    req = urllib.request.Request(
-        f"{gateway}/messages", data=body,
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {token}"},
-        method="POST",
-    )
     try:
+        # Request(...) parses the URL eagerly and raises ValueError on a
+        # schemeless/misconfigured gateway — so build it INSIDE the try, or a
+        # bad GATEWAY_URL crashes the daemon (the exact fail-safe this guards).
+        req = urllib.request.Request(
+            f"{gateway}/messages", data=body,
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {token}"},
+            method="POST",
+        )
         with urllib.request.urlopen(req, timeout=10) as resp:
             return 200 <= resp.status < 300
     except (urllib.error.URLError, OSError, ValueError) as exc:
