@@ -44,3 +44,9 @@ def test_send_stall_alert_failsafe_on_error(monkeypatch):
         raise OSError("network down")
     monkeypatch.setattr(st.urllib.request, "urlopen", boom)
     assert st.send_stall_alert("http://gw", "tok", "cell", 6, 1) is False
+
+
+def test_send_stall_alert_failsafe_on_bad_gateway():
+    # a schemeless / misconfigured gateway must be caught at Request-build time,
+    # not raised (no monkeypatch — Request(...) itself raises ValueError).
+    assert st.send_stall_alert("not-a-valid-url", "tok", "cell", 6, 1) is False
