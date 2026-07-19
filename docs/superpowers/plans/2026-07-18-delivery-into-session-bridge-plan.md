@@ -251,8 +251,13 @@ import swarph_cli.session_bridge as sb
 
 
 def test_sanitize_collapses_newlines_and_strips_control():
-    # embedded newline + a control byte (ESC \x1b) must be gone
-    assert sb._sanitize("hello\n\nworld\x1b[2J  x") == "hello world x"
+    # Newlines collapse to single spaces; the ESC control byte (\x1b) is
+    # STRIPPED so no ANSI interpretation is possible. The security property is
+    # "no ESC byte reaches the pane" (a broken ANSI seq's residual bracket
+    # chars are inert literal text) — not "all bracket chars removed".
+    out = sb._sanitize("hello\n\nworld \x1b more  x")
+    assert out == "hello world more x"
+    assert "\x1b" not in out and "\n" not in out
 
 
 def test_sanitize_empty():
