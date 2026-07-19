@@ -252,13 +252,21 @@ def _route_to_handler(state: DaemonState, dm: dict) -> None:
         state.queue.enqueue(dm)
 
 
+_MAX_CONTENT = 2000  # per-DM content cap in the injected block — bounds the
+# send-keys argv so an oversized DM can't fail inject (ARG_MAX) and silently
+# wedge the whole queue behind it.
+
+
 def _render_delivery_block(entries: list) -> str:
     """The compact block injected into the session — the resident model reads
     it as 'you have N mesh DM(s), act per DM SEMANTICS'."""
     lines = [f"📨 mesh delivery ({len(entries)} new):"]
     for e in entries:
+        c = e.get("content") or ""
+        if len(c) > _MAX_CONTENT:
+            c = c[:_MAX_CONTENT] + "…(truncated)"
         lines.append(
-            f"  · from={e.get('from')} kind={e.get('kind')}: {e.get('content','')}"
+            f"  · from={e.get('from')} kind={e.get('kind')}: {c}"
         )
     lines.append("(act per DM SEMANTICS — reply AI-to-AI via mesh-gateway; "
                  "loop human only across a privilege boundary)")

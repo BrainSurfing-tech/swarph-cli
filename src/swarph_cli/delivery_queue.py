@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import List
 
@@ -32,7 +33,16 @@ class DeliveryQueue:
                 raise ValueError("queue file is not a JSON object")
             self._pending = list(data.get("pending", []))
             self.deferred_ticks = int(data.get("deferred_ticks", 0))
-        except (FileNotFoundError, ValueError, OSError, TypeError, AttributeError):
+        except FileNotFoundError:
+            self._pending = []            # first run — no queue yet, not an error
+            self.deferred_ticks = 0
+        except (ValueError, OSError, TypeError, AttributeError) as exc:
+            # Corruption: reset to empty but LOG it — since the cursor advanced
+            # on drain, wiped entries won't be re-fetched, so a silent reset
+            # would lose DMs from the session (spec: "treat as empty, log, continue").
+            print(f"[swarph-daemon] delivery queue unreadable at {self.path} "
+                  f"({type(exc).__name__}: {exc}); starting empty — any queued "
+                  f"DMs survive only in inbox.log", file=sys.stderr, flush=True)
             self._pending = []
             self.deferred_ticks = 0
 

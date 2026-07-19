@@ -132,6 +132,40 @@ def test_attempt_delivery_never_raises(tmp_path, monkeypatch):
     attempt_delivery(s)                    # must swallow the exception
 
 
+def test_delivery_holds_when_inject_fails_no_bump(tmp_path, monkeypatch):
+    # idle pane but inject() fails → entries stay queued, deferred NOT bumped
+    # (idle-but-send-failed is transient, not a stall).
+    s = _state(tmp_path)
+    s.queue.enqueue(_dm(1))                       # question → wake
+    monkeypatch.setattr(d.session_bridge, "resolve_session_pane", lambda n: "%1")
+    monkeypatch.setattr(d.session_bridge, "probe_pane", lambda p: "idle")
+    monkeypatch.setattr(d.session_bridge, "inject", lambda p, t: False)
+    attempt_delivery(s)
+    assert [e["id"] for e in s.queue.pending()] == [1]
+    assert s.queue.deferred_ticks == 0
+
+
+def test_delivery_defers_on_stuck_modal(tmp_path, monkeypatch):
+    # a modal that won't dismiss to idle defers like busy (bump), never injects.
+    s = _state(tmp_path)
+    s.queue.enqueue(_dm(1))
+    monkeypatch.setattr(d.session_bridge, "resolve_session_pane", lambda n: "%1")
+    monkeypatch.setattr(d.session_bridge, "probe_pane", lambda p: "modal")
+    monkeypatch.setattr(d.session_bridge, "try_dismiss_safe_modal", lambda p: False)
+    monkeypatch.setattr(d.session_bridge, "inject",
+                        lambda p, t: (_ for _ in ()).throw(AssertionError("must not inject")))
+    attempt_delivery(s)
+    assert [e["id"] for e in s.queue.pending()] == [1]
+    assert s.queue.deferred_ticks == 1
+
+
+def test_render_block_truncates_oversized_content():
+    big = "x" * 5000
+    block = _render_delivery_block([{"from": "p", "kind": "question", "content": big}])
+    assert "…(truncated)" in block
+    assert len(block) < 5000
+
+
 import shutil
 import subprocess
 import time

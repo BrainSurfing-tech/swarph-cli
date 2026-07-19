@@ -76,3 +76,15 @@ def test_pending_is_defensive_copy(tmp_path):
     q.enqueue(_dm(1))
     q.pending()[0]["content"] = "MUTATED"     # caller mutation must not leak
     assert q.pending()[0]["content"] == "m1"
+
+
+def test_load_logs_on_corrupt_file(tmp_path, capsys):
+    p = tmp_path / "q.json"
+    p.write_text("{not json")
+    DeliveryQueue(p)                     # corruption → reset + LOG
+    assert "delivery queue unreadable" in capsys.readouterr().err
+
+
+def test_load_silent_on_first_run(tmp_path, capsys):
+    DeliveryQueue(tmp_path / "nope.json")   # FileNotFoundError → normal first run
+    assert capsys.readouterr().err == ""    # must NOT log
