@@ -28,9 +28,11 @@ class DeliveryQueue:
     def _load(self) -> None:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):   # valid JSON but wrong shape (null, list, scalar)
+                raise ValueError("queue file is not a JSON object")
             self._pending = list(data.get("pending", []))
             self.deferred_ticks = int(data.get("deferred_ticks", 0))
-        except (FileNotFoundError, ValueError, OSError, TypeError):
+        except (FileNotFoundError, ValueError, OSError, TypeError, AttributeError):
             self._pending = []
             self.deferred_ticks = 0
 
@@ -62,7 +64,7 @@ class DeliveryQueue:
         self._persist()
 
     def pending(self) -> List[dict]:
-        return list(self._pending)
+        return [dict(e) for e in self._pending]   # defensive copy — callers hold + mutate
 
     def any_wake(self) -> bool:
         return any(e.get("wake") for e in self._pending)

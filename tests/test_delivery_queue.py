@@ -58,3 +58,21 @@ def test_corrupt_file_is_empty_failsafe(tmp_path):
     q = DeliveryQueue(p)                  # must not raise
     assert q.pending() == []
     assert q.deferred_ticks == 0
+
+
+def test_valid_json_wrong_shape_is_empty_failsafe(tmp_path):
+    # a torn write can leave syntactically valid JSON of the wrong shape;
+    # must be treated as empty, never raise (never lose the daemon at startup).
+    for bad in ("null", "[1,2,3]", '"a string"', "42"):
+        p = tmp_path / "q.json"
+        p.write_text(bad)
+        q = DeliveryQueue(p)
+        assert q.pending() == []
+        assert q.deferred_ticks == 0
+
+
+def test_pending_is_defensive_copy(tmp_path):
+    q = DeliveryQueue(tmp_path / "q.json")
+    q.enqueue(_dm(1))
+    q.pending()[0]["content"] = "MUTATED"     # caller mutation must not leak
+    assert q.pending()[0]["content"] == "m1"
