@@ -49,6 +49,9 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Optional
 
+from swarph_cli import session_bridge, stall_alert
+from swarph_cli.delivery_queue import DeliveryQueue
+
 
 _DEFAULT_POLL_S = 30
 _BACKOFF_EMPTY_THRESHOLD = 5  # consecutive empty polls before backing off
@@ -212,6 +215,13 @@ class DaemonState:
         self.auto_act = auto_act
         self.cursor_path = state_dir / "cursor.json"
         self.inbox_log_path = state_dir / "inbox.log"
+        self.queue = DeliveryQueue(state_dir / "delivery_queue.json")
+        # The tmux/psmux session hosting the agent is usually named after the
+        # cell, but a cell's mesh id can differ from its session name (verified
+        # on lab-ovh: mesh self_name="lab-ovh" but the session is named "lab").
+        # SWARPH_SESSION_NAME overrides the session used for pane resolution;
+        # defaults to self_name.
+        self.session_name = os.environ.get("SWARPH_SESSION_NAME", self_name)
         self.cursor = _read_cursor(self.cursor_path)
         self.consecutive_empty = 0
         self.disconnect_since: Optional[float] = None
@@ -235,14 +245,78 @@ def _log_dm(state: DaemonState, dm: dict) -> None:
 
 
 def _route_to_handler(state: DaemonState, dm: dict) -> None:
-    """v0.5.0 stub. v0.5.1+ wires this through @swarph.on_dm() registrations
-    on the swarph-mesh side. For now, --auto-act prints a placeholder."""
+    """Under --auto-act, enqueue the DM for delivery into the live session
+    (attempt_delivery runs each tick). Surface-only (no auto-act) is unchanged
+    — the DM is already logged by _log_dm; nothing further here."""
     if state.auto_act:
-        print(
-            f"  [auto-act] handler dispatch deferred to v0.5.1 "
-            f"(@swarph.on_dm + MeshClient.watch); surfacing only.",
-            flush=True,
+        state.queue.enqueue(dm)
+
+
+_MAX_CONTENT = 2000  # per-DM content cap in the injected block — bounds the
+# send-keys argv so an oversized DM can't fail inject (ARG_MAX) and silently
+# wedge the whole queue behind it.
+
+
+def _render_delivery_block(entries: list) -> str:
+    """The compact block injected into the session — the resident model reads
+    it as 'you have N mesh DM(s), act per DM SEMANTICS'."""
+    lines = [f"📨 mesh delivery ({len(entries)} new):"]
+    for e in entries:
+        c = e.get("content") or ""
+        if len(c) > _MAX_CONTENT:
+            c = c[:_MAX_CONTENT] + "…(truncated)"
+        lines.append(
+            f"  · from={e.get('from')} kind={e.get('kind')}: {c}"
         )
+    lines.append("(act per DM SEMANTICS — reply AI-to-AI via mesh-gateway; "
+                 "loop human only across a privilege boundary)")
+    return " ".join(lines)
+
+
+def attempt_delivery(state: DaemonState) -> None:
+    """Try to deliver queued DMs into the cell's live session pane. Runs every
+    tick. NEVER raises (the daemon must keep draining). Opt-in: no-op unless
+    --auto-act. Fail-safe toward defer: only inject on POSITIVE idle."""
+    if not state.auto_act:
+        return
+    try:
+        if not state.queue.pending():
+            return
+        # Wake-gate: only inject when an ACTIONABLE DM is queued. If only
+        # ride-along entries (fyi/status/broadcast-answer) are pending, hold
+        # them — they deliver in the batch when the next actionable DM wakes
+        # the cell. This is what prevents fyi-churn on an idle cell. Not a
+        # stall (no deferred bump) — an intentional wait.
+        if not state.queue.any_wake():
+            return
+        pane = session_bridge.resolve_session_pane(state.session_name)
+        if pane is None:
+            # Headless / non-standard cell — stay surface-only; DMs remain
+            # queued (already logged). Not an error.
+            return
+        st = session_bridge.probe_pane(pane)
+        if st == "modal":
+            if session_bridge.try_dismiss_safe_modal(pane) and \
+                    session_bridge.probe_pane(pane) == "idle":
+                st = "idle"
+        if st != "idle":
+            n = state.queue.bump_deferred()
+            if stall_alert.is_alert_tick(n):
+                stall_alert.send_stall_alert(
+                    state.gateway, state.token, state.self_name,
+                    n, len(state.queue.pending()),
+                )
+            return
+        entries = state.queue.pending()
+        block = _render_delivery_block(entries)
+        if session_bridge.inject(pane, block):
+            state.queue.remove({e["id"] for e in entries})
+            state.queue.reset_deferred()
+        # inject failure → leave queued, retry next tick (no counter bump —
+        # the cell was idle; a send failure is transient, not a stall).
+    except Exception as exc:  # noqa: BLE001 — bridge must never crash the loop
+        print(f"[swarph-daemon] delivery error (continuing): "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
 
 def _select_next_poll_seconds(state: DaemonState) -> int:
@@ -350,6 +424,7 @@ async def _drain_loop(state: DaemonState) -> None:
                 file=sys.stderr,
                 flush=True,
             )
+        attempt_delivery(state)   # deliver queued DMs every tick (guarded, never raises)
 
         delay = _select_next_poll_seconds(state)
         # Sleep in 1-second chunks so SIGINT/SIGTERM can interrupt promptly
