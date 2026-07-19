@@ -850,6 +850,7 @@ git commit -m "feat(bridge): exponential-backoff stall alert for a stuck cell"
   - existing `DaemonState`, `_drain_iteration`, `_drain_loop` (`commands/daemon.py`).
 - Produces:
   - `DaemonState.queue: DeliveryQueue` (new field, initialized from `state_dir / "delivery_queue.json"`).
+  - `DaemonState.session_name: str` (new field = `os.environ.get("SWARPH_SESSION_NAME", self_name)`; the tmux/psmux session used for pane resolution).
   - `_render_delivery_block(entries: list) -> str`.
   - `attempt_delivery(state: DaemonState) -> None` — never raises.
 
@@ -969,6 +970,20 @@ def test_delivery_surface_only_when_no_pane(tmp_path, monkeypatch):
     assert [e["id"] for e in s.queue.pending()] == [1]
 
 
+def test_session_name_env_override(tmp_path, monkeypatch):
+    # a cell whose tmux session name differs from its mesh self_name sets
+    # SWARPH_SESSION_NAME; resolution uses THAT, not self_name.
+    monkeypatch.setenv("SWARPH_SESSION_NAME", "lab")
+    s = _state(tmp_path)
+    assert s.session_name == "lab"
+    s.queue.enqueue(_dm(1))
+    seen = {}
+    monkeypatch.setattr(d.session_bridge, "resolve_session_pane",
+                        lambda n: seen.update(name=n) or None)
+    attempt_delivery(s)
+    assert seen["name"] == "lab"          # resolved by session_name, not self_name "cell"
+
+
 def test_attempt_delivery_never_raises(tmp_path, monkeypatch):
     s = _state(tmp_path)
     s.queue.enqueue(_dm(1))
@@ -995,6 +1010,12 @@ In `DaemonState.__init__`, after `self.inbox_log_path = ...`, add:
 
 ```python
         self.queue = DeliveryQueue(state_dir / "delivery_queue.json")
+        # The tmux/psmux session hosting the agent is usually named after the
+        # cell, but a cell's mesh id can differ from its session name (verified
+        # on lab-ovh: mesh self_name="lab-ovh" but the session is named "lab").
+        # SWARPH_SESSION_NAME overrides the session used for pane resolution;
+        # defaults to self_name.
+        self.session_name = os.environ.get("SWARPH_SESSION_NAME", self_name)
 ```
 
 Replace `_route_to_handler` with enqueue-under-auto-act:
@@ -1040,7 +1061,7 @@ def attempt_delivery(state: DaemonState) -> None:
         # stall (no deferred bump) — an intentional wait.
         if not state.queue.any_wake():
             return
-        pane = session_bridge.resolve_session_pane(state.self_name)
+        pane = session_bridge.resolve_session_pane(state.session_name)
         if pane is None:
             # Headless / non-standard cell — stay surface-only; DMs remain
             # queued (already logged). Not an error.
@@ -1162,3 +1183,5 @@ git commit -m "feat(bridge): wire delivery-into-session into the daemon drain lo
 - Version bumped 0.32.2 → 0.33.0.
 
 **NOT part of this build (post-merge, separate):** the validation rollout on workstation-lc (the finder) + lab-ovh, then droplet / razorpeter / gpu-wsl / gemini-researcher; PyPI release; per-cell `--auto-act` provisioning.
+
+**Rollout note (from Task 3's live verify):** a cell's tmux/psmux session name must match what pane resolution is given. Verified on lab-ovh: the daemon `self_name` is `lab-ovh` but the agent session is named `lab` — so lab-ovh's daemon must launch with `SWARPH_SESSION_NAME=lab`. Cells whose session name already equals their mesh id (e.g. `science-claude`, `drop-on-meta-edge`, `gridiron`) need no override. Where neither matches and no override is set, `resolve_session_pane` returns `None` → surface-only (safe, never mis-injects).
