@@ -578,6 +578,24 @@ def test_corrupt_file_is_empty_failsafe(tmp_path):
     q = DeliveryQueue(p)                  # must not raise
     assert q.pending() == []
     assert q.deferred_ticks == 0
+
+
+def test_valid_json_wrong_shape_is_empty_failsafe(tmp_path):
+    # a torn write can leave syntactically valid JSON of the wrong shape;
+    # must be treated as empty, never raise (never lose the daemon at startup).
+    for bad in ("null", "[1,2,3]", '"a string"', "42"):
+        p = tmp_path / "q.json"
+        p.write_text(bad)
+        q = DeliveryQueue(p)
+        assert q.pending() == []
+        assert q.deferred_ticks == 0
+
+
+def test_pending_is_defensive_copy(tmp_path):
+    q = DeliveryQueue(tmp_path / "q.json")
+    q.enqueue(_dm(1))
+    q.pending()[0]["content"] = "MUTATED"     # caller mutation must not leak
+    assert q.pending()[0]["content"] == "m1"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -619,9 +637,11 @@ class DeliveryQueue:
     def _load(self) -> None:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):   # valid JSON but wrong shape (null, list, scalar)
+                raise ValueError("queue file is not a JSON object")
             self._pending = list(data.get("pending", []))
             self.deferred_ticks = int(data.get("deferred_ticks", 0))
-        except (FileNotFoundError, ValueError, OSError, TypeError):
+        except (FileNotFoundError, ValueError, OSError, TypeError, AttributeError):
             self._pending = []
             self.deferred_ticks = 0
 
@@ -653,7 +673,7 @@ class DeliveryQueue:
         self._persist()
 
     def pending(self) -> List[dict]:
-        return list(self._pending)
+        return [dict(e) for e in self._pending]   # defensive copy — callers hold + mutate
 
     def any_wake(self) -> bool:
         return any(e.get("wake") for e in self._pending)
