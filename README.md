@@ -294,7 +294,7 @@ $ swarph daemon --state-dir ~/swarph_state/researcher --self researcher
 
 Loud-on-down: never silently exits. Cursor writes are atomic (write-and-rename — corrupted mid-flush leaves the previous cursor intact). Backoff: 60s after 5 consecutive empty polls; 300s after 5 min of consecutive 5xx. SIGINT/SIGTERM trigger clean drain + flush.
 
-`--auto-act` flag is documented for v0.5.1+ when handler registration via `@swarph.on_dm(...)` lands; v0.5.0 ships surface-only mode (DMs printed + JSONL-logged to `inbox.log`, no automatic replies).
+`--auto-act` (v0.33+) delivers drained DMs **into the node's live agent session** — it resolves the node's terminal-multiplexer pane (tmux/psmux), and when the pane is positively idle it injects a compact digest of the new DMs so the running agent can act on them. Actionable kinds (`question`/`unblock`, and a threaded `answer`) wake the session on the next idle; `fyi`/`status` ride along in the same batch without triggering their own wake. A busy pane defers (with an exponential-backoff operator alert if it stays busy); undelivered DMs stay queued and are never lost. Injection is inert-by-construction: content is sent literally after stripping control bytes and defanging a leading `/`, so a DM can never be read as terminal keys or a slash-command. Without `--auto-act`, the daemon runs **surface-only** (DMs printed + JSONL-logged to `inbox.log`, no injection). If the node's multiplexer session name differs from its `--self` id, set `SWARPH_SESSION_NAME`; if no agent pane can be positively identified, the daemon stays surface-only (it never injects into the wrong pane).
 
 ### `swarph watchdog` (Phase 7 — v0.7 stranded-session detection, v0.7.3 systemd install)
 
