@@ -737,47 +737,44 @@ def test_is_alert_tick_below_threshold():
 
 
 def test_send_stall_alert_posts_unblock(monkeypatch):
+    # Mock ONLY urlopen; let the real urllib.request.Request build so the
+    # captured Request carries a genuine .full_url and .data (POST body).
+    import json
     captured = {}
 
-    def fake_post(url, data=None, headers=None, method=None):
-        captured["url"] = url
-        captured["body"] = data
-        captured["headers"] = headers
+    class _Resp:
+        status = 200
 
-        class _Resp:
-            status = 200
+        def read(self):
+            return b"{}"
 
-            def read(self):
-                return b"{}"
+        def __enter__(self):
+            return self
 
-            def __enter__(self):
-                return self
+        def __exit__(self, *a):
+            return False
 
-            def __exit__(self, *a):
-                return False
-
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["body"] = req.data
         return _Resp()
 
-    monkeypatch.setattr(st.urllib.request, "Request",
-                        lambda url, data=None, headers=None, method=None:
-                        (captured.update(url=url, body=data, headers=headers) or "REQ"))
-    monkeypatch.setattr(st.urllib.request, "urlopen",
-                        lambda req, timeout=None: fake_post(captured["url"]))
+    monkeypatch.setattr(st.urllib.request, "urlopen", fake_urlopen)
     ok = st.send_stall_alert("http://gw", "tok", "workstation-lc", 12, 3)
     assert ok is True
-    assert "/messages" in captured["url"]
-    import json
+    assert captured["url"] == "http://gw/messages"
     body = json.loads(captured["body"].decode())
     assert body["to_node"] == "commander"
     assert body["kind"] == "unblock"
+    assert body["from_node"] == "workstation-lc"
     assert "workstation-lc" in body["content"]
 
 
 def test_send_stall_alert_failsafe_on_error(monkeypatch):
-    def boom(*a, **k):
+    # A network failure inside urlopen must be swallowed → False, never raise.
+    def boom(req, timeout=None):
         raise OSError("network down")
     monkeypatch.setattr(st.urllib.request, "urlopen", boom)
-    monkeypatch.setattr(st.urllib.request, "Request", lambda *a, **k: "REQ")
     assert st.send_stall_alert("http://gw", "tok", "cell", 6, 1) is False
 ```
 
