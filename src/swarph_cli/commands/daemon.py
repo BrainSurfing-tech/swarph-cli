@@ -101,9 +101,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--auto-act",
         action="store_true",
-        help="route DMs to registered @swarph.on_dm handlers (v0.5.1+ — "
-        "in v0.5.0 this is a documentation flag; surface-only mode runs "
-        "regardless).",
+        help="deliver drained DMs into the node's live agent session pane "
+        "(resolve pane -> inject on positive-idle; defer on busy; wake only on "
+        "actionable kinds). Without it, surface-only (drained + logged, no "
+        "injection). Set SWARPH_SESSION_NAME if the session name != --self.",
     )
     p.add_argument(
         "--once",
@@ -496,8 +497,11 @@ def run_daemon(argv: list[str]) -> int:
     )
 
     if args.once:
-        # Test mode — single iteration, no signal handlers, no loop
+        # Test mode — a single COMPLETE tick (drain + deliver), matching one
+        # loop iteration; no signal handlers, no loop. attempt_delivery is a
+        # no-op unless --auto-act, and never raises.
         asyncio.run(_drain_iteration(state))
+        attempt_delivery(state)
         return 0
 
     loop = asyncio.new_event_loop()

@@ -18,6 +18,24 @@ def _dm(i, kind="question", thread_id=None):
             "created_at": "t"}
 
 
+def test_once_mode_runs_a_complete_tick(tmp_path, monkeypatch):
+    # --once is a single COMPLETE tick: drain THEN deliver (not drain only),
+    # so `swarph daemon --once --auto-act` actually injects, matching one loop
+    # iteration.
+    calls = []
+
+    async def fake_iter(state):
+        calls.append("drain")
+
+    monkeypatch.setattr(d, "_resolve_token", lambda tf: "tok")
+    monkeypatch.setattr(d, "_drain_iteration", fake_iter)
+    monkeypatch.setattr(d, "attempt_delivery", lambda state: calls.append("deliver"))
+    rc = d.run_daemon(["--once", "--auto-act", "--self", "x",
+                       "--gateway", "http://gw", "--state-dir", str(tmp_path)])
+    assert rc == 0
+    assert calls == ["drain", "deliver"]
+
+
 def test_render_block_lists_entries():
     block = _render_delivery_block([
         {"from": "droplet", "kind": "question", "content": "ping?"},
