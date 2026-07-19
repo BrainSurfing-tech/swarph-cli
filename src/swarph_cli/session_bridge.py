@@ -140,3 +140,32 @@ def inject(pane_id: str, text: str) -> bool:
         return r2.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return False
+
+
+def resolve_session_pane(self_name: str) -> Optional[str]:
+    """Resolve this cell's own agent pane.
+
+    Convention: the tmux/psmux session hosting the cell's resident agent is
+    named after the cell (`self_name`). `send-keys -t <session>` lands on the
+    ACTIVE pane, which on a multi-pane cell can be a shell where an injected
+    `/model ...` would run as a SHELL command — so this returns the pane-id
+    ONLY when a claude/node pane is POSITIVELY identified, and None on ANY
+    failure or no match. None → caller stays surface-only, NEVER injects."""
+    mux = _mux()
+    if mux is None:
+        return None
+    try:
+        r = subprocess.run(
+            [mux, "list-panes", "-t", self_name, "-F",
+             "#{pane_id} #{pane_current_command}"],
+            capture_output=True, timeout=5, text=True,
+        )
+        if r.returncode != 0:
+            return None
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] in ("claude", "node"):
+                return parts[0]
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return None
+    return None
