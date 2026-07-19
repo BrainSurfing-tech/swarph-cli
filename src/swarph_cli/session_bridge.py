@@ -105,3 +105,38 @@ def try_dismiss_safe_modal(pane_id: str) -> bool:
         return False
     time.sleep(0.4)  # let the TUI re-render before the caller re-probes
     return True
+
+
+def _sanitize(text: str) -> str:
+    """Strip ALL control bytes, then collapse whitespace runs to a space.
+    Result contains no control bytes and no \\n/\\r, so even a literal `-l`
+    send cannot trigger embedded-key / ANSI interpretation."""
+    if not text:
+        return ""
+    return _WS_RUN.sub(" ", _CTRL.sub("", text)).strip()
+
+
+def inject(pane_id: str, text: str) -> bool:
+    """Deliver `text` into the pane: sanitize → literal `send-keys -l` →
+    exactly one `Enter`. Leading `/` defanged. Two subprocess calls; True iff
+    both return 0. Fail-safe: no mux / any error → False (caller re-queues)."""
+    mux = _mux()
+    if mux is None:
+        return False
+    body = _sanitize(text)
+    if body.startswith("/"):
+        body = " " + body
+    try:
+        r1 = subprocess.run(
+            [mux, "send-keys", "-t", pane_id, "-l", body],
+            capture_output=True, timeout=5, text=True,
+        )
+        if r1.returncode != 0:
+            return False
+        r2 = subprocess.run(
+            [mux, "send-keys", "-t", pane_id, "Enter"],
+            capture_output=True, timeout=5, text=True,
+        )
+        return r2.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return False
