@@ -85,9 +85,11 @@ Config is via env, mirroring `swarph mesh`'s token model: `GBRAIN_MCP_URL` or `S
 
 ```
 swarph memory get <slug>                 # read one page by exact slug
-swarph memory list [--tag T] [--type T]  # filter pages (deterministic — --tag is the reliable scope)
+swarph memory list [--type T] [--tag T]  # filter pages (deterministic — use --type; --tag currently inert)
 swarph memory links <slug>               # a concept's forward [[wiki-links]]
 ```
+
+**Remote cells (v0.34.0):** like `brain-ask`, `swarph memory` routes through the mesh gateway when `SWARPH_BRAIN_GATEWAY=http://<gw>:8788` is set, authenticating with the cell's mesh peer token — so a remote cell can navigate memory without a brain read token (the gateway holds it). Unset = direct, unchanged.
 
 - `swarph memory links <slug>` — links **out of** a page (forward `[[links]]`).
   - `--backlinks` — links **into** the page (who links to it).
