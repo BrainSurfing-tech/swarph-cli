@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from swarph_cli.commands import brain_ask, okf_links
@@ -56,23 +57,51 @@ def _mcp_call(url: str, token: str, tool: str, arguments: dict):
     return envelope.get("result")
 
 
+def _gateway_call(gw_base: str, peer_token: str, op: str, arguments: dict):
+    """Route one gbrain read primitive via the mesh gateway's /memory proxy,
+    authenticating with the cell's MESH peer token. The gateway holds the gbrain
+    token; we never do. Mirrors brain_ask._gateway_query."""
+    url = gw_base.rstrip("/") + "/memory"
+    raw = brain_ask._http_post(url, {"op": op, "arguments": arguments}, peer_token,
+                               accept="application/json")
+    return json.loads(raw).get("result")
+
+
+def _via_gateway(op: str, arguments: dict):
+    """When SWARPH_BRAIN_GATEWAY is set, resolve the cell's peer token and route
+    `op` through the gateway; returns (True, result). Else returns (False, None)
+    and the caller uses the direct gbrain path unchanged. A missing/unreadable
+    peer-token file raises OSError, caught by run_memory's CLI fail-safe."""
+    gw = os.environ.get("SWARPH_BRAIN_GATEWAY")
+    if not gw:
+        return False, None
+    self_name = brain_ask._self_name()
+    peer_token = brain_ask._peer_token_path(self_name).read_text(encoding="utf-8").strip()
+    return True, _gateway_call(gw, peer_token, op, arguments)
+
+
 def get_page(url: str, token: str, slug: str) -> dict:
-    """Fetch one page by exact slug via the ``get_page`` MCP tool."""
-    out = _mcp_call(url, token, "get_page", {"slug": slug})
+    """Fetch one page by exact slug. Via the gateway /memory proxy when
+    SWARPH_BRAIN_GATEWAY is set (peer-token auth), else direct ``get_page`` MCP."""
+    routed, out = _via_gateway("get", {"slug": slug})
+    if not routed:
+        out = _mcp_call(url, token, "get_page", {"slug": slug})
     return out if isinstance(out, dict) else {}
 
 
 def list_pages(url: str, token: str, type_: str | None = None,
                tag: str | None = None, limit: int = 50) -> list:
-    """List pages filtered by metadata (type/tag) via ``list_pages`` — a
-    DETERMINISTIC filter, not semantic search. NOTE: gbrain reclassifies its
-    own page `type`, so `tag` is the reliable scope (see gbrain-api-notes)."""
+    """List pages filtered by metadata (type/tag). Via the gateway /memory proxy
+    when SWARPH_BRAIN_GATEWAY is set, else direct ``list_pages`` MCP. NOTE: gbrain
+    reclassifies its own page `type`, so `tag` is the reliable scope."""
     args: dict = {"limit": limit}
     if type_:
         args["type"] = type_
     if tag:
         args["tag"] = tag
-    out = _mcp_call(url, token, "list_pages", args)
+    routed, out = _via_gateway("list", args)
+    if not routed:
+        out = _mcp_call(url, token, "list_pages", args)
     return out if isinstance(out, list) else (out.get("pages", []) if isinstance(out, dict) else [])
 
 
