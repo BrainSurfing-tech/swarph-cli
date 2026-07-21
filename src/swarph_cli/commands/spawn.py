@@ -1229,11 +1229,17 @@ class ProviderMembrane:
     ) -> Optional[int]:
         """Hook run after binary resolution, before launch.
 
-        Return an int exit code to short-circuit ``run_spawn`` (claude uses
-        this for the tmux-session launch / Windows Terminal relaunch). Return
-        None to proceed. ``session_name`` is the operator-typed spawn name used
-        as the tmux session identity (claude only).
+        Return an int exit code to short-circuit ``run_spawn`` (the base does the
+        named-tmux session launch for every provider; claude additionally relaunches
+        in Windows Terminal). Return None to proceed. ``session_name`` is the
+        operator-typed spawn name used as the tmux session identity for every provider.
         """
+        # A named spawn runs the cell in a tmux session (durable + send-keys-
+        # supervisable), for EVERY provider. No-op when unnamed / already inside
+        # tmux / tmux absent (then fall through to None). tmux's PTY answers the
+        # TUI's terminal queries so every provider's TUI renders correctly.
+        if session_name and _launch_via_tmux(binary, argv, cell.cwd, session_name):
+            return 0
         return None
 
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
@@ -1276,15 +1282,14 @@ class ClaudeMembrane(ProviderMembrane):
         self, cell: Cell, binary: str, argv: list[str], *, no_banner: bool,
         session_name: Optional[str] = None,
     ) -> Optional[int]:
-        # Preferred Windows path (CLAUDE only — codex/agy don't use the claude
-        # TUI): run the cell in a NAMED tmux session. tmux's own PTY handles
-        # VT-input correctly, so the conhost Enter-inserts-'m' bug doesn't apply,
-        # and the session is durable + supervisable (sidecar/watchdog send-keys).
-        # Returns 0 (this console can exit) when it took over the launch. No-op
-        # when not win32 / already inside tmux / tmux absent — then we fall
-        # through to the Windows Terminal relaunch below.
-        if session_name and _launch_via_tmux(binary, argv, cell.cwd, session_name):
-            return 0
+        # tmux launch is now provider-generic (base). Claude keeps ONLY its extra:
+        # the Windows-Terminal relaunch + legacy-conhost warning for the Ink-TUI/
+        # PowerShell Enter-inserts-'m' bug that is Claude-specific.
+        rc = super().pre_launch(
+            cell, binary, argv, no_banner=no_banner, session_name=session_name
+        )
+        if rc is not None:
+            return rc
 
         # conhost TUI auto-fix fallback (no tmux): on legacy Windows console (not
         # Windows Terminal), relaunch the claude session in Windows Terminal where
@@ -1479,21 +1484,6 @@ class GrokMembrane(ProviderMembrane):
             "swarph spawn: 'grok' binary not found on PATH. "
             "Install the Grok CLI or set PATH explicitly."
         )
-
-    def pre_launch(
-        self, cell: Cell, binary: str, argv: list[str], *, no_banner: bool,
-        session_name: Optional[str] = None,
-    ) -> Optional[int]:
-        # Durable named-tmux launch — identical mechanism to the claude cell, so
-        # the cell lands in its OWN tmux session (keyed on the operator-typed
-        # spawn name), never a window of another session. No-op (falls through
-        # to the in-place execve below) when already inside a tmux pane /
-        # SWARPH_SPAWN set / tmux absent. Unlike claude there is no
-        # Windows-Terminal relaunch fallback — grok's TUI has no conhost
-        # Enter-inserts-'m' bug.
-        if session_name and _launch_via_tmux(binary, argv, cell.cwd, session_name):
-            return 0
-        return None
 
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
         try:
