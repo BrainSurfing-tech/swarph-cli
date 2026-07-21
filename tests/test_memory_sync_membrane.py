@@ -64,3 +64,31 @@ def test_grok_membrane_isolated_home(tmp_path):
     assert m.memory_restore_dest(("grok-memory", "proj", "MEMORY.md"), types.SimpleNamespace(cwd=cwd, provider="grok")) \
         == cwd / spawn._GROK_CELL_HOME_SUBDIR / ".grok" / "memory" / "proj" / "MEMORY.md"
     assert m.memory_guard_file(types.SimpleNamespace(cwd=cwd, provider="grok")) is None   # no cwd doc
+
+
+# Tests for memory_sync.py dispatch (Task 2)
+from swarph_cli.commands import memory_sync
+
+
+def test_get_files_to_sync_dispatches_to_membrane(tmp_path):
+    cwd = tmp_path; (cwd / "CURRENT_TASK.md").write_text("t"); (cwd / "AGENTS.md").write_text("A")
+    cell = types.SimpleNamespace(cwd=cwd, provider="codex")
+    rels = {r for r, _ in memory_sync._get_files_to_sync(cell)}
+    assert rels == {"CURRENT_TASK.md", "AGENTS.md"}   # common + codex membrane
+
+
+def test_get_files_unknown_provider_is_common_only(tmp_path):
+    cwd = tmp_path; (cwd / "CURRENT_TASK.md").write_text("t")
+    cell = types.SimpleNamespace(cwd=cwd, provider="nonesuch")
+    assert {r for r, _ in memory_sync._get_files_to_sync(cell)} == {"CURRENT_TASK.md"}
+
+
+def test_grok_roundtrip_sync_then_restore_dest(tmp_path):
+    cwd = tmp_path
+    mem = cwd / spawn._GROK_CELL_HOME_SUBDIR / ".grok" / "memory"
+    mem.mkdir(parents=True); (mem / "MEMORY.md").write_text("m")
+    cell = types.SimpleNamespace(cwd=cwd, provider="grok")
+    files = memory_sync._get_files_to_sync(cell)
+    rel = next(r for r, _ in files if r.startswith("grok-memory"))
+    dest = spawn.MEMBRANES["grok"].memory_restore_dest(tuple(Path(rel).parts), cell)
+    assert dest == mem / "MEMORY.md"   # snapshot rel round-trips to the isolated-HOME source
