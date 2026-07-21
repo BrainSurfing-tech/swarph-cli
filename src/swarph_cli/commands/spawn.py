@@ -1596,7 +1596,7 @@ class GrokMembrane(ProviderMembrane):
         mem_dir = cell.cwd / _GROK_CELL_HOME_SUBDIR / ".grok" / "memory"
         if mem_dir.is_dir():
             for p in mem_dir.rglob("*.md"):
-                files.append((f"grok-memory/{p.relative_to(mem_dir)}", p))
+                files.append((f"grok-memory/{p.relative_to(mem_dir).as_posix()}", p))
         return files
 
     def memory_restore_dest(self, rel_parts, cell):

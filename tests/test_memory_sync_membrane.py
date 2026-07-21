@@ -56,8 +56,11 @@ def test_grok_membrane_isolated_home(tmp_path):
     (cwd / spawn._GROK_CELL_HOME_SUBDIR / ".grok" / "memory" / "MEMORY.md").write_text("m")
     (mem / "MEMORY.md").write_text("p")
     m = spawn.MEMBRANES["grok"]
-    rels = {r for r, _ in m.memory_sync_files(types.SimpleNamespace(cwd=cwd, provider="grok"))}
+    files = m.memory_sync_files(types.SimpleNamespace(cwd=cwd, provider="grok"))
+    rels = {r for r, _ in files}
     assert rels == {"grok-memory/MEMORY.md", "grok-memory/proj/MEMORY.md"}
+    # Verify no backslashes in keys (cross-OS restore safety)
+    assert all("\\" not in r for r, _ in files)
     assert m.memory_restore_dest(("grok-memory", "proj", "MEMORY.md"), types.SimpleNamespace(cwd=cwd, provider="grok")) \
         == cwd / spawn._GROK_CELL_HOME_SUBDIR / ".grok" / "memory" / "proj" / "MEMORY.md"
     assert m.memory_guard_file(types.SimpleNamespace(cwd=cwd, provider="grok")) is None   # no cwd doc
