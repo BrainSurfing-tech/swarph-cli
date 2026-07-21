@@ -1229,10 +1229,10 @@ class ProviderMembrane:
     ) -> Optional[int]:
         """Hook run after binary resolution, before launch.
 
-        Return an int exit code to short-circuit ``run_spawn`` (claude uses
-        this for the tmux-session launch / Windows Terminal relaunch). Return
-        None to proceed. ``session_name`` is the operator-typed spawn name used
-        as the tmux session identity (claude only).
+        Return an int exit code to short-circuit ``run_spawn`` (the base does the
+        named-tmux session launch for every provider; claude additionally relaunches
+        in Windows Terminal). Return None to proceed. ``session_name`` is the
+        operator-typed spawn name used as the tmux session identity for every provider.
         """
         # A named spawn runs the cell in a tmux session (durable + send-keys-
         # supervisable), for EVERY provider. No-op when unnamed / already inside
