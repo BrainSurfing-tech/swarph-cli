@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from swarph_cli.cell import Cell, load_cell, CellError
+from swarph_cli.commands.spawn import MEMBRANES
 
 
 def get_memory_repo_path(cell: Cell) -> Path:
@@ -19,44 +20,13 @@ def get_memory_repo_path(cell: Cell) -> Path:
 
 def _get_files_to_sync(cell: Cell) -> list[tuple[str, Path]]:
     files_to_sync = []
-
-    # Common
+    # Common (provider-agnostic)
     if (cell.cwd / "CURRENT_TASK.md").exists():
         files_to_sync.append(("CURRENT_TASK.md", cell.cwd / "CURRENT_TASK.md"))
-
-    if cell.provider == "claude":
-        if (cell.cwd / "CLAUDE.md").exists():
-            files_to_sync.append(("CLAUDE.md", cell.cwd / "CLAUDE.md"))
-        mem_dir = Path.home() / ".claude"
-        if (mem_dir / "MEMORY.md").exists():
-            files_to_sync.append(("MEMORY.md", mem_dir / "MEMORY.md"))
-        for p in mem_dir.glob("memory/*.md"):
-            files_to_sync.append((f"memory/{p.name}", p))
-        if (mem_dir / "inbox-cursor").exists():
-            files_to_sync.append(("inbox-cursor", mem_dir / "inbox-cursor"))
-
-    elif cell.provider == "codex":
-        if (cell.cwd / "AGENTS.md").exists():
-            files_to_sync.append(("AGENTS.md", cell.cwd / "AGENTS.md"))
-
-    elif cell.provider == "antigravity":
-        if (cell.cwd / "GEMINI.md").exists():
-            files_to_sync.append(("GEMINI.md", cell.cwd / "GEMINI.md"))
-        if (cell.cwd / "inbox-cursor.json").exists():
-            files_to_sync.append(("inbox-cursor.json", cell.cwd / "inbox-cursor.json"))
-        
-        gemini_tmp = Path.home() / ".gemini" / "tmp"
-        if gemini_tmp.is_dir():
-            for proj_dir in gemini_tmp.iterdir():
-                if proj_dir.is_dir():
-                    for p in proj_dir.glob("memory/*.md"):
-                        rel = f"tmp/{proj_dir.name}/memory/{p.name}"
-                        files_to_sync.append((rel, p))
-
-        history_proj = Path.home() / ".gemini" / "history" / ".project_root"
-        if history_proj.exists():
-            files_to_sync.append(("history/.project_root", history_proj))
-
+    # Provider-specific memory lives in the membrane (non-discriminatory dispatch)
+    membrane = MEMBRANES.get(cell.provider)
+    if membrane is not None:
+        files_to_sync += membrane.memory_sync_files(cell)
     return files_to_sync
 
 
@@ -110,21 +80,15 @@ def perform_restore(cell: Cell) -> Optional[str]:
                 continue
 
             rel = src.relative_to(repo_dir)
-            
+
             dest = None
             if rel.parts[0] in ("CURRENT_TASK.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md", "inbox-cursor.json"):
                 dest = cell.cwd / rel
-            elif cell.provider == "claude" and rel.parts[0] == "MEMORY.md":
-                dest = Path.home() / ".claude" / "MEMORY.md"
-            elif cell.provider == "claude" and rel.parts[0] == "memory":
-                dest = Path.home() / ".claude" / rel
-            elif cell.provider == "claude" and rel.parts[0] == "inbox-cursor":
-                dest = Path.home() / ".claude" / "inbox-cursor"
-            elif cell.provider == "antigravity" and rel.parts[0] == "tmp":
-                dest = Path.home() / ".gemini" / rel
-            elif cell.provider == "antigravity" and rel.parts[0] == "history":
-                dest = Path.home() / ".gemini" / rel
-                
+            else:
+                membrane = MEMBRANES.get(cell.provider)
+                if membrane is not None:
+                    dest = membrane.memory_restore_dest(rel.parts, cell)
+
             if dest:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dest)
@@ -168,13 +132,8 @@ def run_memory_sync(argv: list[str]) -> int:
         pass
 
     # EMPTY-GUARD check
-    guard_file = None
-    if cell.provider == "claude":
-        guard_file = cell.cwd / "CLAUDE.md"
-    elif cell.provider == "codex":
-        guard_file = cell.cwd / "AGENTS.md"
-    elif cell.provider == "antigravity":
-        guard_file = cell.cwd / "GEMINI.md"
+    membrane = MEMBRANES.get(cell.provider)
+    guard_file = membrane.memory_guard_file(cell) if membrane is not None else None
 
     if guard_file and (not guard_file.exists() or guard_file.stat().st_size == 0):
         print(f"[auto_sync] {datetime.datetime.now(datetime.timezone.utc).strftime('%FT%TZ')} SAFETY: {guard_file} missing or empty — skipping sync", file=sys.stderr)
