@@ -1246,6 +1246,22 @@ class ProviderMembrane:
         """chdir + env setup + exec-replace. Only returns on exec failure."""
         raise NotImplementedError
 
+    def memory_sync_files(self, cell) -> list:
+        """Provider-specific memory files to snapshot: (repo-relative, source-abs)
+        pairs. Base = none; each provider declares its own. The COMMON files
+        (CURRENT_TASK.md) are handled provider-agnostically in memory_sync."""
+        return []
+
+    def memory_restore_dest(self, rel_parts, cell):
+        """Where a provider-specific repo-relative path restores to (None = not
+        mine; the common cwd files are restored by memory_sync)."""
+        return None
+
+    def memory_guard_file(self, cell):
+        """The empty-guard file whose emptiness means 'skip sync' (None = no
+        guard, always sync)."""
+        return None
+
 
 class ClaudeMembrane(ProviderMembrane):
     name = "claude"
@@ -1361,6 +1377,31 @@ class ClaudeMembrane(ProviderMembrane):
             return 1
         return 0  # unreachable on POSIX (execve replaces); keeps type checker happy
 
+    def memory_sync_files(self, cell) -> list:
+        files = []
+        if (cell.cwd / "CLAUDE.md").exists():
+            files.append(("CLAUDE.md", cell.cwd / "CLAUDE.md"))
+        mem_dir = Path.home() / ".claude"
+        if (mem_dir / "MEMORY.md").exists():
+            files.append(("MEMORY.md", mem_dir / "MEMORY.md"))
+        for p in mem_dir.glob("memory/*.md"):
+            files.append((f"memory/{p.name}", p))
+        if (mem_dir / "inbox-cursor").exists():
+            files.append(("inbox-cursor", mem_dir / "inbox-cursor"))
+        return files
+
+    def memory_restore_dest(self, rel_parts, cell):
+        if rel_parts[0] == "MEMORY.md":
+            return Path.home() / ".claude" / "MEMORY.md"
+        if rel_parts[0] == "memory":
+            return Path.home() / ".claude" / Path(*rel_parts)
+        if rel_parts[0] == "inbox-cursor":
+            return Path.home() / ".claude" / "inbox-cursor"
+        return None
+
+    def memory_guard_file(self, cell):
+        return cell.cwd / "CLAUDE.md"
+
 
 class CodexMembrane(ProviderMembrane):
     name = "codex"
@@ -1394,6 +1435,15 @@ class CodexMembrane(ProviderMembrane):
             print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
             return 1
         return 0  # unreachable, keeps type checker happy
+
+    def memory_sync_files(self, cell) -> list:
+        files = []
+        if (cell.cwd / "AGENTS.md").exists():
+            files.append(("AGENTS.md", cell.cwd / "AGENTS.md"))
+        return files
+
+    def memory_guard_file(self, cell):
+        return cell.cwd / "AGENTS.md"
 
 
 class AntigravityMembrane(ProviderMembrane):
@@ -1435,6 +1485,31 @@ class AntigravityMembrane(ProviderMembrane):
             print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
             return 1
         return 0  # unreachable, keeps type checker happy
+
+    def memory_sync_files(self, cell) -> list:
+        files = []
+        if (cell.cwd / "GEMINI.md").exists():
+            files.append(("GEMINI.md", cell.cwd / "GEMINI.md"))
+        if (cell.cwd / "inbox-cursor.json").exists():
+            files.append(("inbox-cursor.json", cell.cwd / "inbox-cursor.json"))
+        gemini_tmp = Path.home() / ".gemini" / "tmp"
+        if gemini_tmp.is_dir():
+            for proj_dir in gemini_tmp.iterdir():
+                if proj_dir.is_dir():
+                    for p in proj_dir.glob("memory/*.md"):
+                        files.append((f"tmp/{proj_dir.name}/memory/{p.name}", p))
+        history_proj = Path.home() / ".gemini" / "history" / ".project_root"
+        if history_proj.exists():
+            files.append(("history/.project_root", history_proj))
+        return files
+
+    def memory_restore_dest(self, rel_parts, cell):
+        if rel_parts[0] in ("tmp", "history"):
+            return Path.home() / ".gemini" / Path(*rel_parts)
+        return None
+
+    def memory_guard_file(self, cell):
+        return cell.cwd / "GEMINI.md"
 
 
 class GrokMembrane(ProviderMembrane):
@@ -1513,6 +1588,25 @@ class GrokMembrane(ProviderMembrane):
             print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
             return 1
         return 0  # unreachable on POSIX (execve replaces); keeps type checker happy
+
+    def memory_sync_files(self, cell) -> list:
+        # Grok cells run under an isolated HOME (_GROK_CELL_HOME_SUBDIR); memory
+        # lives at <cell_home>/.grok/memory/**/*.md.
+        files = []
+        mem_dir = cell.cwd / _GROK_CELL_HOME_SUBDIR / ".grok" / "memory"
+        if mem_dir.is_dir():
+            for p in mem_dir.rglob("*.md"):
+                files.append((f"grok-memory/{p.relative_to(mem_dir).as_posix()}", p))
+        return files
+
+    def memory_restore_dest(self, rel_parts, cell):
+        if rel_parts[0] == "grok-memory":
+            return (cell.cwd / _GROK_CELL_HOME_SUBDIR / ".grok" / "memory"
+                    / Path(*rel_parts[1:]))
+        return None
+
+    def memory_guard_file(self, cell):
+        return None  # grok has no cwd project-doc; always-sync
 
 
 MEMBRANES: dict[str, ProviderMembrane] = {
