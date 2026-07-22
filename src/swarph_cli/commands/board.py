@@ -167,6 +167,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ck.add_argument("--json", action="store_true"); _add_common(ck)
     cn = cards.add_parser("assign", help="set a card's assignee")
     cn.add_argument("id", type=int); cn.add_argument("assignee"); cn.add_argument("--json", action="store_true"); _add_common(cn)
+    cr = cards.add_parser("ready", help="flag a card ready-to-advance (move_ready) for the orchestrator")
+    cr.add_argument("id", type=int); cr.add_argument("--clear", action="store_true", help="unset move_ready")
+    cr.add_argument("--json", action="store_true"); _add_common(cr)
     return p
 
 
@@ -232,6 +235,9 @@ def run_board(argv: list[str]) -> int:
         if args.command == "assign":
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "assignee": args.assignee}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} assignee -> {x.get('assignee')}", aj)
+        if args.command == "ready":
+            st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "move_ready": not args.clear}, token)
+            return _out(st, d, lambda x: f"card #{x.get('id')} move_ready -> {x.get('move_ready')}", aj)
         if args.command == "link":
             gst, gcard = _http_get_json(f"{gw}/board/cards/{args.id}", token)
             if not (gst and 200 <= gst < 300):
