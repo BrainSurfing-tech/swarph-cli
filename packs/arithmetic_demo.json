@@ -1,0 +1,52 @@
+{
+  "theme": "arithmetic_demo",
+  "version": "1",
+  "system": "You are a careful, fast assistant used to sanity-check arithmetic and simple classification before a result reaches a human. Read each question exactly, compute the precise result yourself, and reply in EXACTLY the requested JSON shape with no extra prose (except the free-text task, which wants a plain sentence).",
+  "description": "Synthetic seed pack (NOT proprietary data) exercising all four swarph-bench task types end-to-end: numeric, categorical, ranking, text. Meant to demo `swarph bench run`/`validate` and as a schema-conformant fixture, not a serious model eval.",
+  "tasks": [
+    {
+      "id": "arith_mult",
+      "type": "numeric",
+      "expected": 68,
+      "weight": 1.0,
+      "prompt": "What is 17 multiplied by 4? Reply ONLY with JSON: {\"answer\": <number>}"
+    },
+    {
+      "id": "arith_area",
+      "type": "numeric",
+      "expected": 28.0,
+      "weight": 1.0,
+      "prompt": "A rectangle is 3.5 meters wide and 8 meters long. What is its area in square meters? Reply ONLY with JSON: {\"answer\": <number>}"
+    },
+    {
+      "id": "prime_97",
+      "type": "categorical",
+      "expected": "PRIME",
+      "weight": 1.5,
+      "meta": { "class": "prime" },
+      "prompt": "Is 97 a PRIME or COMPOSITE number? Reply ONLY with JSON: {\"answer\": \"PRIME\" or \"COMPOSITE\"}"
+    },
+    {
+      "id": "prime_91",
+      "type": "categorical",
+      "expected": "COMPOSITE",
+      "weight": 1.5,
+      "meta": { "class": "composite", "note": "91 = 7 x 13 — a classic prime-looking trap" },
+      "prompt": "Is 91 a PRIME or COMPOSITE number? Reply ONLY with JSON: {\"answer\": \"PRIME\" or \"COMPOSITE\"}"
+    },
+    {
+      "id": "rank_three",
+      "type": "ranking",
+      "expected": ["7", "19", "42"],
+      "weight": 1.0,
+      "prompt": "Rank these numbers smallest to largest: 42, 7, 19. Reply ONLY with JSON: {\"answer\": [\"<smallest>\", \"<mid>\", \"<largest>\"]}"
+    },
+    {
+      "id": "text_even_sum",
+      "type": "text",
+      "expected": "The sum of two even numbers is always even because each even addend is divisible by two, so their total is also divisible by two.",
+      "weight": 1.0,
+      "prompt": "In one short sentence, explain why adding two multiples of 2 always produces another multiple of 2."
+    }
+  ]
+}

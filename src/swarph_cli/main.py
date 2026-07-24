@@ -105,6 +105,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "install-multiplexer": "swarph_cli.commands.install_multiplexer.run_install_multiplexer",
     "highlight": "swarph_cli.commands.highlight.run_highlight",
     "codegraph": "swarph_cli.commands.codegraph.run_codegraph",
+    "bench": "swarph_cli.commands.bench.run_bench",
     # Future: "list-peers", "list-adapters", etc.
 }
 

@@ -6,3 +6,4 @@ build/
 .pytest_cache/
 *.pyc
 src/swarph_cli/gateway/*.db
+src/swarph_cli/bench/data/llm_prices.json
