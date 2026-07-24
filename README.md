@@ -35,6 +35,7 @@ swarph channel <sub>     mesh channels — create/join/leave/list/members/post/r
 swarph schedule <sub>    scheduled events — create/list/get/enable/disable/delete/fire-now
 swarph board <sub>       mesh board — projects/cards kanban (list/show/add/move/link/assign)
 swarph lane <sub>        $0-lane orchestration — list/create/scale/delete/enqueue
+swarph bench <sub>       deterministic LLM benchmark-pack runner — run/validate/add/prices
 swarph highlight "<x>"   log a highlight to the shared git-backed swarph timeline
 swarph spawn <role>      launch a long-lived agent session as a named mesh cell
 swarph daemon            foreground inbox-drain loop (the mesh doorbell)
@@ -64,6 +65,24 @@ swarph board cards assign <id> <who>
 ```
 
 `--project` accepts a numeric id **or** a slug (resolved via `projects list`). Note: card creation always starts at `proposed` (the gateway has no stage-on-create) — use `cards move` to advance.
+
+### `swarph bench` (v0.38.0)
+
+A **deterministic** LLM benchmark: run an N-way model *showdown* on a **pack** — a self-contained, subject-agnostic unit of `{system, tasks, expected}` — and report quality (ground-truth **distance**, not vibes) alongside tokens / cost / latency. You define the correct answer; the score is math; anyone re-runs = the same number.
+
+```
+swarph bench run --models <csv> --pack <path> [--report json|table] [--strict]
+swarph bench validate <pack> [--reference-models <csv>]
+swarph bench add <pack> [--force] [--packs-dir <dir>]
+swarph bench prices [--refresh] [--grep <substr>]
+```
+
+- **`run`** — for each model × task: dispatch, extract the answer, score. Output is a **confusion view** (per-class hit-rates + mean distance + tokens + metered-$ + latency + parse-fails), ranked by (distance, cost) — never a single reward-hackable scalar. A **credential preflight** skips models whose API key isn't set (with a clear message) instead of failing mid-run; `--strict` aborts instead.
+- **`validate`** — four trust gates: schema/integrity, answer-leak scan, discrimination (do reference models actually spread?), and the headline **context-calibration** discipline (a pack's `system` must mirror real deployment, or the eval measures the author's framing, not the model).
+- **`add`** — validates, then self-registers the pack at `packs/<theme>.json` **from its own header** (no manual name); refuses on leak/schema failure.
+- **`prices`** — the full LLM price list (auto-refreshed from LiteLLM, ~1500+ models), a shared cost cache.
+
+Task types: `numeric` (rel-err), `categorical` (exact), `ranking` (Kendall-tau), `text` (Jaccard). Packs are **data only** — the scoring engine is fixed and shared. Metered backend needs the provider key (e.g. `GEMINI_API_KEY`); the `[bench]` extra pulls `google-genai`.
 
 ### `swarph brain-ask` (v0.14.0)
 
