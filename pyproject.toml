@@ -60,6 +60,12 @@ dev = ["pytest>=7.0"]
 # so the core one-shot/mesh paths don't pull it in; `swarph mcp-server`
 # prints a `pip install swarph-cli[mcp]` hint when it's absent.
 mcp = ["mcp>=1.0"]
+# `swarph bench run` (metered backend) calls the google-genai Developer API
+# directly. The dependency is an extra so `bench`'s pack loader/validate/
+# distance-engine paths (and every other swarph-cli verb) stay usable without
+# it; MeteredGeminiBackend prints a `pip install swarph-cli[bench]` hint via
+# its ImportError message when it's absent.
+bench = ["google-genai>=0.3"]
 # `swarph gateway serve` runs the bundled mesh-gateway HTTP server. The
 # FastAPI/uvicorn stack is an extra so the core client paths stay
 # dependency-light; the verb prints a `pip install swarph-cli[gateway]`
