@@ -434,3 +434,62 @@ INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (8, CURRENT_TI
 INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (9, CURRENT_TIMESTAMP);
 INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (10, CURRENT_TIMESTAMP);
 INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (11, CURRENT_TIMESTAMP);
+
+-- ─── RBAC GROUPS (#103) — two-gateways PARITY with the deployed gateway ──
+-- AAD-style RIGHTS groups: a group CARRIES GRANTS and membership => INHERITED
+-- rights. principal(peer) -> group -> grants. Resolution is DYNAMIC (live union
+-- at check time), never a member snapshot.
+-- Spec: hedge-fund-mcp docs/design/2026-07-24-mesh-rbac-groups-spec.md §8 makes
+-- this surface non-negotiable on BOTH gateways — a divergence here is an authz
+-- split-brain, which is what the parity ratchet hard-fails on.
+CREATE TABLE IF NOT EXISTS groups (
+  name        TEXT PRIMARY KEY,
+  description TEXT,
+  kind        TEXT NOT NULL DEFAULT 'custom'
+              CHECK (kind IN ('role','custom','virtual')),
+  created_by  TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+-- membership. ALL is VIRTUAL (computed from claude_peers) — never materialized.
+CREATE TABLE IF NOT EXISTS group_members (
+  "group"   TEXT NOT NULL,
+  peer      TEXT NOT NULL,
+  added_by  TEXT NOT NULL,
+  added_at  TEXT NOT NULL,
+  PRIMARY KEY ("group", peer)
+);
+CREATE INDEX IF NOT EXISTS idx_group_members_peer ON group_members(peer);
+-- the RIGHTS a group carries. grant_type = subsystem, so a NEW subsystem needs
+-- no schema change (only a dispatcher case + consumer).
+CREATE TABLE IF NOT EXISTS group_grants (
+  "group"    TEXT NOT NULL,
+  grant_type TEXT NOT NULL,
+  target     TEXT NOT NULL,
+  level      TEXT NOT NULL DEFAULT 'member',
+  added_by   TEXT NOT NULL,
+  added_at   TEXT NOT NULL,
+  PRIMARY KEY ("group", grant_type, target)
+);
+CREATE INDEX IF NOT EXISTS idx_group_grants_lookup ON group_grants(grant_type, target);
+-- APPEND-ONLY audit: EVERY membership + grant mutation. Adding a peer to a
+-- rights-bearing group GRANTS it those rights — never silent.
+CREATE TABLE IF NOT EXISTS group_audit (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor       TEXT NOT NULL,
+  action      TEXT NOT NULL,
+  "group"     TEXT NOT NULL,
+  target_peer TEXT,
+  grant_type  TEXT,
+  target      TEXT,
+  level       TEXT,
+  detail      TEXT,
+  at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_group_audit_group ON group_audit("group", at);
+-- Well-known role groups (mirrors the deployed gateway's seed).
+INSERT OR IGNORE INTO groups (name,description,kind,created_by,created_at) VALUES
+  ('ALL','every ratified peer (computed from claude_peers)','virtual','system','bootstrap'),
+  ('orchestrator','admin scope','role','system','bootstrap'),
+  ('execute-grant','board + lane execute','role','system','bootstrap'),
+  ('metas','meta-edge scope','role','system','bootstrap');
+INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (12, CURRENT_TIMESTAMP);
