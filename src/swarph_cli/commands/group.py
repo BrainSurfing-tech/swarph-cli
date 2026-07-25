@@ -68,6 +68,29 @@ def _group_url(gateway: str, name: str) -> str:
     return f"{gateway.rstrip('/')}/groups/{urllib.parse.quote(name, safe='')}"
 
 
+def _with_actor(url: str, actor: str) -> str:
+    """Append ?actor=<self>. The gateway reads `actor` as a QUERY PARAMETER on
+    every DELETE (groups_delete / groups_member_remove / groups_grant_remove all
+    declare it in the signature, not in a body model). Sending it in a JSON body
+    — which the CLI did until card #114 — arrives as None, `_board_actor` then
+    resolves a non-orchestrator under the shared-token regime, and the gateway
+    returns 403. Verified live: body -> 403, ?actor=lab-ovh -> 200."""
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}actor={urllib.parse.quote(actor, safe='')}"
+
+
+def _revoke_url(gateway: str, name: str, grant_type: str, target: str, actor: str) -> str:
+    """DELETE /groups/{name}/grants takes grant_type, target AND actor as QUERY
+    params — `groups_grant_remove(name, grant_type, target, actor, ...)`.
+
+    The §4 contract said the body carried grant_type+target and the CLI was built
+    to that; the implementation diverged. Body-encoded, the request reaches the
+    server with the required query params missing. Unit tests could not catch it
+    because they mock the HTTP layer — only a live call does."""
+    q = urllib.parse.urlencode({"grant_type": grant_type, "target": target, "actor": actor})
+    return f"{_grants_url(gateway, name)}?{q}"
+
+
 def _members_url(gateway: str, name: str) -> str:
     return f"{_group_url(gateway, name)}/members"
 
@@ -288,7 +311,7 @@ def run_group(argv: list[str]) -> int:
         return _out(st, d, _format_groups, aj)
 
     if args.command == "delete":
-        st, d = delete_json(_group_url(gw, args.name), token)
+        st, d = delete_json(_with_actor(_group_url(gw, args.name), self_name), token)
         return _out(st, d, lambda _x: f"deleted group {args.name}", aj)
 
     if args.command == "members":
@@ -300,7 +323,7 @@ def run_group(argv: list[str]) -> int:
         return _out(st, d, lambda _x: f"added {args.peer} to {args.name}", aj)
 
     if args.command == "remove":
-        st, d = delete_json(_member_url(gw, args.name, args.peer), token)
+        st, d = delete_json(_with_actor(_member_url(gw, args.name, args.peer), self_name), token)
         return _out(st, d, lambda _x: f"removed {args.peer} from {args.name}", aj)
 
     if args.command == "grants":
@@ -318,7 +341,7 @@ def run_group(argv: list[str]) -> int:
 
     if args.command == "revoke":
         payload = _revoke_payload(args.grant_type, args.target)
-        st, d = _delete_json_body(_grants_url(gw, args.name), payload, token)
+        st, d = delete_json(_revoke_url(gw, args.name, args.grant_type, args.target, self_name), token)
         return _out(
             st, d,
             lambda _x: f"revoked {args.grant_type} {args.target} from {args.name}",
