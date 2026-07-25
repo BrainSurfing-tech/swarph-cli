@@ -228,7 +228,7 @@ def test_group_delete_uses_delete_json(monkeypatch):
     monkeypatch.setattr(group, "delete_json", fake)
     rc = group.run_group(["delete", "eng"])
     assert rc == 0
-    assert cap["url"].endswith("/groups/eng")
+    assert "/groups/eng?" in cap["url"] and "actor=" in cap["url"]  # card #114
 
 
 def test_group_members_does_get(monkeypatch):
@@ -268,7 +268,7 @@ def test_group_remove_uses_delete_json_with_peer_path(monkeypatch):
     monkeypatch.setattr(group, "delete_json", fake)
     rc = group.run_group(["remove", "eng", "lab-ovh"])
     assert rc == 0
-    assert cap["url"].endswith("/groups/eng/members/lab-ovh")
+    assert "/groups/eng/members/lab-ovh?" in cap["url"]  # ?actor= appended (card #114)
 
 
 def test_group_grants_does_get(monkeypatch):
@@ -311,36 +311,31 @@ def test_group_grant_explicit_level(monkeypatch):
     assert cap["body"]["level"] == "admin"
 
 
-def test_group_revoke_sends_body_via_delete_json_body(monkeypatch):
+def test_group_revoke_sends_everything_in_the_QUERY_STRING(monkeypatch):
+    """REPLACES two tests that PINNED THE BUG.
+
+    The originals asserted revoke sends {grant_type,target} in a request BODY via
+    _delete_json_body, and asserted it must NOT use plain delete_json. Both were
+    faithful to the §4 contract and wrong about the server: groups_grant_remove
+    declares (name, grant_type, target, actor) — all QUERY params. A body-encoded
+    revoke reaches the gateway with required params missing.
+
+    The tests passed throughout because they mocked the HTTP layer, so they were
+    verifying the CLI against the spec rather than against the service. That is
+    the failure this test now guards: assert the WIRE FORM, not the helper."""
     cap = {}
 
-    def fake(url, body, token, **k):
-        cap.update(url=url, body=body, token=token)
+    def fake(url, token, **k):
+        cap.update(url=url, token=token)
         return (204, {})
 
-    monkeypatch.setattr(group, "_delete_json_body", fake)
+    monkeypatch.setattr(group, "delete_json", fake)
     rc = group.run_group(["revoke", "eng", "board", "cards"])
     assert rc == 0
-    assert cap["url"].endswith("/groups/eng/grants")
-    assert cap["body"] == {"grant_type": "board", "target": "cards"}
+    assert "/groups/eng/grants?" in cap["url"], cap
+    for expected in ("grant_type=board", "target=cards", "actor="):
+        assert expected in cap["url"], (expected, cap["url"])
     assert cap["token"] == "tok"
-
-
-def test_group_revoke_does_not_call_plain_delete_json(monkeypatch):
-    called = {"plain_delete": False}
-
-    def fail_plain(*a, **k):
-        called["plain_delete"] = True
-        return (204, {})
-
-    def fake_body(url, body, token, **k):
-        return (204, {})
-
-    monkeypatch.setattr(group, "delete_json", fail_plain)
-    monkeypatch.setattr(group, "_delete_json_body", fake_body)
-    rc = group.run_group(["revoke", "eng", "board", "cards"])
-    assert rc == 0
-    assert called["plain_delete"] is False
 
 
 def test_group_check_renders_allow(monkeypatch, capsys):
@@ -488,3 +483,59 @@ def test_group_registered_in_verb_handlers():
 def test_rights_registered_in_verb_handlers():
     from swarph_cli.main import _VERB_HANDLERS
     assert _VERB_HANDLERS["rights"] == "swarph_cli.commands.group.run_rights"
+
+
+# ── card #114: the three DELETE verbs were dead against the LIVE gateway ──────
+# Found by exercising prod, not by unit tests: the gateway reads `actor` as a
+# QUERY param on every DELETE, the CLI sent it in a JSON body (or not at all),
+# so `_board_actor` saw None and returned 403 under the shared-token regime.
+# `revoke` was worse — grant_type/target are query params too, so a body-encoded
+# request arrives with required params MISSING.
+#
+# These assert the WIRE FORM, which is the only thing that would have caught it.
+# The pre-existing tests asserted the URL path and passed throughout.
+
+def test_delete_group_sends_actor_as_QUERY_param(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(group, "delete_json", lambda url, token: (seen.update(url=url), (204, {}))[1])
+    monkeypatch.setattr(group, "resolve_self_name", lambda *a, **k: "lab-ovh")
+    monkeypatch.setattr(group, "resolve_token", lambda *a, **k: "t")
+    group.run_group(["delete", "eng", "--gateway", "http://gw"])
+    assert "actor=lab-ovh" in seen["url"], seen
+    assert seen["url"].startswith("http://gw/groups/eng?"), seen
+
+
+def test_remove_member_sends_actor_as_QUERY_param(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(group, "delete_json", lambda url, token: (seen.update(url=url), (204, {}))[1])
+    monkeypatch.setattr(group, "resolve_self_name", lambda *a, **k: "lab-ovh")
+    monkeypatch.setattr(group, "resolve_token", lambda *a, **k: "t")
+    group.run_group(["remove", "eng", "droplet", "--gateway", "http://gw"])
+    assert "actor=lab-ovh" in seen["url"], seen
+    assert "/groups/eng/members/droplet" in seen["url"], seen
+
+
+def test_revoke_puts_grant_type_target_AND_actor_in_the_QUERY_STRING(monkeypatch):
+    """The endpoint is groups_grant_remove(name, grant_type, target, actor) —
+    all query params. A body-encoded revoke reaches the server with required
+    params missing, which is a 422, not merely an auth failure."""
+    seen = {}
+    monkeypatch.setattr(group, "delete_json", lambda url, token: (seen.update(url=url), (204, {}))[1])
+    monkeypatch.setattr(group, "resolve_self_name", lambda *a, **k: "lab-ovh")
+    monkeypatch.setattr(group, "resolve_token", lambda *a, **k: "t")
+    group.run_group(["revoke", "eng", "channel", "releases", "--gateway", "http://gw"])
+    url = seen["url"]
+    for expected in ("grant_type=channel", "target=releases", "actor=lab-ovh"):
+        assert expected in url, (expected, url)
+
+
+def test_no_DELETE_verb_relies_on_a_request_BODY(monkeypatch):
+    """Structural guard: DELETE bodies are non-standard and this gateway ignores
+    them. If a future change routes any DELETE through a body helper again, the
+    verb silently stops working against prod while unit tests still pass."""
+    import inspect
+    src = inspect.getsource(group.run_group)
+    assert "_delete_json_body(" not in src, (
+        "a DELETE verb is sending a request body again — the gateway reads these "
+        "params from the QUERY STRING (card #114); body-encoded params arrive as None"
+    )
