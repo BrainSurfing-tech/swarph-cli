@@ -4264,3 +4264,353 @@ async def brain_query(req: BrainQueryRequest,
 _init_db()
 _lc.init_db()   # launched-lane registry (separate lanes.db; mirrors the table inits above)
 log.info("mesh-gateway ready: port=%d db=%s", PORT, DB_PATH)
+
+
+# =====================================================================
+# RBAC GROUPS (#103) — two-gateways PARITY surface
+# =====================================================================
+# The deployed :8788 gateway owns the canonical implementation; spec §8 makes
+# this surface (11 routes + 4 tables) NON-NEGOTIABLE on both, because a
+# divergence is an authz SPLIT-BRAIN. The parity ratchet hard-fails on it.
+#
+# PORTED, NOT COPIED — this fork has no board layer (no board_projects /
+# board_project_grants / _board_role / _board_actor), so two things differ by
+# necessity and are ledgered rather than faked:
+#   * ADMIN GUARD: the deployed gateway gates on _board_role (orchestrator/meta).
+#     Here there is no board, so the admin set is an explicit allowlist,
+#     MESH_GROUP_ADMINS. It DEFAULTS EMPTY = every mutation 403s (FAIL CLOSED).
+#     A security primitive that ships open-by-default is the failure mode this
+#     whole card exists to remove.
+#   * BOARD GRANTS: unresolvable here (no board tables), so /authz/check returns
+#     deny for grant_type='board' and grant creation rejects it, exactly as the
+#     deployed gateway rejects it at groups_grant_add.
+# Everything else — the tables, the 11 routes, live-union resolution, the
+# ratified+enabled ALL boundary, max-level selection, and audit-on-every-
+# mutation — is behaviourally identical.
+_GROUP_VIRTUAL = {"ALL"}
+_GRANT_LEVEL_RANK = {"member": 1, "read": 1, "propose": 2, "write": 2,
+                     "execute": 3, "admin": 4}
+# Group names share a namespace with grant targets; validated like peer names.
+_GROUP_NAME_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
+# FAIL CLOSED: no admins configured => no mutations. Set explicitly to enable.
+MESH_GROUP_ADMINS = {
+    p.strip() for p in os.environ.get("MESH_GROUP_ADMINS", "").split(",") if p.strip()
+}
+
+
+def _group_actor(auth: "AuthContext", asserted: Optional[str]) -> str:
+    """Acting peer. A per-peer token binds identity; a shared token cannot, so
+    the asserted value is honour-system there — the same ASPIRATIONAL-UNTIL-C5
+    posture the deployed gateway documents. Not a production identity boundary."""
+    if getattr(auth, "regime", None) == "per_peer_token" and getattr(auth, "peer", None):
+        return auth.peer
+    return (asserted or "").strip() or "anonymous"
+
+
+def _require_group_admin(actor: str) -> None:
+    """v1 escalation guard — allowlist only, NO delegated group-admin (granting
+    scopes you don't hold is the classic RBAC trap). Empty allowlist = deny all."""
+    if actor not in MESH_GROUP_ADMINS:
+        raise HTTPException(403, "only a configured group admin may administer groups")
+
+
+def _validate_group_name(name: str) -> str:
+    name = (name or "").strip()
+    if not _GROUP_NAME_RE.match(name):
+        raise HTTPException(400, "group name must match ^[a-zA-Z0-9_.-]{1,64}$")
+    return name
+
+
+def _group_audit(c, actor: str, action: str, group: str, *, target_peer: str = None,
+                 grant_type: str = None, target: str = None, level: str = None,
+                 detail: str = None) -> None:
+    c.execute(
+        'INSERT INTO group_audit (actor,action,"group",target_peer,grant_type,target,level,detail,at)'
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        (actor, action, group, target_peer, grant_type, target, level, detail, _utcnow_iso()),
+    )
+
+
+def _all_peers(c) -> list:
+    """The virtual ALL group = every RATIFIED and ENABLED peer. The filter is a
+    SECURITY boundary: /peers/register self-registers with ratified=0, so without
+    it any token-holder could register a name and inherit every grant on ALL."""
+    try:
+        return [r["name"] for r in c.execute(
+            "SELECT name FROM claude_peers WHERE ratified=1 AND enabled=1 ORDER BY name"
+        ).fetchall()]
+    except sqlite3.OperationalError:
+        return []
+
+
+def _peer_groups(c, peer: str) -> list:
+    out = []
+    try:
+        out = [r["group"] for r in c.execute(
+            'SELECT "group" FROM group_members WHERE peer=?', (peer,)).fetchall()]
+    except sqlite3.OperationalError:
+        return []
+    if "ALL" not in out and peer in _all_peers(c):
+        out.append("ALL")
+    return out
+
+
+def _group_grants_for(c, peer: str, grant_type: Optional[str] = None,
+                      target: Optional[str] = None) -> list:
+    groups = _peer_groups(c, peer)
+    if not groups:
+        return []
+    q = ('SELECT "group" AS grp, grant_type, target, level FROM group_grants '
+         'WHERE "group" IN (%s)' % ",".join("?" * len(groups)))
+    args = list(groups)
+    if grant_type:
+        q += " AND grant_type=?"; args.append(grant_type)
+    if target:
+        q += " AND target=?"; args.append(target)
+    try:
+        return [dict(r) for r in c.execute(q, tuple(args)).fetchall()]
+    except sqlite3.OperationalError:
+        return []
+
+
+def _group_members(c, name: str) -> list:
+    if name in _GROUP_VIRTUAL:
+        return [{"peer": p, "added_by": "system", "added_at": ""} for p in _all_peers(c)]
+    return [dict(r) for r in c.execute(
+        'SELECT peer, added_by, added_at FROM group_members WHERE "group"=? ORDER BY peer',
+        (name,)).fetchall()]
+
+
+def _channel_group_members(c, channel: str) -> set:
+    """Peers who reach `channel` via a group grant — LIVE, so a peer added to the
+    group later is a member immediately (the #82 lesson)."""
+    try:
+        groups = [r["group"] for r in c.execute(
+            'SELECT "group" FROM group_grants WHERE grant_type=\'channel\' AND target=?',
+            (channel,)).fetchall()]
+    except sqlite3.OperationalError:
+        return set()
+    out = set()
+    for g in groups:
+        if g in _GROUP_VIRTUAL:
+            out |= set(_all_peers(c))
+        else:
+            out |= {r["peer"] for r in c.execute(
+                'SELECT peer FROM group_members WHERE "group"=?', (g,)).fetchall()}
+    return out
+
+
+class GroupCreate(BaseModel):
+    name: str
+    description: str = ""
+    kind: str = "custom"
+    actor: Optional[str] = None
+
+
+class GroupMemberAdd(BaseModel):
+    peer: str
+    actor: Optional[str] = None
+
+
+class GroupGrantAdd(BaseModel):
+    grant_type: str
+    target: str
+    level: str = "member"
+    actor: Optional[str] = None
+
+
+class AuthzCheck(BaseModel):
+    peer: str
+    grant_type: str
+    target: str
+
+
+@app.post("/groups")
+async def groups_create(req: GroupCreate, authorization: Optional[str] = Header(None)) -> dict:
+    auth = _authorize(authorization)
+    actor = _group_actor(auth, req.actor)
+    _require_group_admin(actor)
+    name = _validate_group_name(req.name)
+    if name in _GROUP_VIRTUAL:
+        raise HTTPException(409, f"{name} is a reserved virtual group")
+    if req.kind not in ("role", "custom"):
+        raise HTTPException(400, "kind must be role|custom ('virtual' is server-only)")
+    now = _utcnow_iso()
+    with _conn() as c:
+        try:
+            c.execute("INSERT INTO groups (name,description,kind,created_by,created_at) VALUES (?,?,?,?,?)",
+                      (name, req.description, req.kind, actor, now))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, f"group {name!r} already exists")
+        _group_audit(c, actor, "group.create", name)
+    return {"name": name, "description": req.description, "kind": req.kind,
+            "created_by": actor, "created_at": now}
+
+
+@app.get("/groups")
+async def groups_list(authorization: Optional[str] = Header(None)) -> dict:
+    _authorize(authorization)
+    with _conn() as c:
+        out = []
+        for r in c.execute("SELECT name,description,kind,created_by,created_at FROM groups ORDER BY name").fetchall():
+            d = dict(r)
+            d["member_count"] = len(_group_members(c, d["name"]))
+            out.append(d)
+    return {"groups": out}
+
+
+@app.delete("/groups/{name}")
+async def groups_delete(name: str, actor: Optional[str] = None,
+                        authorization: Optional[str] = Header(None)) -> dict:
+    auth = _authorize(authorization)
+    who = _group_actor(auth, actor)
+    _require_group_admin(who)
+    if name in _GROUP_VIRTUAL:
+        raise HTTPException(400, f"{name} is a virtual group and cannot be deleted")
+    with _conn() as c:
+        if not c.execute("SELECT 1 FROM groups WHERE name=?", (name,)).fetchone():
+            raise HTTPException(404, f"group {name!r} not found")
+        n_mem = c.execute('SELECT COUNT(*) n FROM group_members WHERE "group"=?', (name,)).fetchone()["n"]
+        n_gr = c.execute('SELECT COUNT(*) n FROM group_grants WHERE "group"=?', (name,)).fetchone()["n"]
+        c.execute('DELETE FROM group_members WHERE "group"=?', (name,))
+        c.execute('DELETE FROM group_grants WHERE "group"=?', (name,))
+        c.execute("DELETE FROM groups WHERE name=?", (name,))
+        _group_audit(c, who, "group.delete", name,
+                     detail=f"cascade:{n_mem} members,{n_gr} grants")
+    return {"deleted": name}
+
+
+@app.get("/groups/{name}/members")
+async def groups_members(name: str, authorization: Optional[str] = Header(None)) -> dict:
+    _authorize(authorization)
+    with _conn() as c:
+        if name not in _GROUP_VIRTUAL and not c.execute("SELECT 1 FROM groups WHERE name=?", (name,)).fetchone():
+            raise HTTPException(404, f"group {name!r} not found")
+        return {"group": name, "members": _group_members(c, name)}
+
+
+@app.post("/groups/{name}/members")
+async def groups_member_add(name: str, req: GroupMemberAdd,
+                            authorization: Optional[str] = Header(None)) -> dict:
+    auth = _authorize(authorization)
+    actor = _group_actor(auth, req.actor)
+    _require_group_admin(actor)
+    if name in _GROUP_VIRTUAL:
+        raise HTTPException(400, f"{name} is virtual (computed) — membership is not editable")
+    now = _utcnow_iso()
+    with _conn() as c:
+        if not c.execute("SELECT 1 FROM groups WHERE name=?", (name,)).fetchone():
+            raise HTTPException(404, f"group {name!r} not found")
+        try:
+            c.execute('INSERT INTO group_members ("group",peer,added_by,added_at) VALUES (?,?,?,?)',
+                      (name, req.peer, actor, now))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, f"{req.peer!r} is already a member of {name!r}")
+        _group_audit(c, actor, "member.add", name, target_peer=req.peer)
+    return {"group": name, "peer": req.peer, "added_by": actor, "added_at": now}
+
+
+@app.delete("/groups/{name}/members/{peer}")
+async def groups_member_remove(name: str, peer: str, actor: Optional[str] = None,
+                               authorization: Optional[str] = Header(None)) -> dict:
+    auth = _authorize(authorization)
+    who = _group_actor(auth, actor)
+    _require_group_admin(who)
+    if name in _GROUP_VIRTUAL:
+        raise HTTPException(400, f"{name} is virtual (computed) — membership is not editable")
+    with _conn() as c:
+        cur = c.execute('DELETE FROM group_members WHERE "group"=? AND peer=?', (name, peer))
+        if not cur.rowcount:
+            raise HTTPException(404, f"{peer!r} is not a member of {name!r}")
+        _group_audit(c, who, "member.remove", name, target_peer=peer)
+    return {"group": name, "peer": peer, "removed": True}
+
+
+@app.get("/groups/{name}/grants")
+async def groups_grants_list(name: str, authorization: Optional[str] = Header(None)) -> dict:
+    _authorize(authorization)
+    with _conn() as c:
+        rows = [dict(r) for r in c.execute(
+            'SELECT grant_type,target,level,added_by,added_at FROM group_grants'
+            ' WHERE "group"=? ORDER BY grant_type,target', (name,)).fetchall()]
+    return {"group": name, "grants": rows}
+
+
+@app.post("/groups/{name}/grants")
+async def groups_grant_add(name: str, req: GroupGrantAdd,
+                           authorization: Optional[str] = Header(None)) -> dict:
+    auth = _authorize(authorization)
+    actor = _group_actor(auth, req.actor)
+    _require_group_admin(actor)
+    if req.grant_type == "board":
+        # Rejected on BOTH gateways: inert here (this fork has no board layer at
+        # all) and rejected on the deployed one (board rights live in
+        # board_project_grants). An accepted-but-inert grant is worse than a 400.
+        raise HTTPException(400, "board rights are not granted here")
+    now = _utcnow_iso()
+    with _conn() as c:
+        if name not in _GROUP_VIRTUAL and not c.execute("SELECT 1 FROM groups WHERE name=?", (name,)).fetchone():
+            raise HTTPException(404, f"group {name!r} not found")
+        try:
+            c.execute('INSERT INTO group_grants ("group",grant_type,target,level,added_by,added_at)'
+                      " VALUES (?,?,?,?,?,?)", (name, req.grant_type, req.target, req.level, actor, now))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, f"grant {req.grant_type}:{req.target} already on {name!r}")
+        _group_audit(c, actor, "grant.add", name, grant_type=req.grant_type,
+                     target=req.target, level=req.level)
+    return {"group": name, "grant_type": req.grant_type, "target": req.target,
+            "level": req.level, "added_by": actor, "added_at": now}
+
+
+@app.delete("/groups/{name}/grants")
+async def groups_grant_remove(name: str, grant_type: str, target: str,
+                              actor: Optional[str] = None,
+                              authorization: Optional[str] = Header(None)) -> dict:
+    auth = _authorize(authorization)
+    who = _group_actor(auth, actor)
+    _require_group_admin(who)
+    with _conn() as c:
+        cur = c.execute('DELETE FROM group_grants WHERE "group"=? AND grant_type=? AND target=?',
+                        (name, grant_type, target))
+        if not cur.rowcount:
+            raise HTTPException(404, f"grant {grant_type}:{target} not on {name!r}")
+        _group_audit(c, who, "grant.remove", name, grant_type=grant_type, target=target)
+    return {"group": name, "grant_type": grant_type, "target": target, "removed": True}
+
+
+@app.post("/authz/check")
+async def authz_check(req: AuthzCheck, authorization: Optional[str] = Header(None)) -> dict:
+    """The crown API — every subsystem calls this. Live resolution, no cache."""
+    _authorize(authorization)
+    peer, gtype, target = req.peer, req.grant_type, req.target
+    with _conn() as c:
+        if gtype == "board":
+            # No board layer in this fork -> deny (fail closed), never guess.
+            return {"allow": False, "via_group": None, "level": None}
+        if gtype == "channel":
+            if c.execute("SELECT 1 FROM channel_members WHERE channel=? AND peer=?",
+                         (target, peer)).fetchone():
+                return {"allow": True, "via_group": None, "level": "member"}
+        rows = _group_grants_for(c, peer, gtype, target)
+        if rows:
+            best = max(rows, key=lambda r: (_GRANT_LEVEL_RANK.get(r["level"], 0), r["level"]))
+            return {"allow": True, "via_group": best["grp"], "level": best["level"]}
+    return {"allow": False, "via_group": None, "level": None}
+
+
+@app.get("/peers/{peer}/grants")
+async def peer_grants(peer: str, authorization: Optional[str] = Header(None)) -> dict:
+    """A peer's EFFECTIVE rights — LIVE union. `via_group` = the WHY; `direct` =
+    peer-direct vs group-inherited."""
+    _authorize(authorization)
+    with _conn() as c:
+        groups = _peer_groups(c, peer)
+        grants = [{"grant_type": r["grant_type"], "target": r["target"], "level": r["level"],
+                   "via_group": r["grp"], "direct": False} for r in _group_grants_for(c, peer)]
+        try:
+            for r in c.execute("SELECT channel FROM channel_members WHERE peer=?", (peer,)).fetchall():
+                grants.append({"grant_type": "channel", "target": r["channel"],
+                               "level": "member", "via_group": None, "direct": True})
+        except sqlite3.OperationalError:
+            pass
+    return {"peer": peer, "groups": groups, "grants": grants}
