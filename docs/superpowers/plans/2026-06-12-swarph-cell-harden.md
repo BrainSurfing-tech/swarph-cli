@@ -1,0 +1,1647 @@
+# swarph cell harden — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Ship the buildable core of the capture-at-birth / cell-durability primitive — a systemd template, a `swarph cell harden` kit-emitter, a `swarph cell verify` fail-loud pre-spawn gate (liveness PROBE, not a stored flag), and an append-only provenance lineage record covering genesis + mitosis — so every cell born or split leaves a durable revival kit automatically.
+
+**Architecture:** Three new surfaces in `swarph-cli` (the open commons): (1) a `deploy/sidecar/claude-tmux@.service` systemd TEMPLATE (`%i` = cell name) that replaces N hand-authored per-cell units; (2) a `swarph cell` verb (`commands/cell.py`) with two subcommands `harden`/`verify`, backed by a new `capture/` subpackage (paths / liveness probe / lineage / manifest / harden / verify logic); (3) a small mitosis-lineage hook in the existing `spawn.py` `--new-instance` path. The load-bearing rule throughout: liveness is **probed** (tmux has-session + pid-alive), never inferred from the stored `live_pin_holder` flag — a crashed holder that never cleared its pin must NOT block respawn (poison-pin).
+
+**Tech Stack:** Python 3.9–3.13, stdlib-only (argparse, pathlib, hashlib, json, subprocess, datetime, os) + the existing `swarph_shared.cell` schema (`Cell`, `CellError`, `Lineage`). Tests: pytest, mirroring `tests/test_watchdog*.py` (patch the liveness/tmux primitives — no real tmux server in CI). systemd unit is a static template file (validated structurally by a test, never installed by the suite).
+
+---
+
+## Context the implementer needs
+
+**The design is already merged + AI²-converged.** The authoritative spec is
+`/home/ubuntu/research/hedge-fund-mcp/research/architecture/swarph_cell_capture_birth.md`
+(rev 2.1, reviewers droplet + science-claude). This plan turns it into buildable tasks. Key spec anchors:
+- §2 / §4.4 / §4.4b — **two axes**: BIRTH (recipe + provenance-lineage, static) vs HEAD (continuity, moving). This plan builds BIRTH + the verify gate; HEAD checkpointing is **deferred** (see "Out of scope").
+- §4.3 — the durability template + the two fixes (`KillMode=mixed` not deprecated `none`; ExecStart gated on `swarph cell verify %i`).
+- §4.4b / §5 / §10 — **`swarph cell verify`**: (a) cwd-drift gate, (b) per-UUID liveness PROBE not stored flag; poison-pin clears + allows.
+- §4.4 / §5 / §6 — provenance lineage: genesis (parent=null, self) vs mitosis (parent=spawning cell), `signed:false` + null sig fields forward-compatible, `workspace_fingerprint = sha256(cwd + cell.yaml + starter)`.
+
+**Existing code the new surfaces build on (read these once before starting):**
+- `src/swarph_cli/cell.py` — `session_state_path(role)` (the R5 pin store at `$XDG_STATE_HOME/swarph/sessions/<role>.session-id`), `_read_session_sidecar(path) -> (uuid, cwd)`, `load_cell`, `resolve_cell_path`, `read_starter_prompt`, `_atomic_write_text`. The pin sidecar is two lines: `<uuid>\n<cwd>\n`.
+- `src/swarph_cli/commands/spawn.py` — `_session_state_exists(uuid)` globs `~/.claude/projects/*/<uuid>.jsonl` (the project-scoped store); `load_or_create_session_id(role, cell, new_instance)` returns `(session_id, was_generated, effective_role)` and already re-pins on cwd-mismatch. The `--new-instance` mitosis path is around `spawn.py:929-970`.
+- `src/swarph_cli/main.py:73` — `_VERB_HANDLERS` dict; add `"cell": "swarph_cli.commands.cell.run_cell"`.
+- `src/swarph_cli/commands/compress.py` + `src/swarph_cli/compress/` — the **pattern to mirror**: a thin command module dispatching into a focused subpackage. `capture/` mirrors `compress/`.
+- `deploy/sidecar/{claude-tmux.service,launch-cell.sh,README.md}` — science-claude's reference files. The new `@.service` template is the parameterized successor; `launch-cell.sh` stays the wrapper shape.
+- `swarph_shared.cell.Lineage` — reserved shape `{parent_peer_id, spawn_manifest_signature}`. The lineage JSONL records are richer (this plan's schema); the `Lineage` dataclass is only the cell.yaml-embedded pointer, not the append-only log.
+
+**Conventions (non-negotiable):**
+- Commits use explicit `git add <path>`, **never** `git add -A` (shared tree).
+- **Branch + PR**; do **not** self-merge — drop seat-A merges the public-repo PR. swarph-cli now lives in the `BrainSurfing-tech` org; lab is on the OAuth so org push works.
+- The 6-dimension hardening gate applies at merge (published commons) — `signed:false` + null sig fields are the forward-compatible seam, not a deferred TODO inside a record.
+- `cursor_path` / `tmux_session` are read from cell.yaml **top-level** keys via `cell.extra.get(...)` (the F4 double-nest gotcha in `deploy/sidecar/README.md`) — never a hardcoded `/tmp/lab-claude-*` path (science-claude's cursor cross-wire fix).
+- Capture must **never block the claude exec** (§7): the mitosis hook in `spawn.py` is wrapped in try/except, logs + degrades, never raises into the hot path.
+
+---
+
+## File Structure
+
+**Create:**
+- `deploy/sidecar/claude-tmux@.service` — systemd TEMPLATE (`%i` = cell name). System-unit shape; user-unit diff documented inline + in README.
+- `src/swarph_cli/commands/cell.py` — `run_cell(argv)`: dispatch `harden`/`verify`. Thin, like `compress.py`.
+- `src/swarph_cli/capture/__init__.py` — subpackage marker.
+- `src/swarph_cli/capture/paths.py` — `captures_path(cell)`, `lineage_path(cell)`, `manifest_path(cell)` under `$XDG_STATE_HOME/swarph/{captures,lineage}/`.
+- `src/swarph_cli/capture/liveness.py` — `probe_holder_liveness(holder)` (tmux has-session + pid-alive) + the patchable primitives `_tmux_has_session`, `_pane_pids`, `_process_alive`.
+- `src/swarph_cli/capture/lineage.py` — `workspace_fingerprint(cell)`, `append_lineage_event(...)`, `record_genesis(cell, ...)`, `record_mitosis(child_role, parent_role, ...)`, `lineage_exists(role)`.
+- `src/swarph_cli/capture/manifest.py` — `write_manifest`, `read_manifest`, `clear_live_pin`.
+- `src/swarph_cli/capture/verify.py` — `locate_session_jsonl(uuid)`, `expected_project_dir(cwd)`, `verify_cell(role) -> VerifyResult` (the gate logic).
+- `src/swarph_cli/capture/harden.py` — `harden_cell(role) -> HardenResult` (emit kit; never install).
+- `tests/test_cell_command_dispatch.py`, `tests/test_capture_paths.py`, `tests/test_capture_liveness.py`, `tests/test_capture_lineage.py`, `tests/test_capture_manifest.py`, `tests/test_cell_verify.py`, `tests/test_cell_harden.py`, `tests/test_claude_tmux_template.py`, `tests/test_spawn_mitosis_lineage.py`.
+
+**Modify:**
+- `src/swarph_cli/main.py:73-94` — register the `cell` verb in `_VERB_HANDLERS`.
+- `src/swarph_cli/commands/spawn.py` — add the guarded mitosis-lineage hook after a sibling is minted (~`spawn.py:958`).
+- `deploy/sidecar/README.md` — add the `@.service` template section + system-vs-user shapes.
+
+**Out of scope (DEFERRED — separate future plans; do NOT build here):**
+- **Cryptographic SIGNING** of the lineage chain (counter-signatures). Gated on the mesh auth-ladder per-cell keys (`project_mesh_auth_ladder`). The schema ships `signed:false` + `sig:null` + `parent_sig:null` so signing drops in **additively** with no migration.
+- **HEAD / continuity delta-checkpoint layer** (`capture@.timer`, `jsonl_offset` + `sha256` + `last_compact_summary_offset`). The manifest reserves these `head` fields as `null`/`0`; this plan never advances them. droplet validated compaction is append-only, so it's buildable — but it's a separate plan.
+- **Auto-installing systemd units.** `swarph cell harden` EMITS artifacts + prints `systemctl enable` instructions; it NEVER runs `systemctl`/`loginctl`. Install stays commander-gated.
+
+---
+
+## Record schemas (single source of truth — reference from every task)
+
+**Lineage event** (one JSON object per line in `$XDG_STATE_HOME/swarph/lineage/<cell>.jsonl`):
+```json
+{
+  "cell": "droplet",
+  "kind": "genesis",
+  "parent": null,
+  "parent_session_id": null,
+  "session_id": "e5bb5472-1097-4df3-b4be-7ac8057b4457",
+  "when": "2026-06-12T14:03:11.482919+00:00",
+  "where": {"cwd": "/root/hedge-fund-mcp", "host": "omega-ovh"},
+  "workspace_fingerprint": "sha256:1f3a…",
+  "cursor_path": "/root/swarph_state/droplet/cursor.json",
+  "signed": false,
+  "sig": null,
+  "parent_sig": null
+}
+```
+- Mitosis differs only in: `"kind": "mitosis"`, `"parent": "droplet"` (base role), `"parent_session_id": "<base uuid>"`.
+- `signed`/`sig`/`parent_sig` are **present-but-null** — the forward-compatible crypto seam.
+
+**Capture manifest** (`$XDG_STATE_HOME/swarph/captures/<cell>.json`):
+```json
+{
+  "cell": "droplet",
+  "recipe": "/root/.config/swarph/cells/droplet.yaml",
+  "pin": "/root/.local/state/swarph/sessions/droplet.session-id",
+  "service": "claude-tmux@droplet.service",
+  "lineage": "/root/.local/state/swarph/lineage/droplet.jsonl",
+  "head": {
+    "session_id": "e5bb5472-1097-4df3-b4be-7ac8057b4457",
+    "jsonl_offset": null,
+    "sha256": null,
+    "last_compact_summary_offset": null,
+    "live_pin_holder": null
+  }
+}
+```
+- `head.jsonl_offset` / `sha256` / `last_compact_summary_offset` are reserved for the deferred HEAD layer — written `null` by harden, never advanced here.
+- `head.live_pin_holder` is the stored flag that `swarph cell verify` **probes around** (never trusts).
+
+---
+
+## Task 1: capture subpackage skeleton + state paths
+
+**Files:**
+- Create: `src/swarph_cli/capture/__init__.py`
+- Create: `src/swarph_cli/capture/paths.py`
+- Test: `tests/test_capture_paths.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_capture_paths.py
+from pathlib import Path
+from swarph_cli.capture import paths
+
+
+def test_paths_honour_xdg_state_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    assert paths.lineage_path("droplet") == tmp_path / "swarph" / "lineage" / "droplet.jsonl"
+    assert paths.manifest_path("droplet") == tmp_path / "swarph" / "captures" / "droplet.json"
+    assert paths.captures_dir() == tmp_path / "swarph" / "captures"
+
+
+def test_paths_fall_back_to_home_state(monkeypatch, tmp_path):
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert paths.lineage_path("lab-ovh") == tmp_path / ".local" / "state" / "swarph" / "lineage" / "lab-ovh.jsonl"
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_capture_paths.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'swarph_cli.capture'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/swarph_cli/capture/__init__.py
+"""swarph-cli capture-at-birth primitive (spec: research/architecture/swarph_cell_capture_birth.md).
+
+BIRTH axis only in this package: recipe + provenance lineage + the verify gate +
+the revival-kit emitter. The HEAD/continuity delta-checkpoint layer is a separate
+future build (head.* manifest fields are reserved null here).
+"""
+```
+
+```python
+# src/swarph_cli/capture/paths.py
+"""State paths for capture artifacts, mirroring cell.session_state_path's XDG layout.
+
+Lives beside sessions/ under $XDG_STATE_HOME/swarph (or ~/.local/state/swarph):
+  sessions/<role>.session-id   (existing R5 pin store)
+  lineage/<role>.jsonl         (append-only provenance log)
+  captures/<role>.json         (revival-kit manifest + live-pin + reserved HEAD)
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+
+def _state_root() -> Path:
+    xdg = os.environ.get("XDG_STATE_HOME", "").strip()
+    if xdg:
+        return Path(xdg)
+    return Path.home() / ".local" / "state"
+
+
+def _swarph_state() -> Path:
+    return _state_root() / "swarph"
+
+
+def lineage_dir() -> Path:
+    return _swarph_state() / "lineage"
+
+
+def captures_dir() -> Path:
+    return _swarph_state() / "captures"
+
+
+def lineage_path(role: str) -> Path:
+    return lineage_dir() / f"{role}.jsonl"
+
+
+def manifest_path(role: str) -> Path:
+    return captures_dir() / f"{role}.json"
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_capture_paths.py -v`
+Expected: PASS (2 passed)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/swarph_cli/capture/__init__.py src/swarph_cli/capture/paths.py tests/test_capture_paths.py
+git commit -m "feat(capture): subpackage skeleton + XDG state paths"
+```
+
+---
+
+## Task 2: liveness probe (the probe-not-flag primitive)
+
+**Files:**
+- Create: `src/swarph_cli/capture/liveness.py`
+- Test: `tests/test_capture_liveness.py`
+
+This is the load-bearing primitive. `probe_holder_liveness(holder)` returns True ONLY when the tmux session exists AND at least one pane process is alive. The three low-level functions (`_tmux_has_session`, `_pane_pids`, `_process_alive`) are factored out so tests patch them (no real tmux in CI), mirroring `tests/test_watchdog*.py`.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_capture_liveness.py
+from swarph_cli.capture import liveness
+
+
+def test_holder_alive_when_session_and_pid_live(monkeypatch):
+    monkeypatch.setattr(liveness, "_tmux_has_session", lambda h: True)
+    monkeypatch.setattr(liveness, "_pane_pids", lambda h: [4242])
+    monkeypatch.setattr(liveness, "_process_alive", lambda pid: True)
+    assert liveness.probe_holder_liveness("droplet") is True
+
+
+def test_holder_dead_when_no_session(monkeypatch):
+    # tmux session gone entirely → holder dead (the common crash case)
+    monkeypatch.setattr(liveness, "_tmux_has_session", lambda h: False)
+    assert liveness.probe_holder_liveness("droplet") is False
+
+
+def test_holder_dead_when_session_lingers_but_pane_pid_gone(monkeypatch):
+    # poison-pin variant: tmux session exists but its claude pane process died
+    monkeypatch.setattr(liveness, "_tmux_has_session", lambda h: True)
+    monkeypatch.setattr(liveness, "_pane_pids", lambda h: [9999])
+    monkeypatch.setattr(liveness, "_process_alive", lambda pid: False)
+    assert liveness.probe_holder_liveness("droplet") is False
+
+
+def test_holder_dead_when_no_pane_pids(monkeypatch):
+    monkeypatch.setattr(liveness, "_tmux_has_session", lambda h: True)
+    monkeypatch.setattr(liveness, "_pane_pids", lambda h: [])
+    assert liveness.probe_holder_liveness("droplet") is False
+
+
+def test_falsy_holder_is_not_live(monkeypatch):
+    assert liveness.probe_holder_liveness(None) is False
+    assert liveness.probe_holder_liveness("") is False
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_capture_liveness.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'swarph_cli.capture.liveness'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/swarph_cli/capture/liveness.py
+"""Actual liveness PROBE for a pinned session's holder (spec §4.4b).
+
+THE root rule (project_pain memory feedback_probe_liveness_not_stale_proxy + spec):
+liveness is PROBED, never inferred from a stored proxy. `swarph cell verify` calls
+probe_holder_liveness() against the manifest's live_pin_holder so a holder that
+CRASHED without clearing its pin (the poison-pin — exactly the failure this primitive
+exists to fix) reads as DEAD and the stale pin is cleared, NOT as a permanent block.
+
+Holder = a tmux session name (the cell's tmux_session / role). Live iff the session
+exists AND at least one of its pane processes is alive.
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+from typing import List, Optional
+
+
+def _tmux_has_session(holder: str) -> bool:
+    try:
+        return subprocess.run(
+            ["tmux", "has-session", "-t", holder],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _pane_pids(holder: str) -> List[int]:
+    try:
+        out = subprocess.run(
+            ["tmux", "list-panes", "-t", holder, "-F", "#{pane_pid}"],
+            capture_output=True, text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    pids: List[int] = []
+    for line in out.stdout.split():
+        try:
+            pids.append(int(line))
+        except ValueError:
+            continue
+    return pids
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by another user
+    except OSError:
+        return False
+    return True
+
+
+def probe_holder_liveness(holder: Optional[str]) -> bool:
+    """True iff `holder`'s tmux session exists AND a pane process is alive."""
+    if not holder:
+        return False
+    if not _tmux_has_session(holder):
+        return False
+    pids = _pane_pids(holder)
+    if not pids:
+        return False
+    return any(_process_alive(pid) for pid in pids)
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_capture_liveness.py -v`
+Expected: PASS (5 passed)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/swarph_cli/capture/liveness.py tests/test_capture_liveness.py
+git commit -m "feat(capture): liveness PROBE primitive (tmux has-session + pid-alive, never stored flag)"
+```
+
+---
+
+## Task 3: lineage records (genesis + mitosis, forward-compatible schema)
+
+**Files:**
+- Create: `src/swarph_cli/capture/lineage.py`
+- Test: `tests/test_capture_lineage.py`
+
+`workspace_fingerprint(cell)` = `sha256(cwd + cell.yaml bytes + starter text)`, deterministic. `append_lineage_event` is append-only + atomic (mkdir parents, open "a"). `record_genesis` / `record_mitosis` build the schema'd dict.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_capture_lineage.py
+import json
+from pathlib import Path
+
+import pytest
+
+from swarph_cli.capture import lineage, paths
+from swarph_shared.cell import Cell
+
+
+def _make_cell(tmp_path: Path) -> Cell:
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    yaml = tmp_path / "droplet.yaml"
+    yaml.write_text("schema_version: '1'\nname: droplet\nrole: droplet\n")
+    starter = tmp_path / "starter.md"
+    starter.write_text("you are droplet")
+    cell = Cell(
+        schema_version="1", name="droplet", role="droplet",
+        cwd=cwd, provider="claude",
+        session_id=None, starter_prompt_path=starter, extra={},
+    )
+    cell.source_path = yaml
+    return cell
+
+
+def test_workspace_fingerprint_is_deterministic(tmp_path):
+    cell = _make_cell(tmp_path)
+    fp1 = lineage.workspace_fingerprint(cell)
+    fp2 = lineage.workspace_fingerprint(cell)
+    assert fp1 == fp2
+    assert fp1.startswith("sha256:")
+
+
+def test_record_genesis_shape(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    cell = _make_cell(tmp_path)
+    lineage.record_genesis(cell, session_id="uuid-1", cursor_path="/c/cursor.json")
+    rows = [json.loads(l) for l in paths.lineage_path("droplet").read_text().splitlines()]
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["kind"] == "genesis"
+    assert r["parent"] is None and r["parent_session_id"] is None
+    assert r["session_id"] == "uuid-1"
+    assert r["cursor_path"] == "/c/cursor.json"
+    assert r["signed"] is False and r["sig"] is None and r["parent_sig"] is None
+    assert r["workspace_fingerprint"].startswith("sha256:")
+    assert r["where"]["cwd"] == str(cell.cwd)
+
+
+def test_record_mitosis_carries_parent(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    cell = _make_cell(tmp_path)
+    lineage.record_mitosis(
+        cell, child_role="droplet-2", parent_role="droplet",
+        child_session_id="uuid-2", parent_session_id="uuid-1", cursor_path=None,
+    )
+    rows = [json.loads(l) for l in paths.lineage_path("droplet-2").read_text().splitlines()]
+    r = rows[0]
+    assert r["cell"] == "droplet-2"
+    assert r["kind"] == "mitosis"
+    assert r["parent"] == "droplet"
+    assert r["parent_session_id"] == "uuid-1"
+    assert r["session_id"] == "uuid-2"
+    assert r["signed"] is False
+
+
+def test_append_is_append_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    cell = _make_cell(tmp_path)
+    lineage.record_genesis(cell, session_id="uuid-1", cursor_path=None)
+    lineage.append_lineage_event("droplet", {"kind": "reseat", "when": "later"})
+    rows = paths.lineage_path("droplet").read_text().splitlines()
+    assert len(rows) == 2
+
+
+def test_lineage_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    cell = _make_cell(tmp_path)
+    assert lineage.lineage_exists("droplet") is False
+    lineage.record_genesis(cell, session_id="uuid-1", cursor_path=None)
+    assert lineage.lineage_exists("droplet") is True
+```
+
+> Implementer note: confirm the `Cell` constructor signature against `swarph_shared.cell` before relying on the `_make_cell` kwargs — if the dataclass differs, adapt the fixture (the assertions are the contract, not the fixture).
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_capture_lineage.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'swarph_cli.capture.lineage'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/swarph_cli/capture/lineage.py
+"""Append-only provenance lineage (spec §4.4 / §5 / §6).
+
+Answers "was this birth SANCTIONED?" (an edge property), NOT "is this the same
+self?" (continuity — that's the HEAD, a separate deferred layer). Genesis records
+are self (parent=null); mitosis records name the spawning parent. The crypto
+counter-signature is DEFERRED (auth-ladder per-cell keys); the schema ships the
+seam NOW as signed:false + sig/parent_sig null so signing is purely additive.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import socket
+from datetime import datetime, timezone
+from typing import Optional
+
+from swarph_shared.cell import Cell
+
+from swarph_cli.capture import paths
+from swarph_cli.cell import read_starter_prompt
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def workspace_fingerprint(cell: Cell) -> str:
+    """sha256(cwd + cell.yaml bytes + starter text) — deterministic per spec §5."""
+    h = hashlib.sha256()
+    h.update(str(cell.cwd).encode("utf-8"))
+    if cell.source_path is not None and cell.source_path.exists():
+        h.update(cell.source_path.read_bytes())
+    starter = read_starter_prompt(cell)
+    if starter:
+        h.update(starter.encode("utf-8"))
+    return "sha256:" + h.hexdigest()
+
+
+def lineage_exists(role: str) -> bool:
+    return paths.lineage_path(role).exists()
+
+
+def append_lineage_event(role: str, event: dict) -> None:
+    """Append one JSON event as a line to lineage/<role>.jsonl (append-only)."""
+    target = paths.lineage_path(role)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(event, sort_keys=True)
+    with open(target, "a", encoding="utf-8") as fp:
+        fp.write(line + "\n")
+        fp.flush()
+        os.fsync(fp.fileno())
+
+
+def _base_event(cell: Cell, *, session_id: str, cursor_path: Optional[str]) -> dict:
+    return {
+        "session_id": session_id,
+        "when": _now_iso(),
+        "where": {"cwd": str(cell.cwd), "host": socket.gethostname()},
+        "workspace_fingerprint": workspace_fingerprint(cell),
+        "cursor_path": cursor_path,
+        "signed": False,
+        "sig": None,
+        "parent_sig": None,
+    }
+
+
+def record_genesis(cell: Cell, *, session_id: str, cursor_path: Optional[str]) -> None:
+    event = _base_event(cell, session_id=session_id, cursor_path=cursor_path)
+    event.update({
+        "cell": cell.role,
+        "kind": "genesis",
+        "parent": None,
+        "parent_session_id": None,
+    })
+    append_lineage_event(cell.role, event)
+
+
+def record_mitosis(
+    cell: Cell,
+    *,
+    child_role: str,
+    parent_role: str,
+    child_session_id: str,
+    parent_session_id: Optional[str],
+    cursor_path: Optional[str],
+) -> None:
+    event = _base_event(cell, session_id=child_session_id, cursor_path=cursor_path)
+    event.update({
+        "cell": child_role,
+        "kind": "mitosis",
+        "parent": parent_role,
+        "parent_session_id": parent_session_id,
+    })
+    append_lineage_event(child_role, event)
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_capture_lineage.py -v`
+Expected: PASS (5 passed)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/swarph_cli/capture/lineage.py tests/test_capture_lineage.py
+git commit -m "feat(capture): append-only lineage (genesis/mitosis) with forward-compatible signed:false seam"
+```
+
+---
+
+## Task 4: capture manifest (revival-kit index + live-pin + reserved HEAD)
+
+**Files:**
+- Create: `src/swarph_cli/capture/manifest.py`
+- Test: `tests/test_capture_manifest.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_capture_manifest.py
+import json
+
+from swarph_cli.capture import manifest, paths
+
+
+def test_write_then_read_roundtrips(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    manifest.write_manifest(
+        "droplet",
+        recipe="/cfg/droplet.yaml",
+        pin="/state/sessions/droplet.session-id",
+        service="claude-tmux@droplet.service",
+        lineage="/state/lineage/droplet.jsonl",
+        session_id="uuid-1",
+    )
+    m = manifest.read_manifest("droplet")
+    assert m["cell"] == "droplet"
+    assert m["service"] == "claude-tmux@droplet.service"
+    assert m["head"]["session_id"] == "uuid-1"
+    # reserved HEAD fields ship null (deferred checkpoint layer)
+    assert m["head"]["jsonl_offset"] is None
+    assert m["head"]["sha256"] is None
+    assert m["head"]["last_compact_summary_offset"] is None
+    assert m["head"]["live_pin_holder"] is None
+
+
+def test_read_missing_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    assert manifest.read_manifest("ghost") is None
+
+
+def test_clear_live_pin(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    manifest.write_manifest(
+        "droplet", recipe="r", pin="p", service="s", lineage="l",
+        session_id="uuid-1", live_pin_holder="droplet",
+    )
+    assert manifest.read_manifest("droplet")["head"]["live_pin_holder"] == "droplet"
+    manifest.clear_live_pin("droplet")
+    assert manifest.read_manifest("droplet")["head"]["live_pin_holder"] is None
+
+
+def test_clear_live_pin_noop_when_no_manifest(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    manifest.clear_live_pin("ghost")  # must not raise
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_capture_manifest.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'swarph_cli.capture.manifest'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/swarph_cli/capture/manifest.py
+"""Capture manifest (spec §5) — the revival-kit index + live-pin + reserved HEAD.
+
+head.jsonl_offset / sha256 / last_compact_summary_offset are reserved for the
+DEFERRED HEAD/continuity checkpoint layer — written null here, never advanced.
+head.live_pin_holder is the stored flag swarph-cell-verify PROBES around (never
+trusts): a present-but-dead holder is a stale poison-pin → clear it + allow.
+"""
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from typing import Optional
+
+from swarph_cli.capture import paths
+
+
+def write_manifest(
+    role: str,
+    *,
+    recipe: str,
+    pin: str,
+    service: str,
+    lineage: str,
+    session_id: Optional[str],
+    live_pin_holder: Optional[str] = None,
+) -> None:
+    data = {
+        "cell": role,
+        "recipe": recipe,
+        "pin": pin,
+        "service": service,
+        "lineage": lineage,
+        "head": {
+            "session_id": session_id,
+            "jsonl_offset": None,
+            "sha256": None,
+            "last_compact_summary_offset": None,
+            "live_pin_holder": live_pin_holder,
+        },
+    }
+    _atomic_write_json(role, data)
+
+
+def read_manifest(role: str) -> Optional[dict]:
+    path = paths.manifest_path(role)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def clear_live_pin(role: str) -> None:
+    """Clear a stale live_pin_holder. No-op if the manifest is absent."""
+    m = read_manifest(role)
+    if m is None:
+        return
+    m.setdefault("head", {})["live_pin_holder"] = None
+    _atomic_write_json(role, m)
+
+
+def _atomic_write_json(role: str, data: dict) -> None:
+    target = paths.manifest_path(role)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            json.dump(data, fp, indent=2, sort_keys=True)
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(tmp, target)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_capture_manifest.py -v`
+Expected: PASS (4 passed)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/swarph_cli/capture/manifest.py tests/test_capture_manifest.py
+git commit -m "feat(capture): revival-kit manifest with reserved-null HEAD + clearable live-pin"
+```
+
+---
+
+## Task 5: verify gate logic (cwd-drift + liveness probe + poison-pin clear)
+
+**Files:**
+- Create: `src/swarph_cli/capture/verify.py`
+- Test: `tests/test_cell_verify.py`
+
+`verify_cell(role)` returns a `VerifyResult(ok: bool, code: int, reason: str)`. Codes mirror the spec's refusal classes: 0 OK, 3 cwd-drift, 4 double-resume (holder live). Fresh cell with no pin or no jsonl yet → OK (genesis hasn't run). The `locate_session_jsonl` + `expected_project_dir` helpers encode Claude's `projects/<sanitized-cwd>/<uuid>.jsonl` layout (`/` → `-`).
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_cell_verify.py
+from pathlib import Path
+
+import pytest
+
+from swarph_cli.capture import verify, manifest
+from swarph_shared.cell import Cell
+
+
+def _cell(cwd: Path) -> Cell:
+    c = Cell(schema_version="1", name="droplet", role="droplet",
+             cwd=cwd, provider="claude", session_id=None,
+             starter_prompt_path=None, extra={})
+    return c
+
+
+def test_expected_project_dir_sanitizes_slashes():
+    assert verify.expected_project_dir(Path("/root/hedge-fund-mcp")) == "-root-hedge-fund-mcp"
+
+
+def test_no_pin_is_ok_fresh_genesis(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(verify, "_resolve_cell", lambda role: _cell(tmp_path))
+    monkeypatch.setattr(verify, "_read_pin", lambda role: (None, None))
+    r = verify.verify_cell("droplet")
+    assert r.ok and r.code == 0
+
+
+def test_no_jsonl_anywhere_is_ok_unstarted_pin(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(verify, "_resolve_cell", lambda role: _cell(tmp_path))
+    monkeypatch.setattr(verify, "_read_pin", lambda role: ("uuid-1", str(tmp_path)))
+    monkeypatch.setattr(verify, "locate_session_jsonl", lambda u: [])
+    r = verify.verify_cell("droplet")
+    assert r.ok and r.code == 0
+
+
+def test_jsonl_under_wrong_project_dir_is_cwd_drift(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    cwd = tmp_path / "right"
+    cwd.mkdir()
+    monkeypatch.setattr(verify, "_resolve_cell", lambda role: _cell(cwd))
+    monkeypatch.setattr(verify, "_read_pin", lambda role: ("uuid-1", str(cwd)))
+    wrong = tmp_path / ".claude" / "projects" / "-some-other-dir" / "uuid-1.jsonl"
+    monkeypatch.setattr(verify, "locate_session_jsonl", lambda u: [wrong])
+    r = verify.verify_cell("droplet")
+    assert not r.ok and r.code == 3
+
+
+def test_jsonl_under_correct_dir_and_holder_dead_clears_and_allows(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    cwd = tmp_path / "right"
+    cwd.mkdir()
+    monkeypatch.setattr(verify, "_resolve_cell", lambda role: _cell(cwd))
+    monkeypatch.setattr(verify, "_read_pin", lambda role: ("uuid-1", str(cwd)))
+    good = Path(".claude/projects") / verify.expected_project_dir(cwd) / "uuid-1.jsonl"
+    monkeypatch.setattr(verify, "locate_session_jsonl", lambda u: [good])
+    manifest.write_manifest("droplet", recipe="r", pin="p", service="s",
+                            lineage="l", session_id="uuid-1", live_pin_holder="droplet")
+    monkeypatch.setattr(verify, "probe_holder_liveness", lambda h: False)  # dead holder
+    r = verify.verify_cell("droplet")
+    assert r.ok and r.code == 0
+    # the stale poison-pin was cleared
+    assert manifest.read_manifest("droplet")["head"]["live_pin_holder"] is None
+
+
+def test_holder_alive_refuses_double_resume(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    cwd = tmp_path / "right"
+    cwd.mkdir()
+    monkeypatch.setattr(verify, "_resolve_cell", lambda role: _cell(cwd))
+    monkeypatch.setattr(verify, "_read_pin", lambda role: ("uuid-1", str(cwd)))
+    good = Path(".claude/projects") / verify.expected_project_dir(cwd) / "uuid-1.jsonl"
+    monkeypatch.setattr(verify, "locate_session_jsonl", lambda u: [good])
+    manifest.write_manifest("droplet", recipe="r", pin="p", service="s",
+                            lineage="l", session_id="uuid-1", live_pin_holder="droplet")
+    monkeypatch.setattr(verify, "probe_holder_liveness", lambda h: True)  # ALIVE
+    r = verify.verify_cell("droplet")
+    assert not r.ok and r.code == 4
+    # a real live holder's pin is NOT cleared
+    assert manifest.read_manifest("droplet")["head"]["live_pin_holder"] == "droplet"
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_cell_verify.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'swarph_cli.capture.verify'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/swarph_cli/capture/verify.py
+"""`swarph cell verify` gate logic (spec §4.4b / §5 / §10).
+
+Fail-LOUD pre-spawn gate, run from claude-tmux@.service ExecStart BEFORE spawn.
+Two checks:
+  (a) cwd-drift — the pinned session's .jsonl must live under cell.cwd's project
+      dir, else `claude --resume` would die with "No conversation found" (the
+      droplet re-seat incident). A pin whose .jsonl exists under a DIFFERENT
+      project dir → REFUSE (code 3). A pin with NO .jsonl yet (unstarted) or no
+      pin at all → OK (fresh genesis; spawn will mint/create).
+  (b) per-UUID liveness — PROBE the manifest's live_pin_holder. ALIVE → REFUSE
+      (code 4, a real double-resume). DEAD → the flag is a stale poison-pin
+      (holder crashed without clearing it); clear it + ALLOW. Refusing on the
+      stale flag would turn the durability fix into a durability TRAP (droplet).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+from swarph_shared.cell import Cell, CellError
+
+from swarph_cli.cell import _read_session_sidecar, load_cell, resolve_cell_path, session_state_path
+from swarph_cli.capture import manifest
+from swarph_cli.capture.liveness import probe_holder_liveness
+
+
+@dataclass
+class VerifyResult:
+    ok: bool
+    code: int
+    reason: str
+
+
+def expected_project_dir(cwd: Path) -> str:
+    """Claude Code's projects/<sanitized-cwd>/ dir name: '/' → '-'."""
+    return str(cwd).replace("/", "-")
+
+
+def locate_session_jsonl(session_id: str) -> List[Path]:
+    """All ~/.claude/projects/*/<session_id>.jsonl paths (across project dirs)."""
+    projects = Path.home() / ".claude" / "projects"
+    if not projects.exists():
+        return []
+    return list(projects.glob(f"*/{session_id}.jsonl"))
+
+
+# Indirection seams so tests patch without a real cell.yaml / pin store.
+def _resolve_cell(role: str) -> Cell:
+    return load_cell(resolve_cell_path(role))
+
+
+def _read_pin(role: str) -> Tuple[Optional[str], Optional[str]]:
+    return _read_session_sidecar(session_state_path(role))
+
+
+def verify_cell(role: str) -> VerifyResult:
+    try:
+        cell = _resolve_cell(role)
+    except CellError as exc:
+        return VerifyResult(False, 2, f"cell.yaml unresolved: {exc}")
+
+    session_id, _recorded_cwd = _read_pin(role)
+    if not session_id:
+        return VerifyResult(True, 0, "no pin yet — fresh genesis, spawn will mint")
+
+    # (a) cwd-drift gate
+    jsonls = locate_session_jsonl(session_id)
+    if jsonls:
+        want = expected_project_dir(cell.cwd)
+        if not any(p.parent.name == want for p in jsonls):
+            found = ", ".join(sorted({p.parent.name for p in jsonls}))
+            return VerifyResult(
+                False, 3,
+                f"cwd-drift: pin {session_id} lives under [{found}] but cell.cwd "
+                f"resolves to project dir {want!r} — `claude --resume` from here "
+                f"would die with 'No conversation found'. Re-pin or fix cell.cwd.",
+            )
+    # jsonls == [] → pin minted but session never ran; spawn will create it. OK.
+
+    # (b) liveness probe
+    m = manifest.read_manifest(role)
+    holder = (m or {}).get("head", {}).get("live_pin_holder")
+    if holder:
+        if probe_holder_liveness(holder):
+            return VerifyResult(
+                False, 4,
+                f"double-resume refused: pin {session_id} is already LIVE under "
+                f"holder {holder!r} (tmux session + live pane). Attach via "
+                f"`tmux attach -t {holder}`, never a second --resume.",
+            )
+        # poison-pin: holder dead → clear stale flag + allow
+        manifest.clear_live_pin(role)
+        return VerifyResult(True, 0, f"cleared stale live-pin (dead holder {holder!r}) — allow")
+
+    return VerifyResult(True, 0, "ok")
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_cell_verify.py -v`
+Expected: PASS (6 passed)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/swarph_cli/capture/verify.py tests/test_cell_verify.py
+git commit -m "feat(capture): cell verify gate — cwd-drift refuse + liveness PROBE + poison-pin clear"
+```
+
+---
+
+## Task 6: harden — emit the revival kit (no auto-install)
+
+**Files:**
+- Create: `src/swarph_cli/capture/harden.py`
+- Test: `tests/test_cell_harden.py`
+
+`harden_cell(role)` ensures the recipe (cell.yaml + pin) exists, writes `launch-<role>.sh`, writes the manifest, writes a genesis lineage record if none exists, and returns a `HardenResult` listing the emitted artifacts + the (printed-only) enable instructions. It NEVER runs `systemctl`/`loginctl`. `cursor_path` is read from cell.yaml top-level via `cell.extra.get("cursor_path")` (F4 gotcha).
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_cell_harden.py
+from pathlib import Path
+
+import pytest
+
+from swarph_cli.capture import harden, manifest, lineage, paths
+from swarph_shared.cell import Cell
+
+
+def _cell(tmp_path: Path, extra=None) -> Cell:
+    cwd = tmp_path / "work"; cwd.mkdir()
+    yaml = tmp_path / "droplet.yaml"
+    yaml.write_text("schema_version: '1'\nname: droplet\nrole: droplet\n")
+    c = Cell(schema_version="1", name="droplet", role="droplet", cwd=cwd,
+             provider="claude", session_id=None, starter_prompt_path=None,
+             extra=extra or {})
+    c.source_path = yaml
+    return c
+
+
+def test_harden_emits_kit_without_installing(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    cell = _cell(tmp_path, extra={"cursor_path": "/c/cursor.json"})
+    monkeypatch.setattr(harden, "_resolve_cell", lambda role: cell)
+    monkeypatch.setattr(harden, "_read_pin_uuid", lambda role: "uuid-1")
+    res = harden.harden_cell("droplet")
+    # launch wrapper emitted + executable
+    launch = Path(res.launch_script)
+    assert launch.exists()
+    assert "swarph spawn droplet" in launch.read_text()
+    assert launch.stat().st_mode & 0o100  # owner-exec bit set
+    # manifest written with the cursor + service ref
+    m = manifest.read_manifest("droplet")
+    assert m["service"] == "claude-tmux@droplet.service"
+    assert m["head"]["session_id"] == "uuid-1"
+    # genesis lineage written
+    assert lineage.lineage_exists("droplet")
+    rows = paths.lineage_path("droplet").read_text().splitlines()
+    assert len(rows) == 1
+    # NO systemctl/loginctl was invoked (instructions are strings only)
+    assert any("systemctl" in line for line in res.enable_instructions)
+
+
+def test_harden_is_idempotent_no_duplicate_genesis(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    cell = _cell(tmp_path)
+    monkeypatch.setattr(harden, "_resolve_cell", lambda role: cell)
+    monkeypatch.setattr(harden, "_read_pin_uuid", lambda role: "uuid-1")
+    harden.harden_cell("droplet")
+    harden.harden_cell("droplet")
+    rows = paths.lineage_path("droplet").read_text().splitlines()
+    assert len(rows) == 1  # genesis recorded once, not twice
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_cell_harden.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'swarph_cli.capture.harden'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/swarph_cli/capture/harden.py
+"""`swarph cell harden` — emit a cell's durable revival kit (spec §4.2 / §9 step 1).
+
+EMITS artifacts; never installs. `systemctl enable` stays commander-gated. Writes:
+  - launch-<role>.sh wrapper (exec swarph spawn <role>)
+  - the capture manifest (recipe/pin/service/lineage pointers + reserved HEAD)
+  - a genesis lineage record IF none exists (idempotent)
+and prints (returns) the enable instructions for the claude-tmux@<role> unit.
+"""
+from __future__ import annotations
+
+import os
+import stat
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional
+
+from swarph_shared.cell import Cell, CellError
+
+from swarph_cli.cell import (
+    _read_session_sidecar,
+    cells_dir,
+    load_cell,
+    resolve_cell_path,
+    session_state_path,
+    _config_root,
+)
+from swarph_cli.capture import lineage, manifest, paths
+
+
+@dataclass
+class HardenResult:
+    role: str
+    launch_script: str
+    manifest_path: str
+    lineage_path: str
+    service: str
+    enable_instructions: List[str] = field(default_factory=list)
+
+
+def _resolve_cell(role: str) -> Cell:
+    return load_cell(resolve_cell_path(role))
+
+
+def _read_pin_uuid(role: str) -> Optional[str]:
+    uuid_str, _cwd = _read_session_sidecar(session_state_path(role))
+    return uuid_str
+
+
+def _launch_dir() -> Path:
+    return _config_root() / "swarph"
+
+
+def _write_launch_wrapper(role: str) -> Path:
+    target = _launch_dir() / f"launch-{role}.sh"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "#!/bin/bash -l\n"
+        f"# Auto-emitted by `swarph cell harden {role}`. Runs as the tmux\n"
+        "# session command; exec-replaces with the resumed cell session.\n"
+        f"exec swarph spawn {role}\n",
+        encoding="utf-8",
+    )
+    target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return target
+
+
+def harden_cell(role: str) -> HardenResult:
+    cell = _resolve_cell(role)  # raises CellError if recipe missing — fail loud
+    service = f"claude-tmux@{role}.service"
+
+    launch = _write_launch_wrapper(role)
+    pin_uuid = _read_pin_uuid(role)
+
+    manifest.write_manifest(
+        role,
+        recipe=str(cell.source_path) if cell.source_path else str(cells_dir() / f"{role}.yaml"),
+        pin=str(session_state_path(role)),
+        service=service,
+        lineage=str(paths.lineage_path(role)),
+        session_id=pin_uuid,
+        live_pin_holder=None,
+    )
+
+    if not lineage.lineage_exists(role) and pin_uuid:
+        cursor_path = cell.extra.get("cursor_path") if cell.extra else None
+        lineage.record_genesis(cell, session_id=pin_uuid, cursor_path=cursor_path)
+
+    instructions = [
+        f"# Revival kit emitted for {role!r} — install is commander-gated.",
+        f"# 1. Drop the template (once per host): cp deploy/sidecar/claude-tmux@.service "
+        f"~/.config/systemd/user/   (or /etc/systemd/system/ for a root cell)",
+        f"# 2. Enable this cell:  systemctl --user enable --now {service}",
+        f"#    (root cell:        sudo systemctl enable --now {service})",
+        f"# 3. Non-root cells need linger:  loginctl enable-linger $USER",
+    ]
+    return HardenResult(
+        role=role,
+        launch_script=str(launch),
+        manifest_path=str(paths.manifest_path(role)),
+        lineage_path=str(paths.lineage_path(role)),
+        service=service,
+        enable_instructions=instructions,
+    )
+```
+
+> Implementer note: confirm `_config_root` is importable from `swarph_cli.cell` (it's module-level there). If it's treated as private and the reviewer objects, add a thin public `config_root()` in `cell.py` and import that instead — don't duplicate the XDG logic.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_cell_harden.py -v`
+Expected: PASS (2 passed)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/swarph_cli/capture/harden.py tests/test_cell_harden.py
+git commit -m "feat(capture): swarph cell harden emits revival kit (launch wrapper + manifest + genesis lineage), never installs"
+```
+
+---
+
+## Task 7: the `swarph cell` command + verb registration
+
+**Files:**
+- Create: `src/swarph_cli/commands/cell.py`
+- Modify: `src/swarph_cli/main.py:73-94`
+- Test: `tests/test_cell_command_dispatch.py`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_cell_command_dispatch.py
+import json
+from pathlib import Path
+
+import pytest
+
+from swarph_cli.commands import cell as cell_cmd
+from swarph_cli.capture import verify, harden
+
+
+def test_unknown_subcommand_returns_2(capsys):
+    assert cell_cmd.run_cell(["frobnicate"]) == 2
+
+
+def test_no_args_prints_usage_returns_0(capsys):
+    assert cell_cmd.run_cell([]) == 0
+    assert "harden" in capsys.readouterr().err
+
+
+def test_verify_returns_gate_code(monkeypatch, capsys):
+    monkeypatch.setattr(
+        verify, "verify_cell",
+        lambda role: verify.VerifyResult(False, 4, "double-resume refused"),
+    )
+    rc = cell_cmd.run_cell(["verify", "droplet"])
+    assert rc == 4
+    assert "double-resume" in capsys.readouterr().err
+
+
+def test_verify_ok_returns_0(monkeypatch):
+    monkeypatch.setattr(
+        verify, "verify_cell",
+        lambda role: verify.VerifyResult(True, 0, "ok"),
+    )
+    assert cell_cmd.run_cell(["verify", "droplet"]) == 0
+
+
+def test_harden_prints_artifacts_returns_0(monkeypatch, capsys):
+    res = harden.HardenResult(
+        role="droplet", launch_script="/x/launch-droplet.sh",
+        manifest_path="/x/m.json", lineage_path="/x/l.jsonl",
+        service="claude-tmux@droplet.service",
+        enable_instructions=["# systemctl --user enable --now claude-tmux@droplet.service"],
+    )
+    monkeypatch.setattr(harden, "harden_cell", lambda role: res)
+    rc = cell_cmd.run_cell(["harden", "droplet"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "launch-droplet.sh" in out
+    assert "systemctl" in out
+
+
+def test_main_routes_cell_verb(monkeypatch):
+    # `swarph cell verify droplet` dispatches through main._VERB_HANDLERS
+    from swarph_cli import main
+    assert "cell" in main._VERB_HANDLERS
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_cell_command_dispatch.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'swarph_cli.commands.cell'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/swarph_cli/commands/cell.py
+"""`swarph cell <subcommand>` — capture-at-birth operator surface.
+
+Subcommands:
+  harden <cell>   Emit the durable revival kit (launch wrapper + manifest +
+                  genesis lineage). Never installs systemd units.
+  verify <cell>   Fail-loud pre-spawn gate (cwd-drift + per-UUID liveness PROBE).
+                  Exit 0 = safe to spawn; non-zero = refuse. Run from
+                  claude-tmux@.service ExecStart before `swarph spawn`.
+"""
+from __future__ import annotations
+
+import sys
+from typing import List, Optional
+
+from swarph_shared.cell import CellError
+
+from swarph_cli.capture import harden as _harden
+from swarph_cli.capture import verify as _verify
+
+_USAGE = """\
+Usage:
+  swarph cell harden <cell>    Emit the durable revival kit (no install)
+  swarph cell verify <cell>    Pre-spawn gate (exit 0 = ok, non-zero = refuse)
+"""
+
+
+def run_cell(argv: Optional[List[str]] = None) -> int:
+    if argv is None:
+        argv = sys.argv[2:]  # skip "swarph cell"
+    if not argv:
+        print(_USAGE, file=sys.stderr)
+        return 0
+    sub, rest = argv[0], argv[1:]
+    if sub == "verify":
+        return _run_verify(rest)
+    if sub == "harden":
+        return _run_harden(rest)
+    print(f"swarph cell: unknown subcommand {sub!r}\n\n{_USAGE}", file=sys.stderr)
+    return 2
+
+
+def _run_verify(rest: List[str]) -> int:
+    if not rest:
+        print("swarph cell verify: missing <cell>", file=sys.stderr)
+        return 2
+    role = rest[0]
+    result = _verify.verify_cell(role)
+    stream = sys.stdout if result.ok else sys.stderr
+    print(f"[verify {role}] {'OK' if result.ok else 'REFUSE'}: {result.reason}", file=stream)
+    return result.code
+
+
+def _run_harden(rest: List[str]) -> int:
+    if not rest:
+        print("swarph cell harden: missing <cell>", file=sys.stderr)
+        return 2
+    role = rest[0]
+    try:
+        res = _harden.harden_cell(role)
+    except CellError as exc:
+        print(f"swarph cell harden: {exc}", file=sys.stderr)
+        return 1
+    print(f"[harden {res.role}] revival kit emitted:")
+    print(f"  launch:   {res.launch_script}")
+    print(f"  manifest: {res.manifest_path}")
+    print(f"  lineage:  {res.lineage_path}")
+    print(f"  service:  {res.service}")
+    print("\nEnable (commander-gated — harden does NOT install):")
+    for line in res.enable_instructions:
+        print(f"  {line}")
+    return 0
+```
+
+Then register the verb. In `src/swarph_cli/main.py`, add one line to `_VERB_HANDLERS` (after the `"compress"` entry at line ~92):
+
+```python
+    "compress": "swarph_cli.commands.compress.run_compress",
+    "cell": "swarph_cli.commands.cell.run_cell",
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_cell_command_dispatch.py -v`
+Expected: PASS (6 passed)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/swarph_cli/commands/cell.py src/swarph_cli/main.py tests/test_cell_command_dispatch.py
+git commit -m "feat(cell): swarph cell verb (harden/verify) + verb registration"
+```
+
+---
+
+## Task 8: the `claude-tmux@.service` systemd template
+
+**Files:**
+- Create: `deploy/sidecar/claude-tmux@.service`
+- Modify: `deploy/sidecar/README.md`
+- Test: `tests/test_claude_tmux_template.py`
+
+The template is a static file; the test validates its structure (the two AI² fixes + the verify gate) so a regression to `KillMode=none` or an ungated ExecStart fails CI.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_claude_tmux_template.py
+from pathlib import Path
+
+TEMPLATE = Path(__file__).resolve().parents[1] / "deploy" / "sidecar" / "claude-tmux@.service"
+
+
+def test_template_exists():
+    assert TEMPLATE.is_file()
+
+
+def test_killmode_is_mixed_not_deprecated_none():
+    text = TEMPLATE.read_text()
+    assert "KillMode=mixed" in text
+    assert "KillMode=none" not in text  # science-claude AI² fix
+
+
+def test_execstart_is_gated_on_verify_before_spawn():
+    text = TEMPLATE.read_text()
+    # droplet BLOCKING fix: per-UUID verify gates the per-name has-session
+    assert "swarph cell verify %i" in text
+    verify_at = text.index("swarph cell verify %i")
+    spawn_at = text.index("swarph spawn %i")
+    assert verify_at < spawn_at  # verify must run BEFORE spawn
+    assert "tmux has-session -t %i" in text
+    assert "tmux new-session -d -s %i" in text
+
+
+def test_has_explicit_execstop_kill_session():
+    assert "ExecStop=/usr/bin/tmux kill-session -t %i" in TEMPLATE.read_text()
+
+
+def test_is_a_systemd_template_using_instance_specifier():
+    # `%i` instance specifier + `@` in filename = real template, not N hand units
+    assert "%i" in TEMPLATE.read_text()
+    assert TEMPLATE.name == "claude-tmux@.service"
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_claude_tmux_template.py -v`
+Expected: FAIL (file does not exist)
+
+- [ ] **Step 3: Write the template**
+
+```ini
+# deploy/sidecar/claude-tmux@.service
+# Durable in-tmux swarph cell — systemd TEMPLATE (%i = cell name).
+#
+# One template replaces N hand-authored per-cell units. Enable a cell with:
+#   systemctl --user enable --now claude-tmux@<cell>.service        (user cell)
+#   sudo systemctl enable --now claude-tmux@<cell>.service          (root cell)
+# Non-root user cells also need:  loginctl enable-linger $USER
+#
+# Shape below is the USER-unit form (swarph at ~/.local/bin, WantedBy=default.target).
+# ROOT/system cell: swarph at /usr/local/bin, WantedBy=multi-user.target,
+#   After=network-online.target. Adjust the two binary paths + the [Install] target.
+#
+# AI² fix (science-claude): KillMode=mixed + an explicit ExecStop kill-session —
+#   KillMode=none is deprecated (systemd warns). mixed = SIGTERM the main process,
+#   SIGKILL the rest of the cgroup on stop; ExecStop owns the session teardown.
+# BLOCKING fix (droplet): ExecStart is gated on `swarph cell verify %i` BEFORE the
+#   per-name `has-session` check. The double-resume footgun is per-UUID, not per
+#   tmux-name (two cell names pinning one UUID both pass has-session → both resume →
+#   tmux-server death). verify refuses if the pinned UUID is already live under ANY
+#   holder, and clears a stale poison-pin if the holder is dead.
+
+[Unit]
+Description=Durable in-tmux swarph cell %i — tmux session hosting a live claude
+After=default.target
+
+[Service]
+Type=forking
+Environment=TERM=xterm-256color
+ExecStart=/bin/sh -lc '%h/.local/bin/swarph cell verify %i \
+  && (/usr/bin/tmux has-session -t %i 2>/dev/null \
+      || /usr/bin/tmux new-session -d -s %i "%h/.local/bin/swarph spawn %i")'
+ExecStop=/usr/bin/tmux kill-session -t %i
+KillMode=mixed
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target
+```
+
+> Implementer note: `%h` (systemd user-unit home specifier) resolves to `$HOME` in user units. For the root/system shape, replace `%h/.local/bin/swarph` with `/usr/local/bin/swarph` in both places. Keep both binary references pointing at the SAME swarph install — a verify from one path and a spawn from another would skew the gate. The test asserts ordering + the two fixes, not the exact binary path, so either shape passes; document both in README.
+
+Then add a section to `deploy/sidecar/README.md` (after the three-unit stack table) documenting: that `claude-tmux@.service` is the parameterized successor to the hand-authored `claude-tmux.service`; the system-vs-user binary-path + `[Install]` target diff; and that `swarph cell harden <cell>` emits the per-cell `launch-<cell>.sh` + prints these enable instructions but never installs.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_claude_tmux_template.py -v`
+Expected: PASS (5 passed)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add deploy/sidecar/claude-tmux@.service deploy/sidecar/README.md tests/test_claude_tmux_template.py
+git commit -m "feat(deploy): claude-tmux@.service systemd template (KillMode=mixed + verify-gated ExecStart)"
+```
+
+---
+
+## Task 9: mitosis-lineage hook in spawn (guarded, non-blocking)
+
+**Files:**
+- Modify: `src/swarph_cli/commands/spawn.py` (~`spawn.py:958`, after a sibling is minted)
+- Test: `tests/test_spawn_mitosis_lineage.py`
+
+When `swarph spawn <role> --new-instance` mints a true sibling (`was_generated and effective_role != sidecar_role`), append a mitosis lineage record (`parent` = base role, `parent_session_id` = base pin uuid, `child_session_id` = the new uuid). Wrapped in try/except → logs to stderr, NEVER raises into the exec path (spec §7: capture partial-fail must not block claude).
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_spawn_mitosis_lineage.py
+from pathlib import Path
+
+import pytest
+
+from swarph_cli.commands import spawn
+from swarph_shared.cell import Cell
+
+
+def _cell(tmp_path: Path) -> Cell:
+    cwd = tmp_path / "work"; cwd.mkdir()
+    c = Cell(schema_version="1", name="drop", role="drop", cwd=cwd,
+             provider="claude", session_id=None, starter_prompt_path=None, extra={})
+    c.source_path = tmp_path / "drop.yaml"
+    return c
+
+
+def test_sibling_mint_records_mitosis(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    cell = _cell(tmp_path)
+    calls = {}
+
+    def fake_record_mitosis(c, *, child_role, parent_role, child_session_id,
+                            parent_session_id, cursor_path):
+        calls.update(child_role=child_role, parent_role=parent_role,
+                     child_session_id=child_session_id,
+                     parent_session_id=parent_session_id)
+
+    monkeypatch.setattr(spawn, "_record_mitosis_safe", spawn._record_mitosis_safe)
+    monkeypatch.setattr("swarph_cli.capture.lineage.record_mitosis", fake_record_mitosis)
+    monkeypatch.setattr(spawn, "_base_pin_uuid", lambda role: "parent-uuid")
+
+    spawn._record_mitosis_safe(
+        cell, sidecar_role="drop", effective_role="drop-2",
+        session_id="child-uuid", was_generated=True,
+    )
+    assert calls["child_role"] == "drop-2"
+    assert calls["parent_role"] == "drop"
+    assert calls["child_session_id"] == "child-uuid"
+    assert calls["parent_session_id"] == "parent-uuid"
+
+
+def test_non_sibling_spawn_records_nothing(tmp_path, monkeypatch):
+    cell = _cell(tmp_path)
+    called = []
+    monkeypatch.setattr("swarph_cli.capture.lineage.record_mitosis",
+                        lambda *a, **k: called.append(1))
+    # effective_role == sidecar_role → base slot, not a sibling
+    spawn._record_mitosis_safe(cell, sidecar_role="drop", effective_role="drop",
+                               session_id="x", was_generated=True)
+    assert called == []
+
+
+def test_record_failure_never_raises(tmp_path, monkeypatch, capsys):
+    cell = _cell(tmp_path)
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr("swarph_cli.capture.lineage.record_mitosis", boom)
+    monkeypatch.setattr(spawn, "_base_pin_uuid", lambda role: "p")
+    # must swallow + warn, not propagate (spec §7: never block the exec)
+    spawn._record_mitosis_safe(cell, sidecar_role="drop", effective_role="drop-2",
+                               session_id="c", was_generated=True)
+    assert "lineage" in capsys.readouterr().err.lower()
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_spawn_mitosis_lineage.py -v`
+Expected: FAIL with `AttributeError: module 'swarph_cli.commands.spawn' has no attribute '_record_mitosis_safe'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Add these helpers to `spawn.py` (near the other module-level helpers, e.g. after `_session_state_exists`):
+
+```python
+def _base_pin_uuid(role: str) -> Optional[str]:
+    """Read the base role's pinned UUID (the mitosis parent_session_id)."""
+    from swarph_cli.cell import _read_session_sidecar, session_state_path
+    uuid_str, _cwd = _read_session_sidecar(session_state_path(role))
+    return uuid_str
+
+
+def _record_mitosis_safe(
+    cell: Cell,
+    *,
+    sidecar_role: str,
+    effective_role: Optional[str],
+    session_id: Optional[str],
+    was_generated: bool,
+) -> None:
+    """Append a mitosis lineage record for a freshly-minted sibling.
+
+    Spec §6: a true sibling is `was_generated and effective_role != sidecar_role`
+    (base slot reuse has effective_role == sidecar_role). NEVER raises — capture
+    partial-fail must not block the claude exec (spec §7); log + degrade.
+    """
+    if not (was_generated and effective_role and effective_role != sidecar_role):
+        return
+    try:
+        from swarph_cli.capture import lineage
+        cursor_path = cell.extra.get("cursor_path") if cell.extra else None
+        lineage.record_mitosis(
+            cell,
+            child_role=effective_role,
+            parent_role=sidecar_role,
+            child_session_id=session_id,
+            parent_session_id=_base_pin_uuid(sidecar_role),
+            cursor_path=cursor_path,
+        )
+    except Exception as exc:  # never block the exec
+        print(f"swarph spawn: mitosis lineage record failed (non-fatal): {exc}",
+              file=sys.stderr)
+```
+
+Then call it in `run_spawn`, immediately after the `load_or_create_session_id` block resolves `session_id, was_generated, effective_role` (the `if membrane.uses_pinned_session():` branch, after the two stderr-note `if` blocks at ~`spawn.py:970`):
+
+```python
+        _record_mitosis_safe(
+            cell,
+            sidecar_role=sidecar_role,
+            effective_role=effective_role,
+            session_id=session_id,
+            was_generated=was_generated,
+        )
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_spawn_mitosis_lineage.py -v`
+Expected: PASS (3 passed)
+
+- [ ] **Step 5: Run the full spawn suite to confirm no regression**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest tests/test_spawn_command.py tests/test_spawn_windows_relaunch.py -v`
+Expected: PASS (all existing spawn tests still green — the hook is additive + guarded)
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/swarph_cli/commands/spawn.py tests/test_spawn_mitosis_lineage.py
+git commit -m "feat(spawn): guarded mitosis-lineage hook on --new-instance sibling mint (never blocks exec)"
+```
+
+---
+
+## Task 10: full-suite gate + version bump + branch/PR
+
+**Files:**
+- Modify: `pyproject.toml` (version bump)
+- Modify: `CHANGELOG.md` if present
+
+- [ ] **Step 1: Run the entire test suite**
+
+Run: `cd /home/ubuntu/swarph-cli && python3 -m pytest -q`
+Expected: PASS — all new tests green, zero regressions in the existing suite. If any pre-existing test fails, diagnose before proceeding (do NOT bundle an unrelated fix into this PR).
+
+- [ ] **Step 2: Smoke the CLI end-to-end (dry, no install)**
+
+Run:
+```bash
+cd /home/ubuntu/swarph-cli
+python3 -m swarph_cli.main cell           # prints usage, rc 0
+python3 -m swarph_cli.main cell verify lab-ovh   # gate runs against the real lab pin (rc 0/3/4)
+```
+Expected: `cell` prints usage; `cell verify lab-ovh` runs the gate against lab's actual pin store and prints an `OK`/`REFUSE` line. (Read-only — verify never spawns.)
+
+- [ ] **Step 3: Bump the version**
+
+Edit `pyproject.toml`: `version = "0.10.2"` → `version = "0.11.0"` (new feature surface = minor bump). Mirror in any `__init__.py` `__version__` if it duplicates the string.
+
+- [ ] **Step 4: Commit the bump**
+
+```bash
+git add pyproject.toml src/swarph_cli/__init__.py
+git commit -m "chore: bump to 0.11.0 (swarph cell harden/verify + capture-at-birth)"
+```
+
+- [ ] **Step 5: Open the PR (do NOT self-merge)**
+
+```bash
+git push -u origin <branch>
+gh pr create --repo BrainSurfing-tech/swarph-cli \
+  --title "feat: swarph cell harden/verify — capture-at-birth buildable core" \
+  --body "Implements the BUILD-NOW scope of research/architecture/swarph_cell_capture_birth.md (rev 2.1): claude-tmux@.service template (KillMode=mixed + verify-gated ExecStart), swarph cell harden (revival-kit emitter, no install), swarph cell verify (cwd-drift + liveness PROBE + poison-pin clear), append-only genesis/mitosis lineage (signed:false forward-compatible seam). DEFERRED: crypto signing, HEAD checkpointing, auto-install. drop seat-A merges."
+```
+
+Then DM drop-on-meta-edge (seat-A) via mesh-gateway with the PR link + a one-line summary so the public-repo review starts. Do not merge yourself.
+
+---
+
+## Self-Review (run before declaring the plan complete)
+
+**Spec coverage** — every BUILD-NOW item maps to a task:
+- §4.3 template (KillMode=mixed + verify-gated ExecStart) → Task 8 ✓
+- §4.4b verify gate (cwd-drift + liveness PROBE + poison-pin) → Task 5 (logic) + Task 7 (CLI) ✓
+- §4.2/§9 harden kit-emitter (no install) → Task 6 (logic) + Task 7 (CLI) ✓
+- §4.4/§5/§6 lineage genesis + mitosis, signed:false seam, workspace_fingerprint, per-cell cursor_path → Task 3 (records) + Task 6 (genesis emit) + Task 9 (mitosis hook) ✓
+- §5 manifest (recipe/pin/service/lineage + reserved HEAD + live_pin_holder) → Task 4 ✓
+- liveness probe-not-flag primitive → Task 2 ✓
+
+**Deferred is explicit + not buried as TODOs:** crypto signing (schema seam `signed:false`/null), HEAD checkpointing (manifest `head.*` reserved null), auto-install (harden prints, never runs) — all called out in "Out of scope" + reiterated in the relevant tasks. ✓
+
+**Type consistency:** `VerifyResult(ok, code, reason)` used identically in Task 5 + Task 7; `HardenResult` fields match between Task 6 + Task 7; `probe_holder_liveness` signature matches between Task 2 (def) + Task 5 (call); manifest `head.live_pin_holder` written by Task 4/Task 6 + read/cleared by Task 5. ✓
+
+**Known seams the implementer must confirm against live code (flagged inline):** the `Cell` constructor kwargs in test fixtures (Task 3 note), `_config_root` import visibility from `cell.py` (Task 6 note), and Claude's exact `projects/<sanitized>/` dir-name rule (Task 5 — `/`→`-` is the dominant convention; the existing `_session_state_exists` glob corroborates the `<uuid>.jsonl` leaf). These are confirm-then-adapt, not open design questions.
+
+---
+
+## Execution Handoff
+
+Plan complete and saved to `docs/superpowers/plans/2026-06-12-swarph-cell-harden.md`.
+
+**Recommended: Subagent-Driven Development** — fresh subagent per task, two-stage review (spec compliance, then code quality) between tasks, continuous execution. Tasks 1–9 are mostly mechanical (well-specified, 1–2 files each) → cheap/standard models; Task 5 (verify gate) + Task 9 (spawn hook) carry the judgment and warrant the standard model. First action at execution: create a build branch off `main` (never build on the default branch).
