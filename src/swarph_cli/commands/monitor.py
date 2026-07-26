@@ -113,6 +113,51 @@ def _resolve(args: argparse.Namespace) -> tuple[str, Path]:
     return self_name, state_dir_arg or mesh._default_sidecar_state_dir(self_name)
 
 
+def _self_name_was_derived(args: argparse.Namespace) -> bool:
+    """True when the identity came from the STATE DIR BASENAME, not the operator.
+
+    That is the dangerous path: `--as` and $SWARPH_SELF are deliberate, a
+    directory name is incidental.
+    """
+    return not args.self_name and not os.environ.get("SWARPH_SELF")
+
+
+def _verify_self_is_registered(self_name, gateway, token):
+    """Confirm the resolved identity is a real peer. Returns (ok, detail).
+
+    THE FOOTGUN (droplet, deploying 0.39.0 on his box): self_name falls back to
+    the state dir's BASENAME. He ran
+
+        swarph monitor start --state-dir /var/lib/swarph/droplet-monitor
+
+    and got a monitor for the peer `droplet-monitor`, WHICH DOES NOT EXIST. The
+    gateway had 0 DMs addressed to it, because nobody can address a peer that is
+    not registered. So it polled a nonexistent inbox, saw zero DMs forever, and
+    reported itself RUNNING AND HEALTHY.
+
+    That is THE EXACT FAILURE THIS CARD EXISTS TO REMOVE -- silent deafness --
+    reintroduced through CONFIGURATION rather than through code. A dead sink and
+    a nonexistent inbox emit the same signal as a quiet mesh: nothing.
+
+    NETWORK FAILURE MUST NOT BLOCK: `start` is contractually safe to call
+    unconditionally from a SessionStart hook, so an unreachable gateway warns
+    and proceeds. We refuse only on a POSITIVE answer that the peer is absent.
+    """
+    url = f"{gateway.rstrip('/')}/peers"
+    status, body = mesh._http_get_json(url, token)
+    if status != 200 or not isinstance(body, dict):
+        return (True, f"UNVERIFIED (gateway {status or 'unreachable'})")
+    peers = body.get("peers")
+    if not isinstance(peers, list):
+        return (True, "UNVERIFIED (unexpected /peers shape)")
+    names = {p.get("name") for p in peers if isinstance(p, dict)}
+    if not names:
+        return (True, "UNVERIFIED (empty peer list)")
+    if self_name in names:
+        return (True, "registered")
+    return (False, f"NOT a registered peer (gateway knows {len(names)} peers)")
+
+
 # ── start ────────────────────────────────────────────────────────────────────
 
 _DAEMON_PIDFILE = "daemon.pid"
@@ -190,6 +235,41 @@ def _cmd_start(args: argparse.Namespace) -> int:
         # THE HOOK PATH. This runs on every SessionStart, so it must cost
         # nothing and say nothing: no banner, no re-poll, exit 0.
         return 0
+
+    # IDENTITY CHECK GOES HERE, NOT EARLIER. It costs a gateway round-trip, and
+    # the `live_ours` path above is the SessionStart hook path -- contractually
+    # free and silent. Putting this before that return made every session pay
+    # for a network call and print on it; the pre-existing
+    # test_start_is_quiet_and_zero_when_already_running caught that immediately.
+    # An already-running monitor was verified when it started.
+    # A monitor polling an inbox nobody can address is deaf while reporting
+    # healthy -- see _verify_self_is_registered. Only the DERIVED path is
+    # refused: an operator who typed `--as X` meant X, and may legitimately be
+    # pre-staging a peer that is not registered yet.
+    ok, detail = _verify_self_is_registered(self_name, args.gateway, mesh._resolve_token(self_name, args.token_file))
+    if not ok:
+        derived = _self_name_was_derived(args)
+        print(
+            f"swarph monitor: identity {self_name!r} is {detail}.\n"
+            f"  Nothing can be addressed to it, so this monitor would see zero "
+            f"DMs FOREVER and report itself healthy -- silent deafness.",
+            file=sys.stderr,
+        )
+        if derived:
+            print(
+                f"  It was DERIVED from the state dir basename "
+                f"({state_dir.name!r}), not chosen. Pass --as <peer> "
+                f"(or set $SWARPH_SELF).",
+                file=sys.stderr,
+            )
+            return 2
+        print("  Continuing because you named it explicitly with --as.",
+              file=sys.stderr)
+    elif detail != "registered":
+        print(f"swarph monitor: identity {self_name!r} {detail} -- "
+              f"continuing (a hook must not fail on a down gateway).",
+              file=sys.stderr)
+
     if status == "stale":
         # Reclaiming silently is fine right up until the day it was not stale.
         print(
