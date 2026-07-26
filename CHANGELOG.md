@@ -2,6 +2,30 @@
 
 Notable changes to `swarph-cli`. Earlier history: `git log`.
 
+## 0.39.2 — 2026-07-26
+- **fix(mesh):** `--token-file` is now **one parser**. It previously did
+  `read_text().strip()` and returned the ENTIRE FILE, so pointing it at an
+  env-style file — the shape the shipped systemd unit, the README and peers'
+  docs all document — put comments and unrelated variables into the
+  `Authorization` header. An em-dash in a *comment* crashed a peer's monitor
+  with a latin-1 codec error. `swarph daemon` read the same flag through a
+  different, correct parser: **one flag, two parsers**, diverging silently
+  where both happened to work. Now accepts env-style
+  `MESH_GATEWAY_TOKEN=<token>` (quotes stripped, comments and blanks skipped,
+  unrelated keys ignored) or a bare token line, and a test asserts the two
+  readers **agree** so the divergence cannot recur at the next call site.
+  - Not introduced in 0.39.1: that release added a *foreground* call site,
+    where the same failure previously died into `monitor.log` while the parent
+    exited 0. It made a pre-existing silent failure loud.
+- **fix(mesh):** a token that cannot go in an HTTP header now raises a **named**
+  error giving the file, line, character and codepoint, instead of a latin-1
+  traceback deep in `http/client.py` — which points the reader at the HTTP
+  layer for what is a malformed config file.
+- **test:** shipped `*.service` units are now parsed in CI, and every `swarph
+  <verb> --flags` they prescribe must exist and be accepted. Catches a shipped
+  unit invoking a verb or flag the CLI dropped — which breaks every deployment
+  using it at next restart, silently.
+
 ## 0.39.1 — 2026-07-26
 - **fix(monitor):** refuse a **derived** identity that is not a registered peer.
   `self_name` falls back to the state dir BASENAME, so
