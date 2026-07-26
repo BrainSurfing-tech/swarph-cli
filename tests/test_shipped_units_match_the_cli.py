@@ -23,6 +23,15 @@ WHAT THIS TEST DOES AND DOES NOT CATCH -- stated so nobody over-trusts it:
         file's CONTENT, not its flag, and is caught by
         tests/test_token_file_one_parser.py instead.
 
+THE RESIDUAL, recorded by droplet as a limit rather than as work (DM #8618):
+this scan proves every unit's verb and flags EXIST and are ACCEPTED. It does
+not prove the invocation RUNS against realistic inputs -- that coverage comes
+from the token fixtures beside it. So a FUTURE flag pointing at a NEW file
+shape would pass this scan and could still break on contact. THE TWO HALVES
+MUST BE KEPT IN STEP: whenever a shipped unit gains a flag that names a FILE,
+add a fixture of that file's real deployed shape next door. Do not read a green
+deployment scan as an end-to-end guarantee.
+
 Run: venv/bin/python -m pytest tests/test_shipped_units_match_the_cli.py -v
 """
 import argparse
