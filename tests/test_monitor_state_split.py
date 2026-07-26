@@ -315,12 +315,72 @@ def test_inbox_log_written_regardless_of_sink_outcome(monkeypatch, tmp_path):
     assert ids == [80, 81]
 
 
-def test_empty_poll_with_nothing_owed_writes_nothing(monkeypatch, tmp_path):
-    """A monitor that rewrites its state files every 30s for no reason is a
-    monitor whose mtimes cannot be used to spot a stall."""
+# ── upgrading a peer that is running the pre-#122 sidecar right now ──────────
+
+def _legacy_cursor(tmp_path, **fields):
+    base = {"last_msg_id": 8500, "last_wake_at": 1000.0, "pending_wake": False}
+    base.update(fields)
+    (tmp_path / "cursor.json").write_text(json.dumps(base), encoding="utf-8")
+
+
+def test_pre_122_cursor_seeds_the_ledger_instead_of_replaying(monkeypatch, tmp_path):
+    """`pending_wake` WAS the ledger. Adopt it, don't start from zero.
+
+    Starting from zero would give every upgraded peer a redundant wake plus a
+    capped-replay warning about mail it delivered days ago.
+    """
+    monkeypatch.setattr(mesh, "_http_get_json", lambda u, t, **k: (200, {"messages": []}))
+    _legacy_cursor(tmp_path, pending_wake=False)
+
+    sink = mesh.parse_sink("tmux:pane:0.0")
+    state = _state(tmp_path, [sink])
+    assert state.ledger(sink.name)["last_delivered_id"] == 8500
+    assert state.new_ledgers == set(), "a migrated ledger is not a NEW ledger"
+
+    woke = []
+    monkeypatch.setattr(mesh, "_tmux_wake", lambda t: woke.append(t) or True)
+    mesh._monitor_iteration(state)
+    assert woke == [], "nothing is owed; the upgrade must be silent"
+
+
+def test_pre_122_pending_wake_survives_the_upgrade(monkeypatch, tmp_path):
+    monkeypatch.setattr(mesh, "_http_get_json", lambda u, t, **k: (200, {"messages": []}))
+    _legacy_cursor(tmp_path, pending_wake=True, last_wake_at=0.0)
+
+    woke = []
+    monkeypatch.setattr(mesh, "_tmux_wake", lambda t: woke.append(t) or True)
+    mesh._monitor_iteration(_state(tmp_path, [mesh.parse_sink("tmux:pane:0.0")]))
+
+    assert woke == ["pane:0.0"], "a wake owed before the upgrade is still owed after"
+
+
+def test_a_cursor_written_by_the_new_engine_is_not_migrated(monkeypatch, tmp_path):
+    """The migration keys off `pending_wake`, which only the pre-#122 sidecar
+    wrote — otherwise a late-attached sink would be seeded instead of replaying."""
+    monkeypatch.setattr(mesh, "_http_get_json", _window(_dm(77)))
+    mesh._monitor_iteration(_state(tmp_path, [mesh.parse_sink("none")]))
+    assert "pending_wake" not in json.loads((tmp_path / "cursor.json").read_text())
+
+    late = _state(tmp_path, [mesh.parse_sink("stdout")])
+    assert late.ledger("stdout")["last_delivered_id"] == 0, "it must replay, not skip"
+
+
+def test_idle_polls_do_not_churn_the_state_files(monkeypatch, tmp_path):
+    """A monitor that rewrites its state every 30s for no reason is a monitor
+    whose mtimes cannot be used to spot a stall.
+
+    Ledgers ARE materialized once (found by driving the real CLI: a pure `pull`
+    monitor otherwise never writes ledgers.json, so `status` shows the
+    late-attached-sink warning forever on the DEFAULT path). Once is not churn.
+    """
     monkeypatch.setattr(mesh, "_http_get_json", lambda u, t, **k: (200, {"messages": []}))
     state = _state(tmp_path, [mesh.parse_sink("tmux:pane:0.0")])
     mesh._monitor_iteration(state)
 
+    assert not (tmp_path / "cursor.json").exists(), "nothing was observed"
+    ledgers = (tmp_path / "ledgers.json").read_text()
+
+    for _ in range(4):
+        mesh._monitor_iteration(state)
+    assert (tmp_path / "ledgers.json").read_text() == ledgers, "idle == no rewrite"
     assert not (tmp_path / "cursor.json").exists()
-    assert not (tmp_path / "ledgers.json").exists()

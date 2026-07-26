@@ -108,7 +108,7 @@ def test_stop_refuses_to_kill_a_foreign_pid(monkeypatch, tmp_path, capsys):
     _env(monkeypatch)
     _write_pidfile(tmp_path, _own_record(cmdline="/usr/bin/definitely-not-swarph --serve"))
     killed = []
-    monkeypatch.setattr(mesh.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(mesh, "_terminate", killed.append)
 
     rc = _run(["stop"], tmp_path)
 
@@ -123,12 +123,12 @@ def test_stop_signals_our_monitor_and_says_deliveries_are_abandoned(
     _env(monkeypatch)
     _write_pidfile(tmp_path, _own_record())
     killed = []
-    monkeypatch.setattr(mesh.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(mesh, "_terminate", killed.append)
 
     rc = _run(["stop"], tmp_path)
 
     assert rc == 0
-    assert killed and killed[0][0] == os.getpid()
+    assert killed == [os.getpid()]
     assert "abandon" in capsys.readouterr().out.lower(), (
         "abandoning owed deliveries is fine; doing it without saying so is not"
     )
@@ -167,6 +167,7 @@ def test_status_exits_1_when_dms_are_pending(monkeypatch, tmp_path, capsys):
     _env(monkeypatch)
     _serve(monkeypatch, _dm(101), _dm(102, frm="watchtower"))
     _run(["start", "--once"], tmp_path)
+    capsys.readouterr()                      # drop start's own observation log
 
     rc = _run(["status"], tmp_path)
     out = capsys.readouterr().out
@@ -180,6 +181,7 @@ def test_status_brief_is_one_line_when_there_is_something(monkeypatch, tmp_path,
     _env(monkeypatch)
     _serve(monkeypatch, _dm(201), _dm(202, frm="watchtower"))
     _run(["start", "--once"], tmp_path)
+    capsys.readouterr()                      # drop start's own observation log
 
     rc = _run(["status", "--brief"], tmp_path)
     out = capsys.readouterr().out
@@ -208,6 +210,7 @@ def test_status_under_none_refuses_to_report_zero_unread(monkeypatch, tmp_path, 
     _env(monkeypatch)
     _serve(monkeypatch, _dm(301))
     _run(["start", "--deliver", "none", "--once"], tmp_path)
+    capsys.readouterr()                      # drop start's own observation log
 
     rc = _run(["status"], tmp_path)
     out = capsys.readouterr().out
@@ -221,6 +224,7 @@ def test_status_brief_under_none_still_says_it_cannot_tell(monkeypatch, tmp_path
     _env(monkeypatch)
     _serve(monkeypatch, _dm(302))
     _run(["start", "--deliver", "none", "--once"], tmp_path)
+    capsys.readouterr()                      # drop start's own observation log
 
     rc = _run(["status", "--brief"], tmp_path)
     out = capsys.readouterr().out
@@ -234,6 +238,7 @@ def test_status_json_marks_unread_as_not_reportable_under_none(monkeypatch, tmp_
     _env(monkeypatch)
     _serve(monkeypatch, _dm(303))
     _run(["start", "--deliver", "none", "--once"], tmp_path)
+    capsys.readouterr()                      # drop start's own observation log
 
     rc = _run(["status", "--json"], tmp_path)
     payload = json.loads(capsys.readouterr().out)
@@ -249,6 +254,7 @@ def test_status_json_reports_per_sink_lag(monkeypatch, tmp_path, capsys):
     _serve(monkeypatch, _dm(401))
     monkeypatch.setattr(mesh, "_tmux_wake", lambda t: False)
     _run(["start", "--deliver", "pull", "--deliver", "tmux:gone:0.0", "--once"], tmp_path)
+    capsys.readouterr()                      # drop start's own observation log
 
     rc = _run(["status", "--json"], tmp_path)
     payload = json.loads(capsys.readouterr().out)
@@ -267,6 +273,7 @@ def test_status_flags_a_ledger_that_does_not_exist_yet(monkeypatch, tmp_path, ca
     _serve(monkeypatch, _dm(501))
     _run(["start", "--deliver", "none", "--once"], tmp_path)
     _write_pidfile(tmp_path, _own_record(sinks=["tmux:brand-new:0.0"]))
+    capsys.readouterr()                      # drop start's own observation log
 
     _run(["status", "--json"], tmp_path)
     payload = json.loads(capsys.readouterr().out)
