@@ -295,6 +295,39 @@ cell.yaml schema is **frozen at `schema_version: "v1"`**. v0.7 migrates the pars
 
 **Known limitations (v0.6).** Single-instance-per-role only. Re-running `swarph spawn <role>` reuses the persisted UUID (R5 fix), so sibling-spawn (alpha + beta co-existing on the same peer-id) requires v0.7's `--new-instance` flag. Manual sibling spawning via `tmux` + explicit `--session-id` pinning still works unchanged; v0.6 does not regress that path, it just doesn't yet expose a CLI shape for it.
 
+### `swarph monitor`
+
+Watches this peer's mesh inbox and delivers new DMs to **named, pluggable sinks** — each with its own independent delivery ledger.
+
+```bash
+swarph monitor start  [--deliver SINK]... [--poll-s N] [--wake-min-interval-s N] [--as PEER]
+swarph monitor status [--json] [--brief]
+swarph monitor stop
+```
+
+| Sink | Meaning |
+|---|---|
+| `pull` | **default.** Nothing is pushed anywhere; the ledger advances when the consumer ACKs (a DM being marked read by `swarph mesh inbox`), so `status` can answer "you have DMs". |
+| `tmux:<target>` | `tmux send-keys` to that pane — what `swarph mesh sidecar` has always done. |
+| `stdout` | write the DM to stdout; delivery always succeeds. |
+| `none` | genuinely nothing: observe, append `inbox.log`, no ledger, **no unread tracking**. |
+| `webhook:<url>` | **held** pending an egress review — exits non-zero rather than silently no-op. |
+
+**Two pieces of state that never share a variable.** The *observation cursor* (`cursor.json`) is what this monitor has READ from the gateway; it advances on observation, always, gated on nothing. A *delivery ledger* (`ledgers.json`, one per sink) advances only when that sink is satisfied and may lag arbitrarily far. So a dead tmux pane can no longer freeze the cursor, one dead sink cannot stall another, and a sink attached tomorrow starts with an empty ledger and replays from `inbox.log` (bounded, and it reports what it skipped).
+
+**Pull beats push.** Every push sink's liveness is a precondition for hearing anything — if the pane dies, "no wake arrived" is indistinguishable from "no mail arrived". A pull check run *by* the cell lives one layer above tmux and cannot die with it. Designed to drop straight into a SessionStart hook:
+
+```bash
+swarph monitor start && swarph monitor status --brief
+#=> 2 unread DMs (droplet, watchtower) — swarph mesh inbox
+```
+
+`start` is idempotent — a live pidfile means "already running", so it exits 0 fast and silent (a stale pidfile is reclaimed *and* logged; a live PID that is not ours is never adopted, so `stop` can never kill something unrelated). `status --brief` prints **nothing** with exit 0 when there is nothing to say. Exit codes carry the answer for scripts: `0` nothing pending, `1` DMs pending, `2` monitor not running.
+
+Under `--deliver none` there is no ledger, so `status` reports that it **cannot** report unread — it never prints "0 unread", because an absence that reads as evidence is the exact defect this command was built to remove.
+
+`swarph mesh sidecar` still works as a deprecated alias for `swarph monitor start --deliver tmux:<target>` (deprecation notice on stderr).
+
 ### `swarph daemon` (Phase 5.6)
 
 Replaces the 4-layer `tail -F | grep | Monitor | systemd | cron poll` stack with one foreground process. Liveness check collapses to:

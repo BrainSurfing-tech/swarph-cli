@@ -148,6 +148,33 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+DAEMON_PIDFILE = "daemon.pid"
+
+
+def _write_daemon_pidfile(state_dir: Path) -> Optional[Path]:
+    """Announce that a daemon owns this state dir.
+
+    `swarph monitor` shares this exact layout (cursor.json + inbox.log) and
+    refuses to start when it finds this file live -- two writers on one cursor
+    lose or repeat DMs, silently (droplet, PR #139 review). Best-effort: a
+    daemon that cannot write its pidfile still runs, because refusing to start
+    the daemon over a marker file would be a worse failure than the race it
+    prevents. monitor's second detector (`tasks_snapshot` in cursor.json)
+    covers that gap and every daemon predating this file.
+    """
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        path = state_dir / DAEMON_PIDFILE
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+        os.replace(tmp, path)
+        return path
+    except OSError as exc:
+        print(f"[swarph-daemon] could not write {DAEMON_PIDFILE}: {exc}",
+              file=sys.stderr, flush=True)
+        return None
+
+
 def _read_cursor(path: Path) -> dict:
     if not path.exists():
         return {"last_msg_id": 0, "tasks_snapshot": {}}
@@ -482,6 +509,9 @@ def run_daemon(argv: list[str]) -> int:
         return 2
 
     state_dir.mkdir(parents=True, exist_ok=True)
+    # Announce ownership of this state dir BEFORE any cursor work, so a
+    # concurrently-starting `swarph monitor` sees it and refuses (PR #139).
+    _write_daemon_pidfile(state_dir)
     token = _resolve_token(args.token_file)
     if not token:
         print("swarph daemon: empty MESH_GATEWAY_TOKEN", file=sys.stderr)

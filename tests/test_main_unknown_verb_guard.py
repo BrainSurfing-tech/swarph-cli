@@ -3,8 +3,11 @@
 Reported by peer cell `droplet` 2026-07-26: `swarph inbox` (the real verb is
 `swarph mesh inbox`) is not in _VERB_HANDLERS, so it falls through to the
 one-shot path, becomes `prompt="inbox"`, and bills a provider call that answers
-a question nobody asked. Same for `swarph watch`, `swarph monitor`, and every
+a question nobody asked. Same for `swarph watch`, `swarph sidecar`, and every
 typo of a real verb.
+
+(`monitor` was in this list until card #122 made it a real verb -- swapped for
+`sidecar`, which is likewise a SUBcommand mistaken for a top-level one.)
 
 A bare identifier-shaped token is a MISTYPED VERB, not a prompt -- real one-shot
 prompts are sentences. `--` remains the escape hatch for the rare single-word
@@ -26,7 +29,7 @@ def _no_llm(monkeypatch):
     return boom
 
 
-@pytest.mark.parametrize("verb", ["inbox", "watch", "monitor", "bord", "memry"])
+@pytest.mark.parametrize("verb", ["inbox", "watch", "sidecar", "bord", "memry"])
 def test_unknown_verb_errors_instead_of_billing(verb, capsys):
     rc = main_mod.main([verb])
     assert rc != 0, f"`swarph {verb}` must fail, not silently prompt an LLM"

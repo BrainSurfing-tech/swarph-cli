@@ -1,4 +1,20 @@
-"""``swarph mesh`` — provider-agnostic mesh DM tools and sidecar wake loop."""
+"""``swarph mesh`` — provider-agnostic mesh DM tools and the monitor engine.
+
+This module also hosts the DELIVERY ENGINE behind ``swarph monitor`` (card #122).
+It lives here, next to the gateway primitives it drives (``_http_get_json``,
+``_tmux_wake``, ``_log_dm``), for two reasons:
+
+  1. ``swarph mesh sidecar`` is the deprecated alias for ``swarph monitor start
+     --deliver tmux:<target>``, and there must be exactly ONE implementation
+     underneath. A second copy is how the deployed :8788 gateway and the CLI's
+     forked gateway drifted ~1800 lines apart; we are not repeating that.
+  2. The sidecar's regression suites monkeypatch ``mesh._tmux_wake`` /
+     ``mesh._http_get_json`` / ``mesh._log_dm``. Those patches only bite if the
+     engine's call sites resolve through THIS module's namespace.
+
+``src/swarph_cli/commands/monitor.py`` is the CLI surface (start/status/stop) and
+imports from here; the import is one-directional on purpose.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +28,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
+from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Optional
 
@@ -376,6 +394,10 @@ def _run_register(args: argparse.Namespace) -> int:
 
 
 def _default_sidecar_state_dir(self_name: str) -> Path:
+    # NOT renamed to .../monitor when `swarph monitor` shipped (card #122).
+    # `swarph init` pins this exact path as the cell's cursor_path and the
+    # watchdog reads it (see commands/init.py); renaming it would have silently
+    # split every existing cell's cursor from its reader.
     return Path.home() / "swarph_state" / self_name / "mesh-sidecar"
 
 
@@ -386,7 +408,7 @@ def _read_cursor(path: Path) -> dict:
         cursor = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         print(
-            f"[mesh-sidecar] ignoring unreadable cursor {path}: {exc}",
+            f"[monitor] ignoring unreadable cursor {path}: {exc}",
             file=sys.stderr,
             flush=True,
         )
@@ -405,7 +427,278 @@ def _write_cursor_atomic(path: Path, cursor: dict) -> None:
     os.replace(tmp, path)
 
 
-class MeshSidecarState:
+# ─────────────────────────────────────────────────────────────────────────────
+# card #122 — pluggable delivery
+#
+# TWO PIECES OF STATE. They answer different questions and must never share a
+# variable:
+#
+#   OBSERVATION CURSOR (cursor.json, `last_msg_id`)
+#       what this monitor has READ from the gateway. One per monitor. Advances
+#       on observation, ALWAYS, gated on nothing downstream.
+#
+#   DELIVERY LEDGER (ledgers.json, `last_delivered_id`)
+#       what has been DELIVERED to a GIVEN sink. One per sink. Advances only
+#       when that sink is satisfied. May lag arbitrarily far.
+#
+# `pending_wake` (PR #138) was the degenerate one-sink form of the ledger; this
+# is that generalized, not a special case bolted beside it. The bug class being
+# retired is "one variable, two questions": `last_msg_id` was named a cursor and
+# was ALSO a wake receipt, so a dead tmux pane froze it forever and every poll
+# re-selected the same DMs with no backoff and no alarm (droplet, 2026-07-26).
+#
+# Consequence worth stating plainly: NOVELTY IS A PROPERTY OF A SINK'S LEDGER,
+# not of the cursor. Attach a sink tomorrow and it replays from inbox.log — the
+# data was never consumed, only that sink's pointer is new.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MONITOR_REPLAY_LIMIT = 50   # matches the gateway's 50-message window
+_MONITOR_PIDFILE = "monitor.pid"
+
+
+class MonitorSinkError(RuntimeError):
+    """A --deliver spec that must fail LOUDLY (unknown sink, or a held gate)."""
+
+
+class Sink:
+    """A named delivery target with its own independent ledger.
+
+    Subclasses override `deliver` (push) or `observe` (pull). Nothing in the
+    engine branches on sink type: a sink that behaves differently says so
+    through these flags, so adding one never means special-casing a leg.
+    """
+
+    keeps_ledger = True   # False => no ledger, and therefore no unread tracking
+    is_push = False       # True => the engine calls deliver() when the ledger lags
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> bool:
+        """Push `dms` (may be a bounded/empty replay). True == delivered."""
+        raise NotImplementedError
+
+    def observe(self, state: "MonitorState", ledger: dict, window: list) -> bool:
+        """Called with every poll's raw window. True == this ledger changed."""
+        return False
+
+    def pending_label(self, count: int) -> str:
+        plural = "s" if count != 1 else ""
+        return f"{count} DM{plural} pending for {self.name}"
+
+
+class PullSink(Sink):
+    """The DEFAULT. Consumer-pulled: the monitor pushes nothing at all.
+
+    Its ledger advances on ACK — a message being marked read by the gateway when
+    the agent runs `swarph mesh inbox` — and NEVER on observation. That is what
+    lets `status` answer "you have DMs" as cursor-minus-ledger without inventing
+    any new state.
+
+    Why this is the floor and not a nicety: every PUSH sink's liveness is a
+    precondition for hearing anything, and the mesh has gone silently deaf twice
+    that way (tmux crash kills the wake Monitor, SessionStart drains but does not
+    re-arm, and "no wake" is indistinguishable from "no mail"). A pull check run
+    BY the cell lives one layer above tmux and cannot die with it.
+    """
+
+    is_push = False
+
+    def __init__(self):
+        super().__init__("pull")
+
+    def observe(self, state: "MonitorState", ledger: dict, window: list) -> bool:
+        observed = int(state.observed.get("last_msg_id", 0))
+        mine = sorted(
+            (int(m.get("id", 0)), bool(m.get("read_at")))
+            for m in window
+            if m.get("from_node") != state.self_name
+        )
+        new = int(ledger["last_delivered_id"])
+        for msg_id, is_read in mine:
+            # Stop at the OLDEST unread: an ACK on id 62 says nothing about 61.
+            if not is_read:
+                break
+            new = max(new, msg_id)
+        else:
+            # Nothing unread anywhere in the window -> the consumer is caught up
+            # to the cursor, including DMs the window no longer carries.
+            new = max(new, observed)
+        if new == int(ledger["last_delivered_id"]):
+            return False
+        ledger["last_delivered_id"] = new
+        ledger["last_delivery_at"] = time.time()
+        return True
+
+    def pending_label(self, count: int) -> str:
+        plural = "s" if count != 1 else ""
+        return f"{count} unread DM{plural}"
+
+
+class NoneSink(Sink):
+    """Genuinely nothing: observe, append inbox.log, no ledger, no unread track.
+
+    `none` MEANS none. An earlier draft had it keeping a ledger so `status` could
+    still report unread; droplet rejected the NAME rather than the mechanism
+    (DM #8532), because a flag whose name and behaviour diverge is the bug class
+    we spent two days digging out — `count` that was a decaying weight, `MID` that
+    straddled a mode boundary, `last_msg_id` that was also a wake receipt. The
+    mechanism became `pull`; the word `none` stayed true.
+    """
+
+    keeps_ledger = False
+    is_push = False
+
+    def __init__(self):
+        super().__init__("none")
+
+
+class TmuxSink(Sink):
+    """Poke a tmux pane — the behaviour `mesh sidecar` has always had."""
+
+    is_push = True
+
+    def __init__(self, target: str):
+        super().__init__(f"tmux:{target}")
+        self.target = target
+
+    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> bool:
+        # Module-global lookup on purpose: the sidecar regression suites patch
+        # `mesh._tmux_wake`, and a `from`-import here would silently bypass them.
+        return _tmux_wake(self.target)
+
+    def pending_label(self, count: int) -> str:
+        plural = "s" if count != 1 else ""
+        return f"{count} DM{plural} not yet delivered to {self.name}"
+
+
+class StdoutSink(Sink):
+    """Write the DM to stdout. Delivery always succeeds."""
+
+    is_push = True
+
+    def __init__(self):
+        super().__init__("stdout")
+
+    def _emit(self, line: str) -> None:
+        print(line, flush=True)
+
+    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> bool:
+        if not dms:
+            # The ledger says something is owed but inbox.log cannot produce it
+            # (log rotated, or `_log_dm` was bypassed). Say so rather than
+            # marking the gap delivered in silence.
+            self._emit(
+                f"[monitor] stdout: {up_to_id} observed but no body recoverable "
+                "from inbox.log for the owed range"
+            )
+            return True
+        for dm in dms:
+            self._emit(_format_inbox_line(dm))
+        return True
+
+
+def parse_sink(spec: str) -> Sink:
+    """`--deliver SINK` -> Sink. Unknown or held specs RAISE; nothing no-ops."""
+    if spec == "pull":
+        return PullSink()
+    if spec == "none":
+        return NoneSink()
+    if spec == "stdout":
+        return StdoutSink()
+    if spec.startswith("tmux:"):
+        target = spec[len("tmux:"):]
+        if not target:
+            raise MonitorSinkError("sink 'tmux:' needs a target, e.g. tmux:lab:0.0")
+        return TmuxSink(target)
+    if spec.startswith("webhook:"):
+        # HELD by the commander: outward-facing egress, and a build greenlight
+        # does not clear an egress gate. It must EXIT, not silently no-op — a
+        # held feature that no-ops rots into a phantom capability, where someone
+        # configures it, sees no error, and believes it is delivering.
+        raise MonitorSinkError(
+            "sink 'webhook:' is HELD pending the commander's egress gate "
+            "(card #122); it is not implemented and will not be silently "
+            "ignored. Use --deliver pull / tmux:<target> / stdout / none."
+        )
+    raise MonitorSinkError(
+        f"unknown sink {spec!r}; expected pull, none, stdout, or tmux:<target>"
+    )
+
+
+def _new_ledger() -> dict:
+    return {
+        "last_delivered_id": 0,
+        "last_delivery_at": 0.0,
+        "consecutive_failures": 0,
+        "created_at": time.time(),
+    }
+
+
+def _read_ledgers(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        # Losing a ledger costs at most a duplicate delivery; refusing to start
+        # costs every delivery. Say it loudly and carry on.
+        print(f"[monitor] ignoring unreadable ledgers {path}: {exc}",
+              file=sys.stderr, flush=True)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for name, led in data.items():
+        if not isinstance(led, dict):
+            continue
+        base = _new_ledger()
+        base.update(led)
+        out[str(name)] = base
+    return out
+
+
+def _write_ledgers_atomic(path: Path, ledgers: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(ledgers, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _replay_from_inbox_log(
+    path: Path, after_id: int, limit: int
+) -> tuple[list, int]:
+    """Owed DMs newer than `after_id`, newest `limit` kept. Returns (dms, skipped).
+
+    This is BOTH the restart-retry path and the late-attached-sink replay path.
+    They are the same question — "what does this ledger still owe" — so they get
+    one mechanism; two would drift.
+    """
+    if not path.exists():
+        return [], 0
+    keep: deque = deque(maxlen=max(0, limit))
+    total = 0
+    try:
+        with path.open("r", encoding="utf-8") as fp:
+            for raw in fp:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    dm = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if int(dm.get("id", 0)) <= after_id:
+                    continue
+                total += 1
+                keep.append(dm)
+    except OSError as exc:
+        print(f"[monitor] cannot replay {path}: {exc}", file=sys.stderr, flush=True)
+        return [], 0
+    return list(keep), total - len(keep)
+
+
+class MonitorState:
     def __init__(
         self,
         *,
@@ -413,38 +706,87 @@ class MeshSidecarState:
         state_dir: Path,
         gateway: str,
         token: str,
-        tmux_target: str,
-        poll_s: int,
-        wake_min_interval_s: int,
+        sinks: list,
+        poll_s: int = _DEFAULT_POLL_S,
+        min_interval_s: int = _DEFAULT_WAKE_MIN_INTERVAL_S,
+        log_prefix: str = "[monitor]",
+        replay_limit: int = _MONITOR_REPLAY_LIMIT,
     ):
         self.self_name = self_name
-        self.state_dir = state_dir
+        self.state_dir = Path(state_dir)
         self.gateway = gateway.rstrip("/")
         self.token = token
-        self.tmux_target = tmux_target
+        self.sinks = list(sinks)
         self.poll_s = poll_s
-        self.wake_min_interval_s = wake_min_interval_s
-        self.cursor_path = state_dir / "cursor.json"
-        self.inbox_log_path = state_dir / "inbox.log"
-        self.cursor = _read_cursor(self.cursor_path)
+        self.min_interval_s = min_interval_s
+        self.log_prefix = log_prefix
+        self.replay_limit = replay_limit
+        self.cursor_path = self.state_dir / "cursor.json"
+        self.ledgers_path = self.state_dir / "ledgers.json"
+        self.inbox_log_path = self.state_dir / "inbox.log"
+        self.pidfile_path = self.state_dir / _MONITOR_PIDFILE
+        # `observed` is the real dict; `cursor` is what the engine touches. The
+        # deprecated sidecar swaps `cursor` for a view (see _LegacyCursorView).
+        self.observed = _read_cursor(self.cursor_path)
+        self.cursor = self.observed
+        self.ledgers = _read_ledgers(self.ledgers_path)
+        if not self.ledgers_path.exists() and "pending_wake" in self.observed:
+            self._migrate_pre_122_ledger()
+        # Ledgers are keyed by the sink STRING, so renaming a pane creates a
+        # fresh ledger that replays from zero. That is a deliberate trade (no ids
+        # for an operator to manage) — `status` reports `ledger_missing` so the
+        # surprise replay is visible rather than mysterious.
+        self.new_ledgers = {s.name for s in self.sinks
+                            if s.keeps_ledger and s.name not in self.ledgers}
+        self.deliveries: dict = {}
         self.consecutive_empty = 0
         self.disconnect_since: Optional[float] = None
         self.shutdown_requested = False
         self.iterations = 0
         self.dms_seen = 0
-        self.wakes_sent = 0
-        # Counts CONSECUTIVE delivery failures. Delivery health is tracked
-        # separately from the read cursor so a dead pane is visible without
-        # ever rewinding what has already been observed (see _sidecar_poll_once).
-        self.consecutive_wake_failures = 0
+
+    def _migrate_pre_122_ledger(self) -> None:
+        """Adopt a pre-card-#122 cursor's `pending_wake` as the initial ledger.
+
+        A `pending_wake` key in cursor.json with no ledgers.json beside it means
+        this state dir was last written by the one-sink sidecar, where the ledger
+        WAS that boolean. Without this, every upgraded peer's first poll would
+        see `last_delivered_id=0` against a cursor in the thousands, fire a
+        redundant wake and report a capped replay of mail it already delivered.
+
+        Applied uniformly to every ledger-keeping sink -- this is the degenerate
+        one-sink ledger being generalized, not a per-sink special case.
+        """
+        observed = int(self.observed.get("last_msg_id", 0))
+        seed = 0 if self.observed.get("pending_wake") else observed
+        for sink in self.sinks:
+            if not sink.keeps_ledger:
+                continue
+            led = _new_ledger()
+            led["last_delivered_id"] = seed
+            led["last_delivery_at"] = float(self.observed.get("last_wake_at", 0.0))
+            self.ledgers[sink.name] = led
+
+    def ledger(self, name: str) -> dict:
+        led = self.ledgers.get(name)
+        if led is None:
+            led = _new_ledger()
+            self.ledgers[name] = led
+        return led
 
 
-def _log_dm(state: MeshSidecarState, dm: dict) -> None:
+def _log_dm(state: MonitorState, dm: dict) -> None:
+    """Append to inbox.log for EVERY observed DM, whatever the sinks do.
+
+    This archive is the thing that makes a late-attached sink able to replay, and
+    the thing that makes an owed delivery survive a restart. It is written before
+    any delivery is attempted, on purpose.
+    """
     state.inbox_log_path.parent.mkdir(parents=True, exist_ok=True)
     with state.inbox_log_path.open("a", encoding="utf-8") as fp:
         fp.write(json.dumps(dm) + "\n")
     print(
-        f"[mesh-sidecar] id={dm.get('id')} from={dm.get('from_node')} "
+        f"{state.log_prefix} id={dm.get('id')} from={dm.get('from_node')} "
         f"kind={dm.get('kind')}",
         flush=True,
     )
@@ -461,11 +803,11 @@ def _tmux_wake(target: str) -> bool:
         )
         return True
     except (OSError, subprocess.CalledProcessError) as exc:
-        print(f"[mesh-sidecar] tmux wake failed: {exc}", file=sys.stderr, flush=True)
+        print(f"[monitor] tmux wake failed: {exc}", file=sys.stderr, flush=True)
         return False
 
 
-def _select_next_poll_seconds(state: MeshSidecarState) -> int:
+def _select_next_poll_seconds(state: MonitorState) -> int:
     if state.disconnect_since is not None:
         if time.time() - state.disconnect_since > _BACKOFF_5XX_THRESHOLD_SECONDS:
             return _BACKOFF_5XX_SECONDS
@@ -474,42 +816,65 @@ def _select_next_poll_seconds(state: MeshSidecarState) -> int:
     return state.poll_s
 
 
-def _sidecar_deliver_wake(state: MeshSidecarState) -> None:
-    """Best-effort wake for observed-but-undelivered messages.
+def _monitor_deliver(state: MonitorState) -> None:
+    """Best-effort delivery to every PUSH sink whose ledger lags the cursor.
 
-    NEVER touches `last_msg_id`. Delivery failure (dead pane) and delivery
-    deferral (idle guard) both leave `pending_wake` set so the next iteration
-    retries -- the cursor is not the retry mechanism.
+    NEVER touches the observation cursor. A failed delivery (dead pane) and a
+    deferred one (idle guard) both leave the ledger where it was, so the next
+    iteration retries — re-selection is not the retry mechanism, the ledger is.
+    That distinction is load-bearing: the gateway only returns the last 50
+    messages, so a long-throttled delivery whose message rolled out of the window
+    would otherwise be lost outright.
     """
-    if not state.cursor.get("pending_wake"):
-        return
-
+    observed = int(state.observed.get("last_msg_id", 0))
     now = time.time()
-    last_wake_at = float(state.cursor.get("last_wake_at", 0.0))
-    if now - last_wake_at < state.wake_min_interval_s:
-        print("[mesh-sidecar] wake suppressed by idle guard "
-              "(cursor advanced; wake still pending)", flush=True)
-        return
+    changed = False
 
-    if _tmux_wake(state.tmux_target):
-        state.cursor["last_wake_at"] = now
-        state.cursor["pending_wake"] = False
-        state.wakes_sent += 1
-        state.consecutive_wake_failures = 0
-    else:
-        # A dead pane is now VISIBLE instead of silently freezing the cursor.
-        state.consecutive_wake_failures += 1
-        print(f"[mesh-sidecar] WAKE FAILED ({state.consecutive_wake_failures} "
-              f"consecutive) for target {state.tmux_target!r} -- messages up to "
-              f"id {state.cursor.get('last_msg_id')} were still recorded; the "
-              f"pane is probably gone (session restart / renamed target)",
-              file=sys.stderr, flush=True)
-    _write_cursor_atomic(state.cursor_path, state.cursor)
+    for sink in state.sinks:
+        if not sink.keeps_ledger:
+            continue
+        led = state.ledger(sink.name)
+        if sink.is_push:
+            delivered = int(led["last_delivered_id"])
+            if delivered >= observed:
+                continue          # this sink owes nothing
+            if now - float(led["last_delivery_at"]) < state.min_interval_s:
+                print(f"{state.log_prefix} wake suppressed by idle guard for "
+                      f"{sink.name} (cursor advanced; delivery still pending)",
+                      flush=True)
+                continue
+            dms, skipped = _replay_from_inbox_log(
+                state.inbox_log_path, delivered, state.replay_limit
+            )
+            if skipped:
+                # A silent cap reads as "delivered everything" when it did not.
+                print(f"{state.log_prefix} REPLAY CAPPED for {sink.name}: "
+                      f"skipped {skipped} older DM(s) above id {delivered}; "
+                      f"delivering the newest {len(dms)} (limit "
+                      f"{state.replay_limit}) -- see {state.inbox_log_path}",
+                      file=sys.stderr, flush=True)
+            if sink.deliver(state, dms, observed):
+                led["last_delivered_id"] = observed
+                led["last_delivery_at"] = now
+                led["consecutive_failures"] = 0
+                state.deliveries[sink.name] = state.deliveries.get(sink.name, 0) + 1
+            else:
+                # A dead sink is VISIBLE instead of silently freezing anything.
+                led["consecutive_failures"] = int(led["consecutive_failures"]) + 1
+                print(f"{state.log_prefix} DELIVERY FAILED to {sink.name} "
+                      f"({led['consecutive_failures']} consecutive) -- DMs up to "
+                      f"id {observed} were still observed and archived; the sink "
+                      f"is probably gone (session restart / renamed target)",
+                      file=sys.stderr, flush=True)
+            changed = True
+
+    if changed:
+        _write_ledgers_atomic(state.ledgers_path, state.ledgers)
 
 
-def _sidecar_iteration(state: MeshSidecarState) -> None:
+def _monitor_iteration(state: MonitorState) -> None:
     state.iterations += 1
-    last_id = int(state.cursor.get("last_msg_id", 0))
+    last_id = int(state.observed.get("last_msg_id", 0))
     # NO unread_only: novelty is the `id > last_msg_id` cursor below, not the read
     # flag. Since `mesh inbox` now marks read (INCIDENT 2026-07-10), a DM read before
     # the next poll would vanish from an unread-filtered query and the cell would
@@ -524,57 +889,282 @@ def _sidecar_iteration(state: MeshSidecarState) -> None:
     if status >= 500:
         if state.disconnect_since is None:
             state.disconnect_since = time.time()
-        print(f"[mesh-sidecar] gateway {status}: {body.get('detail', '?')}", file=sys.stderr)
+        print(f"{state.log_prefix} gateway {status}: {body.get('detail', '?')}",
+              file=sys.stderr)
         return
     if status >= 400:
-        print(f"[mesh-sidecar] gateway {status}: {body.get('detail', '?')}", file=sys.stderr)
+        print(f"{state.log_prefix} gateway {status}: {body.get('detail', '?')}",
+              file=sys.stderr)
         return
 
     state.disconnect_since = None
+    window = body.get("messages", [])
     messages = [
         m
-        for m in body.get("messages", [])
+        for m in window
         if int(m.get("id", 0)) > last_id and m.get("from_node") != state.self_name
     ]
-    if not messages:
+
+    if messages:
+        messages.sort(key=lambda m: int(m["id"]))
+        state.consecutive_empty = 0
+        new_last_id = last_id
+        for dm in messages:
+            _log_dm(state, dm)
+            state.dms_seen += 1
+            new_last_id = max(new_last_id, int(dm["id"]))
+
+        # ── BOOKKEEPING: advance the cursor because the DMs were OBSERVED ──
+        # Unconditional, and BEFORE any sink is touched. This previously happened
+        # inside `if _tmux_wake(...)`, so a gone pane froze it forever; that is
+        # the same shape as the 2026-07-10 grok-researcher incident (read-marking
+        # tied to listing; one request answered 67 times, ~410k tokens).
+        # Delivery is delivery; the cursor is bookkeeping.
+        state.observed["last_msg_id"] = new_last_id
+        _write_cursor_atomic(state.cursor_path, dict(state.cursor))
+    else:
         state.consecutive_empty += 1
-        # A wake deferred by the idle guard (or failed against a dead pane) must
-        # still land even though no NEW mail arrived -- re-selection is no longer
-        # the retry mechanism.
-        _sidecar_deliver_wake(state)
-        return
 
-    messages.sort(key=lambda m: int(m["id"]))
-    state.consecutive_empty = 0
-    new_last_id = last_id
-    for dm in messages:
-        _log_dm(state, dm)
-        state.dms_seen += 1
-        new_last_id = max(new_last_id, int(dm["id"]))
+    # Pull-shaped sinks read the raw window (ACKs live in `read_at`).
+    acked = False
+    for sink in state.sinks:
+        if sink.keeps_ledger and sink.observe(state, state.ledger(sink.name), window):
+            acked = True
+    if acked:
+        _write_ledgers_atomic(state.ledgers_path, state.ledgers)
 
-    # ── BOOKKEEPING: advance the cursor because the messages were OBSERVED ──
-    # This MUST happen independently of any delivery attempt. It previously
-    # happened only inside `if _tmux_wake(...)`, re-coupling exactly what the
-    # 2026-07-10 fix decoupled (see this module's docstring: grok-researcher
-    # answered one request 67 times, ~410k tokens, because read-marking was tied
-    # to listing). Here the pair was cursor-advance tied to WAKING: `_tmux_wake`
-    # returns False whenever the pane is gone (session restart, tmux server
-    # reaped, target renamed), so `last_msg_id` never moved and every poll
-    # re-selected the same messages forever, with no backoff and no alarm.
-    #
-    # Delivery is delivery; the cursor is bookkeeping. `pending_wake` carries the
-    # "somebody still needs waking" state so a throttled or failed wake is
-    # retried WITHOUT rewinding what has already been seen -- the retry used to
-    # depend on re-selecting the same messages, which silently dropped a DM once
-    # the gateway's 50-message window rolled past it.
-    state.cursor["last_msg_id"] = new_last_id
-    state.cursor["pending_wake"] = True
-    _write_cursor_atomic(state.cursor_path, state.cursor)
+    # A delivery deferred by the idle guard (or failed against a dead sink) must
+    # still land even though no NEW mail arrived, so this runs on every poll.
+    _monitor_deliver(state)
 
-    _sidecar_deliver_wake(state)
+    # MATERIALIZE new ledgers even if nothing moved them. Found by driving the
+    # real CLI: a pure `--deliver pull` monitor never writes ledgers.json until
+    # somebody ACKs, so `status` reported "no ledger on disk" -- the
+    # late-attached-sink warning -- forever, on the DEFAULT path. A warning that
+    # fires when nothing is wrong is a warning nobody reads when something is.
+    if state.ledgers and not state.ledgers_path.exists():
+        _write_ledgers_atomic(state.ledgers_path, state.ledgers)
+        state.new_ledgers = set()
+
+
+def _monitor_loop(state: MonitorState) -> int:
+    print(
+        f"{state.log_prefix} starting self={state.self_name} "
+        f"sinks={','.join(s.name for s in state.sinks)} "
+        f"gateway={state.gateway} state={state.state_dir}",
+        flush=True,
+    )
+    while not state.shutdown_requested:
+        try:
+            _monitor_iteration(state)
+        except KeyboardInterrupt:
+            state.shutdown_requested = True
+            break
+        except Exception as exc:
+            print(f"{state.log_prefix} iteration error: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+        time.sleep(_select_next_poll_seconds(state))
+    return 0
+
+
+# ── pidfile: `start` must be safe to call unconditionally from a hook ────────
+
+def _proc_cmdline(pid: int) -> Optional[str]:
+    """The process's argv, space-joined. None when it cannot be determined."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fp:
+            raw = fp.read()
+    except OSError:
+        return None            # not Linux, or the process is gone
+    return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip() or None
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True            # exists, owned by another user
+    except OSError:
+        return False
+    return True
+
+
+def _terminate(pid: int) -> None:
+    """SIGTERM, isolated in its own function so `stop`'s one dangerous call is a
+    single named seam -- easy to see in review, easy to pin in a test."""
+    import signal
+
+    os.kill(pid, signal.SIGTERM)
+
+
+def read_pidfile(path: Path) -> Optional[dict]:
+    if not path.exists():
+        return None
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return rec if isinstance(rec, dict) and isinstance(rec.get("pid"), int) else None
+
+
+def pidfile_status(path: Path) -> tuple[str, Optional[dict]]:
+    """One of 'absent' | 'live_ours' | 'stale' | 'foreign', plus the record.
+
+    'foreign' exists because adopting a live PID we cannot PROVE is ours is how
+    `stop` ends up killing something unrelated. When ownership cannot be decided
+    we return 'foreign', which means: reclaim the FILE, never signal the PROCESS.
+    """
+    rec = read_pidfile(path)
+    if rec is None:
+        return "absent", None
+    pid = int(rec["pid"])
+    if not _process_alive(pid):
+        return "stale", rec
+    recorded = rec.get("cmdline")
+    current = _proc_cmdline(pid)
+    if not recorded:
+        # Written on a platform with no /proc. Fall back to the identity we did
+        # record; this is weaker than a cmdline match and deliberately last.
+        return ("live_ours", rec) if current is None else ("foreign", rec)
+    if current is not None and current == recorded:
+        return "live_ours", rec
+    return "foreign", rec
+
+
+def write_pidfile(path: Path, *, self_name: str, sinks: list, poll_s: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "pid": os.getpid(),
+        "self": self_name,
+        "sinks": [s.name if isinstance(s, Sink) else str(s) for s in sinks],
+        "poll_s": poll_s,
+        "started_at": time.time(),
+        "cmdline": _proc_cmdline(os.getpid()),
+    }
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(rec, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+# ── the deprecated `swarph mesh sidecar` surface ─────────────────────────────
+
+class _LegacyCursorView(MutableMapping):
+    """`mesh sidecar`'s flat cursor dict, COMPUTED over the card-#122 split.
+
+    Its callers (and three regression suites) read `cursor["last_msg_id"]`,
+    `cursor["pending_wake"]` and `cursor["last_wake_at"]`. Under the split those
+    are two different questions living in two files: `last_msg_id` is the
+    OBSERVATION cursor, the other two are the tmux sink's LEDGER.
+
+    They are computed here rather than mirrored, because keeping a second copy in
+    sync is precisely the "one variable, two questions" trap the card removes.
+    """
+
+    _KEYS = ("last_msg_id", "last_wake_at", "pending_wake")
+
+    def __init__(self, state: "MeshSidecarState", observed: dict, sink_name: str):
+        self._state = state
+        self._observed = observed
+        self._sink = sink_name
+
+    def _led(self) -> dict:
+        return self._state.ledger(self._sink)
+
+    def _observed_id(self) -> int:
+        return int(self._observed.get("last_msg_id", 0))
+
+    def __getitem__(self, key):
+        if key == "last_msg_id":
+            return self._observed.get("last_msg_id", 0)
+        if key == "last_wake_at":
+            return float(self._led()["last_delivery_at"])
+        if key == "pending_wake":
+            return int(self._led()["last_delivered_id"]) < self._observed_id()
+        raise KeyError(key)
+
+    def __setitem__(self, key, value):
+        if key == "last_msg_id":
+            was_pending = self["pending_wake"]
+            self._observed["last_msg_id"] = value
+            if not was_pending:
+                # Legacy semantics: in the flat dict, assigning `last_msg_id`
+                # never CREATED an owed wake -- `pending_wake` was a separate
+                # field that stayed False. Keep the ledger in step so an outside
+                # caller seeding the cursor does not conjure a phantom delivery.
+                # (The engine writes `state.observed` directly and never lands
+                # here, so a genuinely new observation still owes.)
+                self._led()["last_delivered_id"] = int(value)
+            return
+        if key == "last_wake_at":
+            self._led()["last_delivery_at"] = float(value)
+            return
+        if key == "pending_wake":
+            self._led()["last_delivered_id"] = 0 if value else self._observed_id()
+            return
+        raise KeyError(key)
+
+    def __delitem__(self, key):
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(self._KEYS)
+
+    def __len__(self):
+        return len(self._KEYS)
+
+
+class MeshSidecarState(MonitorState):
+    """DEPRECATED compat facade: a monitor with exactly one `tmux:` sink.
+
+    Kept because droplet and gpu-wsl are running `swarph mesh sidecar` right now;
+    breaking their command to rename a verb is not a trade worth making.
+    """
+
+    def __init__(
+        self,
+        *,
+        self_name: str,
+        state_dir: Path,
+        gateway: str,
+        token: str,
+        tmux_target: str,
+        poll_s: int,
+        wake_min_interval_s: int,
+    ):
+        sink = TmuxSink(tmux_target)
+        super().__init__(
+            self_name=self_name,
+            state_dir=Path(state_dir),
+            gateway=gateway,
+            token=token,
+            sinks=[sink],
+            poll_s=poll_s,
+            min_interval_s=wake_min_interval_s,
+            log_prefix="[mesh-sidecar]",
+        )
+        self.tmux_target = tmux_target
+        self.wake_min_interval_s = wake_min_interval_s
+        self._sink_name = sink.name
+        self.cursor = _LegacyCursorView(self, self.observed, sink.name)
+
+    @property
+    def wakes_sent(self) -> int:
+        return self.deliveries.get(self._sink_name, 0)
+
+    @property
+    def consecutive_wake_failures(self) -> int:
+        return int(self.ledger(self._sink_name)["consecutive_failures"])
+
+
+# Legacy aliases. One engine underneath, so the deprecated verb cannot drift.
+_sidecar_iteration = _monitor_iteration
+_sidecar_deliver_wake = _monitor_deliver
 
 
 def _run_sidecar(args: argparse.Namespace) -> int:
+    """DEPRECATED alias for `swarph monitor start --deliver tmux:<target>` (#122)."""
     state_dir_arg = Path(args.state_dir).expanduser() if args.state_dir else None
     self_name = _resolve_self_name(args.self_name, state_dir=state_dir_arg)
     state_dir = state_dir_arg or _default_sidecar_state_dir(self_name)
@@ -585,6 +1175,13 @@ def _run_sidecar(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # STDERR, never stdout -- stdout is a sink now.
+    print(
+        "swarph mesh sidecar: DEPRECATED (card #122). Use:  swarph monitor start "
+        f"--deliver tmux:{tmux_target}   (or --deliver pull for a silent "
+        "'you have DMs' check that survives a dead pane)",
+        file=sys.stderr,
+    )
     token = _resolve_token(self_name, args.token_file)
     state = MeshSidecarState(
         self_name=self_name,
@@ -596,23 +1193,20 @@ def _run_sidecar(args: argparse.Namespace) -> int:
         wake_min_interval_s=args.wake_min_interval,
     )
     if args.once:
+        # Module-global call: `--once` is the seam the sidecar suites patch.
         _sidecar_iteration(state)
         return 0
-    print(
-        f"[mesh-sidecar] starting self={self_name} target={tmux_target} "
-        f"gateway={args.gateway} state={state_dir}",
-        flush=True,
+    write_pidfile(
+        state.pidfile_path,
+        self_name=self_name,
+        sinks=state.sinks,
+        poll_s=args.poll_seconds,
     )
-    while not state.shutdown_requested:
-        try:
-            _sidecar_iteration(state)
-        except KeyboardInterrupt:
-            state.shutdown_requested = True
-            break
-        except Exception as exc:
-            print(f"[mesh-sidecar] iteration error: {type(exc).__name__}: {exc}", file=sys.stderr)
-        time.sleep(_select_next_poll_seconds(state))
-    return 0
+    try:
+        return _monitor_loop(state)
+    finally:
+        if pidfile_status(state.pidfile_path)[0] == "live_ours":
+            state.pidfile_path.unlink(missing_ok=True)
 
 
 def run_mesh(argv: list[str]) -> int:
