@@ -433,6 +433,10 @@ class MeshSidecarState:
         self.iterations = 0
         self.dms_seen = 0
         self.wakes_sent = 0
+        # Counts CONSECUTIVE delivery failures. Delivery health is tracked
+        # separately from the read cursor so a dead pane is visible without
+        # ever rewinding what has already been observed (see _sidecar_poll_once).
+        self.consecutive_wake_failures = 0
 
 
 def _log_dm(state: MeshSidecarState, dm: dict) -> None:
@@ -470,6 +474,39 @@ def _select_next_poll_seconds(state: MeshSidecarState) -> int:
     return state.poll_s
 
 
+def _sidecar_deliver_wake(state: MeshSidecarState) -> None:
+    """Best-effort wake for observed-but-undelivered messages.
+
+    NEVER touches `last_msg_id`. Delivery failure (dead pane) and delivery
+    deferral (idle guard) both leave `pending_wake` set so the next iteration
+    retries -- the cursor is not the retry mechanism.
+    """
+    if not state.cursor.get("pending_wake"):
+        return
+
+    now = time.time()
+    last_wake_at = float(state.cursor.get("last_wake_at", 0.0))
+    if now - last_wake_at < state.wake_min_interval_s:
+        print("[mesh-sidecar] wake suppressed by idle guard "
+              "(cursor advanced; wake still pending)", flush=True)
+        return
+
+    if _tmux_wake(state.tmux_target):
+        state.cursor["last_wake_at"] = now
+        state.cursor["pending_wake"] = False
+        state.wakes_sent += 1
+        state.consecutive_wake_failures = 0
+    else:
+        # A dead pane is now VISIBLE instead of silently freezing the cursor.
+        state.consecutive_wake_failures += 1
+        print(f"[mesh-sidecar] WAKE FAILED ({state.consecutive_wake_failures} "
+              f"consecutive) for target {state.tmux_target!r} -- messages up to "
+              f"id {state.cursor.get('last_msg_id')} were still recorded; the "
+              f"pane is probably gone (session restart / renamed target)",
+              file=sys.stderr, flush=True)
+    _write_cursor_atomic(state.cursor_path, state.cursor)
+
+
 def _sidecar_iteration(state: MeshSidecarState) -> None:
     state.iterations += 1
     last_id = int(state.cursor.get("last_msg_id", 0))
@@ -501,6 +538,10 @@ def _sidecar_iteration(state: MeshSidecarState) -> None:
     ]
     if not messages:
         state.consecutive_empty += 1
+        # A wake deferred by the idle guard (or failed against a dead pane) must
+        # still land even though no NEW mail arrived -- re-selection is no longer
+        # the retry mechanism.
+        _sidecar_deliver_wake(state)
         return
 
     messages.sort(key=lambda m: int(m["id"]))
@@ -511,16 +552,26 @@ def _sidecar_iteration(state: MeshSidecarState) -> None:
         state.dms_seen += 1
         new_last_id = max(new_last_id, int(dm["id"]))
 
-    now = time.time()
-    last_wake_at = float(state.cursor.get("last_wake_at", 0.0))
-    if now - last_wake_at >= state.wake_min_interval_s:
-        if _tmux_wake(state.tmux_target):
-            state.cursor["last_wake_at"] = now
-            state.wakes_sent += 1
-            state.cursor["last_msg_id"] = new_last_id
-            _write_cursor_atomic(state.cursor_path, state.cursor)
-    else:
-        print("[mesh-sidecar] wake suppressed by idle guard", flush=True)
+    # ── BOOKKEEPING: advance the cursor because the messages were OBSERVED ──
+    # This MUST happen independently of any delivery attempt. It previously
+    # happened only inside `if _tmux_wake(...)`, re-coupling exactly what the
+    # 2026-07-10 fix decoupled (see this module's docstring: grok-researcher
+    # answered one request 67 times, ~410k tokens, because read-marking was tied
+    # to listing). Here the pair was cursor-advance tied to WAKING: `_tmux_wake`
+    # returns False whenever the pane is gone (session restart, tmux server
+    # reaped, target renamed), so `last_msg_id` never moved and every poll
+    # re-selected the same messages forever, with no backoff and no alarm.
+    #
+    # Delivery is delivery; the cursor is bookkeeping. `pending_wake` carries the
+    # "somebody still needs waking" state so a throttled or failed wake is
+    # retried WITHOUT rewinding what has already been seen -- the retry used to
+    # depend on re-selecting the same messages, which silently dropped a DM once
+    # the gateway's 50-message window rolled past it.
+    state.cursor["last_msg_id"] = new_last_id
+    state.cursor["pending_wake"] = True
+    _write_cursor_atomic(state.cursor_path, state.cursor)
+
+    _sidecar_deliver_wake(state)
 
 
 def _run_sidecar(args: argparse.Namespace) -> int:
