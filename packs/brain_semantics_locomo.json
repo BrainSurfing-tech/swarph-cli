@@ -1,0 +1,308 @@
+{
+  "theme": "brain_semantics_locomo",
+  "version": "1",
+  "system": "You answer a question using ONLY the retrieved memory snippets below. If the answer is present, give it as concisely as possible (a name, date, or short phrase). If it is not in the snippets, reply exactly: I don't know.",
+  "description": "Isolates the SEMANTIC-SYNTHESIS layer of gbrain's answer step: given the GOLD evidence/context for a LOCOMO memory-recall question (retrieval held FIXED — not what's under test here, that's board #33's separate concern), which model best answers the question from that context? Built from gbrain-bench's own LOCOMO harness (locomo_loader.py resolves each QA's `evidence` dia_ids to the actual conversation-turn text) and gbrain-bench's real answer() framing (judge.py) as the `system`, so this pack measures model semantics under gbrain's REAL deployment context, not a hand-tuned one. Tasks span LOCOMO's own category taxonomy (1=multi_hop, 2=temporal, 3=open_domain, 4=single_hop) for spread. EVAL/DEMO pack on public LOCOMO data (not proprietary) — first real-domain pack for the swarph-bench community registry (#101), proving the tool on gbrain's own domain (#102). NOTE for `bench validate`'s answer-leak gate: for a memory-recall pack the evidence block legitimately CONTAINS the gold answer (that is the point of the task — the model must extract it from context, not invent it), so leak-gate flags on the `text`-type tasks here are expected false positives, not a pack defect — unlike a reasoning/arithmetic pack where a leak would be a real bug.",
+  "tasks": [
+    {
+      "id": "locomo_conv26_multi_hop_00",
+      "type": "text",
+      "expected": "Adoption agencies",
+      "weight": 1.5,
+      "meta": {
+        "class": "multi_hop",
+        "sample_id": "conv-26",
+        "locomo_category": 1
+      },
+      "prompt": "Retrieved snippets:\n- [1:14 pm on 25 May, 2023] Caroline: Researching adoption agencies — it's been a dream to have a family and give a loving home to kids who need it.\n\nQuestion: What did Caroline research?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv26_multi_hop_01",
+      "type": "text",
+      "expected": "Transgender woman",
+      "weight": 1.5,
+      "meta": {
+        "class": "multi_hop",
+        "sample_id": "conv-26",
+        "locomo_category": 1
+      },
+      "prompt": "Retrieved snippets:\n- [1:56 pm on 8 May, 2023] Caroline: The transgender stories were so inspiring! I was so happy and thankful for all the support.\n\nQuestion: What is Caroline's identity?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv26_multi_hop_02",
+      "type": "categorical",
+      "expected": "Single",
+      "weight": 1.5,
+      "meta": {
+        "class": "multi_hop",
+        "sample_id": "conv-26",
+        "locomo_category": 1
+      },
+      "prompt": "Retrieved snippets:\n- [7:55 pm on 9 June, 2023] Caroline: Yeah, I'm really lucky to have them. They've been there through everything, I've known these friends for 4 years, since I moved from my home country. Their love and help have been so important especially after that tough breakup. I'm super thankful. Who supports you, Mel?\n- [1:14 pm on 25 May, 2023] Caroline: I'm thrilled to make a family for kids who need one. It'll be tough as a single parent, but I'm up for the challenge!\n\nQuestion: What is Caroline's relationship status?\nAnswer:\n\nReply ONLY with JSON: {\"answer\": <value>}"
+    },
+    {
+      "id": "locomo_conv30_multi_hop_03",
+      "type": "text",
+      "expected": "By the water, with natural light and Marley flooring",
+      "weight": 1.5,
+      "meta": {
+        "class": "multi_hop",
+        "sample_id": "conv-30",
+        "locomo_category": 1
+      },
+      "prompt": "Retrieved snippets:\n- [4:04 pm on 20 January, 2023] Jon: Wow, that must've been great! Check my ideal dance studio by the water.\n- [2:32 pm on 29 January, 2023] Jon: Hey Gina! Thanks for asking. I'm on the hunt for the ideal spot for my dance studio and it's been quite a journey! I've been looking at different places and picturing how the space would look. I even found a place with great natural light! Oh, I've been to Paris yesterday! It was sooo cool.\n- [2:32 pm on 29 January, 2023] Jon: Yeah, good flooring's crucial. I'm after Marley flooring, which is what dance studios usually use. It's great 'cause it's grippy but still lets you move, plus it's tough and easy to keep clean.\n\nQuestion: What Jon thinks the ideal dance studio should look like?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv30_multi_hop_04",
+      "type": "categorical",
+      "expected": "Rome",
+      "weight": 1.5,
+      "meta": {
+        "class": "multi_hop",
+        "sample_id": "conv-30",
+        "locomo_category": 1
+      },
+      "prompt": "Retrieved snippets:\n- [2:32 pm on 29 January, 2023] Gina: Wow, nice spot! Where is it? Got any other features you want to think about before you decide? Paris?! That is really great Jon! Never had a chance to visit it. Been only to Rome once.\n- [10:04 am on 19 June, 2023] Jon: Hey Gina, hope you're doing great! Still working on my biz. Took a short trip last week to Rome to clear my mind a little.\n\nQuestion: Which city have both Jean and John visited?\nAnswer:\n\nReply ONLY with JSON: {\"answer\": <value>}"
+    },
+    {
+      "id": "locomo_conv30_multi_hop_05",
+      "type": "text",
+      "expected": "She always loved fashion trends and finding unique pieces and she lost her job so decided it was time to start her own business.",
+      "weight": 1.5,
+      "meta": {
+        "class": "multi_hop",
+        "sample_id": "conv-30",
+        "locomo_category": 1
+      },
+      "prompt": "Retrieved snippets:\n- [2:35 pm on 16 March, 2023] Gina: Thanks! I'm passionate about fashion trends and finding unique pieces. Plus, I wanted to blend my love for dance and fashion, so it was a perfect match.\n- [4:04 pm on 20 January, 2023] Gina: Sorry about your job Jon, but starting your own business sounds awesome! Unfortunately, I also lost my job at Door Dash this month. What business are you thinking of?\n\nQuestion: Why did Gina decide to start her own clothing store?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv26_temporal_00",
+      "type": "text",
+      "expected": "7 May 2023",
+      "weight": 1.5,
+      "meta": {
+        "class": "temporal",
+        "sample_id": "conv-26",
+        "locomo_category": 2
+      },
+      "prompt": "Retrieved snippets:\n- [1:56 pm on 8 May, 2023] Caroline: I went to a LGBTQ support group yesterday and it was so powerful.\n\nQuestion: When did Caroline go to the LGBTQ support group?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv26_temporal_01",
+      "type": "numeric",
+      "expected": 2022.0,
+      "weight": 1.5,
+      "meta": {
+        "class": "temporal",
+        "sample_id": "conv-26",
+        "locomo_category": 2
+      },
+      "prompt": "Retrieved snippets:\n- [1:56 pm on 8 May, 2023] Melanie: You'd be a great counselor! Your empathy and understanding will really help the people you work with. By the way, take a look at this.\n\nQuestion: When did Melanie paint a sunrise?\nAnswer:\n\nReply ONLY with JSON: {\"answer\": <value>}"
+    },
+    {
+      "id": "locomo_conv26_temporal_02",
+      "type": "text",
+      "expected": "The sunday before 25 May 2023",
+      "weight": 1.5,
+      "meta": {
+        "class": "temporal",
+        "sample_id": "conv-26",
+        "locomo_category": 2
+      },
+      "prompt": "Retrieved snippets:\n- [1:14 pm on 25 May, 2023] Melanie: Hey Caroline, since we last chatted, I've had a lot of things happening to me. I ran a charity race for mental health last Saturday – it was really rewarding. Really made me think about taking care of our minds.\n\nQuestion: When did Melanie run a charity race?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv30_temporal_03",
+      "type": "text",
+      "expected": "19 January, 2023",
+      "weight": 1.5,
+      "meta": {
+        "class": "temporal",
+        "sample_id": "conv-30",
+        "locomo_category": 2
+      },
+      "prompt": "Retrieved snippets:\n- [4:04 pm on 20 January, 2023] Jon: Hey Gina! Good to see you too. Lost my job as a banker yesterday, so I'm gonna take a shot at starting my own business.\n\nQuestion: When Jon has lost his job as a banker?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv30_temporal_04",
+      "type": "text",
+      "expected": "January, 2023",
+      "weight": 1.5,
+      "meta": {
+        "class": "temporal",
+        "sample_id": "conv-30",
+        "locomo_category": 2
+      },
+      "prompt": "Retrieved snippets:\n- [4:04 pm on 20 January, 2023] Gina: Sorry about your job Jon, but starting your own business sounds awesome! Unfortunately, I also lost my job at Door Dash this month. What business are you thinking of?\n\nQuestion: When Gina has lost her job at Door Dash?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv30_temporal_05",
+      "type": "text",
+      "expected": "February, 2023",
+      "weight": 1.5,
+      "meta": {
+        "class": "temporal",
+        "sample_id": "conv-30",
+        "locomo_category": 2
+      },
+      "prompt": "Retrieved snippets:\n- [4:04 pm on 20 January, 2023] Jon: Thanks! I rehearsed with a small group of dancers after work. We do all kinds of dances, from contemporary to hip-hop. We've got some cool projects in the works. Finishing up choreography to perform at a nearby festival next month. Can't wait!\n\nQuestion: When is Jon's group performing at a festival?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv26_open_domain_00",
+      "type": "text",
+      "expected": "Psychology, counseling certification",
+      "weight": 1.0,
+      "meta": {
+        "class": "open_domain",
+        "sample_id": "conv-26",
+        "locomo_category": 3
+      },
+      "prompt": "Retrieved snippets:\n- [1:56 pm on 8 May, 2023] Caroline: Gonna continue my edu and check out career options, which is pretty exciting!\n- [1:56 pm on 8 May, 2023] Caroline: I'm keen on counseling or working in mental health - I'd love to support those with similar issues.\n\nQuestion: What fields would Caroline be likely to pursue in her educaton?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv26_open_domain_01",
+      "type": "text",
+      "expected": "Likely no",
+      "weight": 1.0,
+      "meta": {
+        "class": "open_domain",
+        "sample_id": "conv-26",
+        "locomo_category": 3
+      },
+      "prompt": "Retrieved snippets:\n- [10:37 am on 27 June, 2023] Caroline: Thanks, Melanie. It really mattered. My own journey and the support I got made a huge difference. Now I want to help people go through it too. I saw how counseling and support groups improved my life, so I started caring more about mental health and understanding myself. Now I'm passionate about creating a safe, inviting place for people to grow.\n- [7:55 pm on 9 June, 2023] Caroline: Thanks Mel! Your kind words mean a lot. Sharing our experiences isn't always easy, but I feel it's important to help promote understanding and acceptance. I've been blessed with loads of love and support throughout this journey, and I want to pass it on to others. By sharing our stories, we can build a strong, supportive community of hope.\n\nQuestion: Would Caroline still want to pursue counseling as a career if she hadn't received support growing up?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv26_open_domain_02",
+      "type": "text",
+      "expected": "Yes, since she collects classic children's books",
+      "weight": 1.0,
+      "meta": {
+        "class": "open_domain",
+        "sample_id": "conv-26",
+        "locomo_category": 3
+      },
+      "prompt": "Retrieved snippets:\n- [8:18 pm on 6 July, 2023] Caroline: I've got lots of kids' books- classics, stories from different cultures, educational books, all of that. What's a favorite book you remember from your childhood?\n\nQuestion: Would Caroline likely have Dr. Seuss books on her bookshelf?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv41_open_domain_03",
+      "type": "text",
+      "expected": "Middle-class or wealthy",
+      "weight": 1.0,
+      "meta": {
+        "class": "open_domain",
+        "sample_id": "conv-41",
+        "locomo_category": 3
+      },
+      "prompt": "Retrieved snippets:\n- [1:17 pm on 28 January, 2023] John: It's definitely isn't, Maria. My kids have so much and others don't. We really need to do something about it.\n\nQuestion: What might John's financial status be?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv26_single_hop_00",
+      "type": "text",
+      "expected": "mental health",
+      "weight": 1.0,
+      "meta": {
+        "class": "single_hop",
+        "sample_id": "conv-26",
+        "locomo_category": 4
+      },
+      "prompt": "Retrieved snippets:\n- [1:14 pm on 25 May, 2023] Caroline: That charity race sounds great, Mel! Making a difference & raising awareness for mental health is super rewarding - I'm really proud of you for taking part!\n\nQuestion: What did the charity race raise awareness for?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv26_single_hop_01",
+      "type": "text",
+      "expected": "self-care is important",
+      "weight": 1.0,
+      "meta": {
+        "class": "single_hop",
+        "sample_id": "conv-26",
+        "locomo_category": 4
+      },
+      "prompt": "Retrieved snippets:\n- [1:14 pm on 25 May, 2023] Melanie: Thanks, Caroline! The event was really thought-provoking. I'm starting to realize that self-care is really important. It's a journey for me, but when I look after myself, I'm able to better look after my family.\n\nQuestion: What did Melanie realize after the charity race?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv26_single_hop_02",
+      "type": "text",
+      "expected": "by carving out some me-time each day for activities like running, reading, or playing the violin",
+      "weight": 1.0,
+      "meta": {
+        "class": "single_hop",
+        "sample_id": "conv-26",
+        "locomo_category": 4
+      },
+      "prompt": "Retrieved snippets:\n- [1:14 pm on 25 May, 2023] Melanie: Yeah, it's tough. So I'm carving out some me-time each day - running, reading, or playing my violin - which refreshes me and helps me stay present for my fam!\n\nQuestion: How does Melanie prioritize self-care?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv30_single_hop_03",
+      "type": "text",
+      "expected": "by dancing",
+      "weight": 1.0,
+      "meta": {
+        "class": "single_hop",
+        "sample_id": "conv-30",
+        "locomo_category": 4
+      },
+      "prompt": "Retrieved snippets:\n- [4:04 pm on 20 January, 2023] Gina: Wow Jon, same here! Dance is pretty much my go-to for stress relief. Got any fave styles?\n- [4:04 pm on 20 January, 2023] Jon: I've been into dancing since I was a kid and it's been my passion and escape. I wanna start a dance studio so I can teach others the joy that dancing brings me.\n\nQuestion: How do Jon and Gina both like to destress?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv30_single_hop_04",
+      "type": "text",
+      "expected": "He lost his job and decided to start his own business to share his passion.",
+      "weight": 1.0,
+      "meta": {
+        "class": "single_hop",
+        "sample_id": "conv-30",
+        "locomo_category": 4
+      },
+      "prompt": "Retrieved snippets:\n- [4:04 pm on 20 January, 2023] Jon: Hey Gina! Good to see you too. Lost my job as a banker yesterday, so I'm gonna take a shot at starting my own business.\n- [4:04 pm on 20 January, 2023] Jon: Sorry to hear that! I'm starting a dance studio 'cause I'm passionate about dancing and it'd be great to share it with others.\n\nQuestion: Why did Jon decide to start his dance studio?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv30_single_hop_05",
+      "type": "categorical",
+      "expected": "Contemporary",
+      "weight": 1.0,
+      "meta": {
+        "class": "single_hop",
+        "sample_id": "conv-30",
+        "locomo_category": 4
+      },
+      "prompt": "Retrieved snippets:\n- [4:04 pm on 20 January, 2023] Gina: Yeah, me too! Contemporary dance is so expressive and graceful - it really speaks to me.\n\nQuestion: What is Gina's favorite style of dance?\nAnswer:\n\nReply ONLY with JSON: {\"answer\": <value>}"
+    },
+    {
+      "id": "locomo_conv41_single_hop_06",
+      "type": "text",
+      "expected": "Improving education and infrastructure",
+      "weight": 1.0,
+      "meta": {
+        "class": "single_hop",
+        "sample_id": "conv-41",
+        "locomo_category": 4
+      },
+      "prompt": "Retrieved snippets:\n- [11:01 am on 17 December, 2022] John: I'm passionate about improving education and infrastructure in our community. Those are my main focuses.\n\nQuestion: What is John's main focus in local politics?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv41_single_hop_07",
+      "type": "text",
+      "expected": "Seeing how lack of education and crumbling infrastructure affected his neighborhood while growing up.",
+      "weight": 1.0,
+      "meta": {
+        "class": "single_hop",
+        "sample_id": "conv-41",
+        "locomo_category": 4
+      },
+      "prompt": "Retrieved snippets:\n- [11:01 am on 17 December, 2022] John: Growing up, I saw how lack of education and crumbling infrastructure affected my neighborhood. I don't want future generations to go through that, so I think schools and infrastructure should be funded properly. Here's a pic of a school last year, after they got the funding.\n\nQuestion: What sparked John's interest in improving education and infrastructure in the community?\nAnswer:"
+    },
+    {
+      "id": "locomo_conv41_single_hop_08",
+      "type": "text",
+      "expected": "Enabled needed repairs and renovations, making the learning environment safer and more modern for students.",
+      "weight": 1.0,
+      "meta": {
+        "class": "single_hop",
+        "sample_id": "conv-41",
+        "locomo_category": 4
+      },
+      "prompt": "Retrieved snippets:\n- [11:01 am on 17 December, 2022] John: It enabled needed repairs and renovations, making the learning environment safer and more modern for students.\n\nQuestion: How did the extra funding help the school shown in the photo shared by John?\nAnswer:"
+    }
+  ]
+}
