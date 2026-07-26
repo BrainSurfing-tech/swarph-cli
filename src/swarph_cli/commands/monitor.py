@@ -115,12 +115,75 @@ def _resolve(args: argparse.Namespace) -> tuple[str, Path]:
 
 # ── start ────────────────────────────────────────────────────────────────────
 
+_DAEMON_PIDFILE = "daemon.pid"
+
+
+def _daemon_owns_state_dir(state_dir):
+    """Detect a `swarph daemon` already writing this state dir.
+
+    Returns (reason, detail) or (None, None).
+
+    WHY THIS EXISTS (droplet's PR #139 review, live on his box): `swarph daemon`
+    uses the IDENTICAL layout -- state_dir/cursor.json + state_dir/inbox.log.
+    `_MONITOR_PIDFILE` guards monitor-against-monitor; NOTHING guarded
+    monitor-against-daemon. So `swarph monitor start --state-dir
+    /var/lib/swarph/<peer>` -- the obvious thing to type, because that is where
+    the state already is -- puts two processes on one cursor, each advancing it
+    on its own poll. Interleaved writes give lost DMs or repeats, and BOTH
+    failure modes are silent.
+
+    Two detectors, because one is not enough:
+      1. `daemon.pid` -- reliable, but only for daemons started AFTER this
+         landed. Every box already running one has no pidfile.
+      2. `tasks_snapshot` in cursor.json -- the daemon seeds it and monitor
+         NEVER writes it, so its presence is positive evidence a daemon owns
+         this directory. This is what catches the already-running case.
+    """
+    pidfile = state_dir / _DAEMON_PIDFILE
+    if pidfile.exists():
+        try:
+            rec = json.loads(pidfile.read_text(encoding="utf-8"))
+            pid = int(rec.get("pid", 0))
+        except (OSError, ValueError, json.JSONDecodeError):
+            pid = 0
+        if pid and pid != os.getpid() and mesh._process_alive(pid):
+            return ("live daemon pidfile", f"{pidfile} (pid {pid})")
+
+    cursor = state_dir / "cursor.json"
+    if cursor.exists():
+        try:
+            data = json.loads(cursor.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            data = None
+        if isinstance(data, dict) and "tasks_snapshot" in data:
+            return ("daemon-owned cursor", f"{cursor} carries `tasks_snapshot`")
+    return (None, None)
+
+
 def _cmd_start(args: argparse.Namespace) -> int:
     # Parse sinks FIRST: a held or unknown sink must fail before anything is
     # created on disk, so a bad --deliver never leaves a half-started monitor.
     sinks = [mesh.parse_sink(spec) for spec in (args.deliver or ["pull"])]
     self_name, state_dir = _resolve(args)
     pidfile = state_dir / mesh._MONITOR_PIDFILE
+
+    # REFUSE rather than race. droplet's call over silently defaulting to a
+    # private state dir: sharing the directory is legitimate once one of the two
+    # is stopped, so a hard error TEACHES the constraint instead of hiding it.
+    # Same shape as the webhook hold -- loud refusal beats a silent race.
+    reason, detail = _daemon_owns_state_dir(state_dir)
+    if reason is not None:
+        print(
+            f"swarph monitor: REFUSING to start -- `swarph daemon` appears to own "
+            f"{state_dir}\n"
+            f"  evidence: {reason} -- {detail}\n"
+            f"  Both write cursor.json and inbox.log. Two writers on one cursor "
+            f"means lost DMs or repeats, silently.\n"
+            f"  Either stop the daemon, or give the monitor its own "
+            f"--state-dir.",
+            file=sys.stderr,
+        )
+        return 2
 
     status, rec = mesh.pidfile_status(pidfile)
     if status == "live_ours":
