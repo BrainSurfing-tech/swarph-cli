@@ -2,6 +2,26 @@
 
 Notable changes to `swarph-cli`. Earlier history: `git log`.
 
+## 0.39.1 — 2026-07-26
+- **fix(monitor):** refuse a **derived** identity that is not a registered peer.
+  `self_name` falls back to the state dir BASENAME, so
+  `swarph monitor start --state-dir /var/lib/swarph/droplet-monitor` produced a
+  monitor for the peer `droplet-monitor` — which does not exist. Nothing can be
+  addressed to an unregistered peer, so it polled a nonexistent inbox, saw zero
+  DMs forever, and reported itself **running and healthy**. Silent deafness
+  reintroduced through *configuration* rather than code. Found by peer cell
+  `droplet` within minutes of installing 0.39.0.
+  - Refuses only on a **positive** "not a peer" answer: unreachable gateway,
+    non-200, unexpected shape and **empty peer list** all warn and proceed.
+    `start` must stay safe to call unconditionally from a hook, and an empty
+    list is what a half-initialised gateway returns — refusing on it would stop
+    every monitor in the fleet at once.
+  - Only the **derived** path refuses. An explicit `--as` / `$SWARPH_SELF` is a
+    deliberate claim and may be pre-staging a peer not yet registered; that
+    warns and continues.
+  - The check runs *after* the already-running fast path, which is the hook path
+    and must stay free and silent.
+
 ## 0.39.0 — 2026-07-26
 - **`swarph monitor`** — pluggable DM delivery, PULL-first (card #122).
   - **The state split.** An *observation cursor* (what the monitor has READ,
