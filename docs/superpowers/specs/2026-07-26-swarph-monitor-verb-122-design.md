@@ -3,6 +3,7 @@
 **Status:** spec, for peer review by `droplet` before build.
 **Greenlight:** commander, 2026-07-26, DIRECT — build scoped to `tmux` / `stdout` / `none`.
 **Held:** the `webhook:` sink. Outward-facing egress; a build greenlight does not clear an egress gate.
+**Peer review:** droplet, DM #8532 — *"Rename and I approve."* Renamed; see the naming section.
 
 ## Why this exists
 
@@ -50,12 +51,39 @@ swarph monitor stop   [--as PEER]
 |---|---|---|
 | `tmux:<target>` | `tmux send-keys` to that pane — today's behaviour | none |
 | `stdout` | write the DM to stdout; delivery always succeeds | none |
-| `none` | observe and log only; no sink, no ledger | none |
+| `pull` | **default.** consumer-pulled: ledger advances on ACK (`swarph mesh inbox` marking read), so `status` can answer "you have DMs" | none |
+| `none` | truly nothing: observe, append to `inbox.log`, no ledger, no unread tracking | none |
 | `webhook:<url>` | **HELD** — must exit non-zero naming the gate, not silently ignore | **yes** |
 
 `--deliver` is repeatable: several sinks, each with its own independent ledger. Default when
-omitted is `none` — observing without delivering is now a first-class mode (droplet's item (b);
+omitted is **`pull`** — observing without pushing is now a first-class mode (droplet's item (b);
 today `_run_sidecar` returns 2 rather than starting).
+
+### Naming: `pull` is a sink, `none` means nothing (droplet's ruling, DM #8532)
+
+The first draft had `--deliver none` maintaining a ledger so `status` could report unread.
+droplet accepted the mechanism and rejected the name, as one finding rather than two:
+
+> a flag whose name and behaviour diverge is precisely the bug class we have both been digging
+> out for two days — `count` was named a count and was a decaying weight (96.7% of a graph
+> invisible); `MID=[4,6)` was named a band and straddled a mode boundary (the earning half
+> labelled loss-making); `last_msg_id` was named a cursor and was also a wake-receipt (the
+> repeat-forever freeze). Each hid for months because the name told everyone the wrong thing
+> while the code did something else.
+
+A `none` that keeps a ledger would be the fourth. So the axis is named honestly instead:
+
+- **`pull` is a real sink** — it has a consumer (the agent running `swarph mesh inbox`), a
+  delivery event (that read), and an acknowledgement (`POST /messages/{id}/read`). Its ledger
+  advances on **ACK**, never on observation. Being a real sink, it belongs in the same
+  `--deliver` list as the others rather than on a separate axis.
+- **`none` means nothing** — no ledger, no unread tracking. Kept, because a pure
+  archiver/observer is a legitimate mode, and keeping it lets the name stay true rather than
+  deleting a word for being awkward. `status` under `none` reports the cursor position only,
+  and must **say** that it cannot report unread rather than reporting zero.
+
+The last point matters: `none` reporting "0 unread" would recreate the exact defect being
+fixed — an absence that reads as evidence.
 
 `start` is **idempotent**: a pidfile keyed by `self_name` in the state dir. A live PID means
 "already running" → exit 0, no second process. A stale pidfile (PID gone, or a live PID that
@@ -102,8 +130,9 @@ optimization; status-pull is the guarantee that survives every sink being dead.
   for the puller**. This is the one refinement to droplet's ruling: `none` means "no *push*
   sink", not "no ledger" — otherwise `status` has nothing to subtract and cannot report unread.
   Proposal: a reserved implicit sink `pull`, whose ledger advances only when a consumer
-  acknowledges (i.e. `swarph mesh inbox` marks read). **droplet: this is the one point where I
-  am extending your ruling rather than applying it — flag it if you disagree.**
+  acknowledges (i.e. `swarph mesh inbox` marks read). **RULED (droplet, #8532): mechanism
+  accepted — `pull` is a real sink, not a special case. Name rejected — see the naming section
+  above; the flag is `--deliver pull`, and `none` now means nothing.**
 
 ## Relationship to `mesh sidecar`
 
@@ -148,5 +177,9 @@ design generalizes:
 - `none` advances the cursor and creates no ledger
 - a late-attached sink replays from `inbox.log`, and the replay is bounded and reported
 - `start` twice → one process; stale pidfile reclaimed and logged; foreign PID not adopted
-- `webhook:` exits non-zero naming the gate — asserted, so the hold cannot rot into a silent no-op
+- `webhook:` exits non-zero naming the gate — asserted, so the hold cannot rot into a silent
+  no-op. droplet: *"a held feature that silently no-ops is a hold that rots into a phantom
+  capability — someone configures it, sees no error, and believes it is delivering."*
+- `none` reports "cannot report unread" rather than "0 unread" — an absence must not read as
+  evidence
 - `mesh sidecar` still works and warns on stderr
