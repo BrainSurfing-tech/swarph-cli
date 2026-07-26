@@ -128,11 +128,77 @@ def _peer_token_path(self_name: str) -> Path:
     return Path.home() / ".config" / "swarph" / f"{self_name}.peer_token"
 
 
+_TOKEN_KEYS = ("MESH_GATEWAY_TOKEN", "SWARPH_TOKEN", "TOKEN")
+
+
 def _read_token_file(path: Path) -> str:
+    """Read a bearer token from a token file OR an env-style file.
+
+    ONE PARSER BEHIND ONE FLAG (droplet, 2026-07-26). This previously did
+    `read_text().strip()` and returned the ENTIRE FILE, so `--token-file
+    /root/.mesh.env` -- the shape the systemd unit itself documents -- put
+    comments and other variables into the Authorization header. droplet's
+    monitor died with
+
+        UnicodeEncodeError: 'latin-1' codec can't encode character '\u2014'
+
+    from an em-dash in a COMMENT on line 5. Meanwhile `swarph daemon` read the
+    same flag through onboard._resolve_token, which has always skipped comments
+    and parsed KEY=VALUE. Two parsers, one flag -- the same one-thing-two-meanings
+    shape as the cursor that meant both observed and woken.
+
+    Accepts, in order:
+      1. an env-style line `MESH_GATEWAY_TOKEN=...` (quotes stripped), or
+      2. the first non-comment, non-blank, non-KEY=VALUE line as a bare token.
+    """
     try:
-        return path.read_text(encoding="utf-8").strip()
+        raw = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise RuntimeError(f"cannot read token file {path}: {exc}") from exc
+
+    bare: Optional[str] = None
+    for lineno, line in enumerate(raw.splitlines(), start=1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, value = line.split("=", 1)
+            if key.strip().upper() in _TOKEN_KEYS:
+                return _validated_token(value.strip().strip('"').strip("'"),
+                                        path, lineno)
+            continue
+        if bare is None:
+            bare = line
+            bare_lineno = lineno
+    if bare is not None:
+        return _validated_token(bare, path, bare_lineno)
+    raise RuntimeError(
+        f"token file {path} contains no token: expected a bare token line or "
+        f"one of {', '.join(_TOKEN_KEYS)}=<token>"
+    )
+
+
+def _validated_token(token: str, path: Path, lineno: int) -> str:
+    """Reject a token that cannot go in an HTTP header, NAMING THE SOURCE.
+
+    droplet's hardening, and it is worth more than the parse fix: a non-ASCII
+    byte in an outbound header surfaced as a latin-1 codec traceback twelve
+    frames deep in http/client.py, which points every reader at the HTTP layer
+    for what is a malformed config FILE. Fail at the boundary where the operator
+    can act, naming the file and the line.
+    """
+    try:
+        token.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        bad = token[exc.start:exc.start + 1]
+        raise RuntimeError(
+            f"token file {path} line {lineno}: token contains a non-ASCII "
+            f"character {bad!r} (U+{ord(bad):04X}) at position {exc.start}, "
+            f"which cannot be sent in an HTTP Authorization header. "
+            f"If this line is a comment, prefix it with '#'; if the file is "
+            f"env-style, use MESH_GATEWAY_TOKEN=<token>."
+        ) from None
+    return token
 
 
 def _read_secrets_token(path: Path) -> str:
