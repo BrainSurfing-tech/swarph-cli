@@ -119,9 +119,21 @@ def test_sidecar_filters_old_and_self_messages(tmp_path, monkeypatch):
     assert json.loads(log_lines[0])["id"] == 12
 
 
-def test_sidecar_idle_guard_suppresses_wake_without_advancing_cursor(
+def test_sidecar_idle_guard_suppresses_wake_but_still_advances_cursor(
     tmp_path, monkeypatch, capsys
 ):
+    """The guard defers DELIVERY; it must not rewind BOOKKEEPING.
+
+    Renamed and re-pointed 2026-07-26. This test used to assert
+    `last_msg_id == 0` after a suppressed wake -- i.e. that re-selecting the
+    same messages next poll WAS the retry mechanism. That coupling is the bug
+    droplet reported: the same code path froze the cursor forever when the tmux
+    pane was gone, and it silently dropped a DM once the gateway's 50-message
+    window rolled past a long-throttled message. The retry now rides on
+    `pending_wake`, so the guarantee this test protects -- a throttled message
+    still gets woken after the window (asserted below and in
+    test_sidecar_wakes_throttled_message_after_guard_window) -- is unchanged.
+    """
     state = _state(tmp_path)
     state.cursor["last_wake_at"] = 995.0
     monkeypatch.setattr(
@@ -135,10 +147,13 @@ def test_sidecar_idle_guard_suppresses_wake_without_advancing_cursor(
     monkeypatch.setattr(mesh, "_tmux_wake", lambda target: (_ for _ in ()).throw(AssertionError("guarded")))
     monkeypatch.setattr(mesh.time, "time", lambda: 1000.0)
     mesh._sidecar_iteration(state)
-    assert state.cursor["last_msg_id"] == 0
-    assert state.cursor["last_wake_at"] == 995.0
+    assert state.cursor["last_msg_id"] == 1, "observed => recorded, even undelivered"
+    assert state.cursor["pending_wake"] is True, "the wake is owed, not forgotten"
+    assert state.cursor["last_wake_at"] == 995.0, "a suppressed wake does not stamp"
     assert state.wakes_sent == 0
-    assert not (tmp_path / "cursor.json").exists()
+    assert (tmp_path / "cursor.json").exists(), (
+        "the advance must be durable -- a restart here must not rewind and replay"
+    )
     assert "wake suppressed" in capsys.readouterr().out
 
 
@@ -160,8 +175,8 @@ def test_sidecar_wakes_throttled_message_after_guard_window(tmp_path, monkeypatc
     monkeypatch.setattr(mesh.time, "time", lambda: now)
 
     mesh._sidecar_iteration(state)
-    assert wakes == []
-    assert state.cursor["last_msg_id"] == 0
+    assert wakes == [], "inside the guard window: no wake"
+    assert state.cursor["last_msg_id"] == 1, "but the message IS recorded as seen"
 
     now = 1060.0
     mesh._sidecar_iteration(state)
