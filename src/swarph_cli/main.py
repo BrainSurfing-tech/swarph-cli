@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -287,6 +288,36 @@ def _dispatch_verb(verb: str, verb_argv: list[str]) -> int:
     return handler(verb_argv)
 
 
+_VERB_SHAPE = re.compile(r"^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$")
+
+
+def _looks_like_a_mistyped_verb(token: str) -> bool:
+    """True for a lone verb-shaped word that is not a known verb.
+
+    Deliberately narrow: anything with whitespace, uppercase, punctuation or a
+    leading `-` is prompt-or-flag and passes through untouched.
+    """
+    return token not in _VERB_HANDLERS and bool(_VERB_SHAPE.match(token))
+
+
+def _reject_unknown_verb(token: str) -> int:
+    """Fail fast with directions -- never a silent billed prompt."""
+    import difflib
+
+    print(f"swarph: unknown verb {token!r}", file=sys.stderr)
+    close = difflib.get_close_matches(token, _VERB_HANDLERS, n=3, cutoff=0.6)
+    if close:
+        print("  did you mean:  " + "  ".join(f"swarph {c}" for c in close),
+              file=sys.stderr)
+    else:
+        # Most near-misses are SUBcommands of a verb (`inbox` -> `mesh inbox`),
+        # which no top-level match can surface. Point at the verb list instead.
+        print("  it may be a subcommand -- try:  swarph --help", file=sys.stderr)
+        print("  verbs: " + ", ".join(sorted(_VERB_HANDLERS)), file=sys.stderr)
+    print(f"  to send {token!r} as a prompt:  swarph -- {token}", file=sys.stderr)
+    return 2
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -296,6 +327,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     # through to the one-shot path.
     if argv and argv[0] in _VERB_HANDLERS:
         return _dispatch_verb(argv[0], argv[1:])
+
+    # A bare identifier-shaped first token is a MISTYPED VERB, not a prompt.
+    # Without this guard `swarph inbox` (the real verb is `swarph mesh inbox`)
+    # falls straight through to the one-shot path as prompt="inbox" and BILLS a
+    # provider call to answer a question nobody asked -- silently, with a
+    # plausible-looking answer. Reported by peer cell droplet 2026-07-26.
+    # Real one-shot prompts are sentences; `--` is the escape hatch for the rare
+    # single-word prompt (`swarph -- inbox`).
+    if argv and _looks_like_a_mistyped_verb(argv[0]):
+        return _reject_unknown_verb(argv[0])
 
     parser = _build_parser()
     args = parser.parse_args(argv)
