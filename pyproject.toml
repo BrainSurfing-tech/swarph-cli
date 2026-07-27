@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.39.3"
+version = "0.39.4"
 description = "The `swarph` binary — a multi-LLM CLI and mesh-gateway client + bundled server (`swarph gateway`): one-shot prompts across providers, interactive `chat`, multi-provider `spawn` (claude/codex/antigravity via a ProviderMembrane with subprocess billing-scrub), `mesh` send/inbox/register, `brain-ask` over the swarph-brain (gbrain) semantic memory, git-backed `assisted_memory`, session `import`, and a stranded-session `watchdog`."
 readme = "README.md"
 license = { text = "MIT" }
@@ -99,7 +99,12 @@ where = ["src"]
 # v0.7.3: ship bundled systemd unit + timer + default templates so
 # `swarph watchdog --install-service` can read them via importlib.resources.
 # Closes ev_6954f748 substrate-component-installation-gap.
-swarph_cli = ["systemd/*.service", "systemd/*.timer", "systemd/*.default"]
+# v0.39.4: ship the silent-monitor unit + the ensure-monitor helper. 0.39.3
+# shipped a README telling peers to run scripts/ensure_monitor.sh while the
+# wheel did NOT contain it -- non-.py files need declaring here, and a
+# clean-room install is what caught it.
+swarph_cli = ["systemd/*.service", "systemd/*.timer", "systemd/*.default",
+              "scripts/*.sh"]
 # v0.15: ship the bundled mesh-gateway schema so `swarph gateway serve`
 # can apply it at startup via MESH_SCHEMA_PATH (defaults next to server.py).
 "swarph_cli.gateway" = ["*.sql"]
