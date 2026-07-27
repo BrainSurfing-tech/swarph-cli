@@ -1,0 +1,38 @@
+[Unit]
+# Commander's design (2026-07-26): the DM check runs SILENTLY — no `tmux send-keys
+# "check mesh" Enter` typed into the cell's pane on every DM, which cost a turn per
+# message and only worked while the pane existed.
+#
+# The monitor observes in --deliver pull mode and pokes nothing. The cell learns it
+# has mail by ASKING (`swarph monitor status`), not by being typed at.
+#
+# WHY systemd OWNS THE MONITOR RATHER THAN A TIMER STARTING IT:
+# the first attempt was a Type=oneshot supervisor on a 5-min timer calling
+# `swarph monitor start`. It FAILED — systemd's default KillMode=control-group
+# reaped the detached monitor ONE SECOND after the oneshot finished (journal
+# 01:25:16 started -> 01:25:17 killed). Spawning a persistent daemon from a
+# oneshot fights systemd's cgroup lifecycle. Letting systemd own it also restarts
+# INSTANTLY on crash instead of within a 5-minute tick.
+#
+# Composes with a SessionStart hook: `monitor start` is idempotent via pidfile, so
+# a hook-started start is a quiet no-op while this is running.
+#
+# A SUPERVISOR MUST LIVE ABOVE WHAT IT SUPERVISES: as a system unit this survives
+# tmux dying, the session restarting, and the pane being renamed — the three
+# failure modes that made the old wake path go silently deaf.
+Description=swarph DM monitor (<PEER>) — silent pull-mode observer, no prompt injection
+Documentation=https://github.com/BrainSurfing-tech/swarph-cli
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<USER>
+Environment=SWARPH_SELF=<PEER>
+Environment=HOME=<HOME>
+ExecStart=<HOME>/.local/bin/swarph monitor start --as <PEER> --deliver pull --foreground
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
