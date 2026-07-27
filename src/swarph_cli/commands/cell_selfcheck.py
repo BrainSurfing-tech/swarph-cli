@@ -190,14 +190,57 @@ def discover_surfaces() -> list[dict]:
                 continue
             surfaces.append({"name": f.name, "kind": "unit", "text": text,
                              "live": _unit_live(f.name, user=("user" in str(d)))})
+    surfaces.append({"kind": "coverage", "class": "systemd units",
+                     "read": True,
+                     "detail": ", ".join(str(d) for d in unit_dirs if d.is_dir()) or "none present"})
+
+    # >>> THE CRONTAB PROBE HAD THREE SILENT FAILURE PATHS THAT ALL RENDERED AS
+    #     "no crontab surface", AND THE VERDICT PROCEEDED AS IF IT HAD LOOKED. <<<
+    # MEASURED 2026-07-27: grok-researcher's baseline came back `consistent` with 8
+    # flags and ZERO crontab rows, while four other cells ON THE SAME BOX saw 18.
+    # grok is the cell with the KNOWN relation-broken drift (shape 1) — and that
+    # drift lives in the crontab it could not read. THE TOOL CERTIFIED CLEAN THE ONE
+    # CELL IT WAS DESIGNED AROUND, because rc and stderr were both discarded:
+    #   · exception (no crontab binary)  -> except: pass
+    #   · rc=1 "no crontab for <user>"   -> empty stdout, no surface
+    #   · genuinely empty crontab        -> no surface
+    # `crontab -l` exits 1 with "no crontab for X" on STDERR, which the old code
+    # never read. Coverage is now REPORTED as data, so a clean verdict can never be
+    # read as "everything was inspected".
     try:
-        cron = subprocess.run(["crontab", "-l"], capture_output=True, text=True,
-                              timeout=10).stdout
-        if cron.strip():
-            surfaces.append({"name": "(crontab)", "kind": "cron", "text": cron,
+        p = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+        if p.returncode == 0 and p.stdout.strip():
+            surfaces.append({"name": "(crontab)", "kind": "cron", "text": p.stdout,
                              "live": True, "shared": True})
-    except (OSError, subprocess.SubprocessError):
-        pass
+            surfaces.append({"kind": "coverage", "class": "crontab", "read": True,
+                             "detail": f"{len(p.stdout.splitlines())} lines"})
+        elif p.returncode == 0:
+            surfaces.append({"kind": "coverage", "class": "crontab", "read": True,
+                             "detail": "present but empty"})
+        elif "no crontab for" in (p.stderr or ""):
+            # LEGITIMATE EMPTY, and still worth saying out loud: this user has none,
+            # so a cron line for this cell may live in ANOTHER user's crontab where
+            # this cell cannot see it. That is exactly grok's situation.
+            surfaces.append({"kind": "coverage", "class": "crontab", "read": True,
+                             "detail": "no crontab for this user — a cron line for "
+                                       "this cell may exist under another user"})
+        else:
+            surfaces.append({"kind": "coverage", "class": "crontab", "read": False,
+                             "detail": (p.stderr or f"exit {p.returncode}").strip()[:120]})
+    except (OSError, subprocess.SubprocessError) as exc:
+        surfaces.append({"kind": "coverage", "class": "crontab", "read": False,
+                         "detail": f"{type(exc).__name__}: {exc}"[:120]})
+
+    # NOT INSPECTED, stated so a clean verdict cannot be misread (science-claude,
+    # 2026-07-27): her live monitor is a HAND-STARTED process, not a unit and not a
+    # cron line, so THE ONE THING ACTUALLY DELIVERING HER DMs IS INVISIBLE HERE. This
+    # tool reads DECLARED CONFIGURATION, never running state. A migration that
+    # installs a unit beside a hand-started daemon gets two monitors, and this tool
+    # cannot warn about the one it did not install.
+    surfaces.append({"kind": "coverage", "class": "running processes", "read": False,
+                     "detail": "NOT INSPECTED BY DESIGN — this tool reads declared "
+                               "config, not running state; a hand-started daemon is "
+                               "invisible to it"})
     return surfaces
 
 
@@ -249,11 +292,22 @@ def run_selfcheck(*, self_name: str, declaration: Path) -> int:
         except (OSError, ValueError) as exc:
             print(f"  WARN      declaration unreadable ({exc}) — treating as absent")
 
-    rows = [r for s in discover_surfaces() for r in extract(s)]
+    surfaces = discover_surfaces()
+    coverage = [s for s in surfaces if s.get("kind") == "coverage"]
+    rows = [r for s in surfaces if s.get("kind") != "coverage" for r in extract(s)]
     mine = [r for r in rows if r.owner in (None, self_name)]
     drift = False
 
     print(f"cell selfcheck: {self_name}   ({len(rows)} flags across surfaces)")
+
+    # COVERAGE FIRST, ALWAYS. A verdict is only as wide as what was inspected, and a
+    # baseline that does not state its own coverage invites "consistent" to be read
+    # as "everything is fine". grok-researcher's clean verdict over an unread crontab
+    # is the measured instance.
+    for c in coverage:
+        mark = "read" if c.get("read") else "NOT READ"
+        print(f"  COVERAGE  {c.get('class'):18s} {mark:9s} {c.get('detail','')}")
+    blind = [c for c in coverage if not c.get("read") and c.get("class") != "running processes"]
 
     for r in rows:
         if r.owner and r.owner != self_name:
@@ -304,6 +358,15 @@ def run_selfcheck(*, self_name: str, declaration: Path) -> int:
         print(f"  RELATION BROKEN  --cursor {cur[0]} is not under --state-dir {sd[0]}")
         print("                   (both read OK per-key — the relation is the finding)")
         drift = True
+
+    if blind:
+        # A surface class we MEANT to read and could not. Exit 2, not 0 and not 1:
+        # this run did not measure the cell, it measured part of it. Reporting
+        # `consistent` over an unread surface is precisely the lie this card exists
+        # to catch — and the tool committed it against grok-researcher.
+        names = ", ".join(str(c.get("class")) for c in blind)
+        print(f"\n  verdict: DID NOT MEASURE (could not read: {names})")
+        return 2
 
     print(f"\n  verdict: {'DRIFT' if drift else 'consistent'}")
     return 1 if drift else 0
