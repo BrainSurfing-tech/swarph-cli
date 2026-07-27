@@ -207,29 +207,75 @@ def discover_surfaces() -> list[dict]:
     # `crontab -l` exits 1 with "no crontab for X" on STDERR, which the old code
     # never read. Coverage is now REPORTED as data, so a clean verdict can never be
     # read as "everything was inspected".
+    # THE CLASS IS `user crontab`, NOT `crontab`. `crontab -l` reads THE INVOKING
+    # USER'S crontab and nothing else. Naming the class `crontab` overstated it BY
+    # THE NAME ALONE, before any logic ran: a cell with a swarph line in /etc/cron.d
+    # would read "COVERAGE crontab read / verdict: consistent" while a live cron
+    # surface was never opened — grok's failure moved one directory over
+    # (droplet, PR #150 review). One name, two facts, inside the field added to fix
+    # one name, two facts.
+    #
+    # THE OTHER-USER CAVEAT IS UNCONDITIONAL, and that is deliberate. It is a
+    # property of THE PROBE — this command structurally cannot read another user's
+    # crontab in ANY branch — not a property of the cell. Hanging it only off the
+    # "no crontab" branch would tell grok and stay silent for a cell that HAS a
+    # crontab and ALSO has a line under another user.
+    _OTHER_USER = " (cannot see other users' crontabs in any case)"
     try:
         p = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
         if p.returncode == 0 and p.stdout.strip():
             surfaces.append({"name": "(crontab)", "kind": "cron", "text": p.stdout,
                              "live": True, "shared": True})
-            surfaces.append({"kind": "coverage", "class": "crontab", "read": True,
-                             "detail": f"{len(p.stdout.splitlines())} lines"})
+            surfaces.append({"kind": "coverage", "class": "user crontab", "read": True,
+                             "detail": f"{len(p.stdout.splitlines())} lines" + _OTHER_USER})
         elif p.returncode == 0:
-            surfaces.append({"kind": "coverage", "class": "crontab", "read": True,
-                             "detail": "present but empty"})
+            surfaces.append({"kind": "coverage", "class": "user crontab", "read": True,
+                             "detail": "present but empty" + _OTHER_USER})
         elif "no crontab for" in (p.stderr or ""):
-            # LEGITIMATE EMPTY, and still worth saying out loud: this user has none,
-            # so a cron line for this cell may live in ANOTHER user's crontab where
-            # this cell cannot see it. That is exactly grok's situation.
-            surfaces.append({"kind": "coverage", "class": "crontab", "read": True,
-                             "detail": "no crontab for this user — a cron line for "
-                                       "this cell may exist under another user"})
+            # LEGITIMATE EMPTY: a real answer, not a failure. Still stated, because a
+            # cron line for this cell may live under another user. That is grok.
+            #
+            # The stderr match is LOCALE-DEPENDENT ON PURPOSE: a translated message
+            # falls through to the `else` and becomes read=False -> DID NOT MEASURE.
+            # That degrades BLIND rather than FALSELY-CLEAN, which is the safe
+            # direction. Do not "fix" this into a broader match — a wider pattern
+            # would swallow real failures (droplet, PR #150).
+            surfaces.append({"kind": "coverage", "class": "user crontab", "read": True,
+                             "detail": "no crontab for this user" + _OTHER_USER})
         else:
-            surfaces.append({"kind": "coverage", "class": "crontab", "read": False,
+            surfaces.append({"kind": "coverage", "class": "user crontab", "read": False,
                              "detail": (p.stderr or f"exit {p.returncode}").strip()[:120]})
     except (OSError, subprocess.SubprocessError) as exc:
-        surfaces.append({"kind": "coverage", "class": "crontab", "read": False,
+        surfaces.append({"kind": "coverage", "class": "user crontab", "read": False,
                          "detail": f"{type(exc).__name__}: {exc}"[:120]})
+
+    # SYSTEM CRON — /etc/crontab and /etc/cron.d/*, which carry a sixth USER field.
+    # Never enumerated before, so they were invisible AND unmentioned: the tool could
+    # not say they were clean and could not say it had not looked.
+    sys_cron, unreadable = [], []
+    for path in [Path("/etc/crontab")] + sorted(Path("/etc/cron.d").glob("*")
+                                                if Path("/etc/cron.d").is_dir() else []):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            unreadable.append(f"{path.name} ({exc.__class__.__name__})")
+            continue
+        sys_cron.append(path.name)
+        if "swarph" in text:
+            # System cron lines carry a USER column that user crontabs do not, so
+            # ownership here is by --cell/--as exactly as elsewhere; the extra field
+            # is inert to the flag parser.
+            surfaces.append({"name": f"({path})", "kind": "cron", "text": text,
+                             "live": True, "shared": True})
+    if unreadable:
+        surfaces.append({"kind": "coverage", "class": "system cron", "read": False,
+                         "detail": "unreadable: " + ", ".join(unreadable)[:100]})
+    else:
+        surfaces.append({"kind": "coverage", "class": "system cron", "read": True,
+                         "detail": (f"{len(sys_cron)} files read" if sys_cron
+                                    else "none present")})
 
     # NOT INSPECTED, stated so a clean verdict cannot be misread (science-claude,
     # 2026-07-27): her live monitor is a HAND-STARTED process, not a unit and not a
