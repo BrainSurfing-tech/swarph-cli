@@ -80,6 +80,45 @@ def test_relation_fires_on_cursor_statedir_mismatch(monkeypatch, tmp_path, capsy
 
 # ── 2. lab + drop-on-meta-edge: a liveness MARKER passed to --cursor ─────────
 
+_NEIGHBOUR_BREAK = [
+    _cron("*/5 * * * * swarph watchdog --cell grok --cursor ~/s/grok/cursor.json\n"),
+    _unit("swarph-monitor-grok.service",
+          "ExecStart=swarph monitor start --as grok --state-dir ~/s/grok/mesh-sidecar\n"),
+    _unit("swarph-monitor-lab.service",
+          "ExecStart=swarph monitor start --as lab --state-dir ~/s/lab/mesh-sidecar "
+          "--cursor ~/s/lab/mesh-sidecar/cursor.json\n"),
+]
+
+
+def test_another_cells_relation_break_is_reported(monkeypatch, tmp_path, capsys):
+    """RELATIONS ARE FACTS, AND FACTS ARE NOT PER-OWNER.
+
+    Evaluating the relation over self-owned rows only meant a neighbour's live
+    divergence sat in the output as an attributed line that nothing checked. DRIFT is
+    declaration-dependent and correctly per-owner — another cell's divergence may be
+    intentional and declared in a file you cannot read. A cursor outside its state-dir
+    is wrong whoever owns it, and NO DECLARATION CAN MAKE IT RIGHT (droplet: this was
+    in his prototype, his ten fixtures never pinned it, so the reimplementation
+    dropped it and passed both CI and his own review).
+    """
+    _, out = _run(monkeypatch, tmp_path, _NEIGHBOUR_BREAK, "lab", capsys=capsys)
+    assert "RELATION BROKEN[grok]" in out, out
+
+
+def test_another_cells_relation_break_does_not_fail_my_verdict(monkeypatch, tmp_path, capsys):
+    """Their fact, my observation. Failing my run on a neighbour's config would make
+    every cell on a shared box un-green until someone else fixes something — and a
+    verdict nobody can clear is one everybody learns to ignore."""
+    rc, _ = _run(monkeypatch, tmp_path, _NEIGHBOUR_BREAK, "lab", capsys=capsys)
+    assert rc == 0, "a neighbour's break is reported, not inherited"
+
+
+def test_my_own_relation_break_still_fails_me(monkeypatch, tmp_path, capsys):
+    rc, out = _run(monkeypatch, tmp_path, _NEIGHBOUR_BREAK, "grok", capsys=capsys)
+    assert "RELATION BROKEN " in out and "[grok]" not in out, out
+    assert rc == 1
+
+
 def test_marker_in_cursor_is_not_a_relation_break(monkeypatch, tmp_path, capsys):
     rc, out = _run(monkeypatch, tmp_path, [
         _cron("*/5 * * * * swarph watchdog --check --cell lab "
