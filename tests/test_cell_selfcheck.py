@@ -357,6 +357,160 @@ def test_no_declaration_anywhere_still_measures(monkeypatch, tmp_path, capsys):
     assert rc == 1, "two values, nothing declared, no legacy file -> real drift"
 
 
+# ── coverage: a verdict is only as wide as what was inspected ────────────────
+# MEASURED 2026-07-27: grok-researcher's baseline returned `consistent` with 8 flags
+# and ZERO crontab rows, while four other cells ON THE SAME BOX saw 18. grok is the
+# cell carrying the known relation-broken drift (shape 1) — and that drift lives in
+# the crontab it could not read. THE TOOL CERTIFIED CLEAN THE ONE CELL IT WAS
+# DESIGNED AROUND, because `crontab -l`'s rc and stderr were both discarded.
+
+
+def _cov(cls, read, detail=""):
+    return {"kind": "coverage", "class": cls, "read": read, "detail": detail}
+
+
+def test_unreadable_surface_class_is_did_not_measure(monkeypatch, tmp_path, capsys):
+    """Exit 2, never `consistent`. A run that could not read a surface class did not
+    measure the cell — it measured part of it."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("a.service", "ExecStart=x --state-dir /var/lib/swarph/x\n"),
+        _cov("crontab", False, "Permission denied"),
+    ], "somecell", capsys=capsys)
+    assert rc == 2, out
+    assert "DID NOT MEASURE" in out and "crontab" in out
+
+
+def test_legitimately_absent_crontab_is_read_and_still_reported(monkeypatch, tmp_path, capsys):
+    """`no crontab for <user>` is a real answer, NOT a failure — but it must still be
+    stated, because this cell's cron line may live under ANOTHER user where this cell
+    cannot see it. That is exactly grok-researcher's situation."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("a.service", "ExecStart=x --state-dir /var/lib/swarph/x\n"),
+        _cov("crontab", True, "no crontab for this user — a cron line for this cell "
+                              "may exist under another user"),
+    ], "grok-researcher", capsys=capsys)
+    assert rc == 0, out
+    assert "COVERAGE" in out and "another user" in out
+
+
+def test_coverage_is_printed_even_on_a_clean_run(monkeypatch, tmp_path, capsys):
+    """A block that appears only on failure is one nobody reads until too late."""
+    _, out = _run(monkeypatch, tmp_path, [_cov("crontab", True, "51 lines")],
+                  "lab-ovh", capsys=capsys)
+    assert "COVERAGE  crontab" in out and "51 lines" in out
+
+
+def test_not_inspected_classes_do_not_block_the_verdict(monkeypatch, tmp_path, capsys):
+    """`running processes` is NOT INSPECTED BY DESIGN — declared config only. It must
+    be DISCLOSED (science-claude's live monitor is hand-started and invisible here, so
+    a migration could install a second one) but it must not turn every run into
+    DID NOT MEASURE, or the signal becomes noise and gets ignored."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("a.service", "ExecStart=x --state-dir /var/lib/swarph/x\n"),
+        _cov("running processes", False, "NOT INSPECTED BY DESIGN"),
+    ], "science-claude", capsys=capsys)
+    assert rc == 0, out
+    assert "running processes" in out and "NOT INSPECTED" in out
+
+
+@pytest.mark.parametrize("rc,out,err", [
+    (0, "*/5 * * * * swarph watchdog --cell x\n", ""),   # has a crontab
+    (0, "", ""),                                          # present but empty
+    (1, "", "no crontab for grok"),                       # grok's case
+])
+def test_other_user_caveat_is_on_every_readable_branch(rc, out, err):
+    """It is a property of THE PROBE — this command cannot read another user's crontab
+    in ANY branch — not of the cell. Hanging it off the no-crontab branch only would
+    tell grok and stay silent for a cell that HAS a crontab AND a line under another
+    user (droplet, PR #150)."""
+    cov = [s for s in sc.user_crontab_surfaces(rc, out, err) if s.get("kind") == "coverage"]
+    assert cov and cov[0]["read"] is True
+    assert "other users" in cov[0]["detail"], cov
+
+
+def test_user_crontab_class_is_named_for_what_it_actually_reads():
+    """`crontab -l` reads THE INVOKING USER'S crontab and nothing else.
+
+    A class named `crontab` overstated its scope BY THE NAME ALONE, before any logic
+    ran: a cell with a swarph line in /etc/cron.d would read "COVERAGE crontab read /
+    verdict: consistent" while a live cron surface was never opened — grok's failure
+    moved one directory over (droplet, PR #150).
+    """
+    cls = {s["class"] for s in sc.user_crontab_surfaces(0, "x\n", "")
+           if s.get("kind") == "coverage"}
+    assert cls == {"user crontab"}, f"class name overstates its scope: {cls}"
+
+
+def test_absent_cron_platform_is_not_the_same_as_failed_to_read(monkeypatch):
+    """NOT APPLICABLE is a THIRD state, and Windows CI is what found it.
+
+    On Windows there is no crontab binary, so the probe raised, the class went
+    read=False, and the whole run returned DID NOT MEASURE. But "this platform has no
+    cron" is not "I could not read the cron" — the surface does not exist to be read.
+    Collapsing them makes every Windows cell permanently unmeasurable, which teaches
+    people to ignore exit 2 on the platform where it will one day mean something.
+
+    A PermissionError must still be blind: we meant to read it and could not.
+    """
+    def boom(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory: 'crontab'")
+
+    monkeypatch.setattr(sc.subprocess, "run", boom)
+    cov = [s for s in sc.discover_surfaces()
+           if s.get("kind") == "coverage" and s.get("class") == "user crontab"]
+    assert cov and cov[0]["read"] is True, cov
+    assert "not applicable" in cov[0]["detail"], cov
+
+    def denied(cmd, **kw):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(sc.subprocess, "run", denied)
+    cov = [s for s in sc.discover_surfaces()
+           if s.get("kind") == "coverage" and s.get("class") == "user crontab"]
+    assert cov and cov[0]["read"] is False, "a real failure must stay blind"
+
+
+def test_a_real_probe_failure_is_not_read(monkeypatch):
+    """A locale-translated message, a permission error, a missing binary — anything
+    that is not a recognised empty must degrade to NOT READ, never to falsely-clean."""
+    cov = sc.user_crontab_surfaces(1, "", "crontab: permiso denegado")[0]
+    assert cov["read"] is False and "denegado" in cov["detail"]
+
+
+@pytest.mark.parametrize("name,runs", [
+    ("certbot", True), ("e2scrub_all", True), ("swarph-monitor", True), ("my_job", True),
+    (".placeholder", False), ("swarph.conf", False), ("foo.bak", False),
+    ("x.dpkg-dist", False),
+])
+def test_cron_d_filename_rule(name, runs):
+    """cron runs only ^[A-Za-z0-9_-]+$ in /etc/cron.d — ANY DOT disqualifies the file.
+
+    A swarph line in a dot-named file would otherwise be read as live configuration
+    and could produce DRIFT / UNOWNED / RELATION BROKEN for a line CRON WILL NEVER RUN
+    (droplet, PR #150). That is the FOSSIL distinction the systemd path already models,
+    expressed here as a filename rule instead of unit state.
+    """
+    assert bool(sc._CRON_D_NAME_RE.match(name)) is runs
+
+
+def test_inert_cron_file_is_fossil_not_drift(monkeypatch, tmp_path, capsys):
+    """A dot-named cron file's contents must be REPORTED but never counted as drift —
+    same contract as an inactive+disabled unit."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        {"name": "(/etc/cron.d/swarph.conf)", "kind": "cron", "shared": True, "live": False,
+         "text": "*/5 * * * * root swarph watchdog --cell lab --cursor /nope/cursor.json\n"},
+        _unit("a.service", "ExecStart=x --as lab --state-dir /var/lib/swarph/lab\n"),
+    ], "lab", capsys=capsys)
+    assert "FOSSIL" in out, out
+    assert rc == 0, "cron will never run it — it cannot be drift"
+
+
+def test_coverage_entries_are_not_parsed_as_flags(monkeypatch, tmp_path, capsys):
+    """Coverage rides the same injectable channel as surfaces, so it must not leak
+    into the flag count or invent rows."""
+    assert sc.extract(_cov("crontab", True, "--state-dir /nope")) == []
+
+
 def test_the_scan_can_actually_fail():
     """A guard that cannot fail is not a guard. Pins the relation logic itself."""
     assert sc.relation_broken("~/s/x/cursor.json", "~/s/x/mesh-sidecar") is True
