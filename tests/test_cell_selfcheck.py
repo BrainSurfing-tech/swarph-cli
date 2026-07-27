@@ -357,6 +357,68 @@ def test_no_declaration_anywhere_still_measures(monkeypatch, tmp_path, capsys):
     assert rc == 1, "two values, nothing declared, no legacy file -> real drift"
 
 
+# ── coverage: a verdict is only as wide as what was inspected ────────────────
+# MEASURED 2026-07-27: grok-researcher's baseline returned `consistent` with 8 flags
+# and ZERO crontab rows, while four other cells ON THE SAME BOX saw 18. grok is the
+# cell carrying the known relation-broken drift (shape 1) — and that drift lives in
+# the crontab it could not read. THE TOOL CERTIFIED CLEAN THE ONE CELL IT WAS
+# DESIGNED AROUND, because `crontab -l`'s rc and stderr were both discarded.
+
+
+def _cov(cls, read, detail=""):
+    return {"kind": "coverage", "class": cls, "read": read, "detail": detail}
+
+
+def test_unreadable_surface_class_is_did_not_measure(monkeypatch, tmp_path, capsys):
+    """Exit 2, never `consistent`. A run that could not read a surface class did not
+    measure the cell — it measured part of it."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("a.service", "ExecStart=x --state-dir /var/lib/swarph/x\n"),
+        _cov("crontab", False, "Permission denied"),
+    ], "somecell", capsys=capsys)
+    assert rc == 2, out
+    assert "DID NOT MEASURE" in out and "crontab" in out
+
+
+def test_legitimately_absent_crontab_is_read_and_still_reported(monkeypatch, tmp_path, capsys):
+    """`no crontab for <user>` is a real answer, NOT a failure — but it must still be
+    stated, because this cell's cron line may live under ANOTHER user where this cell
+    cannot see it. That is exactly grok-researcher's situation."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("a.service", "ExecStart=x --state-dir /var/lib/swarph/x\n"),
+        _cov("crontab", True, "no crontab for this user — a cron line for this cell "
+                              "may exist under another user"),
+    ], "grok-researcher", capsys=capsys)
+    assert rc == 0, out
+    assert "COVERAGE" in out and "another user" in out
+
+
+def test_coverage_is_printed_even_on_a_clean_run(monkeypatch, tmp_path, capsys):
+    """A block that appears only on failure is one nobody reads until too late."""
+    _, out = _run(monkeypatch, tmp_path, [_cov("crontab", True, "51 lines")],
+                  "lab-ovh", capsys=capsys)
+    assert "COVERAGE  crontab" in out and "51 lines" in out
+
+
+def test_not_inspected_classes_do_not_block_the_verdict(monkeypatch, tmp_path, capsys):
+    """`running processes` is NOT INSPECTED BY DESIGN — declared config only. It must
+    be DISCLOSED (science-claude's live monitor is hand-started and invisible here, so
+    a migration could install a second one) but it must not turn every run into
+    DID NOT MEASURE, or the signal becomes noise and gets ignored."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("a.service", "ExecStart=x --state-dir /var/lib/swarph/x\n"),
+        _cov("running processes", False, "NOT INSPECTED BY DESIGN"),
+    ], "science-claude", capsys=capsys)
+    assert rc == 0, out
+    assert "running processes" in out and "NOT INSPECTED" in out
+
+
+def test_coverage_entries_are_not_parsed_as_flags(monkeypatch, tmp_path, capsys):
+    """Coverage rides the same injectable channel as surfaces, so it must not leak
+    into the flag count or invent rows."""
+    assert sc.extract(_cov("crontab", True, "--state-dir /nope")) == []
+
+
 def test_the_scan_can_actually_fail():
     """A guard that cannot fail is not a guard. Pins the relation logic itself."""
     assert sc.relation_broken("~/s/x/cursor.json", "~/s/x/mesh-sidecar") is True
