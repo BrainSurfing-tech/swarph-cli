@@ -470,12 +470,38 @@ def run_selfcheck(*, self_name: str, declaration: Path) -> int:
             print(f"  DRIFT     --{key} {sorted(vals)} — {len(vals)} values, none declared")
             drift = True
 
-    cur = sorted(by_key.get("cursor", []))
-    sd = sorted(by_key.get("state-dir", []))
-    if len(cur) == 1 and len(sd) == 1 and relation_broken(cur[0], sd[0]):
-        print(f"  RELATION BROKEN  --cursor {cur[0]} is not under --state-dir {sd[0]}")
-        print("                   (both read OK per-key — the relation is the finding)")
-        drift = True
+    # RELATIONS ARE FACTS, AND FACTS ARE NOT PER-OWNER. The asymmetry (droplet, whose
+    # retired prototype had this and whose own ten fixtures never pinned it, so a
+    # reimplementation dropped it and passed both CI and his review):
+    #
+    #   DECLARATION-DEPENDENT — DRIFT / DECLARED — is correctly PER-OWNER. You cannot
+    #     judge another cell's divergence; it may be intentional and declared in THEIR
+    #     file, which you cannot read.
+    #   FACTUAL INCONSISTENCY — RELATION BROKEN — is NOT declaration-dependent.
+    #     `--cursor` not under `--state-dir` is wrong no matter whose line it is, and
+    #     NO DECLARATION CAN MAKE IT RIGHT.
+    #
+    # Attributing another cell's line and then checking NOTHING about it conflates the
+    # two. "attributed, not checked" should be "attributed, not JUDGED — still checked
+    # for facts." On a shared box this is exactly how a neighbour's live divergence
+    # becomes visible to someone who can act on it.
+    #
+    # Another cell's relation break is REPORTED but does NOT set drift: it is not this
+    # cell's verdict to fail on. It is their fact and this cell's observation.
+    by_owner: dict[str, dict[str, set]] = {}
+    for r in rows:
+        if r.live and r.value != "<EMPTY>" and r.key in ("cursor", "state-dir"):
+            by_owner.setdefault(r.owner or self_name, {}).setdefault(r.key, set()).add(r.value)
+
+    for owner in sorted(by_owner):
+        cur = sorted(by_owner[owner].get("cursor", []))
+        sd = sorted(by_owner[owner].get("state-dir", []))
+        if len(cur) == 1 and len(sd) == 1 and relation_broken(cur[0], sd[0]):
+            tag = "RELATION BROKEN" if owner == self_name else f"RELATION BROKEN[{owner}]"
+            print(f"  {tag}  --cursor {cur[0]} is not under --state-dir {sd[0]}")
+            print("                   (both read OK per-key — the relation is the finding)")
+            if owner == self_name:
+                drift = True
 
     if blind:
         # A surface class we MEANT to read and could not. Exit 2, not 0 and not 1:
