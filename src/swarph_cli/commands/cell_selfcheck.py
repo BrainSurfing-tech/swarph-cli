@@ -74,6 +74,11 @@ _DM_CURSOR_RE = re.compile(r"cursor\.json$")
 _SPECIFIER_RE = re.compile(r"%[a-zA-Z]\b|<[A-Za-z_]+>|\$\{?\w+\}?")
 
 
+# /etc/cron.d filenames cron will actually run (Debian/Ubuntu run-parts). Any dot
+# disqualifies the file — see the note at the system-cron probe.
+_CRON_D_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def is_placeholder(value: str) -> bool:
     """True for systemd specifiers (%i), shell vars ($HOME) and template slots (<PEER>).
 
@@ -252,7 +257,7 @@ def discover_surfaces() -> list[dict]:
     # SYSTEM CRON — /etc/crontab and /etc/cron.d/*, which carry a sixth USER field.
     # Never enumerated before, so they were invisible AND unmentioned: the tool could
     # not say they were clean and could not say it had not looked.
-    sys_cron, unreadable = [], []
+    sys_cron, inert, unreadable = [], [], []
     for path in [Path("/etc/crontab")] + sorted(Path("/etc/cron.d").glob("*")
                                                 if Path("/etc/cron.d").is_dir() else []):
         if not path.is_file():
@@ -262,20 +267,40 @@ def discover_surfaces() -> list[dict]:
         except OSError as exc:
             unreadable.append(f"{path.name} ({exc.__class__.__name__})")
             continue
-        sys_cron.append(path.name)
+        # CRON DOES NOT EXECUTE EVERY FILE IN /etc/cron.d. run-parts only runs names
+        # matching ^[A-Za-z0-9_-]+$ — ANY DOT DISQUALIFIES THE FILE. So `.placeholder`,
+        # `swarph.conf`, `foo.bak` and `x.dpkg-dist` are INERT. Reading them as live
+        # configuration would report DRIFT / UNOWNED / RELATION BROKEN for a line CRON
+        # WILL NEVER RUN (droplet, PR #150 — found because the file COUNT could not be
+        # reconciled by hand, which is why the count is printed).
+        #
+        # This is the FOSSIL distinction the systemd path already models
+        # (inactive+disabled -> reported, never drift). Cron expresses the same
+        # live/dead split as a FILENAME RULE instead of unit state, and it must be
+        # applied or one surface class silently lacks the category.
+        #
+        # ASSUMPTION STATED, NOT ASSERTED (droplet's own caveat on his finding): the
+        # rule is Debian/Ubuntu run-parts behaviour, verified against a real file list,
+        # NOT read out of this box's cron source. Vixie-cron variants differ. It is
+        # named in the coverage line so a reader on another platform can distrust it.
+        executable = path.name == "crontab" or _CRON_D_NAME_RE.match(path.name)
+        (sys_cron if executable else inert).append(path.name)
         if "swarph" in text:
-            # System cron lines carry a USER column that user crontabs do not, so
-            # ownership here is by --cell/--as exactly as elsewhere; the extra field
-            # is inert to the flag parser.
+            # System cron lines carry a USER column that user crontabs do not;
+            # ownership is still by --cell/--as, and the extra field is inert to the
+            # flag parser.
             surfaces.append({"name": f"({path})", "kind": "cron", "text": text,
-                             "live": True, "shared": True})
+                             "live": bool(executable), "shared": True})
     if unreadable:
         surfaces.append({"kind": "coverage", "class": "system cron", "read": False,
                          "detail": "unreadable: " + ", ".join(unreadable)[:100]})
     else:
+        detail = f"{len(sys_cron)} live" if sys_cron else "none live"
+        if inert:
+            detail += (f", {len(inert)} ignored (dot-named; cron's run-parts skips "
+                       f"them on Debian/Ubuntu)")
         surfaces.append({"kind": "coverage", "class": "system cron", "read": True,
-                         "detail": (f"{len(sys_cron)} files read" if sys_cron
-                                    else "none present")})
+                         "detail": detail if (sys_cron or inert) else "none present"})
 
     # NOT INSPECTED, stated so a clean verdict cannot be misread (science-claude,
     # 2026-07-27): her live monitor is a HAND-STARTED process, not a unit and not a
