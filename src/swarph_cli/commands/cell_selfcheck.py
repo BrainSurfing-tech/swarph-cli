@@ -262,7 +262,19 @@ def discover_surfaces() -> list[dict]:
     try:
         p = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
         surfaces += user_crontab_surfaces(p.returncode, p.stdout, p.stderr)
+    except FileNotFoundError:
+        # NOT APPLICABLE — a THIRD state, distinct from read and from failed-to-read.
+        # Windows CI found this: no crontab binary exists, so the probe raised, the
+        # class went read=False, and the run returned DID NOT MEASURE. But "this
+        # platform has no cron" is not "I could not read the cron" — the surface does
+        # not exist to be read. Collapsing them makes every Windows cell permanently
+        # unmeasurable, which trains people to ignore exit 2 on the platform where it
+        # would eventually mean something real.
+        surfaces.append({"kind": "coverage", "class": "user crontab", "read": True,
+                         "detail": "not applicable — no cron on this platform"})
     except (OSError, subprocess.SubprocessError) as exc:
+        # A PermissionError or a timeout is genuinely blind: we meant to read it and
+        # could not. That must still be DID NOT MEASURE.
         surfaces.append({"kind": "coverage", "class": "user crontab", "read": False,
                          "detail": f"{type(exc).__name__}: {exc}"[:120]})
 

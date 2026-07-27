@@ -441,6 +441,35 @@ def test_user_crontab_class_is_named_for_what_it_actually_reads():
     assert cls == {"user crontab"}, f"class name overstates its scope: {cls}"
 
 
+def test_absent_cron_platform_is_not_the_same_as_failed_to_read(monkeypatch):
+    """NOT APPLICABLE is a THIRD state, and Windows CI is what found it.
+
+    On Windows there is no crontab binary, so the probe raised, the class went
+    read=False, and the whole run returned DID NOT MEASURE. But "this platform has no
+    cron" is not "I could not read the cron" — the surface does not exist to be read.
+    Collapsing them makes every Windows cell permanently unmeasurable, which teaches
+    people to ignore exit 2 on the platform where it will one day mean something.
+
+    A PermissionError must still be blind: we meant to read it and could not.
+    """
+    def boom(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory: 'crontab'")
+
+    monkeypatch.setattr(sc.subprocess, "run", boom)
+    cov = [s for s in sc.discover_surfaces()
+           if s.get("kind") == "coverage" and s.get("class") == "user crontab"]
+    assert cov and cov[0]["read"] is True, cov
+    assert "not applicable" in cov[0]["detail"], cov
+
+    def denied(cmd, **kw):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(sc.subprocess, "run", denied)
+    cov = [s for s in sc.discover_surfaces()
+           if s.get("kind") == "coverage" and s.get("class") == "user crontab"]
+    assert cov and cov[0]["read"] is False, "a real failure must stay blind"
+
+
 def test_a_real_probe_failure_is_not_read(monkeypatch):
     """A locale-translated message, a permission error, a missing binary — anything
     that is not a recognised empty must degrade to NOT READ, never to falsely-clean."""
