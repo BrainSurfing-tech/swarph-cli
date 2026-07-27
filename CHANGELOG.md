@@ -2,6 +2,17 @@
 
 Notable changes to `swarph-cli`. Earlier history: `git log`.
 
+## 0.39.4 — 2026-07-27
+- **fix(packaging):** ship `scripts/ensure_monitor.sh`. 0.39.3 shipped a README
+  telling operators to run it while the wheel **did not contain it** — non-`.py`
+  files must be declared in `[tool.setuptools.package-data]` and it was not.
+  twine, CI and the build all reported success; a clean-room
+  `pip install --no-cache-dir` from PyPI is what caught it.
+- **test:** `test_packaged_artifacts_exist.py` — a file the docs tell operators
+  to run must exist in the package tree **and** be covered by a package-data
+  pattern. Existing in `src/` is not enough; the wheel omits it silently.
+  Verified to FAIL when the declaration is removed.
+
 ## 0.39.3 — 2026-07-27
 - **`deploy/monitor/swarph-monitor.service`** — a **silent** DM monitor unit. The
   shipped sidecar ran `tmux send-keys -t <pane> "check mesh" Enter` on every DM:
