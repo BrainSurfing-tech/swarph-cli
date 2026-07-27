@@ -1,3 +1,21 @@
+# ============================ DEPRECATED ============================
+# THIS UNIT INJECTS A PROMPT INTO YOUR SESSION ON EVERY DM.
+#
+# `swarph mesh sidecar --tmux-target <pane>` runs, per message:
+#     tmux send-keys -t <pane> "check mesh" Enter
+# which TYPES INTO THE CELL'S PANE. That costs a full turn per DM, and it only
+# works while the pane exists -- a dead pane, a renamed target or a tmux restart
+# and the cell goes silently deaf (the freeze fixed in PR #138 / card #122).
+#
+# USE INSTEAD:  deploy/monitor/swarph-monitor.service
+# The monitor observes in --deliver pull mode and pokes nothing. The cell learns
+# it has mail by ASKING (`swarph monitor status`), not by being typed at, and
+# systemd owns the process so a crash restarts in RestartSec rather than waiting
+# for anything to notice.
+#
+# This file is kept because peers are running it today; it is not removed so an
+# existing install does not break. Migrate at your convenience.
+# ====================================================================
 # swarph mesh sidecar — production deployment unit (systemd USER service).
 #
 # Drains this peer's mesh-gateway inbox (peer-token-direct, post-C5) and wakes
