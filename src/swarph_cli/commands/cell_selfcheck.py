@@ -74,6 +74,11 @@ _DM_CURSOR_RE = re.compile(r"cursor\.json$")
 _SPECIFIER_RE = re.compile(r"%[a-zA-Z]\b|<[A-Za-z_]+>|\$\{?\w+\}?")
 
 
+# /etc/cron.d filenames cron will actually run (Debian/Ubuntu run-parts). Any dot
+# disqualifies the file — see the note at the system-cron probe.
+_CRON_D_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def is_placeholder(value: str) -> bool:
     """True for systemd specifiers (%i), shell vars ($HOME) and template slots (<PEER>).
 
@@ -171,6 +176,40 @@ def extract(surface: dict) -> list[Row]:
     return rows
 
 
+_OTHER_USER_CAVEAT = " (cannot see other users' crontabs in any case)"
+
+
+def user_crontab_surfaces(returncode: int, stdout: str, stderr: str) -> list[dict]:
+    """Classify a `crontab -l` result. PURE — takes the outcome, does not run it.
+
+    Split out so every branch is testable on any box, including Windows where there
+    is no crontab at all. Calling the impure discoverer from a test would make these
+    cases unreachable on half the CI matrix, which is the same "only passes on one
+    box" trap the whole suite is built to avoid.
+    """
+    if returncode == 0 and stdout.strip():
+        return [{"name": "(crontab)", "kind": "cron", "text": stdout,
+                 "live": True, "shared": True},
+                {"kind": "coverage", "class": "user crontab", "read": True,
+                 "detail": f"{len(stdout.splitlines())} lines" + _OTHER_USER_CAVEAT}]
+    if returncode == 0:
+        return [{"kind": "coverage", "class": "user crontab", "read": True,
+                 "detail": "present but empty" + _OTHER_USER_CAVEAT}]
+    if "no crontab for" in (stderr or ""):
+        # LEGITIMATE EMPTY: a real answer, not a failure. Still stated, because a cron
+        # line for this cell may live under another user. That is grok's situation.
+        #
+        # The stderr match is LOCALE-DEPENDENT ON PURPOSE: a translated message falls
+        # through to the failure branch and becomes read=False -> DID NOT MEASURE.
+        # That degrades BLIND rather than FALSELY-CLEAN, which is the safe direction.
+        # Do not "fix" it into a broader match — a wider pattern would swallow real
+        # failures (droplet, PR #150).
+        return [{"kind": "coverage", "class": "user crontab", "read": True,
+                 "detail": "no crontab for this user" + _OTHER_USER_CAVEAT}]
+    return [{"kind": "coverage", "class": "user crontab", "read": False,
+             "detail": (stderr or f"exit {returncode}").strip()[:120]}]
+
+
 def discover_surfaces() -> list[dict]:
     """Read this cell's units and crontab. THE ONLY IMPURE FUNCTION HERE.
 
@@ -190,14 +229,113 @@ def discover_surfaces() -> list[dict]:
                 continue
             surfaces.append({"name": f.name, "kind": "unit", "text": text,
                              "live": _unit_live(f.name, user=("user" in str(d)))})
+    surfaces.append({"kind": "coverage", "class": "systemd units",
+                     "read": True,
+                     "detail": ", ".join(str(d) for d in unit_dirs if d.is_dir()) or "none present"})
+
+    # >>> THE CRONTAB PROBE HAD THREE SILENT FAILURE PATHS THAT ALL RENDERED AS
+    #     "no crontab surface", AND THE VERDICT PROCEEDED AS IF IT HAD LOOKED. <<<
+    # MEASURED 2026-07-27: grok-researcher's baseline came back `consistent` with 8
+    # flags and ZERO crontab rows, while four other cells ON THE SAME BOX saw 18.
+    # grok is the cell with the KNOWN relation-broken drift (shape 1) — and that
+    # drift lives in the crontab it could not read. THE TOOL CERTIFIED CLEAN THE ONE
+    # CELL IT WAS DESIGNED AROUND, because rc and stderr were both discarded:
+    #   · exception (no crontab binary)  -> except: pass
+    #   · rc=1 "no crontab for <user>"   -> empty stdout, no surface
+    #   · genuinely empty crontab        -> no surface
+    # `crontab -l` exits 1 with "no crontab for X" on STDERR, which the old code
+    # never read. Coverage is now REPORTED as data, so a clean verdict can never be
+    # read as "everything was inspected".
+    # THE CLASS IS `user crontab`, NOT `crontab`. `crontab -l` reads THE INVOKING
+    # USER'S crontab and nothing else. Naming the class `crontab` overstated it BY
+    # THE NAME ALONE, before any logic ran: a cell with a swarph line in /etc/cron.d
+    # would read "COVERAGE crontab read / verdict: consistent" while a live cron
+    # surface was never opened — grok's failure moved one directory over
+    # (droplet, PR #150 review). One name, two facts, inside the field added to fix
+    # one name, two facts.
+    #
+    # THE OTHER-USER CAVEAT IS UNCONDITIONAL, and that is deliberate. It is a
+    # property of THE PROBE — this command structurally cannot read another user's
+    # crontab in ANY branch — not a property of the cell. Hanging it only off the
+    # "no crontab" branch would tell grok and stay silent for a cell that HAS a
+    # crontab and ALSO has a line under another user.
     try:
-        cron = subprocess.run(["crontab", "-l"], capture_output=True, text=True,
-                              timeout=10).stdout
-        if cron.strip():
-            surfaces.append({"name": "(crontab)", "kind": "cron", "text": cron,
-                             "live": True, "shared": True})
-    except (OSError, subprocess.SubprocessError):
-        pass
+        p = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+        surfaces += user_crontab_surfaces(p.returncode, p.stdout, p.stderr)
+    except FileNotFoundError:
+        # NOT APPLICABLE — a THIRD state, distinct from read and from failed-to-read.
+        # Windows CI found this: no crontab binary exists, so the probe raised, the
+        # class went read=False, and the run returned DID NOT MEASURE. But "this
+        # platform has no cron" is not "I could not read the cron" — the surface does
+        # not exist to be read. Collapsing them makes every Windows cell permanently
+        # unmeasurable, which trains people to ignore exit 2 on the platform where it
+        # would eventually mean something real.
+        surfaces.append({"kind": "coverage", "class": "user crontab", "read": True,
+                         "detail": "not applicable — no cron on this platform"})
+    except (OSError, subprocess.SubprocessError) as exc:
+        # A PermissionError or a timeout is genuinely blind: we meant to read it and
+        # could not. That must still be DID NOT MEASURE.
+        surfaces.append({"kind": "coverage", "class": "user crontab", "read": False,
+                         "detail": f"{type(exc).__name__}: {exc}"[:120]})
+
+    # SYSTEM CRON — /etc/crontab and /etc/cron.d/*, which carry a sixth USER field.
+    # Never enumerated before, so they were invisible AND unmentioned: the tool could
+    # not say they were clean and could not say it had not looked.
+    sys_cron, inert, unreadable = [], [], []
+    for path in [Path("/etc/crontab")] + sorted(Path("/etc/cron.d").glob("*")
+                                                if Path("/etc/cron.d").is_dir() else []):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            unreadable.append(f"{path.name} ({exc.__class__.__name__})")
+            continue
+        # CRON DOES NOT EXECUTE EVERY FILE IN /etc/cron.d. run-parts only runs names
+        # matching ^[A-Za-z0-9_-]+$ — ANY DOT DISQUALIFIES THE FILE. So `.placeholder`,
+        # `swarph.conf`, `foo.bak` and `x.dpkg-dist` are INERT. Reading them as live
+        # configuration would report DRIFT / UNOWNED / RELATION BROKEN for a line CRON
+        # WILL NEVER RUN (droplet, PR #150 — found because the file COUNT could not be
+        # reconciled by hand, which is why the count is printed).
+        #
+        # This is the FOSSIL distinction the systemd path already models
+        # (inactive+disabled -> reported, never drift). Cron expresses the same
+        # live/dead split as a FILENAME RULE instead of unit state, and it must be
+        # applied or one surface class silently lacks the category.
+        #
+        # ASSUMPTION STATED, NOT ASSERTED (droplet's own caveat on his finding): the
+        # rule is Debian/Ubuntu run-parts behaviour, verified against a real file list,
+        # NOT read out of this box's cron source. Vixie-cron variants differ. It is
+        # named in the coverage line so a reader on another platform can distrust it.
+        executable = path.name == "crontab" or _CRON_D_NAME_RE.match(path.name)
+        (sys_cron if executable else inert).append(path.name)
+        if "swarph" in text:
+            # System cron lines carry a USER column that user crontabs do not;
+            # ownership is still by --cell/--as, and the extra field is inert to the
+            # flag parser.
+            surfaces.append({"name": f"({path})", "kind": "cron", "text": text,
+                             "live": bool(executable), "shared": True})
+    if unreadable:
+        surfaces.append({"kind": "coverage", "class": "system cron", "read": False,
+                         "detail": "unreadable: " + ", ".join(unreadable)[:100]})
+    else:
+        detail = f"{len(sys_cron)} live" if sys_cron else "none live"
+        if inert:
+            detail += (f", {len(inert)} ignored (dot-named; cron's run-parts skips "
+                       f"them on Debian/Ubuntu)")
+        surfaces.append({"kind": "coverage", "class": "system cron", "read": True,
+                         "detail": detail if (sys_cron or inert) else "none present"})
+
+    # NOT INSPECTED, stated so a clean verdict cannot be misread (science-claude,
+    # 2026-07-27): her live monitor is a HAND-STARTED process, not a unit and not a
+    # cron line, so THE ONE THING ACTUALLY DELIVERING HER DMs IS INVISIBLE HERE. This
+    # tool reads DECLARED CONFIGURATION, never running state. A migration that
+    # installs a unit beside a hand-started daemon gets two monitors, and this tool
+    # cannot warn about the one it did not install.
+    surfaces.append({"kind": "coverage", "class": "running processes", "read": False,
+                     "detail": "NOT INSPECTED BY DESIGN — this tool reads declared "
+                               "config, not running state; a hand-started daemon is "
+                               "invisible to it"})
     return surfaces
 
 
@@ -249,11 +387,22 @@ def run_selfcheck(*, self_name: str, declaration: Path) -> int:
         except (OSError, ValueError) as exc:
             print(f"  WARN      declaration unreadable ({exc}) — treating as absent")
 
-    rows = [r for s in discover_surfaces() for r in extract(s)]
+    surfaces = discover_surfaces()
+    coverage = [s for s in surfaces if s.get("kind") == "coverage"]
+    rows = [r for s in surfaces if s.get("kind") != "coverage" for r in extract(s)]
     mine = [r for r in rows if r.owner in (None, self_name)]
     drift = False
 
     print(f"cell selfcheck: {self_name}   ({len(rows)} flags across surfaces)")
+
+    # COVERAGE FIRST, ALWAYS. A verdict is only as wide as what was inspected, and a
+    # baseline that does not state its own coverage invites "consistent" to be read
+    # as "everything is fine". grok-researcher's clean verdict over an unread crontab
+    # is the measured instance.
+    for c in coverage:
+        mark = "read" if c.get("read") else "NOT READ"
+        print(f"  COVERAGE  {c.get('class'):18s} {mark:9s} {c.get('detail','')}")
+    blind = [c for c in coverage if not c.get("read") and c.get("class") != "running processes"]
 
     for r in rows:
         if r.owner and r.owner != self_name:
@@ -304,6 +453,15 @@ def run_selfcheck(*, self_name: str, declaration: Path) -> int:
         print(f"  RELATION BROKEN  --cursor {cur[0]} is not under --state-dir {sd[0]}")
         print("                   (both read OK per-key — the relation is the finding)")
         drift = True
+
+    if blind:
+        # A surface class we MEANT to read and could not. Exit 2, not 0 and not 1:
+        # this run did not measure the cell, it measured part of it. Reporting
+        # `consistent` over an unread surface is precisely the lie this card exists
+        # to catch — and the tool committed it against grok-researcher.
+        names = ", ".join(str(c.get("class")) for c in blind)
+        print(f"\n  verdict: DID NOT MEASURE (could not read: {names})")
+        return 2
 
     print(f"\n  verdict: {'DRIFT' if drift else 'consistent'}")
     return 1 if drift else 0
