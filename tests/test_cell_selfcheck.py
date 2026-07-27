@@ -413,6 +413,21 @@ def test_not_inspected_classes_do_not_block_the_verdict(monkeypatch, tmp_path, c
     assert "running processes" in out and "NOT INSPECTED" in out
 
 
+@pytest.mark.parametrize("rc,out,err", [
+    (0, "*/5 * * * * swarph watchdog --cell x\n", ""),   # has a crontab
+    (0, "", ""),                                          # present but empty
+    (1, "", "no crontab for grok"),                       # grok's case
+])
+def test_other_user_caveat_is_on_every_readable_branch(rc, out, err):
+    """It is a property of THE PROBE — this command cannot read another user's crontab
+    in ANY branch — not of the cell. Hanging it off the no-crontab branch only would
+    tell grok and stay silent for a cell that HAS a crontab AND a line under another
+    user (droplet, PR #150)."""
+    cov = [s for s in sc.user_crontab_surfaces(rc, out, err) if s.get("kind") == "coverage"]
+    assert cov and cov[0]["read"] is True
+    assert "other users" in cov[0]["detail"], cov
+
+
 def test_user_crontab_class_is_named_for_what_it_actually_reads():
     """`crontab -l` reads THE INVOKING USER'S crontab and nothing else.
 
@@ -421,19 +436,16 @@ def test_user_crontab_class_is_named_for_what_it_actually_reads():
     verdict: consistent" while a live cron surface was never opened — grok's failure
     moved one directory over (droplet, PR #150).
     """
-    classes = {s.get("class") for s in sc.discover_surfaces() if s.get("kind") == "coverage"}
-    assert "crontab" not in classes, f"class name overstates its scope: {classes}"
-    assert "user crontab" in classes and "system cron" in classes, classes
+    cls = {s["class"] for s in sc.user_crontab_surfaces(0, "x\n", "")
+           if s.get("kind") == "coverage"}
+    assert cls == {"user crontab"}, f"class name overstates its scope: {cls}"
 
 
-def test_other_user_caveat_is_on_every_user_crontab_branch():
-    """It is a property of THE PROBE — this command cannot read another user's
-    crontab in ANY branch — not of the cell. Hanging it only off the no-crontab
-    branch tells grok and stays silent for a cell that has a crontab AND a line
-    under another user."""
-    cov = [s for s in sc.discover_surfaces()
-           if s.get("kind") == "coverage" and s.get("class") == "user crontab"]
-    assert cov and "other users" in cov[0]["detail"], cov
+def test_a_real_probe_failure_is_not_read(monkeypatch):
+    """A locale-translated message, a permission error, a missing binary — anything
+    that is not a recognised empty must degrade to NOT READ, never to falsely-clean."""
+    cov = sc.user_crontab_surfaces(1, "", "crontab: permiso denegado")[0]
+    assert cov["read"] is False and "denegado" in cov["detail"]
 
 
 @pytest.mark.parametrize("name,runs", [
