@@ -33,7 +33,11 @@ science-claude's box. Implementation is lab's.
 
 Run: venv/bin/python -m pytest tests/test_cell_selfcheck.py -v
 """
+import ast
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -230,6 +234,58 @@ def test_declaration_default_is_per_cell(monkeypatch, tmp_path):
     b = sc.default_declaration_path("science-claude")
     assert a != b, "five cells, one home, one declaration file"
     assert a.name == "cell_expected.lab-ovh.json", a
+
+
+# ── the baseline must run where the install is what is broken ────────────────
+# MEASURED in an empty venv: `python -m swarph_cli.main` and even a direct
+# `from swarph_cli.commands.cell_selfcheck import ...` both die on
+# ModuleNotFoundError: swarph_mesh, because the package __init__ eagerly imports
+# parsers. A pre-migration baseline is needed precisely on cells whose install may
+# be part of the problem, so the file must run standalone.
+
+_MODULE = Path(sc.__file__)
+_STDLIB = set(sys.stdlib_module_names)
+
+
+def test_module_imports_are_stdlib_only():
+    """Pins standalone-runnability at the source level, with the reason readable.
+
+    A single non-stdlib import here silently breaks `python3 cell_selfcheck.py` on
+    every cell that has no install — and it would break it at the moment the tool
+    is most needed.
+    """
+    tree = ast.parse(_MODULE.read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+    imported.discard("__future__")
+    assert imported <= _STDLIB, f"non-stdlib imports break standalone use: {imported - _STDLIB}"
+
+
+def test_runs_as_a_bare_file_in_isolated_mode(tmp_path):
+    """-I ignores PYTHONPATH and user site-packages: the closest thing to a cell
+    with no swarph install. Asserts the ENTRY POINT works, not just the imports."""
+    proc = subprocess.run(
+        [sys.executable, "-I", str(_MODULE), "--as", "test-cell",
+         "--declaration", str(tmp_path / "absent.json")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode in (0, 1), f"crashed instead of reporting:\n{proc.stderr}"
+    assert "cell selfcheck: test-cell" in proc.stdout, proc.stdout
+    assert "Traceback" not in proc.stderr, proc.stderr
+
+
+def test_bare_file_reports_missing_identity_rather_than_guessing(tmp_path):
+    """No --as and no $SWARPH_SELF must be exit 2 and a message, never a guess:
+    a baseline attributed to the wrong cell is worse than no baseline."""
+    env = {"PATH": "/nonexistent"}
+    proc = subprocess.run([sys.executable, "-I", str(_MODULE)],
+                          capture_output=True, text=True, timeout=60, env=env)
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert "pass --as" in proc.stderr, proc.stderr
 
 
 def test_the_scan_can_actually_fail():

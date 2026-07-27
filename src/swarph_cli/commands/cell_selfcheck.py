@@ -311,3 +311,22 @@ def run_cell_selfcheck(argv: list[str]) -> int:
     decl = (Path(args.declaration).expanduser() if args.declaration
             else default_declaration_path(args.self_name))
     return run_selfcheck(self_name=args.self_name, declaration=decl)
+
+
+# RUNNABLE AS A BARE FILE, ON PURPOSE — do not remove.
+#
+#     python3 src/swarph_cli/commands/cell_selfcheck.py --as <peer>
+#
+# The baseline this produces is needed on cells whose swarph install may itself be
+# part of what is broken, and on cells not yet carrying an unreleased version. Both
+# normal entry points are unavailable there, MEASURED in an empty venv:
+#   python -m swarph_cli.main ...                     -> ModuleNotFoundError: swarph_mesh
+#   from swarph_cli.commands.cell_selfcheck import .. -> same; the package __init__
+#                                                        eagerly imports parsers
+# The module's own imports are stdlib-only, so the file runs standalone even though
+# the package around it cannot be imported. REQUIRING A WORKING INSTALL TO DIAGNOSE
+# A BROKEN INSTALL IS THE SAME CIRCULARITY AS SUPERVISING A THING FROM INSIDE IT.
+# tests/test_cell_selfcheck.py pins this: stdlib-only imports, and an isolated-mode
+# subprocess run that fails if anything non-stdlib creeps in.
+if __name__ == "__main__":  # pragma: no cover - exercised via subprocess in tests
+    sys.exit(run_cell_selfcheck(sys.argv[1:]))
