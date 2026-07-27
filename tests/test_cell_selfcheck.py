@@ -470,6 +470,38 @@ def test_absent_cron_platform_is_not_the_same_as_failed_to_read(monkeypatch):
     assert cov and cov[0]["read"] is False, "a real failure must stay blind"
 
 
+def test_system_cron_absent_platform_is_not_applicable():
+    """`none present` reads as I LOOKED AND THERE WERE NONE. On a box with no cron at
+    all that is the wrong answer, and it is the one a reader would trust — it sat
+    beside `user crontab: not applicable` describing ONE platform fact two ways.
+
+    This class fails by an EMPTY LOOP rather than an exception, so the
+    FileNotFoundError fix for its sibling could not reach it (droplet, read from the
+    branch and flagged READ-NOT-MEASURED; measured here).
+    """
+    c = sc.system_cron_coverage([], [], [], platform_has_cron=False)
+    assert c["read"] is True and "not applicable" in c["detail"], c
+
+
+def test_system_cron_present_but_empty_is_distinct_from_absent():
+    """A cron directory that exists and holds nothing IS a measurement."""
+    c = sc.system_cron_coverage([], [], [], platform_has_cron=True)
+    assert c["read"] is True and c["detail"] == "present but empty", c
+
+
+def test_system_cron_unreadable_still_wins_over_platform_absence():
+    """Unreadable is blind and must stay exit-2, whatever the platform looks like."""
+    c = sc.system_cron_coverage([], [], ["cron.d/x (PermissionError)"],
+                                platform_has_cron=False)
+    assert c["read"] is False, c
+
+
+def test_system_cron_counts_stay_hand_reconcilable():
+    c = sc.system_cron_coverage(["crontab", "certbot", "sysstat"], [".placeholder"], [],
+                                platform_has_cron=True)
+    assert c["detail"].startswith("3 live, 1 ignored"), c
+
+
 def test_a_real_probe_failure_is_not_read(monkeypatch):
     """A locale-translated message, a permission error, a missing binary — anything
     that is not a recognised empty must degrade to NOT READ, never to falsely-clean."""
