@@ -214,7 +214,34 @@ def _unit_live(unit: str, *, user: bool) -> bool:
 
 
 def run_selfcheck(*, self_name: str, declaration: Path) -> int:
-    """Pure verdict pass over discovered surfaces. Returns 0 (clean) or 1 (drift)."""
+    """Pure verdict pass over discovered surfaces. 0 clean, 1 drift, 2 DID NOT MEASURE."""
+    # THE PER-CELL RENAME IN #148 IS A SILENT MIGRATION, AND IT LANDS ON THE BASELINE.
+    # MEASURED on droplet: with the old shared cell_expected.json present and the
+    # per-cell file absent, the run reported DRIFT on three keys and NEVER MENTIONED
+    # the file sitting right there; renaming it flipped the same box to consistent
+    # with no surface changed. Every cell that declared anything before #148 would
+    # produce a baseline full of FALSE DRIFT — and that baseline is the "before"
+    # picture #132/#130 gets diffed against.
+    #
+    # A POISONED BASELINE IS WORSE THAN NO BASELINE, BECAUSE IT IS DIFFED AGAINST
+    # WITH CONFIDENCE. An operator reading it would either re-declare from whatever
+    # the tool printed (turning the declaration into decoration) or EDIT SURFACES TO
+    # MATCH a tool that cannot see their existing declaration.
+    #
+    # Deliberately NOT auto-reading the legacy file: that re-introduces the shared
+    # one-file-many-cells defect #148 removed. Exit 2, not 1 — this run did not
+    # measure drift, it measured a MISSING DECLARATION. Empty and blind must not
+    # render identically. (droplet, PR #149 review.)
+    if not declaration.exists():
+        legacy = legacy_declaration_path(declaration)
+        if legacy is not None and legacy.exists():
+            print(f"  DECLARATION NOT READ — found legacy shared {legacy}")
+            print(f"                         per-cell file expected at {declaration}")
+            print("                         NOT read: one declaration per cell since #148.")
+            print("                         Move or split it, then re-run.")
+            print("\n  verdict: DID NOT MEASURE (legacy declaration present, per-cell absent)")
+            return 2
+
     declared: dict = {}
     if declaration.exists():
         try:
@@ -296,6 +323,17 @@ def default_declaration_path(self_name: str) -> Path:
     you cannot reconstruct afterwards whose intent was in the file.
     """
     return Path.home() / ".config" / "swarph" / f"cell_expected.{self_name}.json"
+
+
+# The pre-#148 shared name. Cells that declared anything before the per-cell rename
+# still have this file on disk.
+_LEGACY_DECLARATION_NAME = "cell_expected.json"
+
+
+def legacy_declaration_path(declaration: Path) -> Optional[Path]:
+    """The old shared name beside the expected per-cell one, or None if identical."""
+    legacy = declaration.parent / _LEGACY_DECLARATION_NAME
+    return None if legacy == declaration else legacy
 
 
 def run_cell_selfcheck(argv: list[str]) -> int:
