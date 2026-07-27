@@ -33,7 +33,11 @@ science-claude's box. Implementation is lab's.
 
 Run: venv/bin/python -m pytest tests/test_cell_selfcheck.py -v
 """
+import ast
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -230,6 +234,127 @@ def test_declaration_default_is_per_cell(monkeypatch, tmp_path):
     b = sc.default_declaration_path("science-claude")
     assert a != b, "five cells, one home, one declaration file"
     assert a.name == "cell_expected.lab-ovh.json", a
+
+
+# ── the baseline must run where the install is what is broken ────────────────
+# MEASURED in an empty venv: `python -m swarph_cli.main` and even a direct
+# `from swarph_cli.commands.cell_selfcheck import ...` both die on
+# ModuleNotFoundError: swarph_mesh, because the package __init__ eagerly imports
+# parsers. A pre-migration baseline is needed precisely on cells whose install may
+# be part of the problem, so the file must run standalone.
+
+_MODULE = Path(sc.__file__)
+_STDLIB = set(sys.stdlib_module_names)
+
+
+def test_module_imports_are_stdlib_only():
+    """Pins standalone-runnability at the source level, with the reason readable.
+
+    A single non-stdlib import here silently breaks `python3 cell_selfcheck.py` on
+    every cell that has no install — and it would break it at the moment the tool
+    is most needed.
+    """
+    tree = ast.parse(_MODULE.read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+    imported.discard("__future__")
+    assert imported <= _STDLIB, f"non-stdlib imports break standalone use: {imported - _STDLIB}"
+
+
+def test_runs_as_a_bare_file_in_isolated_mode(tmp_path):
+    """`-I -S`: the closest reachable approximation of a cell with no swarph install.
+
+    -I alone drops PYTHONPATH and user-site but LEAVES SYSTEM SITE-PACKAGES; -S
+    removes those too (droplet, PR #149). It does not change today's result — the
+    file is genuinely stdlib-only — but without -S the guard tested a SUBSET of the
+    condition it exists to prove, which defeats the point of having it.
+
+    Asserts the ENTRY POINT works, not merely that the imports resolve.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-I", "-S", str(_MODULE), "--as", "test-cell",
+         "--declaration", str(tmp_path / "absent.json")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode in (0, 1), f"crashed instead of reporting:\n{proc.stderr}"
+    assert "cell selfcheck: test-cell" in proc.stdout, proc.stdout
+    assert "Traceback" not in proc.stderr, proc.stderr
+
+
+def test_bare_file_reports_missing_identity_rather_than_guessing(tmp_path):
+    """No --as and no $SWARPH_SELF must be exit 2 and a message, never a guess:
+    a baseline attributed to the wrong cell is worse than no baseline."""
+    env = {"PATH": "/nonexistent"}
+    proc = subprocess.run([sys.executable, "-I", "-S", str(_MODULE)],
+                          capture_output=True, text=True, timeout=60, env=env)
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert "pass --as" in proc.stderr, proc.stderr
+
+
+# ── the per-cell rename is a MIGRATION, and it lands on the baseline ─────────
+# droplet, PR #149: with the pre-#148 shared cell_expected.json on disk and the
+# per-cell file absent, the run reported DRIFT on three keys and never mentioned
+# the file sitting right there. Every cell that declared anything before #148 would
+# have produced a baseline full of FALSE DRIFT — the "before" picture #132/#130 is
+# diffed against.
+
+_TWO_VALUES = [
+    _unit("a.service", "ExecStart=x --state-dir /var/lib/swarph/droplet\n"),
+    _unit("b.service", "ExecStart=x --state-dir /var/lib/swarph/droplet-monitor\n"),
+]
+
+
+def test_legacy_declaration_present_is_did_not_measure_not_drift(monkeypatch, tmp_path, capsys):
+    """Exit 2, loudly naming both files. NOT exit 1: this run did not measure drift,
+    it measured a missing declaration. Empty and blind must not render identically."""
+    (tmp_path / "cell_expected.json").write_text(
+        json.dumps({"state-dir": ["/var/lib/swarph/droplet",
+                                  "/var/lib/swarph/droplet-monitor"]}), encoding="utf-8")
+    monkeypatch.setattr(sc, "discover_surfaces", lambda: _TWO_VALUES)
+    rc = sc.run_selfcheck(self_name="droplet",
+                          declaration=tmp_path / "cell_expected.droplet.json")
+    out = capsys.readouterr().out
+    assert rc == 2, f"a poisoned baseline is worse than none:\n{out}"
+    assert "cell_expected.json" in out, "the legacy file must be NAMED, not silently ignored"
+    assert "cell_expected.droplet.json" in out, out
+    assert "DRIFT" not in out, "must not report drift it did not measure"
+
+
+def test_legacy_declaration_is_not_read(monkeypatch, tmp_path, capsys):
+    """Auto-reading it would re-introduce the shared one-file-many-cells defect #148
+    removed. The migration must be performed, not papered over."""
+    (tmp_path / "cell_expected.json").write_text(
+        json.dumps({"state-dir": ["/var/lib/swarph/droplet",
+                                  "/var/lib/swarph/droplet-monitor"]}), encoding="utf-8")
+    monkeypatch.setattr(sc, "discover_surfaces", lambda: _TWO_VALUES)
+    sc.run_selfcheck(self_name="droplet", declaration=tmp_path / "cell_expected.droplet.json")
+    assert "DECLARED" not in capsys.readouterr().out, "legacy values must not silently apply"
+
+
+def test_per_cell_declaration_wins_when_both_exist(monkeypatch, tmp_path, capsys):
+    """Once migrated, the legacy file's mere presence must not keep firing —
+    otherwise the warning becomes noise nobody can clear."""
+    (tmp_path / "cell_expected.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "cell_expected.droplet.json").write_text(
+        json.dumps({"state-dir": ["/var/lib/swarph/droplet",
+                                  "/var/lib/swarph/droplet-monitor"]}), encoding="utf-8")
+    monkeypatch.setattr(sc, "discover_surfaces", lambda: _TWO_VALUES)
+    rc = sc.run_selfcheck(self_name="droplet",
+                          declaration=tmp_path / "cell_expected.droplet.json")
+    out = capsys.readouterr().out
+    assert rc == 0 and "DECLARED" in out, out
+
+
+def test_no_declaration_anywhere_still_measures(monkeypatch, tmp_path, capsys):
+    """The absent-both case is a normal run — drift is a real verdict here."""
+    monkeypatch.setattr(sc, "discover_surfaces", lambda: _TWO_VALUES)
+    rc = sc.run_selfcheck(self_name="droplet",
+                          declaration=tmp_path / "cell_expected.droplet.json")
+    assert rc == 1, "two values, nothing declared, no legacy file -> real drift"
 
 
 def test_the_scan_can_actually_fail():
