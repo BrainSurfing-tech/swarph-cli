@@ -210,6 +210,36 @@ def user_crontab_surfaces(returncode: int, stdout: str, stderr: str) -> list[dic
              "detail": (stderr or f"exit {returncode}").strip()[:120]}]
 
 
+def system_cron_coverage(live: list, inert: list, unreadable: list, *,
+                         platform_has_cron: bool) -> dict:
+    """Classify the system-cron probe. PURE — takes the outcome, does not produce it.
+
+    ABSENT IS NOT NOT-APPLICABLE, AND THIS CLASS FAILED BY AN EMPTY LOOP RATHER THAN
+    BY AN EXCEPTION, so the FileNotFoundError fix for `user crontab` could not reach
+    it (droplet, PR #150 follow-up — READ from the branch, not measured, because his
+    box has cron; confirmed here by test). A Windows cell was returning
+
+        COVERAGE  user crontab  read  not applicable — no cron on this platform
+        COVERAGE  system cron   read  none present
+
+    describing ONE platform fact two different ways, and "none present" — which reads
+    as I LOOKED AND THERE WERE NONE — is the one a reader would trust. Same
+    absent-vs-not-applicable distinction, one class over.
+    """
+    if unreadable:
+        return {"kind": "coverage", "class": "system cron", "read": False,
+                "detail": "unreadable: " + ", ".join(unreadable)[:100]}
+    if not platform_has_cron:
+        return {"kind": "coverage", "class": "system cron", "read": True,
+                "detail": "not applicable — no cron on this platform"}
+    detail = f"{len(live)} live" if live else "none live"
+    if inert:
+        detail += (f", {len(inert)} ignored (dot-named; cron's run-parts skips them "
+                   f"on Debian/Ubuntu)")
+    return {"kind": "coverage", "class": "system cron", "read": True,
+            "detail": detail if (live or inert) else "present but empty"}
+
+
 def discover_surfaces() -> list[dict]:
     """Read this cell's units and crontab. THE ONLY IMPURE FUNCTION HERE.
 
@@ -315,16 +345,9 @@ def discover_surfaces() -> list[dict]:
             # flag parser.
             surfaces.append({"name": f"({path})", "kind": "cron", "text": text,
                              "live": bool(executable), "shared": True})
-    if unreadable:
-        surfaces.append({"kind": "coverage", "class": "system cron", "read": False,
-                         "detail": "unreadable: " + ", ".join(unreadable)[:100]})
-    else:
-        detail = f"{len(sys_cron)} live" if sys_cron else "none live"
-        if inert:
-            detail += (f", {len(inert)} ignored (dot-named; cron's run-parts skips "
-                       f"them on Debian/Ubuntu)")
-        surfaces.append({"kind": "coverage", "class": "system cron", "read": True,
-                         "detail": detail if (sys_cron or inert) else "none present"})
+    surfaces.append(system_cron_coverage(
+        sys_cron, inert, unreadable,
+        platform_has_cron=Path("/etc/crontab").exists() or Path("/etc/cron.d").is_dir()))
 
     # NOT INSPECTED, stated so a clean verdict cannot be misread (science-claude,
     # 2026-07-27): her live monitor is a HAND-STARTED process, not a unit and not a
