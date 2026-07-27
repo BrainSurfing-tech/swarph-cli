@@ -124,6 +124,38 @@ def test_unowned_line_on_a_shared_surface_is_drift(monkeypatch, tmp_path, capsys
     assert rc == 1, "a line nobody owns is drift — nobody will notice when it rots"
 
 
+def test_unowned_gates_on_the_shared_property_not_the_surface_label(monkeypatch, tmp_path, capsys):
+    """The label is documentation; `shared` is the property.
+
+    An earlier form required `r.surface == "(crontab)"`. Renaming the surface for
+    readability — a change nobody reviews closely — silently disabled the check and
+    the run stayed GREEN. This test renames it on purpose.
+    """
+    renamed = dict(_cron(_SIX_CELL_CRON), name="user crontab (lab-ovh)")
+    rc, out = _run(monkeypatch, tmp_path, [renamed], "science-claude", capsys=capsys)
+    assert "UNOWNED" in out, f"check died when the label changed:\n{out}"
+    assert rc == 1
+
+
+def test_unowned_does_not_fire_on_an_unshared_surface(monkeypatch, tmp_path, capsys):
+    """A cell's OWN unit needs no --cell to claim it — only a shared surface does."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("swarph-monitor-lab.service",
+              "ExecStart=swarph monitor start --state-dir ~/swarph_state/lab/mesh-sidecar\n"),
+    ], "lab", capsys=capsys)
+    assert "UNOWNED" not in out, out
+    assert rc == 0
+
+
+def test_unowned_is_not_limited_to_the_cursor_key(monkeypatch, tmp_path, capsys):
+    """Enumerating which keys may rot is the unenumerable-denylist move again."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _cron("*/5 * * * * swarph watchdog --state-dir ~/orphan/state\n"),
+    ], "lab", capsys=capsys)
+    assert "UNOWNED   --state-dir" in out, out
+    assert rc == 1
+
+
 def test_other_cells_lines_are_visible_but_attributed(monkeypatch, tmp_path, capsys):
     _, out = _run(monkeypatch, tmp_path, [_cron(_SIX_CELL_CRON)],
                   "science-claude", capsys=capsys)
@@ -184,6 +216,22 @@ def test_declared_divergence_is_not_drift(monkeypatch, tmp_path, capsys):
     assert rc_declared == 0 and "DECLARED" in out, out
 
 
+def test_declaration_default_is_per_cell(monkeypatch, tmp_path):
+    """The tool's own config must not be a shape-3 defect in the shape-3 detector.
+
+    lab-ovh runs five cells under ONE home. A shared cell_expected.json means two
+    cells declaring different intentional --state-dir values SILENCE EACH OTHER —
+    and the declaration is exactly what separates a choice from rot. Must be
+    per-cell before fleet baselines: a baseline taken against a shared file records
+    the wrong thing and cannot be reattributed afterwards.
+    """
+    monkeypatch.setattr(sc.Path, "home", staticmethod(lambda: tmp_path))
+    a = sc.default_declaration_path("lab-ovh")
+    b = sc.default_declaration_path("science-claude")
+    assert a != b, "five cells, one home, one declaration file"
+    assert a.name == "cell_expected.lab-ovh.json", a
+
+
 def test_the_scan_can_actually_fail():
     """A guard that cannot fail is not a guard. Pins the relation logic itself."""
     assert sc.relation_broken("~/s/x/cursor.json", "~/s/x/mesh-sidecar") is True
@@ -203,6 +251,15 @@ def test_template_placeholders_are_not_values(val):
 @pytest.mark.parametrize("val", ["lab-ovh", "/var/lib/swarph/x", "100%real"])
 def test_real_values_are_not_placeholders(val):
     assert sc.is_placeholder(val) is False
+
+
+# droplet's PR #148 review, finding 1: an earlier form required an UPPERCASE first
+# char, so a script's own locals read as literal values and `--state-dir "$statedir"`
+# reported DRIFT ON TEMPLATE TEXT. His ten tests never pinned it, so a narrower
+# reimplementation passed every gate — the cost of tests-as-spec, paid once.
+@pytest.mark.parametrize("val", ["$state", "${state_dir}", "$1", "$statedir/x"])
+def test_lowercase_and_numeric_shell_vars_are_placeholders(val):
+    assert sc.is_placeholder(val) is True
 
 
 def test_template_unit_does_not_invent_a_cell_named_percent_i(monkeypatch, tmp_path, capsys):

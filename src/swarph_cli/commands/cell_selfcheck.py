@@ -65,7 +65,13 @@ _DM_CURSOR_RE = re.compile(r"cursor\.json$")
 # crucially also `<HOME>/state`, a PARTIALLY substituted path. A half-templated
 # value is still unsubstituted template text; treating it as configuration invents
 # a path no process will ever open.
-_SPECIFIER_RE = re.compile(r"%[a-zA-Z]\b|<[A-Z_]+>|\$\{?[A-Z_]\w*\}?")
+#
+# THE SHELL-VAR BRANCH IS DELIBERATELY CASE-INSENSITIVE AND ACCEPTS DIGITS.
+# An earlier form required an uppercase first character, so `$state`, `${state_dir}`
+# and `$1` read as LITERAL VALUES and `--state-dir "$statedir"` reported DRIFT ON
+# TEMPLATE TEXT (droplet, PR #148 review). Shell variables are not conventionally
+# uppercase — only environment variables are, and a script's locals are neither.
+_SPECIFIER_RE = re.compile(r"%[a-zA-Z]\b|<[A-Za-z_]+>|\$\{?\w+\}?")
 
 
 def is_placeholder(value: str) -> bool:
@@ -79,12 +85,19 @@ def is_placeholder(value: str) -> bool:
 
 @dataclass(frozen=True)
 class Row:
-    """One flag observed on one surface. `live` rides the surface, not a syscall."""
+    """One flag observed on one surface. `live` rides the surface, not a syscall.
+
+    `shared` likewise rides the surface as a PROPERTY. It must never be re-derived
+    from `surface`, which is a human-readable LABEL: gating a check on the string
+    "(crontab)" means renaming that label for readability — the kind of change
+    nobody reviews closely — silently disables the check and the run stays green.
+    """
     key: str
     value: str
     owner: Optional[str]
     live: bool
     surface: str = ""
+    shared: bool = False
 
 
 def cursor_type(path: str) -> str:
@@ -121,6 +134,7 @@ def extract(surface: dict) -> list[Row]:
     """
     rows: list[Row] = []
     live = bool(surface.get("live", True))
+    shared = bool(surface.get("shared", False))
     name = surface.get("name", "?")
     for line in surface.get("text", "").splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
@@ -152,7 +166,8 @@ def extract(surface: dict) -> list[Row]:
                     pairs.append((key, val if val else "<EMPTY>"))
             i += 1
         for key, val in pairs:
-            rows.append(Row(key=key, value=val, owner=owner, live=live, surface=name))
+            rows.append(Row(key=key, value=val, owner=owner, live=live,
+                            surface=name, shared=shared))
     return rows
 
 
@@ -227,9 +242,16 @@ def run_selfcheck(*, self_name: str, declaration: Path) -> int:
             print(f"  MALFORMED --{r.key} has no value   ({r.surface})")
             drift = True
 
-    # shared surfaces: a line nobody claims rots unnoticed
+    # Shared surfaces: a line nobody claims rots unnoticed.
+    #
+    # Gated on the surface's `shared` PROPERTY, and on NO key allowlist. An earlier
+    # form required `r.key == "cursor" and r.surface == "(crontab)"`, which was wrong
+    # twice over (droplet, PR #148 review): the label as a control predicate, and
+    # enumerating which keys can rot instead of stating the property — the same
+    # unenumerable-denylist move this mesh rejected in #128b option (b) one day
+    # earlier, reproduced inside the tool built while rejecting it.
     for r in rows:
-        if r.owner is None and r.live and r.key == "cursor" and r.surface == "(crontab)":
+        if r.shared and r.owner is None and r.live:
             print(f"  UNOWNED   --{r.key} {r.value}   ({r.surface}) — no --cell/--as on this line")
             drift = True
 
@@ -260,6 +282,22 @@ def run_selfcheck(*, self_name: str, declaration: Path) -> int:
     return 1 if drift else 0
 
 
+def default_declaration_path(self_name: str) -> Path:
+    """PER-CELL by construction: ~/.config/swarph/cell_expected.<cell>.json
+
+    A single shared `cell_expected.json` is SHAPE 3 — one file, many cells — inside
+    the shape-3 detector (droplet, PR #148 review). On lab-ovh's shared home five
+    cells resolve the same HOME, so two cells declaring different intentional
+    --state-dir values would silence each other, and the declaration is precisely
+    what separates a deliberate CHOICE from ROT.
+
+    This must be per-cell BEFORE fleet baselines are captured: a baseline taken
+    against a shared declaration records the wrong thing and is unrecoverable —
+    you cannot reconstruct afterwards whose intent was in the file.
+    """
+    return Path.home() / ".config" / "swarph" / f"cell_expected.{self_name}.json"
+
+
 def run_cell_selfcheck(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="swarph cell selfcheck", description=__doc__.split("\n")[0])
     p.add_argument("--as", dest="self_name", default=os.environ.get("SWARPH_SELF"),
@@ -270,6 +308,6 @@ def run_cell_selfcheck(argv: list[str]) -> int:
     if not args.self_name:
         print("swarph cell selfcheck: pass --as <peer> or set $SWARPH_SELF", file=sys.stderr)
         return 2
-    decl = Path(args.declaration).expanduser() if args.declaration else (
-        Path.home() / ".config" / "swarph" / "cell_expected.json")
+    decl = (Path(args.declaration).expanduser() if args.declaration
+            else default_declaration_path(args.self_name))
     return run_selfcheck(self_name=args.self_name, declaration=decl)
