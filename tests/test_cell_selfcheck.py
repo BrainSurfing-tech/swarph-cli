@@ -413,6 +413,29 @@ def test_not_inspected_classes_do_not_block_the_verdict(monkeypatch, tmp_path, c
     assert "running processes" in out and "NOT INSPECTED" in out
 
 
+def test_user_crontab_class_is_named_for_what_it_actually_reads():
+    """`crontab -l` reads THE INVOKING USER'S crontab and nothing else.
+
+    A class named `crontab` overstated its scope BY THE NAME ALONE, before any logic
+    ran: a cell with a swarph line in /etc/cron.d would read "COVERAGE crontab read /
+    verdict: consistent" while a live cron surface was never opened — grok's failure
+    moved one directory over (droplet, PR #150).
+    """
+    classes = {s.get("class") for s in sc.discover_surfaces() if s.get("kind") == "coverage"}
+    assert "crontab" not in classes, f"class name overstates its scope: {classes}"
+    assert "user crontab" in classes and "system cron" in classes, classes
+
+
+def test_other_user_caveat_is_on_every_user_crontab_branch():
+    """It is a property of THE PROBE — this command cannot read another user's
+    crontab in ANY branch — not of the cell. Hanging it only off the no-crontab
+    branch tells grok and stays silent for a cell that has a crontab AND a line
+    under another user."""
+    cov = [s for s in sc.discover_surfaces()
+           if s.get("kind") == "coverage" and s.get("class") == "user crontab"]
+    assert cov and "other users" in cov[0]["detail"], cov
+
+
 def test_coverage_entries_are_not_parsed_as_flags(monkeypatch, tmp_path, capsys):
     """Coverage rides the same injectable channel as surfaces, so it must not leak
     into the flag count or invent rows."""
