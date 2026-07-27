@@ -436,6 +436,34 @@ def test_other_user_caveat_is_on_every_user_crontab_branch():
     assert cov and "other users" in cov[0]["detail"], cov
 
 
+@pytest.mark.parametrize("name,runs", [
+    ("certbot", True), ("e2scrub_all", True), ("swarph-monitor", True), ("my_job", True),
+    (".placeholder", False), ("swarph.conf", False), ("foo.bak", False),
+    ("x.dpkg-dist", False),
+])
+def test_cron_d_filename_rule(name, runs):
+    """cron runs only ^[A-Za-z0-9_-]+$ in /etc/cron.d — ANY DOT disqualifies the file.
+
+    A swarph line in a dot-named file would otherwise be read as live configuration
+    and could produce DRIFT / UNOWNED / RELATION BROKEN for a line CRON WILL NEVER RUN
+    (droplet, PR #150). That is the FOSSIL distinction the systemd path already models,
+    expressed here as a filename rule instead of unit state.
+    """
+    assert bool(sc._CRON_D_NAME_RE.match(name)) is runs
+
+
+def test_inert_cron_file_is_fossil_not_drift(monkeypatch, tmp_path, capsys):
+    """A dot-named cron file's contents must be REPORTED but never counted as drift —
+    same contract as an inactive+disabled unit."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        {"name": "(/etc/cron.d/swarph.conf)", "kind": "cron", "shared": True, "live": False,
+         "text": "*/5 * * * * root swarph watchdog --cell lab --cursor /nope/cursor.json\n"},
+        _unit("a.service", "ExecStart=x --as lab --state-dir /var/lib/swarph/lab\n"),
+    ], "lab", capsys=capsys)
+    assert "FOSSIL" in out, out
+    assert rc == 0, "cron will never run it — it cannot be drift"
+
+
 def test_coverage_entries_are_not_parsed_as_flags(monkeypatch, tmp_path, capsys):
     """Coverage rides the same injectable channel as surfaces, so it must not leak
     into the flag count or invent rows."""
