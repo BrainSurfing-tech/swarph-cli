@@ -176,6 +176,40 @@ def extract(surface: dict) -> list[Row]:
     return rows
 
 
+_OTHER_USER_CAVEAT = " (cannot see other users' crontabs in any case)"
+
+
+def user_crontab_surfaces(returncode: int, stdout: str, stderr: str) -> list[dict]:
+    """Classify a `crontab -l` result. PURE — takes the outcome, does not run it.
+
+    Split out so every branch is testable on any box, including Windows where there
+    is no crontab at all. Calling the impure discoverer from a test would make these
+    cases unreachable on half the CI matrix, which is the same "only passes on one
+    box" trap the whole suite is built to avoid.
+    """
+    if returncode == 0 and stdout.strip():
+        return [{"name": "(crontab)", "kind": "cron", "text": stdout,
+                 "live": True, "shared": True},
+                {"kind": "coverage", "class": "user crontab", "read": True,
+                 "detail": f"{len(stdout.splitlines())} lines" + _OTHER_USER_CAVEAT}]
+    if returncode == 0:
+        return [{"kind": "coverage", "class": "user crontab", "read": True,
+                 "detail": "present but empty" + _OTHER_USER_CAVEAT}]
+    if "no crontab for" in (stderr or ""):
+        # LEGITIMATE EMPTY: a real answer, not a failure. Still stated, because a cron
+        # line for this cell may live under another user. That is grok's situation.
+        #
+        # The stderr match is LOCALE-DEPENDENT ON PURPOSE: a translated message falls
+        # through to the failure branch and becomes read=False -> DID NOT MEASURE.
+        # That degrades BLIND rather than FALSELY-CLEAN, which is the safe direction.
+        # Do not "fix" it into a broader match — a wider pattern would swallow real
+        # failures (droplet, PR #150).
+        return [{"kind": "coverage", "class": "user crontab", "read": True,
+                 "detail": "no crontab for this user" + _OTHER_USER_CAVEAT}]
+    return [{"kind": "coverage", "class": "user crontab", "read": False,
+             "detail": (stderr or f"exit {returncode}").strip()[:120]}]
+
+
 def discover_surfaces() -> list[dict]:
     """Read this cell's units and crontab. THE ONLY IMPURE FUNCTION HERE.
 
@@ -225,31 +259,9 @@ def discover_surfaces() -> list[dict]:
     # crontab in ANY branch — not a property of the cell. Hanging it only off the
     # "no crontab" branch would tell grok and stay silent for a cell that HAS a
     # crontab and ALSO has a line under another user.
-    _OTHER_USER = " (cannot see other users' crontabs in any case)"
     try:
         p = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
-        if p.returncode == 0 and p.stdout.strip():
-            surfaces.append({"name": "(crontab)", "kind": "cron", "text": p.stdout,
-                             "live": True, "shared": True})
-            surfaces.append({"kind": "coverage", "class": "user crontab", "read": True,
-                             "detail": f"{len(p.stdout.splitlines())} lines" + _OTHER_USER})
-        elif p.returncode == 0:
-            surfaces.append({"kind": "coverage", "class": "user crontab", "read": True,
-                             "detail": "present but empty" + _OTHER_USER})
-        elif "no crontab for" in (p.stderr or ""):
-            # LEGITIMATE EMPTY: a real answer, not a failure. Still stated, because a
-            # cron line for this cell may live under another user. That is grok.
-            #
-            # The stderr match is LOCALE-DEPENDENT ON PURPOSE: a translated message
-            # falls through to the `else` and becomes read=False -> DID NOT MEASURE.
-            # That degrades BLIND rather than FALSELY-CLEAN, which is the safe
-            # direction. Do not "fix" this into a broader match — a wider pattern
-            # would swallow real failures (droplet, PR #150).
-            surfaces.append({"kind": "coverage", "class": "user crontab", "read": True,
-                             "detail": "no crontab for this user" + _OTHER_USER})
-        else:
-            surfaces.append({"kind": "coverage", "class": "user crontab", "read": False,
-                             "detail": (p.stderr or f"exit {p.returncode}").strip()[:120]})
+        surfaces += user_crontab_surfaces(p.returncode, p.stdout, p.stderr)
     except (OSError, subprocess.SubprocessError) as exc:
         surfaces.append({"kind": "coverage", "class": "user crontab", "read": False,
                          "detail": f"{type(exc).__name__}: {exc}"[:120]})
