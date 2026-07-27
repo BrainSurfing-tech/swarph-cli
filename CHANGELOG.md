@@ -2,6 +2,28 @@
 
 Notable changes to `swarph-cli`. Earlier history: `git log`.
 
+## 0.39.3 — 2026-07-27
+- **`deploy/monitor/swarph-monitor.service`** — a **silent** DM monitor unit. The
+  shipped sidecar ran `tmux send-keys -t <pane> "check mesh" Enter` on every DM:
+  it typed into the cell's pane, cost a full turn per message, and worked only
+  while the pane existed. The new unit runs the monitor `--deliver pull
+  --foreground` under systemd and pokes nothing.
+  - **SILENT MEANS YOU MUST PULL.** Nothing will type at you any more. Wire
+    `swarph monitor status` into a SessionStart hook (or call
+    `scripts/ensure_monitor.sh`), or a cell that relied on the `check mesh`
+    prompt to be woken will simply go quiet.
+  - `monitor start` is idempotent via pidfile, so a hook calling it is a no-op
+    while the unit runs — they compose rather than compete.
+  - systemd **owns** the process: a crash restarts within `RestartSec`. A
+    `Type=oneshot` + timer supervisor was tried first and failed —
+    `KillMode=control-group` reaped the detached monitor one second after the
+    oneshot exited, while logging "started" as a success.
+- **`deploy/sidecar/swarph-mesh-sidecar.service` — DEPRECATED IN PLACE**, not
+  removed: peers are running it and an existing install must not break.
+- **`scripts/ensure_monitor.sh`** — check status, start if down, report pending.
+  Never fails its caller; a hook that can block a session is worse than the
+  deafness it prevents.
+
 ## 0.39.2 — 2026-07-26
 - **fix(mesh):** `--token-file` is now **one parser**. It previously did
   `read_text().strip()` and returned the ENTIRE FILE, so pointing it at an
