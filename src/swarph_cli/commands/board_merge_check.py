@@ -41,7 +41,21 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
-READY_STAGE = "peer-green"
+# >>> READINESS IS THE `move_ready` FLAG AND A REAL STAGE — NOT AN INVENTED ONE. <<<
+# The first version gated on stage == "peer-green". MEASURED AFTER WRITING IT:
+#     swarph board cards move 141 peer-green  ->  gateway 400: unknown stage 'peer-green'
+# NO CARD CAN EVER BE IN THAT STAGE. The tool would have refused every card forever, and
+# all 19 tests passed because THE FIXTURES CONSTRUCTED A CARD THE REAL SYSTEM CANNOT
+# PRODUCE. Third instance of one defect in this file: `gh pr checks --json` (does not
+# exist), a passing check printing a failure message, and now a stage that does not
+# exist — each a check that can never succeed, which reads as "strict" not "broken".
+#
+# `move_ready` is the mechanism that already exists for exactly this: #70 built it as
+# an explicit ball-in-court handoff, a NON-orchestrator saying "this should advance".
+# NOTE THE DEPENDENCY THIS CREATES: card #141 — move_ready is unreachable on UNASSIGNED
+# cards — now blocks the merge process too, because a PR card nobody has claimed cannot
+# be flagged ready by the peer who reviewed it.
+READY_STAGES = ("build", "test")
 
 # Paths whose modification makes a PR PERMANENTLY HUMAN-MERGE-ONLY.
 # A process that can ship changes to its own gate has no gate.
@@ -93,8 +107,10 @@ def decide(card: dict, pr_state: dict) -> Decision:
     def add(name, ok, detail=""):
         checks.append(Check(name, ok, detail))
 
-    add("stage is peer-green", card.get("stage") == READY_STAGE,
-        f"stage={card.get('stage')!r}")
+    add("stage is one the board accepts for execution", card.get("stage") in READY_STAGES,
+        f"stage={card.get('stage')!r} (expected one of {', '.join(READY_STAGES)})")
+    add("card flagged move_ready", bool(card.get("move_ready")),
+        "" if card.get("move_ready") else "the reviewer has not signalled ready-to-advance")
 
     verdict = parse_verdict(links.get("peer_verdict", ""))
     # Detail only when it FAILED. A passing check that prints a failure message is a
