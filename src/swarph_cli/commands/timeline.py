@@ -36,12 +36,55 @@ def _timeline_path() -> str:
     return os.environ.get("SWARPH_TIMELINE", _DEFAULT_TIMELINE)
 
 
+# EVERY FORM THE SHARED TIMELINE ACTUALLY CONTAINS, not only the one we write today.
+#
+# MEASURED on the live TIMELINE.md 2026-07-27, by shape:
+#     274  NNNN-NN-NNTNN:NNZ      minute precision — the only form this parsed
+#      65  NNNN-NN-NN             DATE ONLY — the OMEGA genesis entries
+#       1  NNNN-NN-NNTNN:NN:NNZ   seconds
+# The strict minute-precision parser silently dropped 66 of 340 entries — THE MESH'S
+# ENTIRE PRE-HISTORY, 2026-03 to 2026-04: genesis, the first worker swarm, the storage
+# hub, OMEGA Command, Knowledge Graph v1.0. `swarph timeline since 2026-03-01` returned
+# NOTHING and exited 0 — this tool's own headline defect (card #135) committed against
+# the oldest and least replaceable content it holds.
+#
+# Found because the gateway's GET /highlights reported parse_skipped=67 on its first
+# live call — a counter that exists only because a peer said the parser should not be
+# exempt from the endpoint's own empty-is-not-blind rule.
+#
+# A DATE-ONLY ENTRY IS ANCHORED AT 00:00Z. That is a choice, not a rounding: such an
+# entry records a DAY, so it sorts at the start of that day and `since <that day>`
+# includes it.
+_TS_FORMATS = (
+    "%Y-%m-%dT%H:%M:%S.%fZ",   # sub-second
+    "%Y-%m-%dT%H:%M:%SZ",      # seconds
+    "%Y-%m-%dT%H:%MZ",         # minute — what `swarph highlight` writes
+    "%Y-%m-%d %H:%M:%SZ",      # space separator, hand-written entries
+    "%Y-%m-%d %H:%MZ",
+    "%Y-%m-%d",                # DATE ONLY — the genesis entries
+)
+
+
 def _parse_entry_ts(s: str) -> dt.datetime | None:
-    """Parse the entry timestamp ``2026-07-15T08:51Z`` (minute precision, UTC)."""
+    """Parse an entry timestamp in any form the timeline actually uses. UTC.
+
+    Returns None for anything unrecognised — the caller REPORTS it as skipped, never
+    guesses. A guessed timestamp files an entry under the wrong day, which is worse
+    than admitting the line was not understood.
+    """
+    for fmt in _TS_FORMATS:
+        try:
+            return dt.datetime.strptime(s, fmt).replace(tzinfo=dt.timezone.utc)
+        except ValueError:
+            continue
+    # Offset forms (+00:00, -05:00) and other ISO-8601 shapes. The explicit formats
+    # run first so the common case takes no exception path. `Z` is spelled out because
+    # fromisoformat did not accept it before 3.11 and cells run 3.10.
     try:
-        return dt.datetime.strptime(s, "%Y-%m-%dT%H:%MZ").replace(tzinfo=dt.timezone.utc)
+        parsed = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
 
 
 def load_entries(path: str) -> list:
