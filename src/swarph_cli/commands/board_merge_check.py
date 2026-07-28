@@ -79,7 +79,13 @@ class Check:
 @dataclass(frozen=True)
 class Decision:
     card_id: str
-    verdict: str                      # WOULD_MERGE | REFUSE
+    # >>> THREE VERDICTS, NOT TWO (droplet, PR #154 review — my own lesson, one level
+    # in). A two-valued REFUSE collapses "this PR FAILS a precondition" and "I COULD NOT
+    # EVALUATE one", and those need opposite responses: the first says FIX YOUR PR, the
+    # second says THE TOOL IS BLIND — go look at it. Same split shipped in `cell
+    # selfcheck` (read/not-read/not-applicable) and GET /highlights (empty/behind/blind),
+    # and omitted here in the module written to enforce discipline. <<<
+    verdict: str                      # WOULD_MERGE | REFUSE | CANNOT_EVALUATE
     checks: list = field(default_factory=list)
 
     @property
@@ -158,9 +164,15 @@ def decide(card: dict, pr_state: dict) -> Decision:
         add("does not modify the merger itself", not self_mod,
             f"human-merge-only: {', '.join(self_mod)}" if self_mod else "")
 
-    ok = all(c.ok is True for c in checks)
-    return Decision(card_id=str(card.get("id")), verdict="WOULD_MERGE" if ok else "REFUSE",
-                    checks=checks)
+    if any(c.ok is None for c in checks):
+        # BLIND BEATS FAILED: if anything could not be evaluated we do not know whether
+        # the PR passes, so we must not report a substantive refusal we did not measure.
+        v = "CANNOT_EVALUATE"
+    elif all(c.ok is True for c in checks):
+        v = "WOULD_MERGE"
+    else:
+        v = "REFUSE"
+    return Decision(card_id=str(card.get("id")), verdict=v, checks=checks)
 
 
 def fetch_pr_state(repo: str, number: str) -> dict:
@@ -246,4 +258,7 @@ def run_board_merge_check(argv: list) -> int:
     d = decide(card, pr_state)
     print(format_decision(d))
     print("\n  DRY RUN — phase 1 merges nothing. See card #137 for the graduation date.")
-    return 0 if d.verdict == "WOULD_MERGE" else 1
+    # 0 would-merge · 1 refused on a measured precondition · 2 could not evaluate.
+    # A caller that cannot tell 1 from 2 will retry a broken tool forever, or file a
+    # bug against a PR that is fine.
+    return {"WOULD_MERGE": 0, "REFUSE": 1}.get(d.verdict, 2)
