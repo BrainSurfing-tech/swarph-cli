@@ -193,6 +193,13 @@ def _resolve_project(gw: str, token: str, value) -> tuple[Optional[int], Optiona
 
 
 def run_board(argv: list[str]) -> int:
+    # `merge-check` is dispatched BEFORE token resolution on purpose: it reads a card
+    # JSON and queries gh, and needs no gateway token. Requiring one would make the
+    # dry-run unusable on exactly the cells that hold a GitHub credential but no board
+    # token (card #137).
+    if argv and argv[0] == "merge-check":
+        from swarph_cli.commands.board_merge_check import run_board_merge_check
+        return run_board_merge_check(argv[1:])
     args = _build_parser().parse_args(argv)
     try:
         self_name = _resolve_self_name(args.self_name)
