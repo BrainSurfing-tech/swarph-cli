@@ -26,7 +26,7 @@ SHA = "abc1234def5678"
 
 
 def _card(**over):
-    card = {"id": 152, "stage": "peer-green", "created_by": "lab-ovh",
+    card = {"id": 152, "stage": "build", "move_ready": True, "created_by": "lab-ovh",
             "links": {"pr": "https://github.com/o/r/pull/152",
                       "peer_verdict": f"droplet APPROVED {SHA}"}}
     card.update(over)
@@ -113,7 +113,28 @@ def test_unresolved_findings_block():
 
 
 def test_wrong_stage_blocks():
-    assert mc.decide(_card(stage="build"), _pr()).verdict == "REFUSE"
+    assert mc.decide(_card(stage="proposed"), _pr()).verdict == "REFUSE"
+
+
+def test_unflagged_card_blocks():
+    """move_ready is the reviewer's ball-in-court signal (#70). Without it, a green
+    PR on a card nobody flagged would merge on CI alone."""
+    assert mc.decide(_card(move_ready=False), _pr()).verdict == "REFUSE"
+
+
+def test_the_vocabulary_is_one_the_real_board_accepts():
+    """>>> THE GUARD FOR THE DEFECT THAT PRODUCED THIS TEST. <<<
+
+    The first version gated on stage "peer-green". The gateway rejects it (400: unknown
+    stage), so no card could ever satisfy it — and all tests passed, because the
+    FIXTURES BUILT A CARD THE REAL SYSTEM CANNOT PRODUCE. A fixture is not a schema.
+
+    _BOARD_EXECUTE_STAGES in the deployed gateway is {"build", "test"}; these must be a
+    subset. If someone invents a stage again, this fails instead of the tool silently
+    refusing everything forever.
+    """
+    assert set(mc.READY_STAGES) <= {"build", "test", "spec", "proposed", "idea", "done"}
+    assert "peer-green" not in mc.READY_STAGES
 
 
 # ── the verdict parser: unrecognised is REPORTED, never guessed ───────────────
