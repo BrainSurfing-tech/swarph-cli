@@ -93,9 +93,18 @@ def test_unreachable_github_is_could_not_evaluate_never_pass():
     discipline as `cell selfcheck` (read/not-read/not-applicable) and GET /highlights
     (empty/behind/blind): an unreachable check is not a passing check."""
     d = mc.decide(_card(), _pr(checks=None, files_changed=None))
-    assert d.verdict == "REFUSE"
+    assert d.verdict == "CANNOT_EVALUATE", "blind must not render as a measured refusal"
     ci = _fail(d, "CI all green (live)")[0]
     assert ci.ok is None, "must be COULD-NOT-EVALUATE, not False"
+
+
+def test_blind_beats_failed_when_both_are_present():
+    """A real precondition failure AND an unevaluable one -> CANNOT_EVALUATE.
+
+    Reporting REFUSE would claim we measured the PR when part of it was never read —
+    the same overstatement as `consistent` over an unread crontab (card #133/grok)."""
+    d = mc.decide(_card(stage="proposed"), _pr(checks=None))
+    assert d.verdict == "CANNOT_EVALUATE"
 
 
 def test_a_pr_touching_the_merger_is_human_merge_only():
@@ -161,14 +170,46 @@ def test_missing_verdict_blocks_and_does_not_crash():
 
 # ── phase-1 contract ─────────────────────────────────────────────────────────
 
-def test_decide_is_pure_and_never_merges(tmp_path, capsys):
-    """Phase 1 decides and logs. There is no merge call in this module — asserted
-    structurally so a future edit that adds one fails here rather than in production."""
-    src = (tmp_path / "src.py")
-    import inspect
-    text = inspect.getsource(mc)
-    for forbidden in ("pr merge", "--merge", "--squash"):
-        assert forbidden not in text, f"phase 1 must not merge: found {forbidden!r}"
+def test_nothing_mutating_is_ever_INVOKED(monkeypatch):
+    """>>> BEHAVIOURAL, NOT TEXTUAL. THE PREVIOUS VERSION OF THIS TEST WAS A SUBSTRING
+    SCAN OF THE SOURCE AND MISSED THE FORMS A FUTURE AUTHOR WOULD ACTUALLY WRITE. <<<
+
+    droplet tested five plausible edits against the old guard's three forbidden strings:
+        gh("pr merge --squash 154")                          CAUGHT
+        gh("pr","merge",num,"--squash")                      CAUGHT
+        gh("pr","merge",num,"--"+"squash")                   MISSED
+        MERGE=["pr","merge"]; gh(*MERGE,num)                 MISSED
+        gh("api", f"repos/{r}/pulls/{n}/merge","-X","PUT")   MISSED
+    The last is the form this module is MOST likely to reach for, because it already hit
+    `gh pr checks --json` not existing and fell back to a different gh invocation — a
+    future author blocked on `gh pr merge` does exactly that.
+
+    A SOURCE GREP TESTS TEXT; THE CLAIM IS ABOUT BEHAVIOUR. Same defect as `pgrep -f`
+    matching its own command line — and as droplet's replacement for it, where he fixed
+    the self-match and not the substring match.
+
+    This observes what RAN, so string construction cannot evade it.
+    """
+    seen = []
+
+    class _Done:
+        returncode, stdout, stderr = 1, "", ""
+
+    def spy(argv, **kw):
+        seen.append(list(argv))
+        return _Done()
+
+    monkeypatch.setattr(mc.subprocess, "run", spy)
+    mc.fetch_pr_state("o/r", "154")
+    mc.decide(_card(), _pr())
+
+    assert seen, "guard is vacuous if nothing was invoked"
+    MUTATING = {"merge", "close", "edit", "delete", "push", "ready", "comment", "review"}
+    for argv in seen:
+        flat = " ".join(argv)
+        assert not (MUTATING & set(argv)), f"mutating verb invoked: {flat}"
+        assert "-X" not in argv and "--method" not in argv, f"raw API write: {flat}"
+        assert "/merge" not in flat, f"merge endpoint reached: {flat}"
 
 
 def test_cli_reports_dry_run(tmp_path, capsys):
@@ -177,4 +218,4 @@ def test_cli_reports_dry_run(tmp_path, capsys):
     rc = mc.run_board_merge_check(["--card-json", str(p), "--offline"])
     out = capsys.readouterr().out
     assert "DRY RUN" in out
-    assert rc == 1, "offline means CI could not be evaluated -> REFUSE"
+    assert rc == 2, "offline means COULD NOT EVALUATE (2), never a measured refusal (1)"
