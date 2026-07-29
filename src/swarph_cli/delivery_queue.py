@@ -9,6 +9,7 @@ import os
 import sys
 from pathlib import Path
 from typing import List
+from swarph_cli.console_safe import print_safe
 
 
 def wake_for(kind: str, thread_id) -> bool:
@@ -40,7 +41,7 @@ class DeliveryQueue:
             # Corruption: reset to empty but LOG it — since the cursor advanced
             # on drain, wiped entries won't be re-fetched, so a silent reset
             # would lose DMs from the session (spec: "treat as empty, log, continue").
-            print(f"[swarph-daemon] delivery queue unreadable at {self.path} "
+            print_safe(f"[swarph-daemon] delivery queue unreadable at {self.path} "
                   f"({type(exc).__name__}: {exc}); starting empty — any queued "
                   f"DMs survive only in inbox.log", file=sys.stderr, flush=True)
             self._pending = []

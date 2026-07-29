@@ -101,39 +101,77 @@ def test_utf8_console_is_unaffected(tmp_path, monkeypatch, capsys):
 
 # ── COVERAGE, not presence — droplet's finding on PR #158 ────────────────────
 
-def test_every_output_path_in_the_daemon_goes_through_the_guard():
-    """>>> A SYMBOL GREP MEASURES PRESENCE, NOT COVERAGE. <<<
+def test_no_unguarded_print_in_ANY_module_the_daemon_loop_reaches():
+    """>>> A SYMBOL GREP MEASURES PRESENCE, NOT COVERAGE — AND SO DID THE FIRST VERSION
+        OF THIS TEST, WHICH WALKED ONE MODULE. <<<
 
-    The first version of the cp1252 guard shipped covering 1 output call out of 13.
-    `grep -c _print_safe` returned 1 on it — the same answer it returns now, with all
-    13 covered. Any check that asks "is the guard there?" passes on both, so this asks
-    the only question that distinguishes them: IS THERE AN UNGUARDED `print`?
+    History, because it is the whole lesson:
+      1. The cp1252 guard shipped covering 1 output call out of 13 in daemon.py.
+         `grep -c _print_safe` returned 1 on it — the same answer it returns now.
+      2. This test was added, walking daemon.py. It closed those 12.
+      3. droplet then found a bare print in the PUBLISHED 0.40.1 artifact at
+         delivery_queue.py:43, and a second lived at stall_alert.py:49. BOTH ON ERROR
+         PATHS INTERPOLATING AN EXCEPTION MESSAGE — the exact crash shape.
 
-    Walks the AST rather than the text so a `print` reached through a differently
-    formatted call, a new function, or a future author's copy-paste is caught. Same
-    reason the merge-check no-merge guard is behavioural and not a substring scan:
-    the claim is about what the module DOES, and text is a proxy for that.
+    The guard was sited INSIDE daemon.py, so the modules daemon IMPORTS could not use
+    it. THE GUARD'S HOME WAS ITSELF A COVERAGE BOUNDARY, and a test scoped to the
+    guard's own module could never see past it — it reported full coverage of the
+    place the bug was not.
+
+    So this walks every module the loop can reach, and the LIST is the assertion: a new
+    daemon-reachable module must be added here or it is unaudited by construction.
     """
     import ast
     from pathlib import Path
 
-    import swarph_cli.commands.daemon as mod
+    import swarph_cli
 
-    src = Path(mod.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    guard = next(n for n in ast.walk(tree)
-                 if isinstance(n, ast.FunctionDef) and n.name == "_print_safe")
-    allowed = {id(n) for n in ast.walk(guard)}
-
-    unguarded = [
-        n.lineno for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-        and n.func.id == "print" and id(n) not in allowed
+    root = Path(swarph_cli.__file__).parent
+    # Every module the daemon's poll loop can execute output from.
+    REACHED = [
+        "commands/daemon.py",
+        "delivery_queue.py",
+        "stall_alert.py",
+        "session_bridge.py",
     ]
-    assert not unguarded, (
-        f"unguarded print() at daemon.py lines {unguarded} — on a cp1252 console an "
-        f"arrow or emoji in that line raises UnicodeEncodeError and takes the loop with it"
+
+    offenders = {}
+    for rel in REACHED:
+        path = root / rel
+        assert path.exists(), f"{rel} listed as daemon-reachable but does not exist"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        bare = [
+            n.lineno for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "print"
+        ]
+        if bare:
+            offenders[rel] = bare
+
+    assert not offenders, (
+        f"unguarded print() on a daemon-reachable path: {offenders} — on a cp1252 "
+        f"console an arrow or emoji in that line raises UnicodeEncodeError, and if the "
+        f"line is inside an except block the raise escapes the try and kills the loop"
     )
+
+
+def test_the_guard_itself_is_the_only_place_a_bare_print_is_allowed():
+    """The implementation must contain exactly one bare print — the one it wraps.
+
+    Guards the degenerate fix for the test above: routing everything through a
+    `print_safe` that no longer prints would pass a coverage walk while emitting
+    nothing at all. Silence is the failure mode this whole feature exists to end.
+    """
+    import ast
+    from pathlib import Path
+
+    from swarph_cli import console_safe
+
+    tree = ast.parse(Path(console_safe.__file__).read_text(encoding="utf-8"))
+    bare = [n.lineno for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "print"]
+    assert len(bare) == 1, f"expected exactly one real print in the guard, found {bare}"
 
 
 def test_the_delivery_error_handler_survives_a_character_it_cannot_render():
