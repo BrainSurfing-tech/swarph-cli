@@ -97,3 +97,78 @@ def test_utf8_console_is_unaffected(tmp_path, monkeypatch, capsys):
     daemon._log_dm(_State(tmp_path), ARROW_DM)
     out = capsys.readouterr().out
     assert "id=1" in out and "lab-ovh" in out
+
+
+# ── COVERAGE, not presence — droplet's finding on PR #158 ────────────────────
+
+def test_every_output_path_in_the_daemon_goes_through_the_guard():
+    """>>> A SYMBOL GREP MEASURES PRESENCE, NOT COVERAGE. <<<
+
+    The first version of the cp1252 guard shipped covering 1 output call out of 13.
+    `grep -c _print_safe` returned 1 on it — the same answer it returns now, with all
+    13 covered. Any check that asks "is the guard there?" passes on both, so this asks
+    the only question that distinguishes them: IS THERE AN UNGUARDED `print`?
+
+    Walks the AST rather than the text so a `print` reached through a differently
+    formatted call, a new function, or a future author's copy-paste is caught. Same
+    reason the merge-check no-merge guard is behavioural and not a substring scan:
+    the claim is about what the module DOES, and text is a proxy for that.
+    """
+    import ast
+    from pathlib import Path
+
+    import swarph_cli.commands.daemon as mod
+
+    src = Path(mod.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    guard = next(n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == "_print_safe")
+    allowed = {id(n) for n in ast.walk(guard)}
+
+    unguarded = [
+        n.lineno for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "print" and id(n) not in allowed
+    ]
+    assert not unguarded, (
+        f"unguarded print() at daemon.py lines {unguarded} — on a cp1252 console an "
+        f"arrow or emoji in that line raises UnicodeEncodeError and takes the loop with it"
+    )
+
+
+def test_the_delivery_error_handler_survives_a_character_it_cannot_render():
+    """THE CRASH droplet MEASURED: a raise inside an `except` propagates past the
+    `try` entirely, so the handler whose comment promises it never crashes the loop
+    was itself the crash — reached only when something has ALREADY gone wrong, i.e.
+    exactly when the text is most likely to carry an arrow or an emoji.
+
+    Not a test of the happy DM path: that path was already guarded, so a clean
+    non-ASCII DM round-trip PASSES while this crash survives. The failure path is
+    the one that has to be driven.
+    """
+    import io
+
+    from swarph_cli.commands import daemon as mod
+
+    class Cp1252Stream(io.StringIO):
+        encoding = "cp1252"
+
+        def write(self, s):  # raises exactly where a French Windows console raises
+            s.encode("cp1252")
+            return super().write(s)
+
+    for payload in ("plain ascii", "arrow -> →", "emoji \U0001f512", "check ✓"):
+        stream = Cp1252Stream()
+        try:
+            raise RuntimeError(payload)
+        except RuntimeError as exc:
+            mod._print_safe(
+                f"[swarph-daemon] delivery error (continuing): "
+                f"{type(exc).__name__}: {exc}",
+                stream=stream,
+            )  # must not raise — that IS the bug
+
+    # canary: the model must still be able to fail, or this file asserts nothing
+    import pytest
+    with pytest.raises(UnicodeEncodeError):
+        Cp1252Stream().write("→")
