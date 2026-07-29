@@ -117,3 +117,52 @@ def test_human_output_link_appears_once(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     # Entry has embedded pointer "· → [[feedback_y]]" in text; should appear exactly once
     assert out.count("[[feedback_y]]") == 1
+
+
+# ── #135(b): accept every form the shared timeline actually contains ─────────
+# MEASURED on the live TIMELINE.md 2026-07-27, by shape:
+#     274  NNNN-NN-NNTNN:NNZ      minute precision — the only form this parsed
+#      65  NNNN-NN-NN             DATE ONLY — the OMEGA genesis entries
+#       1  NNNN-NN-NNTNN:NN:NNZ   seconds
+# The strict parser dropped 66 of 340 entries — the mesh's ENTIRE PRE-HISTORY, 2026-03
+# to 2026-04 — and `swarph timeline since 2026-03-01` returned nothing and exited 0.
+# Found only because the gateway's GET /highlights reported parse_skipped=67 on its
+# first live call.
+import pytest
+
+
+@pytest.mark.parametrize("raw,expect", [
+    ("2026-07-27T21:07Z",         "2026-07-27T21:07:00+00:00"),   # what we write
+    ("2026-07-27T21:07:33Z",      "2026-07-27T21:07:33+00:00"),   # seconds
+    ("2026-07-27T21:07:33.500Z",  "2026-07-27T21:07:33.500000+00:00"),
+    ("2026-03-19",                "2026-03-19T00:00:00+00:00"),   # GENESIS: date only
+    ("2026-07-27 21:07Z",         "2026-07-27T21:07:00+00:00"),   # space separator
+    ("2026-07-27T21:07:00+00:00", "2026-07-27T21:07:00+00:00"),   # explicit offset
+])
+def test_every_timestamp_form_in_the_real_timeline_parses(raw, expect):
+    got = timeline._parse_entry_ts(raw)
+    assert got is not None, f"{raw!r} dropped — this is how 66 entries vanished"
+    assert got.isoformat() == expect, (raw, got.isoformat())
+
+
+@pytest.mark.parametrize("raw", ["garbage-timestamp", "", "2026-13-45", "not a date"])
+def test_unparseable_timestamps_are_still_refused(raw):
+    """Tolerance must not become guessing. A guessed timestamp files an entry under the
+    wrong day, which is worse than admitting the line was not understood."""
+    assert timeline._parse_entry_ts(raw) is None
+
+
+def test_date_only_entries_are_reachable_by_a_since_query(tmp_path):
+    """The end-to-end property: the genesis entries must actually come back.
+
+    `since 2026-03-01` returning nothing WITH EXIT 0 was the defect — indistinguishable
+    from a quiet period that in fact contains the mesh's founding events.
+    """
+    p = tmp_path / "TIMELINE.md"
+    p.write_text(
+        "- 2026-03-19 · **OMEGA · Genesis** · MCP-architecture orchestrator seeded\n"
+        "- 2026-07-27T21:07Z · **droplet** · a recent entry\n", encoding="utf-8")
+    entries = timeline.load_entries(str(p))
+    assert len(entries) == 2, entries
+    assert entries[0].cell == "OMEGA · Genesis"
+    assert entries[0].ts == dt.datetime(2026, 3, 19, tzinfo=dt.timezone.utc)
