@@ -91,8 +91,49 @@ def _peer_token_path(self_name: str) -> Path:
     return Path.home() / ".config" / "swarph" / f"{self_name}.peer_token"
 
 
+# The fallback is ANOTHER CELL'S NAME. Harmless on lab-ovh, silently wrong everywhere
+# else — and it is what made the cold-env failure report a TOKEN fault: with SWARPH_SELF
+# unset the cell hunts lab-ovh.peer_token, finds nothing, and blames the credential.
+# MEASURED 2026-07-29 on 6 of 6 cells (droplet isolated it: adding ONLY the two env vars,
+# changing NO token, turned exit 2 into exit 0 at 1.00).
+# The default is KEPT (removing it would break callers that rely on it) and ANNOUNCED.
+_DEFAULT_SELF = "lab-ovh"
+
+
 def _self_name() -> str:
-    return os.environ.get("SWARPH_SELF") or os.environ.get("SWARPH_NODE") or "lab-ovh"
+    return os.environ.get("SWARPH_SELF") or os.environ.get("SWARPH_NODE") or _DEFAULT_SELF
+
+
+def _self_name_is_defaulted() -> bool:
+    """True when no env named this cell and we fell back to _DEFAULT_SELF."""
+    return not (os.environ.get("SWARPH_SELF") or os.environ.get("SWARPH_NODE"))
+
+
+def env_diagnosis() -> str:
+    """Name the ENVIRONMENT fault before any downstream symptom, or '' if env is sane.
+
+    >>> THE ERROR MUST NAME A DIMENSION THE CALLER CAN ACT ON. <<< Every cell that hit
+    this went looking at credentials, because that is what the message said. The real
+    fault is missing env in a non-interactive context (cron / systemd / env -i), where
+    a sourced profile, a bashrc or a settings.json `env` block never applies.
+    """
+    bits = []
+    if _self_name_is_defaulted():
+        bits.append(f"SWARPH_SELF unset — defaulting to {_DEFAULT_SELF!r}, which is "
+                    f"probably NOT this cell (so any peer-token lookup will hunt the "
+                    f"wrong file)")
+    if not os.environ.get("SWARPH_BRAIN_GATEWAY"):
+        bits.append("SWARPH_BRAIN_GATEWAY unset — falling back to a direct brain "
+                    "connection, which only works where the brain service is reachable "
+                    "AND a read token is provisioned")
+    if not bits:
+        return ""
+    return ("swarph brain-ask: ENVIRONMENT INCOMPLETE — this is the likely cause:\n"
+            + "".join(f"  · {b}\n" for b in bits)
+            + "  If this ran from cron, a systemd unit or any non-interactive shell, set "
+              "these in the UNIT's Environment=/EnvironmentFile= or at the top of the "
+              "crontab. A sourced profile, ~/.bashrc or a settings.json env block does "
+              "NOT reach those contexts.\n")
 
 
 def _resolve_token(token_file: Optional[str], self_name: str) -> Optional[str]:
@@ -178,6 +219,7 @@ def run_brain_ask(argv: list) -> int:
         except OSError:
             peer_token = ""
         if not peer_token:
+            sys.stderr.write(env_diagnosis())
             sys.stderr.write(
                 f"swarph brain-ask: SWARPH_BRAIN_GATEWAY set but no mesh peer token at "
                 f"~/.config/swarph/{self_name}.peer_token\n")
@@ -190,6 +232,8 @@ def run_brain_ask(argv: list) -> int:
     else:
         token = _resolve_token(args.token_file, _self_name())
         if not token:
+            # Diagnosis FIRST: in a cold env the token is a SYMPTOM, not the fault.
+            sys.stderr.write(env_diagnosis())
             sys.stderr.write(
                 "swarph brain-ask: no gbrain read token "
                 "(set GBRAIN_TOKEN / SWARPH_BRAIN_TOKEN, pass --token-file, or place a "
