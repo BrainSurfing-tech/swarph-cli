@@ -8,6 +8,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from swarph_cli.console_safe import print_safe
 
 _STALL_FIRST = 6  # first alert after this many consecutive deferred ticks
 
@@ -46,6 +47,6 @@ def send_stall_alert(gateway: str, token: str, self_name: str,
         with urllib.request.urlopen(req, timeout=10) as resp:
             return 200 <= resp.status < 300
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        print(f"[swarph-daemon] stall-alert POST failed: {exc}",
+        print_safe(f"[swarph-daemon] stall-alert POST failed: {exc}",
               file=sys.stderr, flush=True)
         return False

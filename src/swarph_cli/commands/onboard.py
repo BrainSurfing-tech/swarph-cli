@@ -32,6 +32,7 @@ import urllib.request
 from getpass import getpass
 from pathlib import Path
 from typing import Optional
+from swarph_cli.console_safe import print_safe
 
 
 _HANDSHAKE_TEMPLATE = """\
@@ -147,7 +148,7 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
         try:
             mode = secrets_path.stat().st_mode & 0o777
             if mode != 0o600:
-                print(
+                print_safe(
                     f"swarph onboard: WARNING: {secrets_path} mode is {oct(mode)}, "
                     f"expected 0600. Continuing — fix manually with `chmod 600 {secrets_path}`.",
                     file=sys.stderr,
@@ -162,11 +163,11 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
                     if val:
                         return val
         except Exception as exc:
-            print(
+            print_safe(
                 f"swarph onboard: failed to read {secrets_path}: {exc}", file=sys.stderr
             )
 
-    print(
+    print_safe(
         f"swarph onboard: MESH_GATEWAY_TOKEN not in env, not found in {secrets_path}.\n"
         f"  Canonical secrets.toml shape (mode 0600):\n"
         f"    MESH_GATEWAY_TOKEN=<your-token>\n"
@@ -225,7 +226,7 @@ def run_onboard(argv: list[str]) -> int:
     args = _build_parser().parse_args(argv)
 
     # ── Step 1: validate_node_name ───────────────────────────────────
-    print(f"[1/6] validate_node_name({args.peer!r})")
+    print_safe(f"[1/6] validate_node_name({args.peer!r})")
     try:
         from swarph_shared.peer_registry import (
             validate_node_name,
@@ -233,7 +234,7 @@ def run_onboard(argv: list[str]) -> int:
             GatewayUnreachableError,
         )
     except ImportError as exc:
-        print(f"swarph onboard: missing swarph-shared>=0.2.0: {exc}", file=sys.stderr)
+        print_safe(f"swarph onboard: missing swarph-shared>=0.2.0: {exc}", file=sys.stderr)
         return 1
 
     # NotInRegistry is expected here — onboard's whole point is that
@@ -241,24 +242,24 @@ def run_onboard(argv: list[str]) -> int:
     try:
         from swarph_shared.peer_registry import NAMING_CONVENTION_REGEX, KNOWN_ALIASES
     except ImportError:
-        print("swarph onboard: peer_registry primitives missing", file=sys.stderr)
+        print_safe("swarph onboard: peer_registry primitives missing", file=sys.stderr)
         return 1
 
     canonical = KNOWN_ALIASES.get(args.peer, args.peer)
     if canonical != args.peer:
-        print(
+        print_safe(
             f"      WARN: {args.peer!r} resolved to canonical {canonical!r} "
             f"(contagion alias)",
             file=sys.stderr,
         )
     if not NAMING_CONVENTION_REGEX.match(canonical):
-        print(
+        print_safe(
             f"swarph onboard: {canonical!r} fails naming convention "
             f"(^[a-z][a-z0-9-]*[a-z0-9]$)",
             file=sys.stderr,
         )
         return 1
-    print(f"      ok ({canonical!r})")
+    print_safe(f"      ok ({canonical!r})")
 
     # ── Step 2: would-write peer-registry row (effectively step 4) ───
     # The PLAN's step 2 is logically subsumed by step 4 (the gateway
@@ -267,40 +268,40 @@ def run_onboard(argv: list[str]) -> int:
     capabilities = dict(_parse_capability(c) for c in args.capability) if args.capability else {
         "can_claim_tasks": True
     }
-    print(f"[2/6] prepare peer-registry row (caps={capabilities})")
+    print_safe(f"[2/6] prepare peer-registry row (caps={capabilities})")
 
     # ── Step 3: resolve MESH_GATEWAY_TOKEN ───────────────────────────
-    print("[3/6] resolve MESH_GATEWAY_TOKEN")
+    print_safe("[3/6] resolve MESH_GATEWAY_TOKEN")
     token = _resolve_token(args.token_file)
     if not token:
-        print("swarph onboard: empty token", file=sys.stderr)
+        print_safe("swarph onboard: empty token", file=sys.stderr)
         return 1
-    print("      ok")
+    print_safe("      ok")
 
     # ── Step 4: POST /peers/register ─────────────────────────────────
     peer_url = args.url or f"http://{canonical}:8787"
-    print(f"[4/6] POST {args.gateway}/peers/register")
+    print_safe(f"[4/6] POST {args.gateway}/peers/register")
     status, body = _post_json(
         f"{args.gateway}/peers/register",
         {"name": canonical, "url": peer_url, "capabilities": capabilities},
         token,
     )
     if status != 200:
-        print(
+        print_safe(
             f"swarph onboard: gateway register failed: {status} {body}",
             file=sys.stderr,
         )
         return 2
     if body.get("registered_unratified") is False:
-        print(
+        print_safe(
             f"      ok (already ratified — peer existed pre-Phase-5.5 or was "
             f"witness-flipped already)"
         )
     else:
-        print(f"      ok (registered_unratified=true)")
+        print_safe(f"      ok (registered_unratified=true)")
 
     # ── Step 5: subscription auth check ──────────────────────────────
-    print("[5/6] verify_subscription_setup()")
+    print_safe("[5/6] verify_subscription_setup()")
     try:
         from swarph_shared import verify_subscription_setup
 
@@ -308,9 +309,9 @@ def run_onboard(argv: list[str]) -> int:
         # catch broadly so onboarding doesn't blow up on Claude-runtime-only
         # checks when the peer is non-Claude (§15.6 #10 deferred to Phase 6).
         verify_subscription_setup()
-        print("      ok (Claude subscription credentials + binary verified)")
+        print_safe("      ok (Claude subscription credentials + binary verified)")
     except Exception as exc:
-        print(
+        print_safe(
             f"      WARN: {type(exc).__name__}: {exc}\n"
             f"      Subscription path won't work for this peer until resolved. "
             f"Non-Claude runtimes (Gemini, etc.) ship in Phase 6 per §15.6 #10.",
@@ -324,7 +325,7 @@ def run_onboard(argv: list[str]) -> int:
         else Path.home() / "swarph_state"
     )
     peer_dir = state_root / canonical
-    print(f"[6/6] scaffold {peer_dir}")
+    print_safe(f"[6/6] scaffold {peer_dir}")
     peer_dir.mkdir(parents=True, exist_ok=True)
     try:
         peer_dir.chmod(0o700)
@@ -361,7 +362,7 @@ def run_onboard(argv: list[str]) -> int:
             daemon_sh.chmod(0o755)
         except OSError:
             pass  # best-effort; Windows or fs without POSIX modes
-    print(f"      ok (inbox.log, cursor.json, .env.example, run-daemon.sh)")
+    print_safe(f"      ok (inbox.log, cursor.json, .env.example, run-daemon.sh)")
 
     # ── Step 7: handshake template (MANUAL) ──────────────────────────
     # tempfile.gettempdir() is the platform temp dir ('/tmp' on POSIX, the
@@ -374,7 +375,7 @@ def run_onboard(argv: list[str]) -> int:
         ),
         encoding="utf-8",
     )
-    print(
+    print_safe(
         f"\n[manual] handshake template at {tmp_path}\n"
         f"  Edit each section in your own words, then send to your witness peer.\n"
         f"  After witness reads + judges sufficient, they run:\n"
