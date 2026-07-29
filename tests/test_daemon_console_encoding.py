@@ -101,39 +101,138 @@ def test_utf8_console_is_unaffected(tmp_path, monkeypatch, capsys):
 
 # ── COVERAGE, not presence — droplet's finding on PR #158 ────────────────────
 
-def test_every_output_path_in_the_daemon_goes_through_the_guard():
-    """>>> A SYMBOL GREP MEASURES PRESENCE, NOT COVERAGE. <<<
+def _daemon_import_closure():
+    """Every swarph_cli module the daemon can reach, DERIVED — never listed.
 
-    The first version of the cp1252 guard shipped covering 1 output call out of 13.
-    `grep -c _print_safe` returned 1 on it — the same answer it returns now, with all
-    13 covered. Any check that asks "is the guard there?" passes on both, so this asks
-    the only question that distinguishes them: IS THERE AN UNGUARDED `print`?
+    >>> A HARDCODED LIST ASSERTS THAT ITS MEMBERS ARE CLEAN. IT CANNOT ASSERT THAT ITS
+        MEMBERS ARE ALL OF THEM — AND ITS OWN COMPLETENESS IS THE CLAIM THAT MATTERS. <<<
+    (droplet, PR #159.) The previous version listed five modules and was right about all
+    five, while `multiplexer` sat reachable and unlisted: a future author printing there
+    would have failed nothing. A list-as-assertion is only as good as a fact nobody is
+    checking.
 
-    Walks the AST rather than the text so a `print` reached through a differently
-    formatted call, a new function, or a future author's copy-paste is caught. Same
-    reason the merge-check no-merge guard is behavioural and not a substring scan:
-    the claim is about what the module DOES, and text is a proxy for that.
+    Two traversal details, both learned by getting them wrong:
+
+    * `from swarph_cli import session_bridge, stall_alert` is an ImportFrom whose
+      SUBMODULES live in `n.names`, not `n.module`. A walk queueing only `n.module`
+      resolves it to the package `__init__` and silently drops both — which is how
+      droplet's first closure reported 4 modules and omitted the two under repair.
+      >>> HIS INSTRUMENT HAD THE DEFECT IT WAS MEASURING: confidently correct about a
+      smaller domain, exactly like a guard sited inside the module it audits. <<<
+    * `daemon.py` imports `commands.onboard` INSIDE A FUNCTION BODY. Walking only
+      top-level imports misses it, so this walks every Import node anywhere in the AST.
     """
     import ast
     from pathlib import Path
 
-    import swarph_cli.commands.daemon as mod
+    import swarph_cli
 
-    src = Path(mod.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    guard = next(n for n in ast.walk(tree)
-                 if isinstance(n, ast.FunctionDef) and n.name == "_print_safe")
-    allowed = {id(n) for n in ast.walk(guard)}
+    pkg_root = Path(swarph_cli.__file__).parent.parent
 
-    unguarded = [
-        n.lineno for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-        and n.func.id == "print" and id(n) not in allowed
-    ]
-    assert not unguarded, (
-        f"unguarded print() at daemon.py lines {unguarded} — on a cp1252 console an "
-        f"arrow or emoji in that line raises UnicodeEncodeError and takes the loop with it"
+    def to_path(mod):
+        rel = mod.replace(".", "/")
+        for cand in (pkg_root / f"{rel}.py", pkg_root / rel / "__init__.py"):
+            if cand.exists():
+                return cand
+        return None
+
+    seen, queue = {}, ["swarph_cli.commands.daemon"]
+    while queue:
+        mod = queue.pop()
+        if mod in seen or not mod.startswith("swarph_cli"):
+            continue
+        path = to_path(mod)
+        if path is None:
+            continue
+        seen[mod] = path
+        for n in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(n, ast.Import):
+                queue += [a.name for a in n.names]
+            elif isinstance(n, ast.ImportFrom) and n.module and n.level == 0:
+                queue.append(n.module)
+                queue += [f"{n.module}.{a.name}" for a in n.names]
+    return seen
+
+
+def test_no_unguarded_print_anywhere_the_daemon_can_reach():
+    """>>> A SYMBOL GREP MEASURES PRESENCE, NOT COVERAGE — AND THE FIRST TWO VERSIONS OF
+        THIS TEST MEASURED THE WRONG DOMAIN, EACH TIME CONFIDENTLY. <<<
+
+    The history is the lesson, and every step passed its own check:
+      1. The guard shipped covering 1 output call of 13. `grep -c` returned 1.
+      2. A test walking daemon.py closed those 12 — and reported FULL COVERAGE while
+         `delivery_queue.py:43` and `stall_alert.py:49` sat unguarded in the PUBLISHED
+         artifact. The guard was sited inside daemon.py, so the modules daemon IMPORTS
+         could not import it back: THE GUARD'S HOME WAS A COVERAGE BOUNDARY, and the
+         audit inherited its scope from the thing it audited.
+      3. A hardcoded five-module list closed those two — and could not see that
+         `multiplexer` was reachable and unlisted.
+    Each fix was correct and each left the same hole one level up, because the SCOPE was
+    asserted by the same hand that wrote the claim. So the scope is now DERIVED from the
+    import graph: a new reachable module joins the closure whether or not anyone
+    remembers it exists.
+
+    Why this matters more than the individual lines: on a cp1252 console an arrow or an
+    emoji raises UnicodeEncodeError, and a raise inside an `except` escapes the `try`
+    entirely — so an error handler becomes the crash, on precisely the text most likely
+    to carry such a character (an interpolated exception message).
+    """
+    import ast
+
+    from swarph_cli import console_safe
+
+    closure = _daemon_import_closure()
+    assert len(closure) >= 6, f"closure implausibly small ({sorted(closure)}) — walk is broken"
+
+    offenders = {}
+    for mod, path in closure.items():
+        if mod == console_safe.__name__:
+            continue  # the implementation; pinned by its own test below
+        bare = [n.lineno for n in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "print"]
+        if bare:
+            offenders[mod] = bare
+
+    assert not offenders, (
+        f"unguarded print() reachable from the daemon: {offenders} — route it through "
+        f"swarph_cli.console_safe.print_safe"
     )
+
+
+def test_the_closure_walk_sees_the_two_import_forms_that_hid_modules():
+    """Non-vacuity for the WALK, not just for the assertion it feeds.
+
+    A closure test is only as honest as its traversal, and both forms below were
+    genuinely missed by a real tool earlier today. If either regresses, the coverage
+    test above keeps passing while quietly measuring a smaller world — the exact
+    failure this whole file has now hit three times.
+    """
+    closure = _daemon_import_closure()
+    # `from swarph_cli import session_bridge, stall_alert` — submodules in n.names
+    assert "swarph_cli.stall_alert" in closure, "ImportFrom submodule names not traversed"
+    assert "swarph_cli.session_bridge" in closure
+    # function-local `from swarph_cli.commands.onboard import _resolve_token`
+    assert "swarph_cli.commands.onboard" in closure, "function-local imports not traversed"
+
+
+def test_the_guard_itself_is_the_only_place_a_bare_print_is_allowed():
+    """The implementation must contain exactly one bare print — the one it wraps.
+
+    Guards the degenerate fix for the test above: routing everything through a
+    `print_safe` that no longer prints would pass a coverage walk while emitting
+    nothing at all. Silence is the failure mode this whole feature exists to end.
+    """
+    import ast
+    from pathlib import Path
+
+    from swarph_cli import console_safe
+
+    tree = ast.parse(Path(console_safe.__file__).read_text(encoding="utf-8"))
+    bare = [n.lineno for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "print"]
+    assert len(bare) == 1, f"expected exactly one real print in the guard, found {bare}"
 
 
 def test_the_delivery_error_handler_survives_a_character_it_cannot_render():
