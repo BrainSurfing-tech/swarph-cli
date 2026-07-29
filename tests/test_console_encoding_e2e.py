@@ -17,6 +17,7 @@ WHAT IT COST WHEN NOTHING CHECKED THIS: a hardcoded U+2192 in `_log_dm` raised o
 DM, `_drain_iteration` aborted, THE CURSOR FROZE AND ZERO DMS WERE DELIVERED — while
 Get-ScheduledTask reported Running and every other surface was green.
 """
+import os
 import subprocess
 import sys
 import textwrap
@@ -37,8 +38,14 @@ def _run(code: str, encoding: str) -> subprocess.CompletedProcess:
         [sys.executable, "-c", textwrap.dedent(code)],
         capture_output=True, timeout=60,
         encoding=encoding, errors="replace",
-        env={"PATH": "/usr/bin:/bin", "PYTHONIOENCODING": encoding,
-             "PYTHONPATH": "src"},
+        # INHERIT the real environment and override only what this test controls.
+        # An earlier version passed env={"PATH": "/usr/bin:/bin", ...} — a POSIX path,
+        # in the test written to prove we handle a WINDOWS console. It failed both
+        # Windows legs: the interpreter cannot resolve, and SYSTEMROOT/COMSPEC are
+        # required for a subprocess there. >>> A CROSS-PLATFORM TEST THAT HARDCODES ONE
+        # PLATFORM'S PATH TESTS THE PLATFORM IT RUNS ON, WHICH IS THE ONE THAT WAS
+        # ALREADY FINE. <<<
+        env={**os.environ, "PYTHONIOENCODING": encoding, "PYTHONPATH": "src"},
     )
 
 
