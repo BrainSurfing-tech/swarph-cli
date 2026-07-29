@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Optional
 
 from swarph_cli import session_bridge, stall_alert
+from swarph_cli.console_safe import print_safe
 from swarph_cli.delivery_queue import DeliveryQueue
 
 
@@ -294,53 +295,11 @@ def _log_dm(state: DaemonState, dm: dict) -> None:
     _print_safe(line)
 
 
-def _print_safe(line: str, *, stream=None, file=None, flush: bool = True) -> None:
-    """Print, degrading to a lossy transliteration rather than raising.
-
-    A console whose encoding cannot represent a DM (cp1252 on a French Windows box,
-    any 8-bit codepage) must cost a mangled character, never a poll iteration.
-
-    >>> EVERY output path in this module goes through here, not just the DM line. <<<
-    droplet measured the first version's coverage at 1 call site out of 13, and named
-    the one that matters: the delivery-error handler in `attempt_delivery`, whose own
-    comment promises it will never crash the loop. A raise inside an `except` block
-    propagates past the `try` entirely — so the handler reached ONLY when something has
-    already gone wrong was itself the crash, on precisely the text most likely to carry
-    our characters (an exception message).
-
-    cp1252 coverage of what this fleet actually emits, measured:
-        renders : em-dash, bullet, accented e, guillemet
-        RAISES  : arrow, box-drawing, emoji, check-mark
-    Our DMs and operator lines are full of arrows and emoji, and the em-dash is FINE —
-    so the original DM-blindness was an arrow or an emoji, never punctuation.
-
-    A SYMBOL GREP MEASURES PRESENCE, NOT COVERAGE: `grep _print_safe` returns 1 whether
-    this guards one path or all thirteen. Coverage is asserted by a test that walks the
-    module's AST for unguarded `print(` calls, not by the symbol existing.
-    """
-    # `file=` is accepted as an alias for `stream=`, and `flush` is accepted and
-    # ignored (this always flushes). Deliberate: every call site here was a `print`,
-    # and a future author reaching for the print spelling must land in the guard
-    # rather than a TypeError — a TypeError in the delivery-error handler is the
-    # exact crash this function exists to prevent, merely with a different name.
-    out = stream if stream is not None else (file if file is not None else sys.stdout)
-    try:
-        print(line, file=out, flush=True)
-    except UnicodeEncodeError:
-        enc = getattr(out, "encoding", None) or "ascii"
-        try:
-            out.write(line.encode(enc, errors="replace").decode(enc, errors="replace"))
-            out.write("\n")
-            out.flush()
-        except (OSError, UnicodeEncodeError, ValueError):
-            # The fallback failing must not resurrect the crash it exists to prevent.
-            # Losing an operator line is survivable; losing the loop is not.
-            pass
-    except (OSError, ValueError):
-        # A closed/broken stream (detached service, full disk) is not a reason to stop
-        # draining — the audit write already succeeded. ValueError covers
-        # write-on-closed-file, which service teardown reaches.
-        pass
+# The guard now lives in swarph_cli.console_safe so the modules daemon IMPORTS
+# (delivery_queue, stall_alert, session_bridge) can use it too — siting it here
+# is what left them unguarded in the published 0.40.1. Alias kept: _print_safe is
+# this module's established spelling and the AST coverage test keys on it.
+_print_safe = print_safe
 
 
 def _route_to_handler(state: DaemonState, dm: dict) -> None:
