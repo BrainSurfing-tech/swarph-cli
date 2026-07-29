@@ -170,7 +170,7 @@ def _write_daemon_pidfile(state_dir: Path) -> Optional[Path]:
         os.replace(tmp, path)
         return path
     except OSError as exc:
-        print(f"[swarph-daemon] could not write {DAEMON_PIDFILE}: {exc}",
+        _print_safe(f"[swarph-daemon] could not write {DAEMON_PIDFILE}: {exc}",
               file=sys.stderr, flush=True)
         return None
 
@@ -182,7 +182,7 @@ def _read_cursor(path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         # Loud — corrupted cursor needs operator attention, not silent reset.
-        print(
+        _print_safe(
             f"[swarph-daemon] CORRUPTED cursor at {path}: {exc}. "
             f"Refusing to overwrite. Inspect manually.",
             file=sys.stderr,
@@ -294,22 +294,52 @@ def _log_dm(state: DaemonState, dm: dict) -> None:
     _print_safe(line)
 
 
-def _print_safe(line: str) -> None:
+def _print_safe(line: str, *, stream=None, file=None, flush: bool = True) -> None:
     """Print, degrading to a lossy transliteration rather than raising.
 
     A console whose encoding cannot represent a DM (cp1252 on a French Windows box,
     any 8-bit codepage) must cost a mangled character, never a poll iteration.
+
+    >>> EVERY output path in this module goes through here, not just the DM line. <<<
+    droplet measured the first version's coverage at 1 call site out of 13, and named
+    the one that matters: the delivery-error handler in `attempt_delivery`, whose own
+    comment promises it will never crash the loop. A raise inside an `except` block
+    propagates past the `try` entirely — so the handler reached ONLY when something has
+    already gone wrong was itself the crash, on precisely the text most likely to carry
+    our characters (an exception message).
+
+    cp1252 coverage of what this fleet actually emits, measured:
+        renders : em-dash, bullet, accented e, guillemet
+        RAISES  : arrow, box-drawing, emoji, check-mark
+    Our DMs and operator lines are full of arrows and emoji, and the em-dash is FINE —
+    so the original DM-blindness was an arrow or an emoji, never punctuation.
+
+    A SYMBOL GREP MEASURES PRESENCE, NOT COVERAGE: `grep _print_safe` returns 1 whether
+    this guards one path or all thirteen. Coverage is asserted by a test that walks the
+    module's AST for unguarded `print(` calls, not by the symbol existing.
     """
+    # `file=` is accepted as an alias for `stream=`, and `flush` is accepted and
+    # ignored (this always flushes). Deliberate: every call site here was a `print`,
+    # and a future author reaching for the print spelling must land in the guard
+    # rather than a TypeError — a TypeError in the delivery-error handler is the
+    # exact crash this function exists to prevent, merely with a different name.
+    out = stream if stream is not None else (file if file is not None else sys.stdout)
     try:
-        print(line, flush=True)
+        print(line, file=out, flush=True)
     except UnicodeEncodeError:
-        enc = getattr(sys.stdout, "encoding", None) or "ascii"
-        sys.stdout.write(line.encode(enc, errors="replace").decode(enc, errors="replace"))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-    except OSError:
-        # A closed/broken stdout (detached service, full disk) is not a reason to
-        # stop draining — the audit write above already succeeded.
+        enc = getattr(out, "encoding", None) or "ascii"
+        try:
+            out.write(line.encode(enc, errors="replace").decode(enc, errors="replace"))
+            out.write("\n")
+            out.flush()
+        except (OSError, UnicodeEncodeError, ValueError):
+            # The fallback failing must not resurrect the crash it exists to prevent.
+            # Losing an operator line is survivable; losing the loop is not.
+            pass
+    except (OSError, ValueError):
+        # A closed/broken stream (detached service, full disk) is not a reason to stop
+        # draining — the audit write already succeeded. ValueError covers
+        # write-on-closed-file, which service teardown reaches.
         pass
 
 
@@ -384,7 +414,7 @@ def attempt_delivery(state: DaemonState) -> None:
         # inject failure → leave queued, retry next tick (no counter bump —
         # the cell was idle; a send failure is transient, not a stall).
     except Exception as exc:  # noqa: BLE001 — bridge must never crash the loop
-        print(f"[swarph-daemon] delivery error (continuing): "
+        _print_safe(f"[swarph-daemon] delivery error (continuing): "
               f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
 
@@ -421,7 +451,7 @@ async def _drain_iteration(state: DaemonState) -> None:
             state.disconnect_since = time.time()
         elapsed = time.time() - state.disconnect_since
         if elapsed > _LOUD_DISCONNECT_SECONDS:
-            print(
+            _print_safe(
                 f"[swarph-daemon] LOUD: gateway unreachable for "
                 f"{elapsed:.0f}s — {body.get('detail', '?')}",
                 file=sys.stderr,
@@ -431,14 +461,14 @@ async def _drain_iteration(state: DaemonState) -> None:
     if status >= 500:
         if state.disconnect_since is None:
             state.disconnect_since = time.time()
-        print(
+        _print_safe(
             f"[swarph-daemon] gateway 5xx {status}: {body.get('detail', '?')}",
             file=sys.stderr,
             flush=True,
         )
         return
     if status >= 400:
-        print(
+        _print_safe(
             f"[swarph-daemon] gateway {status}: {body.get('detail', '?')}",
             file=sys.stderr,
             flush=True,
@@ -475,7 +505,7 @@ async def _drain_loop(state: DaemonState) -> None:
     """Main loop. Returns on shutdown_requested. Exceptions in
     _drain_iteration are caught + logged + retried; only signal handlers
     set shutdown_requested."""
-    print(
+    _print_safe(
         f"[swarph-daemon] starting: self={state.self_name} "
         f"gateway={state.gateway} poll={state.poll_s}s "
         f"state={state.state_dir} auto_act={state.auto_act} "
@@ -487,7 +517,7 @@ async def _drain_loop(state: DaemonState) -> None:
         try:
             await _drain_iteration(state)
         except Exception as exc:  # noqa: BLE001 — loud-on-error per §16.4
-            print(
+            _print_safe(
                 f"[swarph-daemon] iteration error (continuing): "
                 f"{type(exc).__name__}: {exc}",
                 file=sys.stderr,
@@ -502,7 +532,7 @@ async def _drain_loop(state: DaemonState) -> None:
                 break
             await asyncio.sleep(1)
 
-    print(
+    _print_safe(
         f"[swarph-daemon] shutdown: iterations={state.iterations} "
         f"dms_seen={state.dms_seen} cursor.last_msg_id={state.cursor.get('last_msg_id', 0)}",
         flush=True,
@@ -515,7 +545,7 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop, state: DaemonState
 
     def _handler(signum, frame):  # noqa: ARG001
         if not state.shutdown_requested:
-            print(
+            _print_safe(
                 f"[swarph-daemon] signal {signum} received — draining + flushing cursor",
                 flush=True,
             )
@@ -541,7 +571,7 @@ def run_daemon(argv: list[str]) -> int:
     elif self_name:
         state_dir = Path.home() / "swarph_state" / self_name
     else:
-        print(
+        _print_safe(
             "swarph daemon: cannot resolve identity. Pass --self <name> or "
             "--state-dir <path> or set $SWARPH_SELF.",
             file=sys.stderr,
@@ -555,7 +585,7 @@ def run_daemon(argv: list[str]) -> int:
     _write_daemon_pidfile(state_dir)
     token = _resolve_token(args.token_file)
     if not token:
-        print("swarph daemon: empty MESH_GATEWAY_TOKEN", file=sys.stderr)
+        _print_safe("swarph daemon: empty MESH_GATEWAY_TOKEN", file=sys.stderr)
         return 2
 
     state = DaemonState(
