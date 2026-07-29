@@ -260,16 +260,57 @@ class DaemonState:
 
 def _log_dm(state: DaemonState, dm: dict) -> None:
     """Both stdout (visible to operator + journald) AND inbox.log (cursor
-    audit trail). Inbox.log is append-only structured JSONL."""
-    line = (
-        f"[{dm.get('created_at', '?')}] "
-        f"id={dm['id']} from={dm.get('from_node')} kind={dm.get('kind')} "
-        f"→ {dm['content'][:120]!r}"
-    )
-    print(line, flush=True)
+    audit trail). Inbox.log is append-only structured JSONL.
+
+    >>> THE AUDIT WRITE COMES FIRST AND THE OPERATOR LINE CANNOT KILL THE LOOP. <<<
+    MEASURED on workstation-lc 2026-07-29 (French Windows, cp1252 console, Task
+    Scheduler): this function printed a hardcoded U+2192 to a charmap stdout, raising
+    UnicodeEncodeError on EVERY DM. `_drain_iteration` aborted, THE CURSOR NEVER
+    ADVANCED, ZERO DMS WERE DELIVERED — and the outer handler swallowed it as
+    "iteration error (continuing)", so Get-ScheduledTask reported Running and every
+    surface was green. THE CELL WAS DM-BLIND WITH NOTHING ANYWHERE SAYING SO.
+
+    Three separate faults, fixed separately because each is sufficient alone:
+      1. the separator was a hardcoded non-ASCII character -> now ASCII "->"
+      2. DM CONTENT is arbitrary (French, emoji, arrows) and reprs unescaped on py3,
+         so the console can still refuse it -> the write is encode-safe
+      3. >>> A DISPLAY FAILURE MUST NEVER BE ABLE TO STOP DELIVERY. <<< The audit
+         trail is written FIRST, and the operator line is best-effort. Losing a
+         console line is cosmetic; losing the cursor is a silent outage.
+    """
+    # 1. AUDIT FIRST — utf-8 explicitly, never the locale default. If anything below
+    #    fails, the DM is already durably recorded and the cursor may safely advance.
     state.inbox_log_path.parent.mkdir(parents=True, exist_ok=True)
     with state.inbox_log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(dm) + "\n")
+
+    # 2. OPERATOR LINE — best-effort, ASCII separator, and encode-safe against a
+    #    console that cannot represent the content.
+    line = (
+        f"[{dm.get('created_at', '?')}] "
+        f"id={dm['id']} from={dm.get('from_node')} kind={dm.get('kind')} "
+        f"-> {dm['content'][:120]!r}"
+    )
+    _print_safe(line)
+
+
+def _print_safe(line: str) -> None:
+    """Print, degrading to a lossy transliteration rather than raising.
+
+    A console whose encoding cannot represent a DM (cp1252 on a French Windows box,
+    any 8-bit codepage) must cost a mangled character, never a poll iteration.
+    """
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "ascii"
+        sys.stdout.write(line.encode(enc, errors="replace").decode(enc, errors="replace"))
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    except OSError:
+        # A closed/broken stdout (detached service, full disk) is not a reason to
+        # stop draining — the audit write above already succeeded.
+        pass
 
 
 def _route_to_handler(state: DaemonState, dm: dict) -> None:
