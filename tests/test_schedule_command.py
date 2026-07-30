@@ -67,8 +67,8 @@ def test_schedule_create_posts_event(monkeypatch):
         "--target", "c2",
         "--task", "summarize the day",
         "--cron", "0 9 * * *",
-        "--context", "ref1",
-        "--context", "ref2",
+        "--context", "memory=proj_x",
+        "--context", "repo=swarph-cli",
         "--out-channel", "general",
         "--min-interval", "300",
     ])
@@ -80,26 +80,57 @@ def test_schedule_create_posts_event(monkeypatch):
     assert body["target_cell"] == "c2"
     assert body["task"] == "summarize the day"
     assert body["created_by"] == "c1"
-    assert body["context_ref"] == ["ref1", "ref2"]
     assert body["cron"] == "0 9 * * *"
     assert body["out_channel"] == "general"
     assert body["min_interval_sec"] == 300
+    # Card #146: anchors must reach the gateway as DICTS. This assertion is the
+    # one the original test was missing — it asserted the POST happened, never
+    # that the BODY was one the gateway accepts.
+    assert body["context_ref"] == [{"memory": "proj_x"}, {"repo": "swarph-cli"}]
 
 
 def test_schedule_create_minimal_omits_optionals(monkeypatch):
+    """>>> THIS TEST USED TO ASSERT THE BUG (card #146). <<<
+
+    It ran `create` with NO --context, asserted rc == 0, and asserted
+    `body["context_ref"] == []`. The gateway REQUIRES a non-empty context_ref, so the
+    behaviour this test pinned as correct was the behaviour that made every real
+    `schedule create` fail with a 400.
+
+    It stayed green for months because it MOCKS THE POST: it verified that the CLI
+    sends what the CLI sends. A mocked transport cannot fail a contract it never
+    talks to — the same shape as a fixture building a card the real system cannot
+    produce.
+
+    Now: the optionals are still omitted, but --context is supplied because it is
+    genuinely required, and the no-context case is asserted to FAIL LOCALLY below.
+    """
     seen = _capture_post(monkeypatch)
     rc = sc.run_schedule([
         "create", "ev",
         "--trigger", "event",
         "--target", "c2",
         "--task", "do thing",
+        "--context", "memory=proj_x",
     ])
     assert rc == 0
     body = seen["body"]
-    assert body["context_ref"] == []
+    assert body["context_ref"] == [{"memory": "proj_x"}]
     assert "cron" not in body
     assert "out_channel" not in body
     assert "min_interval_sec" not in body
+
+
+def test_schedule_create_without_context_fails_LOCALLY_and_never_posts(monkeypatch):
+    """The replacement for what the old minimal test asserted. An event with no
+    durable anchor is refused BEFORE the network, so the user gets the reason and
+    the input rather than a server 400 they must reverse-engineer."""
+    seen = _capture_post(monkeypatch)
+    rc = sc.run_schedule([
+        "create", "ev", "--trigger", "event", "--target", "c2", "--task", "do thing",
+    ])
+    assert rc == 2
+    assert not seen, "a request with no anchors must never reach the gateway"
 
 
 def test_schedule_enable_posts(monkeypatch):
