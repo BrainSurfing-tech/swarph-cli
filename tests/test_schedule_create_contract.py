@@ -84,6 +84,18 @@ def test_the_error_lists_the_actual_keys_not_a_vague_rule():
 
 # ── the drift check: the two sides must agree ───────────────────────────────
 
+# >>> THIS IS THE DEPLOYED TREE, NOT A CHECKOUT — AND THAT IS DELIBERATE. <<<
+# Measured 2026-07-30: the deployed gateway (6e3e01a) is NOT origin/main (b10c3ad).
+# Reading the deployed path validates the CLI against THE CONTRACT CURRENTLY SERVING
+# rather than the one that happens to be merged — the artifact-vs-source distinction
+# that cost us the 0.40.0 release, applied on purpose this time.
+#
+# CONSEQUENCE A FUTURE READER MUST HAVE (droplet, PR #161 review): a green here means
+# "the CLI satisfies the gateway RUNNING RIGHT NOW", never "the CLI satisfies main".
+# So the next time someone `git pull`s the gateway, THESE TESTS CAN GO RED WITH NO CLI
+# CHANGE AT ALL.
+# >>> A RED HERE MEANS THE CONTRACT MOVED. It is the drift check working, not a CLI
+#     regression. Check the gateway diff before you touch this package. <<<
 GATEWAY = Path("/home/ubuntu/mesh-gateway/server.py")
 
 
