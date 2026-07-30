@@ -40,7 +40,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--context",
         action="append",
         default=[],
-        help="context reference (repeatable)",
+        metavar="KEY=VALUE",
+        help="durable context anchor, repeatable. KEY is one of "
+             + "|".join(sorted(DURABLE_ANCHOR_KEYS))
+             + " (e.g. --context memory=project_x --context repo=swarph-cli). "
+             "A raw JSON object is also accepted. REQUIRED: the gateway rejects an "
+             "event with no anchors, because an event that fires with no durable "
+             "context wakes a cell that cannot reconstruct why.",
     )
     create.add_argument(
         "--min-interval",
@@ -93,14 +99,81 @@ def _ctx(args: argparse.Namespace) -> tuple[str, str, str]:
     return self_name, token, base
 
 
+
+# Mirrors mesh-gateway `_DURABLE_ANCHOR_KEYS` (server.py). Kept in sync by
+# test_schedule_create_contract.py, which fails if this drifts from the value the
+# gateway actually enforces — a duplicated constant nobody checks is how the two
+# sides diverged in the first place.
+DURABLE_ANCHOR_KEYS = frozenset({"repo", "memory", "channel", "feature", "file"})
+
+
+def parse_context_anchor(raw: str) -> dict:
+    """Turn one --context value into the ANCHOR DICT the gateway requires.
+
+    >>> THE BUG THIS FIXES (card #146): the CLI sent `--context` values through as
+        RAW STRINGS while the gateway requires each anchor to be a DICT carrying a
+        durable key, and requires the list to be NON-EMPTY. So `swarph schedule
+        create` COULD NOT SUCCEED — every invocation 400'd, and every real event on
+        this mesh had to be armed by hand over the raw API. <<<
+
+    That is why dated reminders kept living in DM threads instead of the scheduler:
+    the verb that makes a date fire was itself broken, so the cheapest path was
+    always to tell a peer and hope.
+
+    Accepts `key=value` for the five durable kinds, or a raw JSON object for
+    anything the shorthand cannot express. Raises ValueError with the valid keys
+    listed, LOCALLY — a 400 from the gateway names the rule but not the input that
+    broke it, and the user is holding the input.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("empty --context value")
+    if raw.startswith("{"):
+        try:
+            anchor = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"--context {raw!r} looks like JSON but does not parse: {exc}") from exc
+        if not isinstance(anchor, dict):
+            raise ValueError(f"--context JSON must be an object, got {type(anchor).__name__}")
+        if not (set(anchor) & DURABLE_ANCHOR_KEYS):
+            raise ValueError(
+                f"--context {raw!r} has no durable key; one of "
+                f"{sorted(DURABLE_ANCHOR_KEYS)} is required")
+        return anchor
+    key, sep, value = raw.partition("=")
+    key, value = key.strip(), value.strip()
+    if not sep or not value:
+        raise ValueError(
+            f"--context {raw!r} must be KEY=VALUE (e.g. memory=project_x); "
+            f"KEY is one of {sorted(DURABLE_ANCHOR_KEYS)}")
+    if key not in DURABLE_ANCHOR_KEYS:
+        raise ValueError(
+            f"--context key {key!r} is not durable; use one of {sorted(DURABLE_ANCHOR_KEYS)}. "
+            f"An anchor must name something that survives compaction — a /tmp path or a "
+            f"session id is exactly what the gateway rejects.")
+    return {key: value}
+
+
 def _run_create(args: argparse.Namespace) -> int:
     self_name, token, base = _ctx(args)
+    if not args.context:
+        print("swarph schedule create: --context is REQUIRED (repeatable).\n"
+              "  The gateway refuses an event with no durable anchor: an event that\n"
+              "  fires with no context wakes a cell that cannot reconstruct why it woke.\n"
+              f"  Use KEY=VALUE with KEY in {sorted(DURABLE_ANCHOR_KEYS)},\n"
+              "  e.g. --context memory=project_graduation_register", file=sys.stderr)
+        return 2
+    try:
+        anchors = [parse_context_anchor(c) for c in args.context]
+    except ValueError as exc:
+        print(f"swarph schedule create: {exc}", file=sys.stderr)
+        return 2
     body = {
         "name": args.name,
         "trigger_type": args.trigger,
         "target_cell": args.target,
         "task": args.task,
-        "context_ref": args.context,
+        "context_ref": anchors,
         "created_by": self_name,
     }
     if args.cron is not None:
