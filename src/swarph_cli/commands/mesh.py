@@ -1013,6 +1013,48 @@ def _monitor_iteration(state: MonitorState) -> None:
         state.new_ledgers = set()
 
 
+def _pidfile_identity_selfcheck(state: "MonitorState") -> Optional[str]:
+    """Read the pidfile BACK and check it names the process about to poll.
+
+    >>> CARD #195. ON WINDOWS THE RECORDED PID DID NOT MATCH THE RUNNING WORKER. <<<
+    Measured by workstation-lc while the monitor was demonstrably draining:
+    monitor.pid carried 28936; the live `swarph.exe monitor` processes were 39608
+    and 23740; 28936 matched nothing alive. So `monitor status` reported "not
+    running (stale pidfile: the recorded pid is gone)" about a HEALTHY monitor --
+    the liveness probe answered CORRECTLY about a pid that really was gone, and the
+    defect is upstream of it, in whatever pid got written.
+
+    The same divergence explains the duplicate spawns: a pidfile that never names
+    the live worker cannot enforce single-instance, so it neither blocks a second
+    start nor reports the first. One root cause, two symptoms.
+
+    lab-ovh is Linux and CANNOT reproduce it -- write_pidfile records os.getpid()
+    and that same process enters this loop, so the invariant holds here by
+    construction and a unit test can only ever be green. Rather than guess at the
+    mechanism from a box that lacks the platform, this makes the NEXT WINDOWS RUN
+    produce the evidence. It is a read-back verification -- the pattern `mesh-dm`
+    and `git-cm` already use on this fleet, where exit 0 measures the send and not
+    the message.
+
+    Returns a warning string when the pidfile does not name us, else None. NEVER
+    raises: a diagnostic that can wedge the monitor is worse than the bug it hunts.
+    """
+    try:
+        rec = read_pidfile(state.state_dir / _MONITOR_PIDFILE)
+        if rec is None:
+            return None                # --once / no pidfile written: not our business
+        recorded, live = int(rec["pid"]), os.getpid()
+        if recorded == live:
+            return None
+        return (f"PIDFILE IDENTITY MISMATCH -- monitor.pid records pid={recorded} but the "
+                f"process entering the poll loop is pid={live} "
+                f"(platform={sys.platform}, argv0={sys.argv[0]!r}). `monitor status` will "
+                f"report this monitor as DEAD while it drains, and the single-instance "
+                f"guard cannot hold. Card #195 -- please report this line.")
+    except Exception:                  # noqa: BLE001 -- diagnostics must never wedge the loop
+        return None
+
+
 def _monitor_loop(state: MonitorState) -> int:
     print(
         f"{state.log_prefix} starting self={state.self_name} "
