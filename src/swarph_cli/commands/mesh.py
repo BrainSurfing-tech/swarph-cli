@@ -1045,16 +1045,93 @@ def _proc_cmdline(pid: int) -> Optional[str]:
     return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip() or None
 
 
-def _process_alive(pid: int) -> bool:
+# Liveness is TRI-STATE. "I could not determine" is not "dead" — see _process_liveness.
+LIVENESS_ALIVE = "alive"
+LIVENESS_DEAD = "dead"
+LIVENESS_UNKNOWN = "unknown"
+
+
+def _windows_liveness(pid: int) -> str:
+    """Ask Windows directly, via OpenProcess — never via os.kill.
+
+    PROCESS_QUERY_LIMITED_INFORMATION (0x1000) is the minimum right that answers
+    "does this pid exist", and it is grantable across sessions where the rights
+    os.kill needs are not. ERROR_ACCESS_DENIED means the process EXISTS and we may
+    not inspect it — that is ALIVE, not dead. ERROR_INVALID_PARAMETER means no such
+    pid. Anything else is UNKNOWN, never dead.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:                                  # noqa: BLE001
+        return LIVENESS_UNKNOWN
+    ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, STILL_ACTIVE = 5, 87, 259
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = k32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            err = ctypes.get_last_error()
+            if err == ERROR_ACCESS_DENIED:
+                return LIVENESS_ALIVE                  # exists; we just cannot look
+            if err == ERROR_INVALID_PARAMETER:
+                return LIVENESS_DEAD                   # no such pid
+            return LIVENESS_UNKNOWN
+        try:
+            code = wintypes.DWORD()
+            if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return LIVENESS_UNKNOWN
+            return LIVENESS_ALIVE if code.value == STILL_ACTIVE else LIVENESS_DEAD
+        finally:
+            k32.CloseHandle(handle)
+    except Exception:                                  # noqa: BLE001
+        return LIVENESS_UNKNOWN
+
+
+def _process_liveness(pid: int) -> str:
+    """'alive' | 'dead' | 'unknown'.
+
+    >>> CARD #195 — `os.kill(pid, 0)` IS NOT A LIVENESS PROBE ON WINDOWS, AND ITS
+    FAILURE WAS BEING SWALLOWED INTO "DEAD". <<< Measured by workstation-lc against
+    a monitor that was demonstrably draining:
+
+        pid 6120 alive per Windows ................. True
+        os.kill(6120, 0) from another process ...... OSError [WinError 87]
+                                                     -> `except OSError: return False`
+        pid 6120 after the probe ................... STILL ALIVE
+
+    The error appears when probing a process the caller did NOT spawn — the worker
+    is a grandchild of a detached cmd.exe, a different session/handle-rights context.
+    His first throwaway test passed because he probed his own CHILD: a child-process
+    control cannot surface this, which is why it read safe.
+
+    ONE LINE PRODUCED BOTH SYMPTOMS: `monitor status` reported "not running" about
+    every healthy monitor, AND the single-instance guard believed nothing was
+    running, so it never blocked a second start. False negative and duplicate
+    spawning from the same swallow.
+
+    >>> THE RULE: "COULD NOT DETERMINE" MUST NEVER BE REPORTED AS "DEAD" BY A GUARD
+    WHOSE JOB IS TO PREVENT A SECOND START. <<< A blocked start is visible and
+    recoverable; a duplicate is silent and produces two writers over one cursor.
+    So callers treat UNKNOWN as occupied, and `status` says so rather than claiming
+    the process is running.
+    """
+    if sys.platform == "win32":
+        return _windows_liveness(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return LIVENESS_DEAD
     except PermissionError:
-        return True            # exists, owned by another user
+        return LIVENESS_ALIVE       # exists, owned by another user
     except OSError:
-        return False
-    return True
+        return LIVENESS_UNKNOWN     # NOT dead — we simply could not tell
+    return LIVENESS_ALIVE
+
+
+def _process_alive(pid: int) -> bool:
+    """Back-compat bool. UNKNOWN counts as alive — see _process_liveness for why
+    treating an undetermined answer as "dead" is the failure mode, not the safe one."""
+    return _process_liveness(pid) in (LIVENESS_ALIVE, LIVENESS_UNKNOWN)
 
 
 def _terminate(pid: int) -> None:
