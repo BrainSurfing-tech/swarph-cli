@@ -145,8 +145,27 @@ def structural_query(term, *, index_path, caller_cell, limit=8, allowlist=None) 
             # verbatim edge kinds (contains/imports/decorates/references/calls/...), and counting
             # all of them would pollute the blast-radius number. 'calls' (plural) is CodeGraph's
             # actual call-edge kind.
+            #
+            # >>> CARD #194 — THE COUNT IS SCOPED TO THE CALLER-VISIBLE REPOS, exactly
+            # like the rows above. <<< This was an unscoped COUNT(*) while `s.repo IN
+            # (allowed)` gated the rows, so a caller who could NOT see a private repo
+            # still received a caller count that INCLUDED its callers.
+            #
+            # drop-on-meta-edge, seat-A: "a count that sums callers living in a private
+            # repo LEAKS THE EXISTENCE AND SIZE of those private callers — the exact
+            # payload #44's transport refuses, delivered as an integer instead of a
+            # path." Measured 2026-07-31: cross-visibility `calls` edges were 0 on the
+            # live index, so the leak was LATENT — but this is the blast-radius number
+            # the feature exists to serve, and the gateway proxy would have exposed it
+            # to every remote peer.
+            #
+            # The unifying rule: EVERY OBSERVABLE — rows, counts, scores, freshness —
+            # must be a function of only the caller-visible subset, never the full
+            # index. Gating the rows is ONE INSTANCE of it, not the whole of it.
             callers = con.execute(
-                "SELECT COUNT(*) FROM edges WHERE dst_symbol=? AND edge_type='calls'", (sid,)
+                f"SELECT COUNT(*) FROM edges e JOIN symbols src ON src.id = e.src_symbol "
+                f"WHERE e.dst_symbol=? AND e.edge_type='calls' AND src.repo IN ({qmarks})",
+                (sid, *sorted(allowed))
             ).fetchone()[0]
             out.append({"repo": repo, "name": name, "kind": kind,
                         "file_path": fp, "start_line": line, "callers": callers, "score": score,
