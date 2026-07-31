@@ -420,12 +420,40 @@ swarph watchdog --check --peer researcher --gateway http://localhost:8788 --dm-w
 Installs Claude Code hooks as **content** wired into `~/.claude/settings.json` — a hook becomes an installable artifact (a script + its event/matcher bindings merged into your settings) with no swarph-cli version bump per hook, the same way `watchdog --install-service` ships systemd units as bundled data.
 
 ```bash
-swarph hooks init                 # install the recommended bundled set (cell-resilience)
-swarph hooks add cell-resilience  # install one builtin by name
-swarph hooks add ./my-hook        # install a local bundle dir (hook.json + script)
-swarph hooks list                 # builtins + install status (installed|available)
+swarph hooks init                    # install the recommended bundled set
+swarph hooks add codegraph-on-grep   # structural search alongside grep (see below)
+swarph hooks add cell-resilience     # install one builtin by name
+swarph hooks add ./my-hook           # install a local bundle dir (hook.json + script)
+swarph hooks list                    # builtins + install status (installed|available)
 swarph hooks remove cell-resilience
 ```
+
+**Bundled `codegraph-on-grep`** *(0.41.0)*. Binds `PostToolUse`/`Bash`. When a `grep`/`rg` searches
+**code**, it also queries the mesh gateway's structural codegraph and hands back the symbol-level
+answer — definitions, `file:line`, and **caller counts, which grep structurally cannot see**:
+
+```
+CODEGRAPH (structural, index 2.1h old) for 'def _board_grant' — grep found text; this is
+the symbol graph, incl. CALLER COUNTS grep cannot see:
+  mesh-gateway/server.py:1352  function _board_grant  callers=11
+```
+
+The point is **context cost**: a grep returning 200 matching lines is far more expensive than the
+handful of symbols that answer *"where is this defined and who calls it"*.
+
+- **It supplements grep; it never blocks it.** grep stays correct for config, logs and string
+  literals — the codegraph indexes *symbols*.
+- **An unavailable index is reported loudly, never as "no matches."** A failed lookup rendered as a
+  real negative teaches exactly the wrong thing, so the hook says so and marks the answer
+  unverified. A genuinely empty result from a *working* index says `a REAL negative` explicitly, and
+  a stale index reports its age.
+- **No local index required.** It asks the gateway, which scopes both rows and caller counts to your
+  visibility — resolved from your **bearer token**, never from a field you send, so it cannot be
+  self-asserted.
+
+Needs `SWARPH_SELF` (or `--as`), your peer token at `~/.config/swarph/<cell>.peer_token`, and a
+reachable gateway. Do not run a hand-rolled copy alongside it: two hooks per `Bash` call means two
+lookups, doubling the cost the hook exists to cut.
 
 **Trust model.** Three tiers: `builtin` (trusted, bundled with swarph-cli — installs without a prompt), `local` (a bundle dir you point at — shown then confirmed before any write), and `published`/`@cell/name` (**fails closed in v1** — never installs another cell's unreviewed code). Signed-publisher identity plus a publish-time security gate is the v2 model.
 
