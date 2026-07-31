@@ -155,7 +155,43 @@ exit 0
 """
 
 
+# The bundled codegraph-on-grep script (card #194). Deliberately a THIN WRAPPER
+# around `swarph codegraph-hook` rather than fat inline shell: the trigger
+# heuristics are the hard-won part — each guard in that module exists because a
+# LOOSER version misfired in production (a heredoc delimiter extracted as the
+# search term; a quoted string lifted out of unrelated prose) — and heuristics
+# that specific must be unit-testable, which inline sh is not. Same pattern as
+# `install-hook`, which points at `swarph hook-output`.
+#
+# `exec` so the hook process IS the handler, and the verb always exits 0: a
+# PostToolUse hook must never fail a turn.
+_CODEGRAPH_ON_GREP_SH = r"""#!/bin/sh
+# codegraph-on-grep.sh — swarph bundled Claude Code hook (PostToolUse/Bash).
+#
+# When a grep/rg searches CODE, also ask the gateway's structural codegraph and
+# hand the symbol-level answer back as context. Supplements grep, never blocks it.
+# All logic lives in `swarph codegraph-hook` so it can be tested; see that module
+# for why each trigger guard exists.
+exec swarph codegraph-hook "$@"
+"""
+
 BUILTIN_HOOKS: dict = {
+    "codegraph-on-grep": HookBundle(
+        name="codegraph-on-grep",
+        description=(
+            "When a grep/rg searches code, also queries the gateway's structural "
+            "codegraph and injects the symbol-level answer (definitions, file:line, "
+            "caller counts) as context. Supplements grep; never blocks it. Reports "
+            "an unavailable index LOUDLY rather than as 'no matches'."
+        ),
+        publisher="swarph-builtin",
+        trust="builtin",
+        script_name="codegraph-on-grep.sh",
+        script_body=_CODEGRAPH_ON_GREP_SH,
+        bindings=(
+            HookBinding("PostToolUse", "Bash"),
+        ),
+    ),
     "cell-resilience": HookBundle(
         name="cell-resilience",
         description=(
