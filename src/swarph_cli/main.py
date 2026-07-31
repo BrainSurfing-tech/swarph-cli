@@ -84,6 +84,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "spawn": "swarph_cli.commands.spawn.run_spawn",
     "install-hook": "swarph_cli.commands.install_hook.run_install_hook",
     "hook-output": "swarph_cli.commands.hook_output.run_hook_output",
+    "codegraph-hook": "swarph_cli.commands.codegraph_hook.run_codegraph_hook",
     "watchdog": "swarph_cli.commands.watchdog.run_watchdog",
     "hooks": "swarph_cli.commands.hooks.run_hooks",
     "protocol-handler": "swarph_cli.commands.protocol_handler.run_protocol_handler",
