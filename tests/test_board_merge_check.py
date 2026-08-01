@@ -347,3 +347,50 @@ def test_a_READY_card_with_NO_peer_verdict_REFUSES():
     d = mc.decide(_card(links={"pr": "https://github.com/o/r/pull/152"}), _pr())
     assert _fail(d, "peer verdict recorded on the card")
     assert d.verdict != "WOULD_MERGE"
+
+
+def test_a_stamp_WITHOUT_the_self_authored_KEY_abstains_like_no_stamp():
+    """>>> THE BUG THAT SHIPPED IN 0.41.2, AND IT WAS 92% OF PRODUCTION. <<<
+
+    Found by droplet RUNNING decide() on the installed package instead of reading
+    it. The first version tested `_vstamp is None` — absence of the STAMP. The
+    backlog's real shape is a stamp that EXISTS (written before self_authored
+    shipped) and lacks the KEY: it fell through to the comparison, where
+    `.get("self_authored")` returns None, `not None` is True, and A TEXTBOOK
+    SELF-REVIEW PASSED.
+
+    Measured at the time: 53 link_stamps in production, 4 carrying the flag — 49
+    (92%) were this shape. The leg was VACUOUS FOR EXACTLY THE BACKLOG IT WAS
+    BUILT FOR, which is the outcome the design explicitly targets and which I had
+    reported to the date-holder as avoided. He authorised near-total ABSTENTION;
+    what shipped was near-total PASS.
+
+    WHY THE VERIFICATION MISSED IT: the wheel audit and the end-to-end check
+    covered self_authored=True (refuses) and no-stamp (abstains). Both correct,
+    NEITHER IS THE PRODUCTION SHAPE. The untested case was the only one that
+    exists in the data.
+    """
+    stamp_no_key = {"peer_verdict": {"by": "droplet", "caller_bound": True,
+                                     "at": "2026-08-01T00:00:00Z"}}
+    d = mc.decide(_card(created_by="lab-ovh", assignee="droplet",
+                        link_stamps=stamp_no_key), _pr())
+    check = [c for c in d.checks if c.name == "verdict is not self-authored"][0]
+    assert check.ok is None, (
+        "a stamp lacking the self_authored KEY passed the self-review leg — "
+        "vacuous for 92% of production")
+    assert d.verdict != "WOULD_MERGE"
+
+
+def test_the_two_BLIND_causes_are_named_distinctly():
+    """They decay differently and must not print the same: a MISSING STAMP is a
+    producer that dropped it (outage shape); a MISSING KEY is a verdict older than
+    the flag (drains to zero as verdicts are rewritten). One message for both
+    would make a permanent outage indistinguishable from a shrinking backlog."""
+    no_stamp = mc.decide(_card(created_by="lab-ovh", link_stamps={}), _pr())
+    no_key = mc.decide(_card(created_by="lab-ovh",
+                             link_stamps={"peer_verdict": {"by": "droplet"}}), _pr())
+    d1 = [c for c in no_stamp.checks if c.name == "verdict is not self-authored"][0].detail
+    d2 = [c for c in no_key.checks if c.name == "verdict is not self-authored"][0].detail
+    assert d1 != d2, "both blind causes printed the same detail"
+    assert "at all" in d1
+    assert "predates the flag" in d2

@@ -161,15 +161,41 @@ def decide(card: dict, pr_state: dict) -> Decision:
         # vacuous for exactly the backlog it must cover. ok=None => COULD NOT
         # EVALUATE => REFUSE, which is this file's existing doctrine for the
         # unreachable-GitHub case and the reason it has a tri-state at all.
+        # >>> A STAMP THAT EXISTS AND LACKS THE KEY IS AS BLIND AS NO STAMP AT ALL,
+        # AND IT IS 92% OF PRODUCTION. <<< (droplet, running decide() on the
+        # INSTALLED 0.41.2 rather than reading it.)
+        #
+        # The first version tested `_vstamp is None` — ABSENCE OF THE STAMP. The
+        # backlog's actual shape is a stamp that EXISTS (written before
+        # self_authored shipped) and lacks the KEY. That fell through to the
+        # comparison, where `.get("self_authored")` returns None, `not None` is
+        # True, and the leg reported ok=True. A textbook self-review PASSED.
+        #
+        # MEASURED: 53 link_stamps in production, 4 carrying the flag — 49 (92%)
+        # are the middle shape. So the leg was VACUOUS FOR EXACTLY THE BACKLOG IT
+        # WAS BUILT FOR: the outcome the design explicitly targets, and which I
+        # reported to the date-holder as avoided. He authorised near-total
+        # ABSTENTION on the backlog; what shipped was near-total PASS — the
+        # opposite, and MORE PERMISSIVE THAN THE PHASE-1 STATE IT REPLACES.
+        #
+        # The two blind causes are kept DISTINCT in the detail because they decay
+        # differently: a missing stamp is a producer that dropped it (an outage
+        # shape); a missing key is a verdict older than the flag (a shape that
+        # drains to zero as verdicts are rewritten). A single message would make
+        # them indistinguishable, which is the naming rule one level down.
         _vstamp = (card.get("link_stamps") or {}).get("peer_verdict")
-        if _vstamp is None:
+        if _vstamp is None or "self_authored" not in _vstamp:
+            _why = ("no link_stamp for peer_verdict at all — a producer dropped it, "
+                    "or the verdict predates #199"
+                    if _vstamp is None else
+                    f"link_stamp exists (by={_vstamp.get('by')!r}) but carries NO "
+                    f"self_authored key — the verdict predates the flag")
             add("verdict is not self-authored", None,
-                "no link_stamp for peer_verdict — cannot tell who wrote it "
-                "(pre-#199 verdict, or a producer that dropped link_stamps); "
-                "COULD NOT EVALUATE, never a pass")
+                f"{_why}; cannot tell whether the reviewee wrote it. "
+                f"COULD NOT EVALUATE, never a pass")
         else:
-            add("verdict is not self-authored", not _vstamp.get("self_authored"),
-                f"self_authored={_vstamp.get('self_authored')!r} by={_vstamp.get('by')!r} "
+            add("verdict is not self-authored", not _vstamp["self_authored"],
+                f"self_authored={_vstamp['self_authored']!r} by={_vstamp.get('by')!r} "
                 f"— the person being reviewed cannot supply the review")
         add("verdict is APPROVED", verdict["verdict"] == "APPROVED",
             f"verdict={verdict['verdict']}")
