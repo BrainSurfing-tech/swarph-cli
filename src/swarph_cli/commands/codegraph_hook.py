@@ -152,6 +152,35 @@ def query_gateway(term: str, gateway: str, token: str, limit: int = MAX_ROWS) ->
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+def _match_quality(term: str, rows: list) -> tuple:
+    """Did the results actually match what was ASKED, or only a common token?
+
+    >>> THE EMPTY ANSWER WAS MADE HONEST; THE NON-EMPTY ONE WAS NOT. <<<
+    (Reported first-hand by a peer, 2026-08-01.) The index's query sanitiser
+    OR-JOINS tokens, so `def command_beta_executor` matches anything containing
+    "command". He grepped a private-repo file and got six confident-looking
+    swarph-cli symbols WITH CALLER COUNTS — plausible structure from the wrong
+    repository, and caller counts make it read authoritative. His words: "the
+    failure mode you engineered out of the empty case walked back in through the
+    non-empty one."
+
+    So: find the query's DISTINCTIVE token — the longest content token, which is
+    the one carrying the intent (`command_beta_executor`, not `def`) — and check
+    whether ANY returned symbol name actually contains it. If none does, every
+    row is a common-token coincidence and must be labelled as such rather than
+    served as an answer.
+
+    Returns (distinctive_token, n_rows_matching_it).
+    """
+    toks = [t for t in re.findall(r"[A-Za-z0-9_]+", (term or "").lower())
+            if len(t) > 2 and t not in {"def", "class", "async", "the", "for"}]
+    if not toks:
+        return ("", len(rows))
+    key = max(toks, key=len)
+    hits = sum(1 for r in rows if key in str(r.get("name", "")).lower())
+    return (key, hits)
+
+
 def render(term: str, env: dict) -> str:
     """Format the envelope for injection. Errors are LOUD and named."""
     if "error" in env:
@@ -179,8 +208,18 @@ def render(term: str, env: dict) -> str:
             f"{r.get('kind')} {r.get('name')}  callers={r.get('callers')}"
             for r in rows[:MAX_ROWS]
         )
+    warn = ""
+    if rows:
+        key, hits = _match_quality(term, rows)
+        if key and hits == 0:
+            repos = sorted({str(r.get("repo")) for r in rows})
+            warn = (f"\n  >>> FUZZY MATCH — NOT AN ANSWER TO YOUR QUERY. No returned symbol's "
+                    f"name contains {key!r}. These matched a COMMON TOKEN only"
+                    + (f", and all are from: {', '.join(repos)}" if repos else "")
+                    + f". Treat them as unrelated: the symbol you grepped for is NOT in "
+                    f"what this index can see. <<<")
     return (f"CODEGRAPH (structural{age}) for '{term}' — grep found text; this is "
-            f"the symbol graph, incl. CALLER COUNTS grep cannot see:\n{body}\n\n"
+            f"the symbol graph, incl. CALLER COUNTS grep cannot see:\n{body}{warn}\n\n"
             f"Use this for definitions/callers/blast-radius. grep remains correct "
             f"for config, logs and string literals the codegraph does not index.")
 

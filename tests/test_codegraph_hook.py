@@ -143,3 +143,51 @@ def test_the_hook_is_a_registered_builtin_bundle():
 def test_the_verb_is_registered():
     from swarph_cli.main import _VERB_HANDLERS  # noqa: PLC0415
     assert "codegraph-hook" in _VERB_HANDLERS
+
+
+# ── the non-empty answer must be as honest as the empty one ───────────────
+
+def test_a_FUZZY_match_is_labelled_not_served_as_an_answer():
+    """>>> a peer's first-hand receipt, 2026-08-01: the defect this closes. <<<
+
+    He grepped a private-repo file for `def command_beta_executor` and got six
+    swarph-cli symbols WITH CALLER COUNTS — the sanitiser OR-joins tokens, so it
+    matched "command". His diagnosis: "the failure mode you engineered out of the
+    empty case walked back in through the non-empty one." An empty answer said
+    "REAL negative"; a wrong answer said nothing at all.
+    """
+    env = {"results": [
+        {"repo": "swarph-cli", "file_path": "src/x.py", "start_line": 46,
+         "kind": "variable", "name": "_HOOK_COMMAND", "callers": 0},
+        {"repo": "swarph-cli", "file_path": "src/y.py", "start_line": 62,
+         "kind": "function", "name": "provider_command", "callers": 1},
+    ], "freshness": [{"index_age_hours": 1.6}]}
+    out = ch.render("def command_beta_executor", env)
+    assert "FUZZY MATCH" in out
+    assert "NOT AN ANSWER TO YOUR QUERY" in out
+    assert "command_beta_executor" in out
+    assert "swarph-cli" in out          # names the repo the strays came from
+
+
+def test_a_GENUINE_match_carries_no_fuzzy_warning():
+    """Non-vacuity pair. If the warning fired on real hits it would be noise, and
+    a warning that always fires is one nobody reads."""
+    env = {"results": [
+        {"repo": "service-repo", "file_path": "server.py", "start_line": 1352,
+         "kind": "function", "name": "_board_grant", "callers": 11},
+    ], "freshness": [{"index_age_hours": 2.0}]}
+    out = ch.render("_board_grant", env)
+    assert "FUZZY MATCH" not in out
+    assert "_board_grant" in out
+
+
+def test_a_PARTIAL_match_is_treated_as_genuine():
+    """One real hit among strays still answers the question — warn only when NOTHING
+    matches, or the signal degrades into noise."""
+    env = {"results": [
+        {"repo": "swarph-cli", "file_path": "a.py", "start_line": 1,
+         "kind": "variable", "name": "_HOOK_COMMAND", "callers": 0},
+        {"repo": "private-repo", "file_path": "workers/worker_beta.py",
+         "start_line": 900, "kind": "function", "name": "command_beta_executor", "callers": 3},
+    ], "freshness": [{"index_age_hours": 1.0}]}
+    assert "FUZZY MATCH" not in ch.render("def command_beta_executor", env)
