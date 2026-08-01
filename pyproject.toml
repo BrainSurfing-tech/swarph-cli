@@ -51,7 +51,6 @@ dependencies = [
 Homepage = "https://github.com/BrainSurfing-tech/swarph-cli"
 Source = "https://github.com/BrainSurfing-tech/swarph-cli"
 Substrate = "https://github.com/BrainSurfing-tech/swarph-mesh"
-Spec = "https://github.com/darw007d/hedge-fund-mcp/blob/main/research/swarph_cli/PLAN.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
