@@ -111,4 +111,11 @@ swarph_cli = ["systemd/*.service", "systemd/*.timer", "systemd/*.default",
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The tree must win over any installed copy. Without this, `pip install swarph-cli`
+# on the same box shadows src/ and the suite silently tests the PUBLISHED wheel
+# instead of your edits — every local change reads green whether or not it works.
+# Measured 2026-08-01: 1689 passed against site-packages vs 1690 against the tree;
+# the only test that noticed was a brand-new one, because the tree and 0.41.0 were
+# nearly identical. That agreement is a polluted baseline, not isolation.
+pythonpath = ["src"]
 addopts = "-v --tb=short"
