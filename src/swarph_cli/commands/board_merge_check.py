@@ -132,34 +132,45 @@ def decide(card: dict, pr_state: dict) -> Decision:
         # cell, so it cannot answer "was this reviewed by someone else".
         add("reviewer is not the author", verdict["cell"] != author,
             f"reviewer={verdict['cell']} author={author}")
-        # >>> LEG 2 (#144): THE INDEPENDENCE CHECK MUST EXCLUDE THE ASSIGNEE, NOT
-        # ONLY created_by. <<<
+        # >>> LEG 2 (#144): READ THE FROZEN, BOUND self_authored FLAG — NOT A
+        # GATE-TIME COMPARISON OF AN ASSERTED NAME. <<<
         #
-        # created_by is merely WHO FILED the card. THE ASSIGNEE IS THE PERSON BEING
-        # REVIEWED — the one doing the work. Guarding only the former guards the
-        # weaker of the two, and on the NORMAL AI² split (filed by one identity,
-        # assigned to another) the weaker leg PASSES while the stronger one fails.
-        # Measured 2026-08-01: 20 of 213 live cards (9%) have created_by !=
-        # assignee. Not an edge case — the standard working shape.
+        # The first version of this leg compared verdict["cell"] against
+        # card["assignee"]. drop-on-meta-edge showed it was DOUBLY WEAK, verified
+        # against the merged commit:
         #
-        # WHY BINDING DOES NOT COVER THIS, and it is the subtle part: the assignee
-        # is a LEGITIMATELY BOUND writer. `is_exec_assignee` permits them to write
-        # peer_verdict on their own card, so every identity check passes CORRECTLY
-        # while the reviewee approves themselves. BINDING CLOSES FORGERY — asserting
-        # someone else's name — AND DOES NOTHING AGAINST SELF-DEALING, acting under
-        # your own true name in a role you should not occupy. Different attacks.
-        # (drop-on-meta-edge, correcting lab's own insufficient fix.)
+        #  (i) ASSERTED — verdict["cell"] is parsed out of the peer_verdict VALUE,
+        #      which the writer controls. The assignee simply writes
+        #      "not-me APPROVED <sha>": cell(not-me) != assignee(me) PASSES, and the
+        #      created_by leg passes too. The self-review leg was defeated by
+        #      asserting a non-self name, so it meant nothing until the value's cell
+        #      was forced to equal the bound writer.
         #
-        # SEVERITY CHANGES ON THE GRADUATION DATE WITHOUT THE CODE CHANGING: today a
-        # self-verdict is VISIBLE and a human reading the card is the compensating
-        # control. Phase 2 makes the authority AUTOMATIC and removes exactly that
-        # control. Date-holder's ruling (droplet, 2026-08-01): graduate 2026-08-11
-        # as scheduled with phase-2 scope NARROWED — no auto-merge where a verdict
-        # author is the assignee — which is a narrowing the register permits rather
-        # than an extension it forbids, and fails safe to the human gate.
-        add("reviewer is not the assignee", not assignee or verdict["cell"] != assignee,
-            f"reviewer={verdict['cell']} assignee={assignee} — the person being "
-            f"reviewed cannot supply the review")
+        # (ii) GATE-TIME — it read card["assignee"] AT MERGE. Self-verdict, then the
+        #      work reassigns (the normal flow: 9% of live cards already have
+        #      created_by != assignee), and the gate sees cell != assignee(new) so a
+        #      STALE SELF-APPROVAL PASSES. Frozen-vs-mutable, on the fix itself.
+        #
+        # `self_authored` closes both in one read. The gateway computes it
+        # SERVER-SIDE from row["assignee"] == the BOUND writer and FREEZES it in
+        # link_stamps at write time: BOUND (so no asserted name can dodge it — no
+        # dependency on leg (a)) and FROZEN (so reassignment cannot launder it).
+        #
+        # ABSENCE IS NOT INNOCENCE. A verdict written before the flag existed has no
+        # stamp, and treating that as "not self-authored" would make this leg
+        # vacuous for exactly the backlog it must cover. ok=None => COULD NOT
+        # EVALUATE => REFUSE, which is this file's existing doctrine for the
+        # unreachable-GitHub case and the reason it has a tri-state at all.
+        _vstamp = (card.get("link_stamps") or {}).get("peer_verdict")
+        if _vstamp is None:
+            add("verdict is not self-authored", None,
+                "no link_stamp for peer_verdict — cannot tell who wrote it "
+                "(pre-#199 verdict, or a producer that dropped link_stamps); "
+                "COULD NOT EVALUATE, never a pass")
+        else:
+            add("verdict is not self-authored", not _vstamp.get("self_authored"),
+                f"self_authored={_vstamp.get('self_authored')!r} by={_vstamp.get('by')!r} "
+                f"— the person being reviewed cannot supply the review")
         add("verdict is APPROVED", verdict["verdict"] == "APPROVED",
             f"verdict={verdict['verdict']}")
         head = pr_state.get("head_sha") or ""
