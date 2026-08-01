@@ -102,3 +102,36 @@ def test_upstream_helper_is_read_only_by_construction(monkeypatch):
     assert out == [{"slug": "s"}]
     assert captured["body"]["params"]["name"] == "query"          # read-only lock
     assert captured["auth"] == "Bearer gbrain_hostheld"           # gateway's held token
+
+
+def test_an_UNCONFIGURED_gbrain_url_names_itself_as_configuration_not_transport(monkeypatch):
+    """Releases up to 0.41.0 shipped a hardcoded PRIVATE TAILNET address as the
+    default for GATEWAY_GBRAIN_URL, so "unconfigured" was never a reachable state —
+    every install silently pointed at one operator's box.
+
+    Removing the default makes it reachable for the first time. An empty URL would
+    otherwise surface as a urllib ValueError: a TRANSPORT error for a CONFIGURATION
+    fault, which sends the reader to the network instead of their env.
+
+    Non-vacuity: this is the only test that exercises the empty branch. Every other
+    test in this file sets the variable in `_load_app`, which is exactly why the
+    hardcoded default survived 79 releases without a single test noticing it.
+    """
+    server = _load_app(monkeypatch)
+    monkeypatch.setattr(server, "GATEWAY_GBRAIN_URL", "")
+    with pytest.raises(RuntimeError) as e:
+        server._brain_query_upstream("anything", 5)
+    msg = str(e.value)
+    assert "UNCONFIGURED" in msg
+    assert "GATEWAY_GBRAIN_URL" in msg
+    assert "not" in msg and "unreachable" in msg   # names which fault it is NOT
+
+
+def test_a_CONFIGURED_url_does_not_raise_the_configuration_error(monkeypatch):
+    """Paired non-vacuity. If the guard fired on a configured gateway it would be a
+    regression, not a safety net — so the silent case is asserted too."""
+    server = _load_app(monkeypatch)
+    monkeypatch.setattr(server, "GATEWAY_GBRAIN_URL", "http://127.0.0.1:8792/mcp")
+    with pytest.raises(Exception) as e:      # noqa: PT011 — any transport failure is fine
+        server._brain_query_upstream("anything", 5)
+    assert "UNCONFIGURED" not in str(e.value)
