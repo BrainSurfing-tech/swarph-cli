@@ -300,3 +300,50 @@ def test_a_MISSING_stamp_is_COULD_NOT_EVALUATE_never_a_pass():
             "— absence read as innocence")
         check = [c for c in d.blockers if c.name == "verdict is not self-authored"][0]
         assert check.ok is None, "must be COULD-NOT-EVALUATE, not a hard False"
+
+
+def test_the_summary_DISTINGUISHES_failed_from_could_not_evaluate():
+    """>>> CONDITION 1 OF THE DATE-HOLDER'S RULING. <<< (droplet, #144.)
+
+    "A gate that graduates and then refuses everything is INDISTINGUISHABLE from a
+    gate that never graduated — from the outside, and from the board."
+
+    A REFUSE that fails a check and a REFUSE that could not see its subject are
+    different facts with different decay: the first is the gate working, the
+    second shrinks to zero as verdicts are rewritten — or doesn't, which is the
+    dead-control signal. They must not print the same.
+    """
+    d = mc.decide(_card(created_by="lab-ovh", link_stamps={}), _pr())
+    out = mc.format_decision(d)
+    assert "COULD-NOT-EVALUATE" in out
+    assert "blind:" in out
+    assert "verdict is not self-authored" in out.split("\n")[0], (
+        "the abstaining check must be NAMED on the summary line, not only "
+        "buried in the per-check list — a count cannot tell a stamp-less backlog "
+        "from a GitHub outage")
+
+
+def test_a_clean_pass_does_not_print_an_abstention_summary():
+    """NON-VACUITY. If the summary always printed the tri-state it would be noise
+    on every healthy run, and noise is how a gate stops being read."""
+    out = mc.format_decision(mc.decide(_card(), _pr()))
+    assert "COULD-NOT-EVALUATE" not in out
+    assert out.split("\n")[0] == "card #152: WOULD_MERGE"
+
+
+def test_a_READY_card_with_NO_peer_verdict_REFUSES():
+    """>>> drop-on-meta-edge's pin, and it guards a live emptiness. <<< MEASURED
+    2026-08-01: 13 cards are in build/test and ZERO carry a peer_verdict link. So
+    at arming EVERY ready card hits "peer verdict recorded on the card" = False →
+    REFUSE → human gate. The gate is safe-BY-EMPTINESS today.
+
+    That is the same empty-subject shape found all night (group_grants, the verdict
+    store) except here it fails SAFE — refuse, not pass — which is the one
+    direction that makes an empty subject acceptable rather than a defect.
+
+    Pinned so the day someone "helpfully" defaults a missing verdict to pass, it
+    fails loudly instead of silently auto-merging an unreviewed card.
+    """
+    d = mc.decide(_card(links={"pr": "https://github.com/o/r/pull/152"}), _pr())
+    assert _fail(d, "peer verdict recorded on the card")
+    assert d.verdict != "WOULD_MERGE"

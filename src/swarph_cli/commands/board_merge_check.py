@@ -260,7 +260,41 @@ def fetch_pr_state(repo: str, number: str) -> dict:
 
 
 def format_decision(d: Decision) -> str:
-    lines = [f"card #{d.card_id}: {d.verdict}"]
+    """Render a decision, and >>> DISTINGUISH *FAILED* FROM *COULD NOT EVALUATE* IN
+    THE SUMMARY, NOT ONLY PER-LINE. <<<
+
+    Condition 1 of the date-holder's ruling on #144 (droplet, 2026-08-01):
+
+        "A gate that graduates and then refuses everything is INDISTINGUISHABLE
+         from a gate that never graduated — from the outside, and from the board.
+         The abstention rate must be REPORTED, not silent."
+
+    The register exists because "a recording phase that never graduates is a
+    control that does not exist, and it LOOKS LIKE PROGRESS ON A BOARD."
+    Abstention is that same failure wearing the opposite mask: near-total
+    abstention is acceptable as a TRANSIENT and is a dead control as a steady
+    state, and the only thing that tells them apart is whether anyone can SEE it
+    without going to look.
+
+    SCOPE, stated so it is not mistaken for more: this tool evaluates ONE card per
+    run (--card-json). It cannot compute a RATE. What it can do — and now does — is
+    make every run self-describing, naming which checks abstained and why, so the
+    caller that iterates cards can aggregate without parsing prose.
+    """
+    ok = sum(1 for c in d.checks if c.ok is True)
+    failed = [c for c in d.checks if c.ok is False]
+    blind = [c for c in d.checks if c.ok is None]
+    head = f"card #{d.card_id}: {d.verdict}"
+    if failed or blind:
+        head += (f"  —  {ok} ok · {len(failed)} FAILED · "
+                 f"{len(blind)} COULD-NOT-EVALUATE")
+        if blind:
+            # Name them. A count alone cannot tell "abstained on self-authorship
+            # because the stamp predates the flag" from "abstained because GitHub
+            # was unreachable", and those decay differently: one shrinks to zero as
+            # verdicts are rewritten, the other is an outage.
+            head += f"  [blind: {', '.join(c.name for c in blind)}]"
+    lines = [head]
     for c in d.checks:
         mark = "ok  " if c.ok is True else ("FAIL" if c.ok is False else "????")
         lines.append(f"  [{mark}] {c.name}" + (f" — {c.detail}" if c.detail else ""))
