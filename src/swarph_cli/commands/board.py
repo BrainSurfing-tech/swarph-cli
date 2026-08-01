@@ -50,18 +50,41 @@ def _patch_json(url: str, body: dict, token: str, *, timeout: float = 10.0) -> t
 
 # ── pure builders (unit-tested) ───────────────────────────────────────────────
 
-def _cards_list_url(gateway: str, *, project=None, stage=None, assignee=None) -> str:
-    q = {k: v for k, v in (("project", project), ("stage", stage), ("assignee", assignee)) if v}
+def _cards_list_url(gateway: str, *, project=None, stage=None, assignee=None,
+                    label=None) -> str:
+    q = {k: v for k, v in (("project", project), ("stage", stage),
+                           ("assignee", assignee), ("label", label)) if v}
     base = f"{gateway.rstrip('/')}/board/cards"
     return f"{base}?{urllib.parse.urlencode(q)}" if q else base
 
 
-def _card_add_payload(actor, project_id, title, *, body=None, ai2=False, priority=0) -> dict:
+def _card_add_payload(actor, project_id, title, *, body=None, ai2=False, priority=0,
+                      labels=None) -> dict:
     p = {"actor": actor, "project_id": int(project_id), "title": title,
          "ai2": bool(ai2), "priority": int(priority)}
     if body:
         p["body"] = body
+    if labels:
+        p["labels"] = list(labels)
     return p
+
+
+def _apply_label(current: list, action: str, label: str) -> list:
+    """Compute the NEW label set. Pure, so the read-modify-write is testable
+    without a gateway.
+
+    The server takes a FULL REPLACEMENT (labels are a set — a merge-only field
+    could never REMOVE one), so `label rm` is unavoidably read-modify-write. That
+    is last-writer-wins between two simultaneous editors of the SAME card, which
+    the board already has for `stage` and `assignee` — stated rather than hidden,
+    because the alternative (server-side add/rm ops) is a bigger surface than
+    this card justifies.
+    """
+    cur = [str(x).strip().lower() for x in (current or [])]
+    lab = label.strip().lower()
+    if action == "add":
+        return cur if lab in cur else cur + [lab]
+    return [x for x in cur if x != lab]
 
 
 def _project_add_payload(actor, slug, title, *, goal=None) -> dict:
@@ -153,13 +176,17 @@ def _build_parser() -> argparse.ArgumentParser:
     cards = top.add_parser("cards", help="board cards").add_subparsers(dest="command", required=True)
     cl = cards.add_parser("list", help="list cards")
     cl.add_argument("--project"); cl.add_argument("--stage"); cl.add_argument("--assignee")
+    cl.add_argument("--label", help="only cards carrying this label (exact match)")
     cl.add_argument("--json", action="store_true"); _add_common(cl)
     cs = cards.add_parser("show", help="show one card"); cs.add_argument("id", type=int)
     cs.add_argument("--json", action="store_true"); _add_common(cs)
     ca = cards.add_parser("add", help="create a card")
     ca.add_argument("--project", required=True, help="project id or slug"); ca.add_argument("--title", required=True)
     ca.add_argument("--body"); ca.add_argument("--ai2", action="store_true")
-    ca.add_argument("--priority", type=int, default=0); ca.add_argument("--json", action="store_true"); _add_common(ca)
+    ca.add_argument("--priority", type=int, default=0)
+    ca.add_argument("--label", action="append", dest="labels", metavar="LABEL",
+                    help="attach a label (repeatable)")
+    ca.add_argument("--json", action="store_true"); _add_common(ca)
     cm = cards.add_parser("move", help="move a card to a stage")
     cm.add_argument("id", type=int); cm.add_argument("stage"); cm.add_argument("--json", action="store_true"); _add_common(cm)
     ck = cards.add_parser("link", help="add/update a link on a card (merges)")
@@ -167,6 +194,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ck.add_argument("--json", action="store_true"); _add_common(ck)
     cn = cards.add_parser("assign", help="set a card's assignee")
     cn.add_argument("id", type=int); cn.add_argument("assignee"); cn.add_argument("--json", action="store_true"); _add_common(cn)
+    cb = cards.add_parser("label", help="add/remove a label on a card")
+    cb.add_argument("action", choices=["add", "rm"])
+    cb.add_argument("id", type=int); cb.add_argument("label")
+    cb.add_argument("--json", action="store_true"); _add_common(cb)
     cr = cards.add_parser("ready", help="flag a card ready-to-advance (move_ready) for the orchestrator")
     cr.add_argument("id", type=int); cr.add_argument("--clear", action="store_true", help="unset move_ready")
     cr.add_argument("--json", action="store_true"); _add_common(cr)
@@ -224,7 +255,9 @@ def run_board(argv: list[str]) -> int:
             if err:
                 print(f"swarph board: {err}", file=sys.stderr)
                 return 1
-            st, d = _http_get_json(_cards_list_url(gw, project=pid, stage=args.stage, assignee=args.assignee), token)
+            st, d = _http_get_json(_cards_list_url(gw, project=pid, stage=args.stage,
+                                                   assignee=args.assignee,
+                                                   label=getattr(args, "label", None)), token)
             return _out(st, d, _format_cards, aj)
         if args.command == "show":
             st, d = _http_get_json(f"{gw}/board/cards/{args.id}", token)
@@ -234,8 +267,26 @@ def run_board(argv: list[str]) -> int:
             if err or pid is None:
                 print(f"swarph board: {err or 'project required'}", file=sys.stderr)
                 return 1
-            st, d = _post_json(f"{gw}/board/cards", _card_add_payload(self_name, pid, args.title, body=args.body, ai2=args.ai2, priority=args.priority), token)
+            st, d = _post_json(f"{gw}/board/cards", _card_add_payload(
+                self_name, pid, args.title, body=args.body, ai2=args.ai2,
+                priority=args.priority, labels=getattr(args, "labels", None)), token)
             return _out(st, d, lambda x: f"created card #{x.get('id')} [{x.get('stage')}] (stage defaults to proposed — use `cards move` to advance)", aj)
+        if args.command == "label":
+            # READ the current set before replacing it. If the GET fails we must
+            # NOT write — a PATCH built on a failed read would silently CLOBBER
+            # every other label on the card. Refuse loudly instead.
+            st, cur = _http_get_json(f"{gw}/board/cards/{args.id}", token)
+            if st != 200 or not isinstance(cur, dict):
+                print(f"swarph board: cannot read card #{args.id} to modify its "
+                      f"labels (HTTP {st}) — refusing to write, a replacement built "
+                      f"on a failed read would drop the card's other labels",
+                      file=sys.stderr)
+                return 1
+            new = _apply_label(cur.get("labels") or [], args.action, args.label)
+            st, d = _patch_json(f"{gw}/board/cards/{args.id}",
+                                {"actor": self_name, "labels": new}, token)
+            return _out(st, d, lambda x: f"card #{x.get('id')} labels -> "
+                                         f"{', '.join(x.get('labels') or []) or '(none)'}", aj)
         if args.command == "move":
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "stage": args.stage}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} -> {x.get('stage')}", aj)
