@@ -76,7 +76,12 @@ PORT = int(os.environ.get("PORT", "8788"))
 # Gateway-held gbrain proxy token (POST /brain/query). Cells authenticate to
 # THIS gateway with their mesh token; the gateway then presents ITS OWN
 # gbrain token upstream so cells never need a separate gbrain_ credential.
-GATEWAY_GBRAIN_URL = os.environ.get("GATEWAY_GBRAIN_URL", "http://100.107.222.72:8792/mcp")
+# No default host. This shipped for 79 releases with a hardcoded PRIVATE TAILNET address as
+# its fallback, so every public install pointed at one operator's box unless the deployer
+# happened to set the variable. Unroutable from outside, so never an access hole — but it
+# disclosed topology, and a default that silently targets someone else's host is wrong even
+# when it cannot be reached. Unset now means UNCONFIGURED, which is the honest state.
+GATEWAY_GBRAIN_URL = os.environ.get("GATEWAY_GBRAIN_URL", "")
 GATEWAY_GBRAIN_TOKEN = os.environ.get("GATEWAY_GBRAIN_TOKEN", "")
 
 # B1 Meta-Edge identity (META_EDGE_IDENTITY_CONTRACT.md). Meta-Edge SSO ISSUES
@@ -4219,6 +4224,15 @@ def _brain_query_upstream(question: str, limit: int) -> list:
     """Proxy a READ-ONLY gbrain query. Builds the MCP `query` call itself (never
     write/admin), POSTs to GATEWAY_GBRAIN_URL with the gateway-held token, returns
     the chunk array. Raises on any upstream/parse failure (caller maps to 502)."""
+    if not GATEWAY_GBRAIN_URL:
+        # Named, not incidental. Removing the hardcoded default turned "unconfigured"
+        # into a reachable state for the first time, and an empty URL would otherwise
+        # surface as a urllib ValueError — a transport error for a CONFIGURATION fault,
+        # which sends the reader looking at the network instead of their env.
+        raise RuntimeError(
+            "GATEWAY_GBRAIN_URL is not set — the brain proxy is UNCONFIGURED, not "
+            "unreachable. Set it to your gbrain MCP endpoint. (Releases up to 0.41.0 "
+            "silently defaulted to one operator's private host; that default is gone.)")
     body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "query",
                        "arguments": {"query": question, "limit": limit, "expand": False}}}

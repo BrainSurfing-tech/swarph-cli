@@ -636,7 +636,7 @@ Dry-run is the default — nothing mutates without `--apply`. Cron-friendly exit
 | `8` | refused — not idempotent (second pass kept cutting; signal-eating alarm) |
 
 Design spec: `docs/superpowers/specs/2026-06-11-swarph-context-compressor-design.md`
-(in the hedge-fund-mcp repo).
+(in a private design repo; not published).
 
 ### `--json` mode semantics
 
