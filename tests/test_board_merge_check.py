@@ -219,3 +219,64 @@ def test_cli_reports_dry_run(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "DRY RUN" in out
     assert rc == 2, "offline means COULD NOT EVALUATE (2), never a measured refusal (1)"
+
+
+# ── #144 leg 2: the independence check must exclude the ASSIGNEE ─────────────
+
+def test_the_ASSIGNEE_cannot_supply_their_own_review():
+    """>>> THE HOLE, AND IT NEEDS NO FORGERY. <<< `is_exec_assignee` permits the
+    assignee to write peer_verdict on their own card. They write
+    "droplet APPROVED <sha>" on a card ASSIGNED to droplet and FILED by the
+    orchestrator; the old check compared only against created_by, so
+    cell(droplet) != author(lab-ovh) PASSED and the person doing the work
+    approved themselves.
+
+    MEASURED 2026-08-01: 20 of 213 live cards (9%) have created_by != assignee —
+    the standard AI2 split, not an edge case.
+
+    Binding does not close this: the assignee is a LEGITIMATELY BOUND writer, so
+    every identity check passes CORRECTLY. Binding closes FORGERY (asserting
+    someone else's name); this closes SELF-DEALING (acting under your own true
+    name in a role you should not occupy). Different attacks.
+    """
+    d = mc.decide(_card(created_by="lab-ovh", assignee="droplet"), _pr())
+    # precondition: the OLD leg must still PASS, or this proves nothing about the new one
+    assert not _fail(d, "reviewer is not the author"), (
+        "the created_by leg fired — this test would pass for the wrong reason")
+    assert _fail(d, "reviewer is not the assignee")
+    assert d.verdict != "WOULD_MERGE"
+
+
+def test_a_genuine_third_party_review_still_passes():
+    """NON-VACUITY. If the new leg fired on real reviews it would be a blocker,
+    not a gate — and third-party review is the entire feature."""
+    d = mc.decide(
+        _card(created_by="lab-ovh", assignee="droplet",
+              links={"pr": "https://github.com/o/r/pull/152",
+                     "peer_verdict": f"grok-researcher APPROVED {SHA}"}),
+        _pr())
+    assert not _fail(d, "reviewer is not the assignee")
+    assert d.verdict == "WOULD_MERGE", [(c.name, c.detail) for c in d.blockers]
+
+
+def test_an_UNASSIGNED_card_does_not_trip_the_new_leg():
+    """A card with no assignee has no person-being-reviewed, so the leg must not
+    fire. A check that fails on ABSENT data is noise, and noise is how a gate
+    stops being read."""
+    d = mc.decide(_card(created_by="lab-ovh", assignee=None), _pr())
+    assert not _fail(d, "reviewer is not the assignee")
+
+
+def test_BOTH_legs_are_required_not_either():
+    """created_by is who FILED the card; the assignee is who is BEING REVIEWED.
+    Either identity self-approving must fail — which is why the fix is
+    `by != assignee AND by != created_by`, not a choice between them."""
+    both = mc.decide(_card(created_by="droplet", assignee="droplet"), _pr())
+    assert _fail(both, "reviewer is not the author")
+    assert _fail(both, "reviewer is not the assignee")
+
+    # the FILER self-approving a card assigned to someone else: old leg catches it,
+    # new leg correctly stays silent — they are independent guards, not duplicates
+    filer = mc.decide(_card(created_by="droplet", assignee="gridiron"), _pr())
+    assert _fail(filer, "reviewer is not the author")
+    assert not _fail(filer, "reviewer is not the assignee")

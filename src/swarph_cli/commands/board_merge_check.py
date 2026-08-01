@@ -126,11 +126,40 @@ def decide(card: dict, pr_state: dict) -> Decision:
         "" if verdict else "missing or unparseable — expected '<cell> APPROVED <sha>'")
 
     author = card.get("created_by")
+    assignee = card.get("assignee")
     if verdict:
         # Author identity comes from the CARD. Git says the same account for every
         # cell, so it cannot answer "was this reviewed by someone else".
         add("reviewer is not the author", verdict["cell"] != author,
             f"reviewer={verdict['cell']} author={author}")
+        # >>> LEG 2 (#144): THE INDEPENDENCE CHECK MUST EXCLUDE THE ASSIGNEE, NOT
+        # ONLY created_by. <<<
+        #
+        # created_by is merely WHO FILED the card. THE ASSIGNEE IS THE PERSON BEING
+        # REVIEWED — the one doing the work. Guarding only the former guards the
+        # weaker of the two, and on the NORMAL AI² split (filed by one identity,
+        # assigned to another) the weaker leg PASSES while the stronger one fails.
+        # Measured 2026-08-01: 20 of 213 live cards (9%) have created_by !=
+        # assignee. Not an edge case — the standard working shape.
+        #
+        # WHY BINDING DOES NOT COVER THIS, and it is the subtle part: the assignee
+        # is a LEGITIMATELY BOUND writer. `is_exec_assignee` permits them to write
+        # peer_verdict on their own card, so every identity check passes CORRECTLY
+        # while the reviewee approves themselves. BINDING CLOSES FORGERY — asserting
+        # someone else's name — AND DOES NOTHING AGAINST SELF-DEALING, acting under
+        # your own true name in a role you should not occupy. Different attacks.
+        # (drop-on-meta-edge, correcting lab's own insufficient fix.)
+        #
+        # SEVERITY CHANGES ON THE GRADUATION DATE WITHOUT THE CODE CHANGING: today a
+        # self-verdict is VISIBLE and a human reading the card is the compensating
+        # control. Phase 2 makes the authority AUTOMATIC and removes exactly that
+        # control. Date-holder's ruling (droplet, 2026-08-01): graduate 2026-08-11
+        # as scheduled with phase-2 scope NARROWED — no auto-merge where a verdict
+        # author is the assignee — which is a narrowing the register permits rather
+        # than an extension it forbids, and fails safe to the human gate.
+        add("reviewer is not the assignee", not assignee or verdict["cell"] != assignee,
+            f"reviewer={verdict['cell']} assignee={assignee} — the person being "
+            f"reviewed cannot supply the review")
         add("verdict is APPROVED", verdict["verdict"] == "APPROVED",
             f"verdict={verdict['verdict']}")
         head = pr_state.get("head_sha") or ""
