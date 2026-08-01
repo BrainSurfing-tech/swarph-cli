@@ -28,7 +28,15 @@ SHA = "abc1234def5678"
 def _card(**over):
     card = {"id": 152, "stage": "build", "move_ready": True, "created_by": "lab-ovh",
             "links": {"pr": "https://github.com/o/r/pull/152",
-                      "peer_verdict": f"droplet APPROVED {SHA}"}}
+                      "peer_verdict": f"droplet APPROVED {SHA}"},
+            # #144 leg 2: the DEFAULT fixture is a NORMAL card — a bound
+            # third-party verdict. Without a stamp the self-authorship leg reports
+            # COULD-NOT-EVALUATE (never a pass), which is correct behaviour and
+            # would otherwise make every unrelated test refuse for the wrong
+            # reason. Tests that care about the flag override it explicitly.
+            "link_stamps": {"peer_verdict": {"by": "droplet", "self_authored": False,
+                                             "caller_bound": True,
+                                             "at": "2026-08-01T00:00:00Z"}}}
     card.update(over)
     return card
 
@@ -221,62 +229,121 @@ def test_cli_reports_dry_run(tmp_path, capsys):
     assert rc == 2, "offline means COULD NOT EVALUATE (2), never a measured refusal (1)"
 
 
-# ── #144 leg 2: the independence check must exclude the ASSIGNEE ─────────────
+# ── #144 leg 2: read the FROZEN, BOUND self_authored flag ────────────────────
+# The first version compared verdict["cell"] against card["assignee"].
+# drop-on-meta-edge showed it was doubly weak: (i) ASSERTED — the writer controls
+# the cell string, so an assignee writing "not-me APPROVED <sha>" passed it; and
+# (ii) GATE-TIME — it read the assignee at merge, so a self-verdict laundered by a
+# later reassignment passed. Both close by reading the server-computed flag.
 
-def test_the_ASSIGNEE_cannot_supply_their_own_review():
-    """>>> THE HOLE, AND IT NEEDS NO FORGERY. <<< `is_exec_assignee` permits the
-    assignee to write peer_verdict on their own card. They write
-    "droplet APPROVED <sha>" on a card ASSIGNED to droplet and FILED by the
-    orchestrator; the old check compared only against created_by, so
-    cell(droplet) != author(lab-ovh) PASSED and the person doing the work
-    approved themselves.
+def _stamped(self_authored, by="droplet", **over):
+    """A card whose peer_verdict carries a link_stamp."""
+    return _card(link_stamps={"peer_verdict": {"by": by, "self_authored": self_authored,
+                                               "caller_bound": True, "at": "2026-08-01T00:00:00Z"}},
+                 **over)
 
-    MEASURED 2026-08-01: 20 of 213 live cards (9%) have created_by != assignee —
-    the standard AI2 split, not an edge case.
 
-    Binding does not close this: the assignee is a LEGITIMATELY BOUND writer, so
-    every identity check passes CORRECTLY. Binding closes FORGERY (asserting
-    someone else's name); this closes SELF-DEALING (acting under your own true
-    name in a role you should not occupy). Different attacks.
-    """
-    d = mc.decide(_card(created_by="lab-ovh", assignee="droplet"), _pr())
-    # precondition: the OLD leg must still PASS, or this proves nothing about the new one
+def test_a_SELF_AUTHORED_verdict_is_refused():
+    """>>> THE HOLE. <<< `is_exec_assignee` permits the assignee to write
+    peer_verdict on their own card, so the person being reviewed supplies the
+    review — no forgery, no privilege escalation. 20 of 213 live cards (9%) have
+    created_by != assignee, so the created_by leg passes on the normal split."""
+    d = mc.decide(_stamped(True, created_by="lab-ovh"), _pr())
     assert not _fail(d, "reviewer is not the author"), (
-        "the created_by leg fired — this test would pass for the wrong reason")
-    assert _fail(d, "reviewer is not the assignee")
+        "the created_by leg fired — this would pass for the wrong reason")
+    assert _fail(d, "verdict is not self-authored")
     assert d.verdict != "WOULD_MERGE"
 
 
+def test_an_ASSERTED_non_self_name_CANNOT_dodge_it():
+    """WEAKNESS (i) OF THE FIRST VERSION, pinned. The assignee writes a verdict
+    naming someone else. The old leg compared that ASSERTED string and passed;
+    the flag is computed server-side from the BOUND writer, so the string is
+    irrelevant."""
+    card = _stamped(True, created_by="lab-ovh",
+                    links={"pr": "https://github.com/o/r/pull/152",
+                           "peer_verdict": f"not-me APPROVED {SHA}"})
+    d = mc.decide(card, _pr())
+    assert _fail(d, "verdict is not self-authored"), (
+        "an asserted non-self name defeated the self-review leg")
+
+
+def test_a_LATER_REASSIGNMENT_cannot_launder_a_self_verdict():
+    """WEAKNESS (ii), pinned. droplet self-verdicts, then the work is reassigned.
+    A gate-time comparison sees cell != assignee(new) and passes; the FROZEN flag
+    still says the verdict was self-authored when written."""
+    card = _stamped(True, created_by="lab-ovh", assignee="gridiron")  # reassigned away
+    d = mc.decide(card, _pr())
+    assert _fail(d, "verdict is not self-authored")
+
+
 def test_a_genuine_third_party_review_still_passes():
-    """NON-VACUITY. If the new leg fired on real reviews it would be a blocker,
-    not a gate — and third-party review is the entire feature."""
-    d = mc.decide(
-        _card(created_by="lab-ovh", assignee="droplet",
-              links={"pr": "https://github.com/o/r/pull/152",
-                     "peer_verdict": f"grok-researcher APPROVED {SHA}"}),
-        _pr())
-    assert not _fail(d, "reviewer is not the assignee")
+    """NON-VACUITY. If the leg fired on real reviews it would be a blocker, not a
+    gate — and third-party review is the entire feature."""
+    card = _stamped(False, by="grok-researcher", created_by="lab-ovh",
+                    links={"pr": "https://github.com/o/r/pull/152",
+                           "peer_verdict": f"grok-researcher APPROVED {SHA}"})
+    d = mc.decide(card, _pr())
+    assert not _fail(d, "verdict is not self-authored")
     assert d.verdict == "WOULD_MERGE", [(c.name, c.detail) for c in d.blockers]
 
 
-def test_an_UNASSIGNED_card_does_not_trip_the_new_leg():
-    """A card with no assignee has no person-being-reviewed, so the leg must not
-    fire. A check that fails on ABSENT data is noise, and noise is how a gate
-    stops being read."""
-    d = mc.decide(_card(created_by="lab-ovh", assignee=None), _pr())
-    assert not _fail(d, "reviewer is not the assignee")
+def test_a_MISSING_stamp_is_COULD_NOT_EVALUATE_never_a_pass():
+    """>>> ABSENCE IS NOT INNOCENCE. <<< A verdict written before the flag existed
+    has no stamp. Treating that as "not self-authored" would make this leg vacuous
+    for exactly the backlog it must cover — the empty-subject defect, in the fix
+    for a self-review defect. ok=None is this file's existing doctrine."""
+    for absent in ({}, None, {"some_other_key": {"by": "x"}}):
+        d = mc.decide(_card(created_by="lab-ovh", link_stamps=absent), _pr())
+        assert _fail(d, "verdict is not self-authored"), (
+            f"a verdict with NO peer_verdict stamp passed (link_stamps={absent!r}) "
+            "— absence read as innocence")
+        check = [c for c in d.blockers if c.name == "verdict is not self-authored"][0]
+        assert check.ok is None, "must be COULD-NOT-EVALUATE, not a hard False"
 
 
-def test_BOTH_legs_are_required_not_either():
-    """created_by is who FILED the card; the assignee is who is BEING REVIEWED.
-    Either identity self-approving must fail — which is why the fix is
-    `by != assignee AND by != created_by`, not a choice between them."""
-    both = mc.decide(_card(created_by="droplet", assignee="droplet"), _pr())
-    assert _fail(both, "reviewer is not the author")
-    assert _fail(both, "reviewer is not the assignee")
+def test_the_summary_DISTINGUISHES_failed_from_could_not_evaluate():
+    """>>> CONDITION 1 OF THE DATE-HOLDER'S RULING. <<< (droplet, #144.)
 
-    # the FILER self-approving a card assigned to someone else: old leg catches it,
-    # new leg correctly stays silent — they are independent guards, not duplicates
-    filer = mc.decide(_card(created_by="droplet", assignee="gridiron"), _pr())
-    assert _fail(filer, "reviewer is not the author")
-    assert not _fail(filer, "reviewer is not the assignee")
+    "A gate that graduates and then refuses everything is INDISTINGUISHABLE from a
+    gate that never graduated — from the outside, and from the board."
+
+    A REFUSE that fails a check and a REFUSE that could not see its subject are
+    different facts with different decay: the first is the gate working, the
+    second shrinks to zero as verdicts are rewritten — or doesn't, which is the
+    dead-control signal. They must not print the same.
+    """
+    d = mc.decide(_card(created_by="lab-ovh", link_stamps={}), _pr())
+    out = mc.format_decision(d)
+    assert "COULD-NOT-EVALUATE" in out
+    assert "blind:" in out
+    assert "verdict is not self-authored" in out.split("\n")[0], (
+        "the abstaining check must be NAMED on the summary line, not only "
+        "buried in the per-check list — a count cannot tell a stamp-less backlog "
+        "from a GitHub outage")
+
+
+def test_a_clean_pass_does_not_print_an_abstention_summary():
+    """NON-VACUITY. If the summary always printed the tri-state it would be noise
+    on every healthy run, and noise is how a gate stops being read."""
+    out = mc.format_decision(mc.decide(_card(), _pr()))
+    assert "COULD-NOT-EVALUATE" not in out
+    assert out.split("\n")[0] == "card #152: WOULD_MERGE"
+
+
+def test_a_READY_card_with_NO_peer_verdict_REFUSES():
+    """>>> drop-on-meta-edge's pin, and it guards a live emptiness. <<< MEASURED
+    2026-08-01: 13 cards are in build/test and ZERO carry a peer_verdict link. So
+    at arming EVERY ready card hits "peer verdict recorded on the card" = False →
+    REFUSE → human gate. The gate is safe-BY-EMPTINESS today.
+
+    That is the same empty-subject shape found all night (group_grants, the verdict
+    store) except here it fails SAFE — refuse, not pass — which is the one
+    direction that makes an empty subject acceptable rather than a defect.
+
+    Pinned so the day someone "helpfully" defaults a missing verdict to pass, it
+    fails loudly instead of silently auto-merging an unreviewed card.
+    """
+    d = mc.decide(_card(links={"pr": "https://github.com/o/r/pull/152"}), _pr())
+    assert _fail(d, "peer verdict recorded on the card")
+    assert d.verdict != "WOULD_MERGE"
