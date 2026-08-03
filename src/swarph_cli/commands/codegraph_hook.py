@@ -195,7 +195,28 @@ def render(term: str, env: dict) -> str:
     age = ""
     if fresh:
         hrs = max((f.get("index_age_hours") or 0) for f in fresh)
-        age = f", index {hrs:.1f}h old"
+        # >>> DO NOT RENDER A PLACEHOLDER AS A MEASUREMENT. <<< The gateway
+        # stamps `basis` on each freshness record, and today it reads
+        # `age_heuristic_pending_indexed_commit_193` — i.e. the age tracks the
+        # last FULL rebuild while ~10-minute incremental patches never restamp
+        # `indexed_at`. Rendering that as a bare "index 17.8h old" told agents a
+        # minutes-fresh index was almost a day stale, ALONGSIDE `stale: false`
+        # from the same payload. Two fields disagreeing, and the reader was
+        # shown only the alarming one.
+        #
+        # THIS ONE FAILS IN THE RARE AND DANGEROUS DIRECTION: every other
+        # freshness defect this week made bad data look good; this makes GOOD
+        # DATA LOOK BAD. An agent discounts a correct structural answer, falls
+        # back to grep, and burns exactly the context the hook exists to save —
+        # and it does so silently, because distrust leaves no error to find.
+        _basis = next((str(f.get("basis") or "") for f in fresh if f.get("basis")), "")
+        _heuristic = "heuristic" in _basis or "pending" in _basis
+        if _heuristic:
+            age = (f", index age {hrs:.1f}h UNRELIABLE (heuristic: {_basis}) — "
+                   f"tracks the last full rebuild, NOT incremental updates; "
+                   f"the content may be far fresher")
+        else:
+            age = f", index {hrs:.1f}h old"
         if stale:
             age += " ⚠ STALE — verify line numbers against the file"
 
