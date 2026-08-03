@@ -183,6 +183,36 @@ def _resolve_token(token_file_arg: Optional[str],
                     if val:
                         _note(f"{secrets_path}")
                         return val
+            # >>> A RAW TOKEN FILE IS THE COMMON CASE AND WAS BEING DISCARDED IN
+            # SILENCE. <<< This branch only ever understood secrets.toml syntax
+            # (`MESH_GATEWAY_TOKEN=...`). A per-peer token file is a BARE TOKEN
+            # with no key — so `--token-file <peer>.peer_token`, which is exactly
+            # what the flag's own help invites, matched nothing, fell through
+            # without a word, and the NEXT source's credential produced a 401
+            # that looked unrelated to the flag the operator had just passed.
+            # Reported from a Windows cell, 2026-08-03.
+            # Accept it: a single non-empty line with no '=' IS the credential.
+            stripped = [ln.strip() for ln in content.splitlines()
+                        if ln.strip() and not ln.strip().startswith("#")]
+            if len(stripped) == 1 and "=" not in stripped[0]:
+                _note(f"{secrets_path} (raw token)")
+                return stripped[0]
+            if token_file_arg:
+                # EXPLICITLY POINTED AT A FILE THAT YIELDED NOTHING -> REFUSE.
+                # Falling through here is what made the original failure
+                # undiagnosable: the operator's explicit choice was overridden by
+                # a default they never named. An explicit flag that silently
+                # loses to an implicit source is worse than no flag.
+                print_safe(
+                    f"swarph onboard: --token-file {secrets_path} contained no usable "
+                    f"credential.\n"
+                    f"  Expected EITHER a bare token on one line, OR a secrets.toml "
+                    f"line 'MESH_GATEWAY_TOKEN=...'.\n"
+                    f"  REFUSING to silently fall back to another source — you named "
+                    f"this file explicitly.",
+                    file=sys.stderr,
+                )
+                return ""
         except Exception as exc:
             print_safe(
                 f"swarph onboard: failed to read {secrets_path}: {exc}", file=sys.stderr

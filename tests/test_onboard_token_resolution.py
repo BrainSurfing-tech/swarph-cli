@@ -100,3 +100,53 @@ def test_source_reporting_is_purely_additive(monkeypatch):
 
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "t")
     assert onboard._resolve_token(None) == "t"
+
+
+def test_token_file_accepts_a_RAW_token(tmp_path, monkeypatch):
+    """>>> --token-file IS DOCUMENTED AS "a credential file" AND ONLY UNDERSTOOD
+    secrets.toml SYNTAX. <<<
+
+    A per-peer token file is a BARE token with no key, so passing exactly what
+    the flag invites matched nothing, was discarded in silence, and the NEXT
+    source's credential produced a 401 that looked unrelated to the flag the
+    operator had just passed. Reported from a Windows cell, 2026-08-03.
+    """
+    from swarph_cli.commands import onboard
+
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    f = tmp_path / "workstation-lc.peer_token"
+    f.write_text("raw-token-value-abc123\n")
+    src: list = []
+    assert onboard._resolve_token(str(f), src) == "raw-token-value-abc123"
+    assert "raw token" in src[0]
+
+
+def test_token_file_still_accepts_secrets_toml(tmp_path, monkeypatch):
+    """The original format must keep working — the fix ADDS a shape."""
+    from swarph_cli.commands import onboard
+
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    f = tmp_path / "secrets.toml"
+    f.write_text('# comment\nMESH_GATEWAY_TOKEN = "toml-value"\n')
+    assert onboard._resolve_token(str(f)) == "toml-value"
+
+
+def test_explicit_token_file_that_yields_nothing_REFUSES(tmp_path, monkeypatch, capsys):
+    """>>> AN EXPLICIT FLAG THAT SILENTLY LOSES TO AN IMPLICIT SOURCE IS WORSE
+    THAN NO FLAG. <<< Falling through is what made the original failure
+    undiagnosable — the operator's named choice was overridden by a default they
+    never asked for, and the resulting 401 pointed nowhere."""
+    from swarph_cli.commands import onboard
+
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    monkeypatch.setenv("SWARPH_SELF", "somecell")
+    # a per-peer file that WOULD have been used on fall-through
+    home = tmp_path / "home"; d = home / ".config" / "swarph"; d.mkdir(parents=True)
+    (d / "somecell.peer_token").write_text("would-have-fallen-through")
+    monkeypatch.setattr(onboard.Path, "home", staticmethod(lambda: home))
+
+    bad = tmp_path / "empty.toml"
+    bad.write_text("# nothing usable\nKEY_A=1\nKEY_B=2\n")
+    assert onboard._resolve_token(str(bad)) == ""      # refuses, does NOT fall through
+    err = capsys.readouterr().err
+    assert "REFUSING to silently fall back" in err
