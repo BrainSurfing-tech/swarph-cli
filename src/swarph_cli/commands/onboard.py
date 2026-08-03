@@ -136,11 +136,27 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _resolve_token(token_file_arg: Optional[str]) -> str:
+def _resolve_token(token_file_arg: Optional[str],
+                   source_out: Optional[list] = None) -> str:
     """Step 3 — token resolution per §15.4. Read-only on the secrets file
-    (does not auto-create per drop DM #726 #3 — privilege boundary)."""
+    (does not auto-create per drop DM #726 #3 — privilege boundary).
+
+    >>> ``source_out`` EXISTS SO A 401 IS ATTRIBUTABLE. <<< This resolver tries
+    four locations and used to report only "ok", so when the gateway then
+    answered ``401 bad token`` there was no way to know WHICH credential had
+    been sent — and the most common cause is a stale ``$MESH_GATEWAY_TOKEN``
+    silently winning over a perfectly good per-peer file two steps below it.
+    A resolver that finds *a* credential has not told you it found *the right
+    one*; naming the source is what makes the next failure diagnosable.
+    Purely additive: callers that pass nothing are unaffected.
+    """
+    def _note(s: str) -> None:
+        if source_out is not None:
+            source_out.append(s)
+
     env_tok = os.environ.get("MESH_GATEWAY_TOKEN")
     if env_tok:
+        _note("$MESH_GATEWAY_TOKEN (env)")
         return env_tok
 
     secrets_path = (
@@ -165,6 +181,7 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
                 if line.startswith("MESH_GATEWAY_TOKEN"):
                     val = line.split("=", 1)[1].strip().strip('"').strip("'")
                     if val:
+                        _note(f"{secrets_path}")
                         return val
         except Exception as exc:
             print_safe(
@@ -193,6 +210,7 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
             try:
                 val = peer_tok.read_text(encoding="utf-8").strip()
                 if val:
+                    _note(str(peer_tok))
                     return val
             except Exception as exc:
                 print_safe(f"swarph onboard: failed to read {peer_tok}: {exc}",
@@ -313,11 +331,16 @@ def run_onboard(argv: list[str]) -> int:
 
     # ── Step 3: resolve MESH_GATEWAY_TOKEN ───────────────────────────
     print_safe("[3/6] resolve MESH_GATEWAY_TOKEN")
-    token = _resolve_token(args.token_file)
+    _src: list = []
+    token = _resolve_token(args.token_file, _src)
     if not token:
         print_safe("swarph onboard: empty token", file=sys.stderr)
         return 1
-    print_safe("      ok")
+    # NAME THE SOURCE. "ok" alone made a subsequent `401 bad token` undiagnosable:
+    # four locations are tried and the winner was never stated, so a stale
+    # $MESH_GATEWAY_TOKEN silently beating a good per-peer file two steps below
+    # looked identical to having no credential problem at all.
+    print_safe(f"      ok (from {_src[0] if _src else 'unknown source'})")
 
     # ── Step 4: POST /peers/register ─────────────────────────────────
     peer_url = args.url or f"http://{canonical}:8787"

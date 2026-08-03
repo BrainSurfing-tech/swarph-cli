@@ -64,3 +64,39 @@ def test_onboard_persists_the_minted_peer_token(tmp_path, monkeypatch):
     assert dest.exists(), "the minted token was DISCARDED — peer cannot authenticate"
     assert dest.read_text().strip() == "MINTED-SECRET"
     assert oct(dest.stat().st_mode)[-3:] == "600", "credential must be 0600 from creation"
+
+
+def test_resolver_names_which_source_it_used(tmp_path, monkeypatch):
+    """>>> A RESOLVER THAT FINDS *A* CREDENTIAL HAS NOT TOLD YOU IT FOUND *THE
+    RIGHT ONE*. <<<
+
+    Step 3 tried four locations and reported only "ok". When the gateway then
+    answered `401 bad token` there was no way to know WHICH credential was sent
+    — and the common cause is a stale $MESH_GATEWAY_TOKEN silently beating a
+    good per-peer file two steps below it. Reported on Windows, 2026-08-03.
+    """
+    from swarph_cli.commands import onboard
+
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "from-env")
+    src: list = []
+    assert onboard._resolve_token(None, src) == "from-env"
+    assert src and "MESH_GATEWAY_TOKEN" in src[0]
+
+    # the per-peer file must name ITS path, not just "ok"
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    monkeypatch.setattr(onboard.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("SWARPH_SELF", "somecell")
+    d = tmp_path / ".config" / "swarph"; d.mkdir(parents=True)
+    (d / "somecell.peer_token").write_text("from-file")
+    src2: list = []
+    assert onboard._resolve_token(None, src2) == "from-file"
+    assert src2 and "somecell.peer_token" in src2[0]
+
+
+def test_source_reporting_is_purely_additive(monkeypatch):
+    """Callers that pass nothing must be unaffected — ratify re-exports this
+    function and daemon delegates to it."""
+    from swarph_cli.commands import onboard
+
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "t")
+    assert onboard._resolve_token(None) == "t"
