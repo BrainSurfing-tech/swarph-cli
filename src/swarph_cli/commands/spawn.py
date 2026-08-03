@@ -655,6 +655,28 @@ def _git_identity_env(cell: Cell) -> dict[str, str]:
     }
 
 
+def _mesh_identity_env(cell: Cell) -> dict[str, str]:
+    """``SWARPH_SELF`` for the spawned cell — the key every mesh verb resolves by.
+
+    >>> MEASURED 2026-08-03: **EIGHT CONSUMERS, ZERO PRODUCERS.** <<< onboard,
+    ratify, mesh, monitor, daemon, brain_ask, codegraph_hook and cell_selfcheck
+    all resolve credentials via ``~/.config/swarph/$SWARPH_SELF.peer_token`` —
+    and nothing in the spawn path ever SET it. So a swarph-spawned cell was born
+    unable to name itself, and every one of those verbs failed with "SWARPH_SELF
+    IS UNSET" the first time it reached for its own credential.
+
+    That is the missing half of the #243 fix: the resolver was taught to REFUSE
+    rather than guess (right), while the spawner still did not SUPPLY the answer.
+    A refusal is only correct when something upstream can satisfy it; otherwise
+    it is just a better-worded dead end.
+
+    Kept SEPARATE from ``_git_identity_env`` deliberately: this is a mesh
+    identity, not a git author, and burying it in a function named for git would
+    be the same name-vs-mechanism drift this codebase spent a day removing.
+    """
+    return {"SWARPH_SELF": cell.name}
+
+
 def _link_grok_auth(link: Path) -> None:
     """Symlink the operator's ``~/.grok/auth.json`` to ``link`` for $0 OIDC.
 
@@ -1350,6 +1372,7 @@ class ClaudeMembrane(ProviderMembrane):
         # injection. The env carries to the child either way.
         env = _claude_env()
         env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
+        env.update(_mesh_identity_env(cell))  # SWARPH_SELF — 8 consumers had 0 producers
 
         # Per-OS launch mechanism — the SAME split as the tmux attach, for the
         # SAME reason:
@@ -1429,6 +1452,7 @@ class CodexMembrane(ProviderMembrane):
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
         env = _scrubbed_codex_env()
         env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
+        env.update(_mesh_identity_env(cell))  # SWARPH_SELF — 8 consumers had 0 producers
         try:
             os.execve(binary, argv, env)
         except OSError as exc:
@@ -1479,6 +1503,7 @@ class AntigravityMembrane(ProviderMembrane):
         # this process's os.environ first (so a failed exec leaves us intact).
         env = _agy_env()
         env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
+        env.update(_mesh_identity_env(cell))  # SWARPH_SELF — 8 consumers had 0 producers
         try:
             os.execve(binary, argv, env)
         except OSError as exc:
@@ -1570,6 +1595,7 @@ class GrokMembrane(ProviderMembrane):
         # this process's os.environ first (a failed exec leaves us intact).
         env = _grok_env(cell)
         env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
+        env.update(_mesh_identity_env(cell))  # SWARPH_SELF — 8 consumers had 0 producers
         # Per-OS launch — the SAME split as claude.launch (v0.12.1 fix): on
         # Windows os.exec* is emulated as spawn-and-exit (not a real replace),
         # which collapses the tmux pane (its root command exits, orphaning grok);
