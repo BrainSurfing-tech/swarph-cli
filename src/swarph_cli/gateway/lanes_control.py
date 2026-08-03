@@ -17,7 +17,13 @@ class LaneError(Exception):
         self.status = status; self.detail = detail; super().__init__(detail)
 
 
-PROVIDERS = ("claude", "gpt", "gemini", "grok")
+PROVIDERS = ("claude", "gpt", "gemini", "grok", "vibe")
+# "vibe" = the EU-domiciled Mistral lane (subscription), the only lane with a
+# HARD per-call cost ceiling (vibe's own --max-price). Allowlisted here so a
+# create attempt reaches the WORKER, whose refusal names the real prerequisite
+# ("requires swarph-mesh>=0.8.0") instead of failing closed as "unknown
+# provider" — the more informative refusal is the correct one when the lane is
+# configured but its dependency is not yet shipped.
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}\Z")  # \Z not $: $ matches before a trailing \n
 MAX_N = int(os.environ.get("LANE_MAX_N", "8"))
 DB_PATH = os.environ.get(
