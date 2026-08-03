@@ -414,7 +414,30 @@ def run_onboard(argv: list[str]) -> int:
         fd = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as fh:
             fh.write(minted.strip() + "\n")
-        print_safe(f"[4b/6] minted per-peer token -> {dest} (mode 0600)")
+        # >>> VERIFY THE MODE INSTEAD OF ASSUMING THE REQUEST WAS HONOURED. <<<
+        # os.open's mode argument is a POSIX permission request; on Windows it
+        # is NOT enforced and the file lands 0666 — world-readable. Measured in
+        # CI 2026-08-03 ('666' != '600'); a Linux-only developer cannot observe
+        # this, which is exactly why the check reports what it FINDS rather than
+        # what it asked for. Announcing "mode 0600" unconditionally would have
+        # been a false assurance printed on the one platform where it is untrue.
+        try:
+            _mode = oct(dest.stat().st_mode)[-3:]
+        except OSError:
+            _mode = "unknown"
+        if _mode == "600":
+            print_safe(f"[4b/6] minted per-peer token -> {dest} (mode 0600)")
+        else:
+            print_safe(f"[4b/6] minted per-peer token -> {dest}")
+            print_safe(
+                f"       WARNING: file mode is {_mode}, not 0600 — this platform did "
+                f"not honour the restriction.\n"
+                f"       THE CREDENTIAL IS READABLE BY OTHER USERS OF THIS MACHINE. "
+                f"Restrict it yourself:\n"
+                f"         Windows:  icacls \"{dest}\" /inheritance:r /grant:r \"%USERNAME%:R\"\n"
+                f"         POSIX:    chmod 600 \"{dest}\"",
+                file=sys.stderr,
+            )
         print_safe(f"       set SWARPH_SELF={canonical} in the peer's environment; "
                    f"this path is how it authenticates.")
     elif token_status == "existing":
