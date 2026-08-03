@@ -341,6 +341,42 @@ def run_onboard(argv: list[str]) -> int:
     else:
         print_safe(f"      ok (registered_unratified=true)")
 
+    # ── Step 4b: PERSIST THE MINTED PER-PEER TOKEN ───────────────────
+    # >>> THE GATEWAY MINTS THE PEER'S CREDENTIAL EXACTLY ONCE, HERE, AND
+    # RETURNS IT IN THIS RESPONSE. <<< Earlier releases read only
+    # `registered_unratified` and DISCARDED `peer_token` — which left every
+    # onboarded peer registered, with a live token nobody held, and unable to
+    # authenticate. The server never re-mints (a re-register returns
+    # peer_token=None + token_status='existing'), so the credential was
+    # unrecoverable without an admin revoke. Onboarding APPEARED to succeed and
+    # produced a peer that could not join: the defect is silent precisely
+    # because the failure surfaces later, somewhere else, as "auth doesn't work".
+    minted = body.get("peer_token")
+    token_status = body.get("token_status")
+    if minted:
+        dest = Path.home() / ".config" / "swarph" / f"{canonical}.peer_token"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # 0600 from the instant it exists — os.open with O_EXCL, never
+        # open()+chmod, which leaves a umask-mode window.
+        fd = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(minted.strip() + "\n")
+        print_safe(f"[4b/6] minted per-peer token -> {dest} (mode 0600)")
+        print_safe(f"       set SWARPH_SELF={canonical} in the peer's environment; "
+                   f"this path is how it authenticates.")
+    elif token_status == "existing":
+        # NOT a success. Name it as the unrecoverable state it is.
+        print_safe(
+            f"[4b/6] WARNING: token_status='existing' and no token returned.\n"
+            f"       The gateway minted {canonical}'s credential on an EARLIER register\n"
+            f"       and MINTS ONCE — so if no {canonical}.peer_token exists on disk,\n"
+            f"       that credential is held by nobody and cannot be recovered here.\n"
+            f"       Recovery is an ADMIN action: revoke the generation (or DELETE the\n"
+            f"       peer) so a re-register mints a fresh one. A per-peer token cannot\n"
+            f"       do it — deregister is ownership-gated to the caller itself.",
+            file=sys.stderr,
+        )
+
     # ── Step 5: subscription auth check ──────────────────────────────
     print_safe("[5/6] verify_subscription_setup()")
     try:
