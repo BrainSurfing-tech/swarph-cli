@@ -109,8 +109,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--token-file",
         default=None,
-        help="explicit path to a secrets file (mode 0600 expected). "
-        "Default resolution order: $MESH_GATEWAY_TOKEN env → ~/.swarph/secrets.toml → prompt.",
+        help="explicit path to a credential file (mode 0600 expected). "
+        "Default resolution order: --token-file → $MESH_GATEWAY_TOKEN → "
+        "~/.swarph/secrets.toml → ~/.config/swarph/<$SWARPH_SELF>.peer_token. "
+        "The per-peer file is the CURRENT convention; the first three are legacy "
+        "and are absent on migrated cells. SWARPH_SELF must be set — this verb "
+        "will not guess a peer name.",
     )
     p.add_argument(
         "--state-dir",
