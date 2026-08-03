@@ -138,7 +138,21 @@ def _resolve_state_dir(arg: Optional[str], self_name_arg: Optional[str]) -> Path
 
 
 def _resolve_token(token_file_arg: Optional[str]) -> str:
-    """Mirror onboard's resolution. env → secrets.toml mode 0600 → prompt."""
+    """DELEGATES to onboard's resolver (#243) — and this docstring used to lie.
+
+    It read "Mirror onboard's resolution. env -> secrets.toml mode 0600 ->
+    prompt", which describes a COPY. The body has always been a delegation, so
+    the fix for #243 reached this verb for free — but a reader auditing which
+    verbs inherited the retired-credential bug would have read this line and
+    concluded daemon had its own broken copy. I did exactly that, and carded it.
+
+    >>> A DOCSTRING THAT DESCRIBES A COPY OVER A BODY THAT DELEGATES IS A STALE
+    RECORD, AND IT COSTS THE NEXT READER THE SAME WRONG CONCLUSION. <<< The
+    resolution order it names is also now wrong: onboard gained
+    ~/.config/swarph/<SWARPH_SELF>.peer_token and REFUSES rather than prompting.
+    Naming the delegation instead of restating the order means this cannot go
+    stale again.
+    """
     from swarph_cli.commands.onboard import _resolve_token as _onboard_resolve
 
     return _onboard_resolve(token_file_arg)

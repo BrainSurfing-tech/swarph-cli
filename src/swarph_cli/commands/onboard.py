@@ -167,14 +167,51 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
                 f"swarph onboard: failed to read {secrets_path}: {exc}", file=sys.stderr
             )
 
-    print_safe(
-        f"swarph onboard: MESH_GATEWAY_TOKEN not in env, not found in {secrets_path}.\n"
-        f"  Canonical secrets.toml shape (mode 0600):\n"
-        f"    MESH_GATEWAY_TOKEN=<your-token>\n"
-        f"  Falling back to interactive prompt.",
-        file=sys.stderr,
+    # ── #243: THE PER-PEER TOKEN — THE CREDENTIAL THAT ACTUALLY EXISTS ──────
+    # >>> THIS VERB WAS LOOKING ONLY FOR THE CREDENTIAL THE R1 MIGRATION
+    # RETIRED. <<< Measured on lab-ovh 2026-08-03: $MESH_GATEWAY_TOKEN UNSET,
+    # ~/.swarph/secrets.toml ABSENT, and 10+ files present at
+    # ~/.config/swarph/<peer>.peer_token. Every other verb resolves the per-peer
+    # file; onboard (and ratify, which re-exports this function, and daemon,
+    # which copied it) were left on the old path — classic mint-vs-cutover, the
+    # credential moved and three consumers did not.
+    #
+    # AND THE GATEWAY NEVER REQUIRED THE SHARED TOKEN: measured, POST
+    # /peers/register with a PER-PEER token returns 200 and mints. So this was
+    # never a permissions problem — only a lookup that never learned.
+    #
+    # Placed AFTER the existing two so a working operator-token setup is
+    # unchanged; this only fills the hole where the verb used to prompt.
+    self_name = os.environ.get("SWARPH_SELF", "").strip()
+    if self_name:
+        peer_tok = Path.home() / ".config" / "swarph" / f"{self_name}.peer_token"
+        if peer_tok.exists():
+            try:
+                val = peer_tok.read_text(encoding="utf-8").strip()
+                if val:
+                    return val
+            except Exception as exc:
+                print_safe(f"swarph onboard: failed to read {peer_tok}: {exc}",
+                           file=sys.stderr)
+
+    # >>> REFUSE. DO NOT PROMPT. <<< getpass on a non-tty is a guaranteed
+    # EOFError, and this verb runs from scripts, cron and spawned cells — the
+    # traceback it produced was reported as a BROKEN VERB, not as a missing
+    # credential, because the prompt hid which of the two it was.
+    #
+    # NOTE the deliberate absence of a default for SWARPH_SELF: guessing a name
+    # makes a cell hunt ANOTHER CELL'S token, find nothing, and blame the
+    # credential — measured on 6 of 6 cells 2026-07-29. Unset is named as unset.
+    raise RuntimeError(
+        "no gateway credential found. Tried, in order:\n"
+        f"  1. --token-file            {'(not given)' if not token_file_arg else token_file_arg}\n"
+        "  2. $MESH_GATEWAY_TOKEN     (unset)\n"
+        f"  3. {secrets_path}\n"
+        f"  4. ~/.config/swarph/<self>.peer_token  "
+        + (f"(SWARPH_SELF={self_name!r} -> not found)" if self_name
+           else "(SWARPH_SELF IS UNSET — set it; this verb will not guess a peer name)")
+        + "\n  The per-peer token is sufficient: POST /peers/register accepts it."
     )
-    return getpass("MESH_GATEWAY_TOKEN: ").strip()
 
 
 def _post_json(
