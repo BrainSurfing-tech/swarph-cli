@@ -48,14 +48,30 @@ def test_resolve_token_warns_on_loose_mode(monkeypatch, tmp_path, capsys):
     assert "0o644" in err
 
 
-def test_resolve_token_falls_back_to_prompt(monkeypatch, tmp_path, capsys):
+def test_resolve_token_REFUSES_rather_than_prompting(monkeypatch, tmp_path):
+    """>>> THIS TEST USED TO ASSERT THE PROMPT, AND THE PROMPT WAS THE BUG (#243).
+    <<<
+
+    It pinned `falls_back_to_prompt` — correct when a shared MESH_GATEWAY_TOKEN
+    was the only credential. After the R1 per-peer migration neither
+    $MESH_GATEWAY_TOKEN nor ~/.swarph/secrets.toml exists on any cell, so the
+    prompt became the DEFAULT path — and getpass on a non-tty is a guaranteed
+    EOFError. `swarph onboard` was reported as a broken verb; it was a missing
+    credential wearing a traceback.
+
+    The expectation is flipped DELIBERATELY: refuse, naming every place it
+    looked, so the operator learns which credential is absent instead of meeting
+    a prompt that cannot be answered.
+    """
     monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
-    monkeypatch.setattr(onboard, "getpass", lambda _: "prompted-tok")
-    fake = tmp_path / "no-such-file.toml"
-    out = onboard._resolve_token(str(fake))
-    assert out == "prompted-tok"
-    err = capsys.readouterr().err
-    assert "secrets.toml shape" in err  # operator learns the pattern
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    monkeypatch.setattr(onboard.Path, "home", staticmethod(lambda: tmp_path))
+    with pytest.raises(RuntimeError) as e:
+        onboard._resolve_token(str(tmp_path / "no-such-file.toml"))
+    msg = str(e.value)
+    assert "MESH_GATEWAY_TOKEN" in msg and "peer_token" in msg, (
+        "the refusal must name every place it looked — a bare failure leaves the "
+        "operator guessing which of four credentials is missing")
 
 
 # ---------------------------------------------------------------------------
