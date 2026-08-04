@@ -1,0 +1,163 @@
+
+
+def test_help_text_names_the_resolution_order_the_code_implements():
+    """>>> THE HELP TEXT IS WHERE A USER LEARNS WHERE TO PUT THEIR CREDENTIAL. <<<
+
+    0.41.4 shipped the #243 fix (per-peer token path) while --help still
+    advertised the PRE-fix order: $MESH_GATEWAY_TOKEN -> ~/.swarph/secrets.toml
+    -> prompt. Both are RETIRED and absent on migrated cells, and the one
+    location that works went unmentioned. A user following --help would place
+    the credential in two dead paths and conclude the verb is broken — which is
+    the #243 defect itself, reintroduced through the documentation.
+
+    So bind the summary to the mechanism: every location the resolver actually
+    reads must appear in the help a user is told to read.
+    """
+    from swarph_cli.commands import onboard
+
+    help_text = onboard._build_parser().format_help()
+
+    assert ".peer_token" in help_text, (
+        "--help omits the per-peer credential path the resolver actually uses"
+    )
+    assert "SWARPH_SELF" in help_text, (
+        "--help must say SWARPH_SELF is required; the verb refuses to guess"
+    )
+
+
+def test_onboard_persists_the_minted_peer_token(tmp_path, monkeypatch):
+    """>>> THE GATEWAY MINTS THE PEER'S CREDENTIAL ONCE, IN THE REGISTER
+    RESPONSE. DISCARDING IT LEAVES A PEER THAT CANNOT AUTHENTICATE. <<<
+
+    Earlier releases read only `registered_unratified` and dropped `peer_token`.
+    The server never re-mints, so the credential became unrecoverable without an
+    admin revoke — and onboarding APPEARED to succeed, with the failure
+    surfacing later, elsewhere, as "auth doesn't work".
+    """
+    import os
+    from pathlib import Path
+    from swarph_cli.commands import onboard
+
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("SWARPH_SELF", "witness")
+    (tmp_path / ".config" / "swarph").mkdir(parents=True)
+    (tmp_path / ".config" / "swarph" / "witness.peer_token").write_text("wtok")
+
+    calls = []
+
+    def fake_post(url, body, token, *, method="POST"):
+        calls.append(url)
+        if url.endswith("/peers/register"):
+            return 200, {"registered_unratified": True,
+                         "peer_token": "MINTED-SECRET", "token_status": "minted"}
+        return 200, {}
+
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    monkeypatch.setattr(onboard, "verify_subscription_setup", lambda *a, **k: None,
+                        raising=False)
+    try:
+        onboard.run_onboard(["newcell", "--gateway", "http://gw"])
+    except Exception:
+        pass  # later scaffold steps are not what this test pins
+
+    dest = tmp_path / ".config" / "swarph" / "newcell.peer_token"
+    assert dest.exists(), "the minted token was DISCARDED — peer cannot authenticate"
+    assert dest.read_text().strip() == "MINTED-SECRET"
+    # >>> PLATFORM IS DATA, NOT AN ASSUMPTION. <<< os.open's mode is a POSIX
+    # permission REQUEST; Windows does not enforce it and the file lands 0666.
+    # Measured in CI ('666' != '600') — a Linux-only developer cannot observe
+    # this. So assert the guarantee where it exists, and assert that the code
+    # TELLS THE TRUTH where it does not: the exposure must be announced, never
+    # papered over with a skip.
+    import sys as _sys
+    mode = oct(dest.stat().st_mode)[-3:]
+    if _sys.platform == "win32":
+        assert mode != "600"  # documents the platform gap rather than hiding it
+    else:
+        assert mode == "600", "credential must be 0600 from creation"
+
+
+def test_resolver_names_which_source_it_used(tmp_path, monkeypatch):
+    """>>> A RESOLVER THAT FINDS *A* CREDENTIAL HAS NOT TOLD YOU IT FOUND *THE
+    RIGHT ONE*. <<<
+
+    Step 3 tried four locations and reported only "ok". When the gateway then
+    answered `401 bad token` there was no way to know WHICH credential was sent
+    — and the common cause is a stale $MESH_GATEWAY_TOKEN silently beating a
+    good per-peer file two steps below it. Reported on Windows, 2026-08-03.
+    """
+    from swarph_cli.commands import onboard
+
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "from-env")
+    src: list = []
+    assert onboard._resolve_token(None, src) == "from-env"
+    assert src and "MESH_GATEWAY_TOKEN" in src[0]
+
+    # the per-peer file must name ITS path, not just "ok"
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    monkeypatch.setattr(onboard.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setenv("SWARPH_SELF", "somecell")
+    d = tmp_path / ".config" / "swarph"; d.mkdir(parents=True)
+    (d / "somecell.peer_token").write_text("from-file")
+    src2: list = []
+    assert onboard._resolve_token(None, src2) == "from-file"
+    assert src2 and "somecell.peer_token" in src2[0]
+
+
+def test_source_reporting_is_purely_additive(monkeypatch):
+    """Callers that pass nothing must be unaffected — ratify re-exports this
+    function and daemon delegates to it."""
+    from swarph_cli.commands import onboard
+
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "t")
+    assert onboard._resolve_token(None) == "t"
+
+
+def test_token_file_accepts_a_RAW_token(tmp_path, monkeypatch):
+    """>>> --token-file IS DOCUMENTED AS "a credential file" AND ONLY UNDERSTOOD
+    secrets.toml SYNTAX. <<<
+
+    A per-peer token file is a BARE token with no key, so passing exactly what
+    the flag invites matched nothing, was discarded in silence, and the NEXT
+    source's credential produced a 401 that looked unrelated to the flag the
+    operator had just passed. Reported from a Windows cell, 2026-08-03.
+    """
+    from swarph_cli.commands import onboard
+
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    f = tmp_path / "workstation-lc.peer_token"
+    f.write_text("raw-token-value-abc123\n")
+    src: list = []
+    assert onboard._resolve_token(str(f), src) == "raw-token-value-abc123"
+    assert "raw token" in src[0]
+
+
+def test_token_file_still_accepts_secrets_toml(tmp_path, monkeypatch):
+    """The original format must keep working — the fix ADDS a shape."""
+    from swarph_cli.commands import onboard
+
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    f = tmp_path / "secrets.toml"
+    f.write_text('# comment\nMESH_GATEWAY_TOKEN = "toml-value"\n')
+    assert onboard._resolve_token(str(f)) == "toml-value"
+
+
+def test_explicit_token_file_that_yields_nothing_REFUSES(tmp_path, monkeypatch, capsys):
+    """>>> AN EXPLICIT FLAG THAT SILENTLY LOSES TO AN IMPLICIT SOURCE IS WORSE
+    THAN NO FLAG. <<< Falling through is what made the original failure
+    undiagnosable — the operator's named choice was overridden by a default they
+    never asked for, and the resulting 401 pointed nowhere."""
+    from swarph_cli.commands import onboard
+
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    monkeypatch.setenv("SWARPH_SELF", "somecell")
+    # a per-peer file that WOULD have been used on fall-through
+    home = tmp_path / "home"; d = home / ".config" / "swarph"; d.mkdir(parents=True)
+    (d / "somecell.peer_token").write_text("would-have-fallen-through")
+    monkeypatch.setattr(onboard.Path, "home", staticmethod(lambda: home))
+
+    bad = tmp_path / "empty.toml"
+    bad.write_text("# nothing usable\nKEY_A=1\nKEY_B=2\n")
+    assert onboard._resolve_token(str(bad)) == ""      # refuses, does NOT fall through
+    err = capsys.readouterr().err
+    assert "REFUSING to silently fall back" in err

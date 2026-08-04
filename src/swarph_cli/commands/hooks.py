@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -80,6 +81,19 @@ class HookBundle:
     script_name: str  # filename under ~/.swarph/hooks/, e.g. "cell-resilience.sh"
     script_body: str  # full shell-script content (inline)
     bindings: tuple  # tuple[HookBinding, ...]
+    # >>> THE VERB THIS HOOK WRAPS, WHEN IT IS *ONLY* A WRAPPER. <<<
+    # Registering a bare `.sh` PATH as the hook command works on POSIX because a
+    # shebang is a KERNEL convention. Windows has no equivalent, so CreateProcess
+    # fails and EVERY matching tool call reports a hook error. Reported from a
+    # Windows cell 2026-08-04 AFTER the installer had "succeeded": the file was
+    # written, the settings entry was valid JSON, and the registered command was
+    # not runnable on the platform that installed it.
+    # For a hook whose entire body is `exec swarph <verb>`, the shell is pure
+    # overhead and the executable can be registered directly on ANY platform.
+    # Empty = this bundle carries real shell logic (mkdir/jq/fallbacks) and has
+    # no direct equivalent; see _installed_command, which REFUSES rather than
+    # writing an entry it knows cannot execute.
+    verb: tuple = ()  # e.g. ("codegraph-hook",) / ("hooks", "touch-activity")
 
 
 # The bundled cell-resilience script. POSIX sh. Observational only: it
@@ -187,6 +201,7 @@ BUILTIN_HOOKS: dict = {
         publisher="swarph-builtin",
         trust="builtin",
         script_name="codegraph-on-grep.sh",
+        verb=("codegraph-hook",),
         script_body=_CODEGRAPH_ON_GREP_SH,
         bindings=(
             HookBinding("PostToolUse", "Bash"),
@@ -218,6 +233,7 @@ BUILTIN_HOOKS: dict = {
         publisher="swarph-builtin",
         trust="builtin",
         script_name="activity-marker.sh",
+        verb=("hooks", "touch-activity"),
         script_body=_ACTIVITY_MARKER_SH,
         bindings=(
             HookBinding("PreToolUse", ""),   # every tool call — the long-turn fix
@@ -629,12 +645,46 @@ def init_hooks(
 
 
 def _installed_command(bundle: HookBundle, hooks_home) -> str:
-    """The absolute installed-script path written into settings for ``bundle``.
+    """The command string written into settings for ``bundle``.
 
     SAME construction ``install_hook`` uses, so unmerge/list match what install
-    merged: ``(hooks_home/script_name).expanduser().resolve()`` as a string.
+    merged.
+
+    POSIX: the installed script path — a shebang makes it directly executable.
+
+    >>> WINDOWS: THE SCRIPT PATH IS NOT EXECUTABLE AND NEVER WAS. <<< A shebang
+    is a kernel convention Windows does not have, so handing a `.sh` path to
+    CreateProcess fails and every matching tool call reports a hook error. The
+    installer still "succeeded" — file written, JSON valid — because nothing
+    checked the one property that matters: THE REGISTERED COMMAND MUST BE
+    RUNNABLE ON THE PLATFORM THAT REGISTERED IT. Presence is not behaviour.
+    So on Windows we register the swarph EXECUTABLE plus the verb the wrapper
+    exists to call. The wrapper's only job is finding `swarph` on PATH, and the
+    installer already knows its absolute location.
     """
-    return str((Path(hooks_home).expanduser() / bundle.script_name).resolve())
+    posix_cmd = str((Path(hooks_home).expanduser() / bundle.script_name).resolve())
+    if sys.platform != "win32":
+        return posix_cmd
+
+    if not bundle.verb:
+        # REFUSE rather than write an entry we KNOW cannot execute. A hook that
+        # errors on every tool call is worse than an absent hook: it is noise
+        # the operator must diagnose, and it discredits the hook system.
+        raise ValueError(
+            f"hook {bundle.name!r} is a shell script with no direct-executable "
+            f"equivalent, and Windows cannot execute a .sh path (no shebang "
+            f"support). Installing it would make every matching tool call emit a "
+            f"hook error. Run it under WSL2, or install a hook that wraps a "
+            f"swarph verb."
+        )
+    exe = shutil.which("swarph") or shutil.which("swarph.exe")
+    if not exe:
+        raise ValueError(
+            "cannot locate the 'swarph' executable to register this hook. It is "
+            "on PATH for you but not for the hook runner, or the install is "
+            "broken — refusing to register a command that would fail at runtime."
+        )
+    return " ".join([f'"{exe}"', *bundle.verb])
 
 
 def uninstall_hook(

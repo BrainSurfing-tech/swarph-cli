@@ -655,6 +655,28 @@ def _git_identity_env(cell: Cell) -> dict[str, str]:
     }
 
 
+def _mesh_identity_env(cell: Cell) -> dict[str, str]:
+    """``SWARPH_SELF`` for the spawned cell — the key every mesh verb resolves by.
+
+    >>> MEASURED 2026-08-03: **EIGHT CONSUMERS, ZERO PRODUCERS.** <<< onboard,
+    ratify, mesh, monitor, daemon, brain_ask, codegraph_hook and cell_selfcheck
+    all resolve credentials via ``~/.config/swarph/$SWARPH_SELF.peer_token`` —
+    and nothing in the spawn path ever SET it. So a swarph-spawned cell was born
+    unable to name itself, and every one of those verbs failed with "SWARPH_SELF
+    IS UNSET" the first time it reached for its own credential.
+
+    That is the missing half of the #243 fix: the resolver was taught to REFUSE
+    rather than guess (right), while the spawner still did not SUPPLY the answer.
+    A refusal is only correct when something upstream can satisfy it; otherwise
+    it is just a better-worded dead end.
+
+    Kept SEPARATE from ``_git_identity_env`` deliberately: this is a mesh
+    identity, not a git author, and burying it in a function named for git would
+    be the same name-vs-mechanism drift this codebase spent a day removing.
+    """
+    return {"SWARPH_SELF": cell.name}
+
+
 def _link_grok_auth(link: Path) -> None:
     """Symlink the operator's ``~/.grok/auth.json`` to ``link`` for $0 OIDC.
 
@@ -1229,10 +1251,10 @@ class ProviderMembrane:
     ) -> Optional[int]:
         """Hook run after binary resolution, before launch.
 
-        Return an int exit code to short-circuit ``run_spawn`` (the base does the
-        named-tmux session launch for every provider; claude additionally relaunches
-        in Windows Terminal). Return None to proceed. ``session_name`` is the
-        operator-typed spawn name used as the tmux session identity for every provider.
+        Return an int exit code to short-circuit ``run_spawn``. The base does the
+        named-tmux session launch AND the legacy-conhost handling for EVERY
+        provider. Return None to proceed. ``session_name`` is the operator-typed
+        spawn name used as the tmux session identity for every provider.
         """
         # A named spawn runs the cell in a tmux session (durable + send-keys-
         # supervisable), for EVERY provider. No-op when unnamed / already inside
@@ -1240,6 +1262,39 @@ class ProviderMembrane:
         # TUI's terminal queries so every provider's TUI renders correctly.
         if session_name and _launch_via_tmux(binary, argv, cell.cwd, session_name):
             return 0
+
+        # >>> LEGACY-CONHOST HANDLING IS PROVIDER-GENERIC. IT WAS ONLY EVER
+        # CLAUDE-SPECIFIC BY WHERE IT WAS PLACED. <<< Both conditions below test
+        # the TERMINAL, never the provider: `_relaunch_in_windows_terminal` takes
+        # the binary as a parameter and inspects nothing about it, and the
+        # warning keys on `sys.platform == "win32"` + `not _console_is_genuine_wt()`.
+        # The remedy was filed under the provider it was DISCOVERED on rather than
+        # the CONDITION it addresses, so codex/grok/antigravity cells on Windows
+        # got neither the relaunch NOR the warning — they simply broke, silently:
+        # mangled interface, cursor in the wrong place, session exiting. Reported
+        # by the commander 2026-08-03 trying to launch a codex cell, hitting the
+        # exact symptoms Claude had before this fix existed.
+        # A remedy scoped to its discovery site is a remedy that will be
+        # rediscovered once per provider.
+        if _relaunch_in_windows_terminal(binary, argv, cell.cwd):
+            return 0
+
+        if (
+            sys.platform == "win32"
+            and not no_banner
+            and not os.environ.get("SWARPH_WIN_ACK")
+            and not _console_is_genuine_wt()
+        ):
+            print(
+                "swarph spawn: WARNING — legacy Windows console (conhost) and Windows "
+                "Terminal (wt.exe) was not found, so the session couldn't be "
+                "auto-relaunched. Interactive agent TUIs mis-handle input here "
+                "(mangled redraw, cursor in the wrong cell, Enter inserting a literal "
+                "'m', session exiting). Install Windows Terminal (Microsoft Store) and "
+                "re-run, or use WSL2. See docs/WINDOWS_KNOWN_ISSUES.md. Set "
+                "SWARPH_WIN_ACK=1 to suppress and run here anyway.",
+                file=sys.stderr,
+            )
         return None
 
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
@@ -1294,46 +1349,13 @@ class ClaudeMembrane(ProviderMembrane):
             "or set PATH explicitly."
         )
 
-    def pre_launch(
-        self, cell: Cell, binary: str, argv: list[str], *, no_banner: bool,
-        session_name: Optional[str] = None,
-    ) -> Optional[int]:
-        # tmux launch is now provider-generic (base). Claude keeps ONLY its extra:
-        # the Windows-Terminal relaunch + legacy-conhost warning for the Ink-TUI/
-        # PowerShell Enter-inserts-'m' bug that is Claude-specific.
-        rc = super().pre_launch(
-            cell, binary, argv, no_banner=no_banner, session_name=session_name
-        )
-        if rc is not None:
-            return rc
-
-        # conhost TUI auto-fix fallback (no tmux): on legacy Windows console (not
-        # Windows Terminal), relaunch the claude session in Windows Terminal where
-        # the Ink TUI works. Returns 0 (and we exit this console) only when it
-        # actually relaunched.
-        if _relaunch_in_windows_terminal(binary, argv, cell.cwd):
-            return 0
-
-        # Still in a broken console (conhost with no wt.exe, or operator acked).
-        # Warn unless suppressed. Inside a genuine Windows Terminal (confirmed by
-        # ancestry, NOT the inheritable WT_SESSION) the TUI works, so no warning
-        # fires there.
-        if (
-            sys.platform == "win32"
-            and not no_banner
-            and not os.environ.get("SWARPH_WIN_ACK")
-            and not _console_is_genuine_wt()
-        ):
-            print(
-                "swarph spawn: WARNING — legacy Windows console (conhost) and Windows "
-                "Terminal (wt.exe) was not found, so the session couldn't be "
-                "auto-relaunched. Claude Code's TUI mis-handles input here (Enter "
-                "inserts literal 'm'). Install Windows Terminal (Microsoft Store) and "
-                "re-run, or use WSL2. See docs/WINDOWS_KNOWN_ISSUES.md. Set "
-                "SWARPH_WIN_ACK=1 to suppress and run here anyway.",
-                file=sys.stderr,
-            )
-        return None
+    # >>> NO pre_launch OVERRIDE. IT COLLAPSED INTO THE BASE. <<<
+    # Claude used to carry the Windows-Terminal relaunch + legacy-conhost
+    # warning as its "provider-specific extra". It never was: every condition
+    # in it tested the TERMINAL, not the provider. Hoisted to
+    # ProviderMembrane.pre_launch, which leaves this override byte-identical to
+    # its parent — so it is gone, exactly as GrokMembrane's was when tmux moved
+    # to the base (PR #129). A membrane should hold what genuinely DIFFERS.
 
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
         try:
@@ -1350,6 +1372,7 @@ class ClaudeMembrane(ProviderMembrane):
         # injection. The env carries to the child either way.
         env = _claude_env()
         env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
+        env.update(_mesh_identity_env(cell))  # SWARPH_SELF — 8 consumers had 0 producers
 
         # Per-OS launch mechanism — the SAME split as the tmux attach, for the
         # SAME reason:
@@ -1429,6 +1452,7 @@ class CodexMembrane(ProviderMembrane):
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
         env = _scrubbed_codex_env()
         env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
+        env.update(_mesh_identity_env(cell))  # SWARPH_SELF — 8 consumers had 0 producers
         try:
             os.execve(binary, argv, env)
         except OSError as exc:
@@ -1479,6 +1503,7 @@ class AntigravityMembrane(ProviderMembrane):
         # this process's os.environ first (so a failed exec leaves us intact).
         env = _agy_env()
         env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
+        env.update(_mesh_identity_env(cell))  # SWARPH_SELF — 8 consumers had 0 producers
         try:
             os.execve(binary, argv, env)
         except OSError as exc:
@@ -1570,6 +1595,7 @@ class GrokMembrane(ProviderMembrane):
         # this process's os.environ first (a failed exec leaves us intact).
         env = _grok_env(cell)
         env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
+        env.update(_mesh_identity_env(cell))  # SWARPH_SELF — 8 consumers had 0 producers
         # Per-OS launch — the SAME split as claude.launch (v0.12.1 fix): on
         # Windows os.exec* is emulated as spawn-and-exit (not a real replace),
         # which collapses the tmux pane (its root command exits, orphaning grok);

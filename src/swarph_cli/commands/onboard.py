@@ -109,8 +109,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--token-file",
         default=None,
-        help="explicit path to a secrets file (mode 0600 expected). "
-        "Default resolution order: $MESH_GATEWAY_TOKEN env → ~/.swarph/secrets.toml → prompt.",
+        help="explicit path to a credential file (mode 0600 expected). "
+        "Default resolution order: --token-file → $MESH_GATEWAY_TOKEN → "
+        "~/.swarph/secrets.toml → ~/.config/swarph/<$SWARPH_SELF>.peer_token. "
+        "The per-peer file is the CURRENT convention; the first three are legacy "
+        "and are absent on migrated cells. SWARPH_SELF must be set — this verb "
+        "will not guess a peer name.",
     )
     p.add_argument(
         "--state-dir",
@@ -132,11 +136,27 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _resolve_token(token_file_arg: Optional[str]) -> str:
+def _resolve_token(token_file_arg: Optional[str],
+                   source_out: Optional[list] = None) -> str:
     """Step 3 — token resolution per §15.4. Read-only on the secrets file
-    (does not auto-create per drop DM #726 #3 — privilege boundary)."""
+    (does not auto-create per drop DM #726 #3 — privilege boundary).
+
+    >>> ``source_out`` EXISTS SO A 401 IS ATTRIBUTABLE. <<< This resolver tries
+    four locations and used to report only "ok", so when the gateway then
+    answered ``401 bad token`` there was no way to know WHICH credential had
+    been sent — and the most common cause is a stale ``$MESH_GATEWAY_TOKEN``
+    silently winning over a perfectly good per-peer file two steps below it.
+    A resolver that finds *a* credential has not told you it found *the right
+    one*; naming the source is what makes the next failure diagnosable.
+    Purely additive: callers that pass nothing are unaffected.
+    """
+    def _note(s: str) -> None:
+        if source_out is not None:
+            source_out.append(s)
+
     env_tok = os.environ.get("MESH_GATEWAY_TOKEN")
     if env_tok:
+        _note("$MESH_GATEWAY_TOKEN (env)")
         return env_tok
 
     secrets_path = (
@@ -161,7 +181,38 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
                 if line.startswith("MESH_GATEWAY_TOKEN"):
                     val = line.split("=", 1)[1].strip().strip('"').strip("'")
                     if val:
+                        _note(f"{secrets_path}")
                         return val
+            # >>> A RAW TOKEN FILE IS THE COMMON CASE AND WAS BEING DISCARDED IN
+            # SILENCE. <<< This branch only ever understood secrets.toml syntax
+            # (`MESH_GATEWAY_TOKEN=...`). A per-peer token file is a BARE TOKEN
+            # with no key — so `--token-file <peer>.peer_token`, which is exactly
+            # what the flag's own help invites, matched nothing, fell through
+            # without a word, and the NEXT source's credential produced a 401
+            # that looked unrelated to the flag the operator had just passed.
+            # Reported from a Windows cell, 2026-08-03.
+            # Accept it: a single non-empty line with no '=' IS the credential.
+            stripped = [ln.strip() for ln in content.splitlines()
+                        if ln.strip() and not ln.strip().startswith("#")]
+            if len(stripped) == 1 and "=" not in stripped[0]:
+                _note(f"{secrets_path} (raw token)")
+                return stripped[0]
+            if token_file_arg:
+                # EXPLICITLY POINTED AT A FILE THAT YIELDED NOTHING -> REFUSE.
+                # Falling through here is what made the original failure
+                # undiagnosable: the operator's explicit choice was overridden by
+                # a default they never named. An explicit flag that silently
+                # loses to an implicit source is worse than no flag.
+                print_safe(
+                    f"swarph onboard: --token-file {secrets_path} contained no usable "
+                    f"credential.\n"
+                    f"  Expected EITHER a bare token on one line, OR a secrets.toml "
+                    f"line 'MESH_GATEWAY_TOKEN=...'.\n"
+                    f"  REFUSING to silently fall back to another source — you named "
+                    f"this file explicitly.",
+                    file=sys.stderr,
+                )
+                return ""
         except Exception as exc:
             print_safe(
                 f"swarph onboard: failed to read {secrets_path}: {exc}", file=sys.stderr
@@ -189,6 +240,7 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
             try:
                 val = peer_tok.read_text(encoding="utf-8").strip()
                 if val:
+                    _note(str(peer_tok))
                     return val
             except Exception as exc:
                 print_safe(f"swarph onboard: failed to read {peer_tok}: {exc}",
@@ -309,11 +361,16 @@ def run_onboard(argv: list[str]) -> int:
 
     # ── Step 3: resolve MESH_GATEWAY_TOKEN ───────────────────────────
     print_safe("[3/6] resolve MESH_GATEWAY_TOKEN")
-    token = _resolve_token(args.token_file)
+    _src: list = []
+    token = _resolve_token(args.token_file, _src)
     if not token:
         print_safe("swarph onboard: empty token", file=sys.stderr)
         return 1
-    print_safe("      ok")
+    # NAME THE SOURCE. "ok" alone made a subsequent `401 bad token` undiagnosable:
+    # four locations are tried and the winner was never stated, so a stale
+    # $MESH_GATEWAY_TOKEN silently beating a good per-peer file two steps below
+    # looked identical to having no credential problem at all.
+    print_safe(f"      ok (from {_src[0] if _src else 'unknown source'})")
 
     # ── Step 4: POST /peers/register ─────────────────────────────────
     peer_url = args.url or f"http://{canonical}:8787"
@@ -336,6 +393,65 @@ def run_onboard(argv: list[str]) -> int:
         )
     else:
         print_safe(f"      ok (registered_unratified=true)")
+
+    # ── Step 4b: PERSIST THE MINTED PER-PEER TOKEN ───────────────────
+    # >>> THE GATEWAY MINTS THE PEER'S CREDENTIAL EXACTLY ONCE, HERE, AND
+    # RETURNS IT IN THIS RESPONSE. <<< Earlier releases read only
+    # `registered_unratified` and DISCARDED `peer_token` — which left every
+    # onboarded peer registered, with a live token nobody held, and unable to
+    # authenticate. The server never re-mints (a re-register returns
+    # peer_token=None + token_status='existing'), so the credential was
+    # unrecoverable without an admin revoke. Onboarding APPEARED to succeed and
+    # produced a peer that could not join: the defect is silent precisely
+    # because the failure surfaces later, somewhere else, as "auth doesn't work".
+    minted = body.get("peer_token")
+    token_status = body.get("token_status")
+    if minted:
+        dest = Path.home() / ".config" / "swarph" / f"{canonical}.peer_token"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # 0600 from the instant it exists — os.open with O_EXCL, never
+        # open()+chmod, which leaves a umask-mode window.
+        fd = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(minted.strip() + "\n")
+        # >>> VERIFY THE MODE INSTEAD OF ASSUMING THE REQUEST WAS HONOURED. <<<
+        # os.open's mode argument is a POSIX permission request; on Windows it
+        # is NOT enforced and the file lands 0666 — world-readable. Measured in
+        # CI 2026-08-03 ('666' != '600'); a Linux-only developer cannot observe
+        # this, which is exactly why the check reports what it FINDS rather than
+        # what it asked for. Announcing "mode 0600" unconditionally would have
+        # been a false assurance printed on the one platform where it is untrue.
+        try:
+            _mode = oct(dest.stat().st_mode)[-3:]
+        except OSError:
+            _mode = "unknown"
+        if _mode == "600":
+            print_safe(f"[4b/6] minted per-peer token -> {dest} (mode 0600)")
+        else:
+            print_safe(f"[4b/6] minted per-peer token -> {dest}")
+            print_safe(
+                f"       WARNING: file mode is {_mode}, not 0600 — this platform did "
+                f"not honour the restriction.\n"
+                f"       THE CREDENTIAL IS READABLE BY OTHER USERS OF THIS MACHINE. "
+                f"Restrict it yourself:\n"
+                f"         Windows:  icacls \"{dest}\" /inheritance:r /grant:r \"%USERNAME%:R\"\n"
+                f"         POSIX:    chmod 600 \"{dest}\"",
+                file=sys.stderr,
+            )
+        print_safe(f"       set SWARPH_SELF={canonical} in the peer's environment; "
+                   f"this path is how it authenticates.")
+    elif token_status == "existing":
+        # NOT a success. Name it as the unrecoverable state it is.
+        print_safe(
+            f"[4b/6] WARNING: token_status='existing' and no token returned.\n"
+            f"       The gateway minted {canonical}'s credential on an EARLIER register\n"
+            f"       and MINTS ONCE — so if no {canonical}.peer_token exists on disk,\n"
+            f"       that credential is held by nobody and cannot be recovered here.\n"
+            f"       Recovery is an ADMIN action: revoke the generation (or DELETE the\n"
+            f"       peer) so a re-register mints a fresh one. A per-peer token cannot\n"
+            f"       do it — deregister is ownership-gated to the caller itself.",
+            file=sys.stderr,
+        )
 
     # ── Step 5: subscription auth check ──────────────────────────────
     print_safe("[5/6] verify_subscription_setup()")

@@ -115,6 +115,27 @@ def _resolve_cell(arg, repo: Path) -> str:
     env = os.environ.get("SWARPH_CELL")
     if env:
         return _collapse(env)
+    # >>> NEVER GUESS THE CELL ON A **SHARED** COMMONS. <<<
+    # `git config user.name` on a shared clone resolves to whoever configured the
+    # CLONE, not to whoever is running the command — so every cell that omitted
+    # SWARPH_CELL published its learning under that one name, silently and
+    # permanently. Measured on the mesh timeline: 5 entries whose git AUTHOR is
+    # the real cell while the LABEL reads the clone-owner's name.
+    # The two failure modes are directional, hence separable after the fact:
+    #     author=X, label=owner  -> this bug (a fallback mislabel)
+    #     author=owner, label=Y  -> a deliberate relay for a cell that cannot write
+    # Scoped to remotes ON PURPOSE: a local-only timeline is nobody else's record,
+    # so the fallback there is a convenience with no victim, and "a fresh solo
+    # user just works" is preserved.
+    if _has_remote(repo):
+        raise ValueError(
+            "cell identity is unset and this timeline has an 'origin' remote — it "
+            "is a SHARED, APPEND-ONLY record. Falling back to `git config "
+            "user.name` there resolves to whoever configured the CLONE, so this "
+            "entry would be attributed to another cell, permanently. "
+            "Pass --cell <name> or set SWARPH_CELL. (A local-only timeline still "
+            "falls back, so solo use is unaffected.)"
+        )
     if _is_git_repo(repo):
         r = _git(repo, "config", "user.name")
         if r.returncode == 0 and r.stdout.strip():
@@ -175,7 +196,11 @@ def run_highlight(argv: list) -> int:
     args = p.parse_args(argv)
 
     repo = _resolve_dir(args.timeline_dir)
-    cell = _resolve_cell(args.cell, repo)
+    try:
+        cell = _resolve_cell(args.cell, repo)
+    except ValueError as exc:
+        print(f"swarph highlight: {exc}", file=sys.stderr)
+        return 2
     highlight = _collapse(args.highlight)
     memory = _collapse(args.memory)
     when = _collapse(args.when) if args.when else ""
