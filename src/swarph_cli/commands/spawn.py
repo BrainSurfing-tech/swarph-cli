@@ -1553,6 +1553,10 @@ def _scrub_vibe_namespace(env: dict[str, str]) -> None:
     makes two contradictory documents both true is extremely satisfying and is
     exactly the shape that stops people checking whether the mechanism exists. <<<
     """
+    # NOTE: this scrubs VIBE_HOME too. _vibe_env SETS IT AFTER calling this, so
+    # the inherited value is closed and the membrane's own value is authoritative
+    # — order is load-bearing, and inverting it would let an operator's shell
+    # VIBE_HOME silently win over the cell's isolation.
     for key in [k for k in env if k.startswith(("VIBE_", "MISTRAL_"))]:
         env.pop(key, None)
 
@@ -1612,11 +1616,26 @@ def _vibe_env(cell: Cell) -> dict[str, str]:
     env = scrub_env_for_subprocess()
     _scrub_vibe_namespace(env)
     env["SWARPH_SPAWN"] = "1"
-    cell_home = cell.cwd / _VIBE_CELL_HOME_SUBDIR
-    vibe_dir = cell_home / ".vibe"
-    vibe_dir.mkdir(parents=True, exist_ok=True)
-    _link_vibe_credential(vibe_dir / ".env")
-    env["HOME"] = str(cell_home)
+    # >>> VIBE_HOME, **NOT** A FAKE $HOME — AND THIS IS WHAT CLOSES BLOCKER C
+    # RATHER THAN DOCUMENTING IT. (drop-on-meta-edge seat-A; the mechanism was
+    # already written in the cell genome at ~/.config/swarph/cells/mistral.yaml:
+    # "vibe honours $VIBE_HOME natively... No fake-$HOME trick needed (grok needs
+    # one; vibe does not).") <<<
+    # VERIFIED BY EXECUTION: `VIBE_HOME=<tmp> vibe --check-upgrade` writes
+    # cache.toml / vibehistory / logs / trusted_folders.toml directly into <tmp>
+    # — a FLAT layout, no `.vibe` subdir.
+    #
+    # WHY IT MATTERS BEYOND TIDINESS: a fake $HOME RELOCATES EVERY Path.home()
+    # LOOKUP IN THE PROCESS, so the cell loses
+    # ~/.config/swarph/<self>.peer_token, ~/.swarph/secrets.toml, brain_ask and
+    # the codegraph hook — "the membrane builds the very blindness it then falls
+    # back from" (gpu-wsl). grok pays that price because grok has no alternative;
+    # VIBE DOES, so paying it here would be a cost with no purchase.
+    # HOME therefore stays the operator's, and ONLY vibe's own state moves.
+    vibe_home = cell.cwd / _VIBE_CELL_HOME_SUBDIR
+    vibe_home.mkdir(parents=True, exist_ok=True)
+    _link_vibe_credential(vibe_home / ".env")
+    env["VIBE_HOME"] = str(vibe_home)
     return env
 
 
@@ -1838,7 +1857,9 @@ class VibeMembrane(ProviderMembrane):
         operator's. Mirrors GrokMembrane's isolated-HOME glob.
         """
         out: list[tuple[str, Path]] = []
-        vibe_dir = cell.cwd / _VIBE_CELL_HOME_SUBDIR / ".vibe"
+        # FLAT layout: VIBE_HOME/vibehistory, not VIBE_HOME/.vibe/vibehistory —
+        # verified by execution, `VIBE_HOME=<tmp> vibe --check-upgrade`.
+        vibe_dir = cell.cwd / _VIBE_CELL_HOME_SUBDIR
         hist = vibe_dir / "vibehistory"
         if hist.exists():
             out.append(("vibe-memory/vibehistory", hist))
@@ -1861,7 +1882,7 @@ class VibeMembrane(ProviderMembrane):
 
     def memory_restore_dest(self, rel_parts: tuple, cell: Cell) -> Optional[Path]:
         if rel_parts and rel_parts[0] == "vibe-memory":
-            return (cell.cwd / _VIBE_CELL_HOME_SUBDIR / ".vibe").joinpath(*rel_parts[1:])
+            return (cell.cwd / _VIBE_CELL_HOME_SUBDIR).joinpath(*rel_parts[1:])
         return None
 
     def memory_guard_file(self, cell: Cell) -> Optional[Path]:

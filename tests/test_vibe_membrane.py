@@ -156,9 +156,34 @@ def test_env_sets_HOME_into_the_cell_and_creates_the_isolated_vibe_dir(tmp_path)
     `<tmp>/.vibe`), so this is what actually separates the cell's vibehistory
     from the operator's."""
     env = _vibe_env(_cell(tmp_path))
-    assert env["HOME"] == str(tmp_path / _VIBE_CELL_HOME_SUBDIR)
-    assert (tmp_path / _VIBE_CELL_HOME_SUBDIR / ".vibe").is_dir()
+    assert env["VIBE_HOME"] == str(tmp_path / _VIBE_CELL_HOME_SUBDIR)
+    assert (tmp_path / _VIBE_CELL_HOME_SUBDIR).is_dir()
     assert env.get("SWARPH_SPAWN") == "1"
+
+
+def test_HOME_is_NOT_relocated_so_the_cell_keeps_its_OWN_mesh_identity(tmp_path, monkeypatch):
+    """>>> BLOCKER C, CLOSED AT THE ROOT RATHER THAN DOCUMENTED. <<< A fake $HOME
+    relocates EVERY Path.home() lookup, so the cell loses
+    ~/.config/swarph/<self>.peer_token, ~/.swarph/secrets.toml, brain_ask and the
+    codegraph hook — and its only remaining credential is the SPAWNER'S inherited
+    token, i.e. "a cell is the spawner's identity or nothing" (drop-on-meta-edge,
+    measured). grok pays that price because grok has no alternative. VIBE HAS
+    ONE, so paying it here would be a cost with no purchase."""
+    monkeypatch.setenv("HOME", "/home/operator")
+    env = _vibe_env(_cell(tmp_path))
+    assert env.get("HOME") == "/home/operator", (
+        "HOME was relocated — the cell can no longer resolve its own peer token, "
+        "secrets.toml, brain_ask or the codegraph hook")
+    assert env["VIBE_HOME"].endswith(_VIBE_CELL_HOME_SUBDIR)
+
+
+def test_an_inherited_VIBE_HOME_cannot_win_over_the_cells_own(tmp_path, monkeypatch):
+    """The scrub removes VIBE_* and _vibe_env sets its own AFTER — order is
+    load-bearing. Inverted, an operator's shell VIBE_HOME silently defeats the
+    isolation."""
+    monkeypatch.setenv("VIBE_HOME", "/operator/elsewhere")
+    env = _vibe_env(_cell(tmp_path))
+    assert env["VIBE_HOME"] == str(tmp_path / _VIBE_CELL_HOME_SUBDIR)
 
 
 def test_env_does_NOT_pop_the_gateway_token(tmp_path, monkeypatch):
@@ -183,8 +208,8 @@ def test_config_toml_is_NOT_synced_it_is_the_auto_approve_VECTOR(tmp_path):
     cell.ROLE, not identity, so a config captured from one cell restores into
     EVERY same-role cell via a git remote. config.toml is POLICY, not memory."""
     m = MEMBRANES["vibe"]
-    vibe_dir = tmp_path / _VIBE_CELL_HOME_SUBDIR / ".vibe"
-    vibe_dir.mkdir(parents=True)
+    vibe_dir = tmp_path / _VIBE_CELL_HOME_SUBDIR
+    vibe_dir.mkdir(parents=True, exist_ok=True)
     (vibe_dir / "vibehistory").write_text("turn 1")
     (vibe_dir / "config.toml").write_text('default_agent = "auto-approve"')
     keys = dict(m.memory_sync_files(_cell(tmp_path)))
@@ -198,8 +223,8 @@ def test_memory_sync_and_restore_round_trip(tmp_path):
     """The membrane declares its OWN memory (card #51's non-discriminatory
     design): sync must find it and restore must put it back in the same place."""
     m = MEMBRANES["vibe"]
-    vibe_dir = tmp_path / _VIBE_CELL_HOME_SUBDIR / ".vibe"
-    vibe_dir.mkdir(parents=True)
+    vibe_dir = tmp_path / _VIBE_CELL_HOME_SUBDIR
+    vibe_dir.mkdir(parents=True, exist_ok=True)
     (vibe_dir / "vibehistory").write_text("turn 1")
     files = dict(m.memory_sync_files(_cell(tmp_path)))
     assert "vibe-memory/vibehistory" in files
