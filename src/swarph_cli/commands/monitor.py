@@ -56,7 +56,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="SINK",
-        help="repeatable; pull (default) | tmux:<target> | stdout | none. "
+        help="repeatable; pull (default) | tmux:<target> | tmux-notify:<target> "
+        "| stdout | none. "
         "Each sink gets its OWN delivery ledger.",
     )
     start.add_argument("--poll-s", type=int, default=mesh._DEFAULT_POLL_S)

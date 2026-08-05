@@ -638,6 +638,25 @@ class TmuxSink(Sink):
         return f"{count} DM{plural} not yet delivered to {self.name}"
 
 
+class TmuxNotifySink(Sink):
+    """Show a tmux status-line notice without modifying the pane input buffer."""
+
+    is_push = True
+
+    def __init__(self, target: str):
+        super().__init__(f"tmux-notify:{target}")
+        self.target = target
+
+    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> bool:
+        # A notification is deliberately content-free: it must not leak DM text
+        # into a shared status line, and unlike TmuxSink it never submits input.
+        return _tmux_notify(self.target, max(1, len(dms)))
+
+    def pending_label(self, count: int) -> str:
+        plural = "s" if count != 1 else ""
+        return f"{count} DM{plural} not yet notified to {self.name}"
+
+
 class StdoutSink(Sink):
     """Write the DM to stdout. Delivery always succeeds."""
 
@@ -672,6 +691,13 @@ def parse_sink(spec: str) -> Sink:
         return NoneSink()
     if spec == "stdout":
         return StdoutSink()
+    if spec.startswith("tmux-notify:"):
+        target = spec[len("tmux-notify:"):]
+        if not target:
+            raise MonitorSinkError(
+                "sink 'tmux-notify:' needs a target, e.g. tmux-notify:lab:0.0"
+            )
+        return TmuxNotifySink(target)
     if spec.startswith("tmux:"):
         target = spec[len("tmux:"):]
         if not target:
@@ -688,7 +714,8 @@ def parse_sink(spec: str) -> Sink:
             "ignored. Use --deliver pull / tmux:<target> / stdout / none."
         )
     raise MonitorSinkError(
-        f"unknown sink {spec!r}; expected pull, none, stdout, or tmux:<target>"
+        f"unknown sink {spec!r}; expected pull, none, stdout, tmux:<target>, "
+        "or tmux-notify:<target>"
     )
 
 
@@ -870,6 +897,24 @@ def _tmux_wake(target: str) -> bool:
         return True
     except (OSError, subprocess.CalledProcessError) as exc:
         print(f"[monitor] tmux wake failed: {exc}", file=sys.stderr, flush=True)
+        return False
+
+
+def _tmux_notify(target: str, dm_count: int) -> bool:
+    """Show a transient tmux notice without sending any pane keystrokes."""
+    plural = "s" if dm_count != 1 else ""
+    try:
+        subprocess.run(
+            ["tmux", "display-message", "-t", target,
+             f"mesh: {dm_count} new DM{plural}; inbox pending"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"[monitor] tmux notification failed: {exc}", file=sys.stderr, flush=True)
         return False
 
 
