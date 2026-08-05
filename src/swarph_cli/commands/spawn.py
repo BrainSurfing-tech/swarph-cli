@@ -548,6 +548,17 @@ def _scrubbed_codex_env() -> dict[str, str]:
 #: inside cwd)").
 _GROK_CELL_HOME_SUBDIR = ".grok-cell"
 
+#: Vibe cell HOME. GROUNDED against real vibe 2.23.3 on 2026-08-05:
+#: `HOME=<tmp> vibe --check-upgrade` CREATES `<tmp>/.vibe`, so vibe honours
+#: $HOME and an isolated HOME genuinely separates the cell's state from the
+#: operator's. That probe matters: `--version` does NOT touch state, so it
+#: proves nothing, and the decisive test would otherwise be a real prompt —
+#: an auth-touching action this repo does not probe.
+#: Operator state observed at ~/.vibe: .env (0600, the credential),
+#: config.toml (0600), vibehistory (the durable conversation log),
+#: trusted_folders.toml, cache.toml, logs/session/.
+_VIBE_CELL_HOME_SUBDIR = ".vibe-cell"
+
 #: Grok cell env: DENY-BY-DEFAULT for the grok/xai namespace. A cell has its own
 #: ISOLATED HOME + file-based config, so it must inherit NOTHING grok-specific
 #: from the operator's interactive env — every ``GROK_*``/``XAI_*`` var is a
@@ -1512,6 +1523,94 @@ class AntigravityMembrane(ProviderMembrane):
         return cell.cwd / "GEMINI.md"
 
 
+def _scrub_vibe_namespace(env: dict[str, str]) -> None:
+    """DENY-BY-DEFAULT scrub of the VIBE_*/MISTRAL_* namespace.
+
+    Same reasoning as the grok scrub, and the same closure: an inherited
+    ``VIBE_HOME``/``VIBE_CONFIG_DIR`` (or any future redirect var) would defeat
+    the isolated HOME silently, and a ``MISTRAL_API_KEY`` in the operator's
+    environment would move the cell OFF the $0 subscription path onto a metered
+    one WITHOUT ANY VISIBLE CHANGE — a billing leak that reads as working.
+    Allowlist nothing: vibe falls back to its own defaults plus the linked
+    credential.
+    """
+    for key in [k for k in env if k.startswith(("VIBE_", "MISTRAL_"))]:
+        env.pop(key, None)
+
+
+def _link_vibe_credential(dest: Path) -> None:
+    """Link the operator's ``~/.vibe/.env`` into the cell's isolated ``.vibe``.
+
+    The cell gets the operator's SUBSCRIPTION credential (the $0 path) while
+    keeping its own history/config/sessions. Symlink, not copy: a copy is a
+    second credential on disk that never rotates when the original does.
+    Absent source is NOT an error here — the cell then starts unauthenticated
+    and vibe says so itself, which is a better failure than a spawn that
+    refuses for a reason the operator cannot see.
+    """
+    src = Path.home() / ".vibe" / ".env"
+    try:
+        if dest.exists() or dest.is_symlink():
+            return
+        if src.exists():
+            dest.symlink_to(src)
+    except OSError:
+        pass
+
+
+def _vibe_env(cell: Cell) -> dict[str, str]:
+    """Subscription env for a local ``vibe`` CELL ($0 Mistral subscription).
+
+    HOME -> an ISOLATED dir inside the cell cwd, with the operator's
+    ``~/.vibe/.env`` linked in, so the cell's vibehistory / config / logs never
+    mix with the operator's personal ``~/.vibe``.
+    MESH_GATEWAY_TOKEN is deliberately NOT popped — identical posture to the
+    other membranes: the cell inherits the gateway token so its mesh DMs work
+    out of the box, and popping it here would silently MUTE the cell.
+    """
+    env = scrub_env_for_subprocess()
+    _scrub_vibe_namespace(env)
+    env["SWARPH_SPAWN"] = "1"
+    cell_home = cell.cwd / _VIBE_CELL_HOME_SUBDIR
+    vibe_dir = cell_home / ".vibe"
+    vibe_dir.mkdir(parents=True, exist_ok=True)
+    _link_vibe_credential(vibe_dir / ".env")
+    env["HOME"] = str(cell_home)
+    return env
+
+
+def _build_vibe_argv(
+    cell: Cell,
+    no_starter: bool,
+    passthrough: list[str],
+) -> list[str]:
+    """Build the ``vibe`` cell argv. Grounded against real vibe 2.23.3.
+
+    INTERACTIVE TUI, not ``-p``: ``-p`` is programmatic one-shot ("send prompt,
+    output response, and exit"), which is the opposite of a durable cell.
+
+    >>> DELIBERATELY ABSENT: ``--auto-approve`` / ``--yolo`` / ``--trust``.
+    Those relax TOOL APPROVAL, and a membrane must not widen a security posture
+    on the operator's behalf. grok's sibling exposes autonomy through cell.yaml
+    (``always_approve``) rather than hardcoding it, and the same axis belongs in
+    cell.yaml here — as an explicit opt-in, in its own change, with its own
+    review. <<<
+
+    The starter prompt is passed POSITIONALLY (vibe's ``PROMPT`` arg: "initial
+    prompt to start the interactive session with"), which is the only identity
+    channel vibe's surface offers — it has no ``--system-prompt-override``
+    sibling. ``--agent NAME`` is a PROFILE selector, not a prompt: passing a
+    swarph role there would select a non-existent agent, not confer identity.
+    """
+    argv = ["vibe"]
+    if not no_starter and cell.starter_prompt_path:
+        starter = read_starter_prompt(cell)
+        if starter:
+            argv.append(starter)
+    argv.extend(passthrough)
+    return argv
+
+
 class GrokMembrane(ProviderMembrane):
     """Local ``grok`` CLI as a durable swarph CELL ($0 OIDC / subscription).
 
@@ -1609,11 +1708,114 @@ class GrokMembrane(ProviderMembrane):
         return None  # grok has no cwd project-doc; always-sync
 
 
+class VibeMembrane(ProviderMembrane):
+    """Local ``vibe`` CLI as a durable swarph CELL ($0 Mistral subscription).
+
+    The EU-domiciled Mistral lane (board #247). Same shape as GrokMembrane: exec
+    the local ``vibe`` agent TUI with an ISOLATED HOME inside the cell cwd, in a
+    named tmux session via the BASE pre_launch (no override — that hoist is
+    exactly what card #2 fixed, and a new membrane must not re-introduce the
+    discrimination it removed).
+
+    Session model (``uses_pinned_session`` False): vibe owns its own sessions and
+    its ``--resume`` takes an OPTIONAL id, so a swarph-pinned UUID has nothing to
+    bind to. The cell relies on vibe's own ``vibehistory`` in the isolated HOME
+    for continuity, and lets vibe mint on genesis — the same reasoning as grok.
+    """
+
+    name = "vibe"
+
+    def uses_pinned_session(self) -> bool:
+        return False
+
+    def build_argv(
+        self,
+        cell: Cell,
+        *,
+        session_id: Optional[str],
+        no_starter: bool,
+        passthrough: list[str],
+        effective_role: Optional[str],
+    ) -> list[str]:
+        return _build_vibe_argv(cell, no_starter, passthrough)
+
+    def resolve_binary(self) -> Optional[str]:
+        provider_bin = shutil.which("vibe")
+        if provider_bin is None:
+            home_local = Path.home() / ".local" / "bin" / "vibe"
+            if home_local.exists():
+                provider_bin = str(home_local)
+        return provider_bin
+
+    def binary_not_found_message(self) -> str:
+        return (
+            "swarph spawn: 'vibe' binary not found on PATH. "
+            "Install the Mistral Vibe CLI or set PATH explicitly."
+        )
+
+    def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
+        try:
+            os.chdir(cell.cwd)
+        except OSError as exc:
+            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
+            return 1
+        env = _vibe_env(cell)
+        env.update(_git_identity_env(cell))
+        # Per-OS split, identical to claude/grok: Windows os.exec* is emulated as
+        # spawn-and-exit, which collapses the tmux pane; a BLOCKING
+        # subprocess.run keeps THIS process as the pane root. POSIX execve does a
+        # true in-place replace.
+        if sys.platform == "win32":
+            try:
+                return subprocess.run([binary, *argv[1:]], env=env).returncode
+            except OSError as exc:
+                print(f"swarph spawn: launch failed: {exc}", file=sys.stderr)
+                return 1
+        try:
+            os.execve(binary, argv, env)
+        except OSError as exc:
+            print(f"swarph spawn: launch failed: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
+    def memory_sync_files(self, cell: Cell) -> list[tuple[str, Path]]:
+        """`vibehistory` is vibe's durable conversation log — the cell's memory.
+
+        Isolated-HOME scoped, so a cell's history is ITS OWN and never the
+        operator's. Mirrors GrokMembrane's isolated-HOME glob.
+        """
+        out: list[tuple[str, Path]] = []
+        vibe_dir = cell.cwd / _VIBE_CELL_HOME_SUBDIR / ".vibe"
+        hist = vibe_dir / "vibehistory"
+        if hist.exists():
+            out.append(("vibe-memory/vibehistory", hist))
+        cfg = vibe_dir / "config.toml"
+        if cfg.exists():
+            out.append(("vibe-memory/config.toml", cfg))
+        return out
+
+    def memory_restore_dest(self, rel_parts: tuple, cell: Cell) -> Optional[Path]:
+        if rel_parts and rel_parts[0] == "vibe-memory":
+            return (cell.cwd / _VIBE_CELL_HOME_SUBDIR / ".vibe").joinpath(*rel_parts[1:])
+        return None
+
+    def memory_guard_file(self, cell: Cell) -> Optional[Path]:
+        """None: vibe has no cwd project-doc (no CLAUDE.md/AGENTS.md sibling), so
+        there is no empty-file clobber to guard against. Same as grok."""
+        return None
+
+
 MEMBRANES: dict[str, ProviderMembrane] = {
     "claude": ClaudeMembrane(),
     "codex": CodexMembrane(),
     "antigravity": AntigravityMembrane(),
     "grok": GrokMembrane(),
+    # #247: the vibe lane. NOTE THE ORDER THAT CAUSED AN OUTAGE — this membrane
+    # must land in a RELEASED swarph-cli BEFORE `vibe` is re-added to
+    # swarph_shared.VALID_PROVIDERS. The guard below is a SUBSET check, so an
+    # extra membrane is inert and harmless; the reverse order raises at import
+    # and kills `swarph spawn` for every fresh install (2026-08-05, ~5h).
+    "vibe": VibeMembrane(),
 }
 
 # Defensive coupling: every shared-whitelisted provider MUST have a membrane,
