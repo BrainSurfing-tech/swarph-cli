@@ -72,17 +72,32 @@ def test_vibe_does_not_use_a_pinned_session():
 
 # ── THE SECURITY POSTURE THIS MEMBRANE DELIBERATELY DOES NOT WIDEN ──────────
 
-def test_argv_NEVER_carries_auto_approve_yolo_or_trust(tmp_path):
-    """>>> A MEMBRANE MUST NOT WIDEN A SECURITY POSTURE ON THE OPERATOR'S
-    BEHALF. <<< `--auto-approve` / `--yolo` / `--trust` relax TOOL APPROVAL.
-    grok's sibling exposes autonomy through cell.yaml rather than hardcoding it;
-    the same axis belongs there for vibe, as an explicit opt-in with its own
-    review. This test exists so adding one is a deliberate act that breaks a
-    test, not a convenience someone slips in."""
+def test_argv_never_carries_the_TOOL_APPROVAL_flags(tmp_path):
+    """>>> TOOL APPROVAL: absent, deliberately. <<< vibe's `default` agent
+    requires approval per tool call and is the schema default, so omitting these
+    genuinely achieves the posture. The autonomy axis belongs in cell.yaml as an
+    explicit opt-in, like grok's `always_approve`."""
     argv = _build_vibe_argv(_cell(tmp_path), no_starter=True, passthrough=[])
-    joined = " ".join(argv)
-    for flag in ("--auto-approve", "--yolo", "--trust"):
-        assert flag not in joined, f"{flag} was added to the default cell argv"
+    for flag in ("--auto-approve", "--yolo"):
+        assert flag not in argv, f"{flag} was added to the default cell argv"
+
+
+def test_argv_DOES_carry_trust_because_refusing_it_FORCES_the_persistent_write(tmp_path):
+    """>>> THE FIRST DRAFT GROUPED `--trust` WITH THE APPROVAL FLAGS AND WAS
+    WRONG — TWO AXES CONFLATED INTO ONE. <<< (drop-on-meta-edge, seat-A.)
+
+    vibe's own help: "Trust the working directory FOR THIS INVOCATION ONLY (not
+    persisted to trusted_folders.toml). Skips the trust prompt. USE THIS FOR
+    NON-INTERACTIVE AUTOMATION."
+
+    Refusing it INVERTS the bar it was meant to protect: a detached cell hits the
+    trust modal, and THE ONLY AFFIRMATIVE ANSWERS THERE ARE THE PERSISTENT ONES.
+    Withholding the session-scoped flag FORCES THE PERSISTENT WRITE — a strictly
+    wider posture, reached by trying to be conservative."""
+    argv = _build_vibe_argv(_cell(tmp_path), no_starter=True, passthrough=[])
+    assert "--trust" in argv, (
+        "without --trust a detached cell blocks on the trust modal, whose only "
+        "affirmative answers persist to trusted_folders.toml")
 
 
 def test_argv_is_the_INTERACTIVE_tui_not_the_one_shot_programmatic_mode(tmp_path):
@@ -157,6 +172,28 @@ def test_env_does_NOT_pop_the_gateway_token(tmp_path, monkeypatch):
 
 # ── MEMORY SYNC ROUND-TRIP ──────────────────────────────────────────────────
 
+def test_config_toml_is_NOT_synced_it_is_the_auto_approve_VECTOR(tmp_path):
+    """>>> THE PROPERTY IS "the cell does not run with relaxed tool approval",
+    AND ARGV IS ONLY ONE OF ITS TWO INPUTS. My argv test passed while the memory
+    channel could set it. VERIFY THE PROPERTY, NOT THE PROXY — my own rule,
+    failed inside the test written to enforce it. <<< (drop-on-meta-edge.)
+
+    `default_agent` lives in config.toml and `auto-approve` is a BUILTIN vibe
+    profile carrying `bypass_tool_permissions: True`. The memory repo is keyed by
+    cell.ROLE, not identity, so a config captured from one cell restores into
+    EVERY same-role cell via a git remote. config.toml is POLICY, not memory."""
+    m = MEMBRANES["vibe"]
+    vibe_dir = tmp_path / _VIBE_CELL_HOME_SUBDIR / ".vibe"
+    vibe_dir.mkdir(parents=True)
+    (vibe_dir / "vibehistory").write_text("turn 1")
+    (vibe_dir / "config.toml").write_text('default_agent = "auto-approve"')
+    keys = dict(m.memory_sync_files(_cell(tmp_path)))
+    assert "vibe-memory/vibehistory" in keys, "memory must still sync"
+    assert not any("config" in k for k in keys), (
+        f"config.toml is synced — a cell with default_agent='auto-approve' would "
+        f"propagate bypass_tool_permissions to every same-role cell: {list(keys)}")
+
+
 def test_memory_sync_and_restore_round_trip(tmp_path):
     """The membrane declares its OWN memory (card #51's non-discriminatory
     design): sync must find it and restore must put it back in the same place."""
@@ -164,10 +201,8 @@ def test_memory_sync_and_restore_round_trip(tmp_path):
     vibe_dir = tmp_path / _VIBE_CELL_HOME_SUBDIR / ".vibe"
     vibe_dir.mkdir(parents=True)
     (vibe_dir / "vibehistory").write_text("turn 1")
-    (vibe_dir / "config.toml").write_text("k = 1")
     files = dict(m.memory_sync_files(_cell(tmp_path)))
     assert "vibe-memory/vibehistory" in files
-    assert "vibe-memory/config.toml" in files
     dest = m.memory_restore_dest(("vibe-memory", "vibehistory"), _cell(tmp_path))
     assert dest == vibe_dir / "vibehistory"
 

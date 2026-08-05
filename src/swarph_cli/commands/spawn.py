@@ -1534,19 +1534,24 @@ def _scrub_vibe_namespace(env: dict[str, str]) -> None:
     Allowlist nothing: vibe falls back to its own defaults plus the linked
     credential.
 
-    >>> AND THIS DIRECTLY CONTRADICTS THE swarph-mesh 0.8.0 NOTE, WHICH SAYS
-    MISTRAL_API_KEY *IS* THE SUBSCRIPTION PATH AND SCRUBBING IT BREAKS THE LANE.
-    BOTH ARE RIGHT, BECAUSE THE CREDENTIAL ARRIVES BY A DIFFERENT CHANNEL IN
-    EACH: <<<
-      · swarph-mesh ADAPTER — a firejail worker with an EPHEMERAL VIBE_HOME and
-        the prompt on stdin. No persistent home, so ENV IS THE ONLY CHANNEL and
-        the key MUST survive.
-      · this CELL — an ISOLATED HOME with the operator's ~/.vibe/.env SYMLINKED
-        in (see _link_vibe_credential). A FILE channel, so env can and should go.
-    Same credential, two delivery paths, opposite correct answers.
-    THIS PARAGRAPH IS LOAD-BEARING: without it, a maintainer chasing a billing
-    bug reads the 0.8.0 note, sees this scrub as the cause, deletes it, and
-    silently un-isolates every vibe cell. (gpu-wsl, reviewing PR #181.)
+    >>> WHAT THE SCRUB ACTUALLY BUYS IS **PRECEDENCE**, NOT A BILLING FORK.
+    (drop-on-meta-edge, seat-A on PR #181, correcting BOTH lab AND a
+    reconciliation lab had already enshrined here as load-bearing.) <<<
+    There is NO subscription-vs-metered fork in vibe 2.23.3: `~/.vibe/.env` IS
+    an env-var source, so a key from the process env and a key from the file
+    TERMINATE AT THE SAME `os.environ['MISTRAL_API_KEY']` against one api_base.
+    THE PLAN IS A PROPERTY OF THE KEY, NOT OF WHERE IT CAME FROM.
+    What the scrub prevents is an INHERITED VALUE SHADOWING THE LINKED FILE —
+    the cell running on the operator's shell key instead of its own login key —
+    plus closing the whole VIBE_* redirect namespace. Both real, neither a
+    billing fork.
+    KEEP THE SCRUB. FIX THE REASON: the earlier "two channels, opposite correct
+    answers" story justified only half of what this does (deny the env) and
+    invented a mechanism that does not exist. A future reader hunting that fork
+    would either weaken the scrub as superstition or build a guard for nothing.
+    >>> AND NOTE HOW IT SURVIVED: TWO SEATS AGREED ON IT. A reconciliation that
+    makes two contradictory documents both true is extremely satisfying and is
+    exactly the shape that stops people checking whether the mechanism exists. <<<
     """
     for key in [k for k in env if k.startswith(("VIBE_", "MISTRAL_"))]:
         env.pop(key, None)
@@ -1625,12 +1630,24 @@ def _build_vibe_argv(
     INTERACTIVE TUI, not ``-p``: ``-p`` is programmatic one-shot ("send prompt,
     output response, and exit"), which is the opposite of a durable cell.
 
-    >>> DELIBERATELY ABSENT: ``--auto-approve`` / ``--yolo`` / ``--trust``.
-    Those relax TOOL APPROVAL, and a membrane must not widen a security posture
-    on the operator's behalf. grok's sibling exposes autonomy through cell.yaml
-    (``always_approve``) rather than hardcoding it, and the same axis belongs in
-    cell.yaml here — as an explicit opt-in, in its own change, with its own
-    review. <<<
+    >>> TWO DIFFERENT AXES, AND THE FIRST DRAFT CONFLATED THEM (drop-on-meta-edge,
+    seat-A): <<<
+      · ``--auto-approve`` / ``--yolo`` RELAX TOOL APPROVAL. DELIBERATELY ABSENT —
+        a membrane must not widen a security posture on the operator's behalf.
+        Verified: vibe's `default` agent requires approval per tool call and is
+        the schema default, so omitting them genuinely achieves that posture.
+        The autonomy axis belongs in cell.yaml as an explicit opt-in, like grok's
+        ``always_approve``.
+      · ``--trust`` IS NOT A TOOL-APPROVAL FLAG. vibe's own help: "Trust the
+        working directory FOR THIS INVOCATION ONLY (not persisted to
+        trusted_folders.toml). Skips the trust prompt. USE THIS FOR
+        NON-INTERACTIVE AUTOMATION." It is session-scoped, explicitly
+        non-persistent, and documented for exactly this case.
+    >>> REFUSING IT INVERTED THE VERY BAR IT WAS MEANT TO PROTECT: a detached
+    cell with nobody at the keyboard hits the trust modal, AND THE ONLY
+    AFFIRMATIVE ANSWERS THERE ARE THE PERSISTENT ONES. So withholding the
+    session-scoped flag FORCES THE PERSISTENT WRITE — a strictly wider posture,
+    reached by trying to be conservative. <<<
 
     The starter prompt is passed POSITIONALLY (vibe's ``PROMPT`` arg: "initial
     prompt to start the interactive session with"), which is the only identity
@@ -1638,7 +1655,7 @@ def _build_vibe_argv(
     sibling. ``--agent NAME`` is a PROFILE selector, not a prompt: passing a
     swarph role there would select a non-existent agent, not confer identity.
     """
-    argv = ["vibe"]
+    argv = ["vibe", "--trust"]
     if not no_starter and cell.starter_prompt_path:
         starter = read_starter_prompt(cell)
         if starter:
@@ -1825,9 +1842,21 @@ class VibeMembrane(ProviderMembrane):
         hist = vibe_dir / "vibehistory"
         if hist.exists():
             out.append(("vibe-memory/vibehistory", hist))
-        cfg = vibe_dir / "config.toml"
-        if cfg.exists():
-            out.append(("vibe-memory/config.toml", cfg))
+        # >>> config.toml IS DELIBERATELY **NOT** SYNCED. It is POLICY, not
+        # memory, and syncing it re-opens the exact posture this membrane
+        # promises not to widen — through a channel argv can never see.
+        # (drop-on-meta-edge, seat-A on PR #181.) <<<
+        # `default_agent` lives in config.toml, and `auto-approve` is a BUILTIN
+        # vibe profile carrying `bypass_tool_permissions: True`. The memory repo
+        # is keyed by cell.ROLE, not cell identity, so a config captured from one
+        # cell is restored into EVERY same-role cell, via a git remote in
+        # between. One operator enabling auto-approve on one cell would have
+        # propagated it to the fleet, and
+        # test_argv_NEVER_carries_auto_approve_yolo_or_trust would have passed
+        # throughout — because the property is "the cell does not run with
+        # relaxed tool approval" and ARGV IS ONLY ONE OF ITS TWO INPUTS.
+        # Verify the property, not the proxy — my own rule, failed inside the
+        # test written to enforce it.
         return out
 
     def memory_restore_dest(self, rel_parts: tuple, cell: Cell) -> Optional[Path]:
