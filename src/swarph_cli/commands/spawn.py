@@ -1549,9 +1549,25 @@ def _scrub_vibe_namespace(env: dict[str, str]) -> None:
     answers" story justified only half of what this does (deny the env) and
     invented a mechanism that does not exist. A future reader hunting that fork
     would either weaken the scrub as superstition or build a guard for nothing.
-    >>> AND NOTE HOW IT SURVIVED: TWO SEATS AGREED ON IT. A reconciliation that
-    makes two contradictory documents both true is extremely satisfying and is
-    exactly the shape that stops people checking whether the mechanism exists. <<<
+    >>> RESOLVED FROM VENDOR SOURCE, NOT FROM ARGUMENT (drop-on-meta-edge, no
+    auth probe and no spawn — vibe 2.23.3's own code): <<<
+      core/config/vibe_schema.py:83-90 loads `.env` into `environ` ONLY where the
+      key is unset, with their comment: "An explicit non-empty process/shell
+      value wins over the .env file."
+      setup/auth/auth_state.py models the sources as ONE RANKED AXIS —
+      PROCESS_ENV > VIBE_HOME_ENV_FILE > OS_KEYRING — with one provider entry,
+      one api_base, one api_key_env_var. THERE IS NO PLAN OR TIER CONCEPT.
+    So: no subscription-vs-metered fork exists, and the scrub's real job is
+    PRECEDENCE — without it an inherited shell key SHADOWS the cell's own linked
+    `.env` and the cell runs on the operator's credential.
+
+    AND THE CELL GENOME'S CONTRARY CLAIM ("the key IS the subscription path;
+    scrubbing BREAKS the cell") IS NOT WRONG — IT IS TRUE OF A DIFFERENT
+    TOPOLOGY. The swarph-mesh ADAPTER lane runs an EPHEMERAL VIBE_HOME with NO
+    `.env` file, so there process env is the ONLY channel and the key must
+    survive. >>> A TRUE FACT MIGRATED FROM ONE LANE TO THE OTHER AND KEPT ITS
+    CONFIDENCE. That is why three accounts disagreed while each was grounded in
+    something real. <<<
     """
     # NOTE: this scrubs VIBE_HOME too. _vibe_env SETS IT AFTER calling this, so
     # the inherited value is closed and the membrane's own value is authoritative

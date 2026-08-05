@@ -295,3 +295,30 @@ def test_an_ABSENT_credential_stays_QUIET_it_is_the_intended_case(tmp_path, caps
     assert capsys.readouterr().err == "", (
         "warned about an absent credential, which is the DOCUMENTED intended "
         "case — a false alarm on the normal path")
+
+
+def test_the_credential_links_to_VIBE_HOME_env_where_vibe_ACTUALLY_looks(tmp_path, monkeypatch):
+    """>>> THIS TEST DID NOT EXIST WHEN IT WAS MOST NEEDED. <<< (drop-on-meta-edge.)
+
+    Switching from a fake `$HOME` to `VIBE_HOME` changed where vibe reads its
+    `.env`: the layout is FLAT, so the credential belongs at `<VIBE_HOME>/.env`,
+    not the old `$HOME`-shaped `<cell_home>/.vibe/.env`. The obvious regression
+    of that switch is moving the LOOKUP and leaving the LINK behind — vibe would
+    then never find it, the cell would start unauthenticated, and
+    `_link_vibe_credential` HAD NO TEST, so nothing would have caught it.
+
+    Verified by execution: `VIBE_HOME=<tmp> vibe --check-upgrade` writes
+    cache.toml / vibehistory / logs / trusted_folders.toml flat into <tmp>."""
+    from swarph_cli.commands import spawn as sp
+    op = tmp_path / "operator"
+    (op / ".vibe").mkdir(parents=True)
+    (op / ".vibe" / ".env").write_text("MISTRAL_API_KEY=sk-sub")
+    monkeypatch.setattr(sp.Path, "home", staticmethod(lambda: op))
+
+    env = _vibe_env(_cell(tmp_path))
+    linked = Path(env["VIBE_HOME"]) / ".env"
+    assert linked.is_symlink(), (
+        f"no credential link at {linked} — vibe reads <VIBE_HOME>/.env (FLAT "
+        f"layout), so a link left at the old $HOME-shaped path is invisible to it")
+    assert linked.resolve() == (op / ".vibe" / ".env").resolve()
+    assert linked.read_text() == "MISTRAL_API_KEY=sk-sub"
