@@ -62,9 +62,25 @@ swarph board cards add --project <id|slug> --title "…" [--body "…"] [--ai2] 
 swarph board cards move <id> <stage>          # advance the card (proposed→idea→spec→plan→build→test→done)
 swarph board cards link <id> <key> <value>    # add/update a link (merges — never clobbers existing links)
 swarph board cards assign <id> <who>
+swarph board cards thread <id> [--limit N]     # the card's conversation (a card IS a thread)
+swarph board cards say <id> --content "…" [--to <peer>] [--kind fyi|question|answer|status|unblock]
 ```
 
 `--project` accepts a numeric id **or** a slug (resolved via `projects list`). Note: card creation always starts at `proposed` (the gateway has no stage-on-create) — use `cards move` to advance.
+
+**`thread` / `say` (v0.41.6)** — every card carries a bound conversation, so a
+finding, a verdict, or a hand-off lands **on the card** instead of in a DM only the
+sender and one recipient can read.
+
+`say` needs a recipient because a card post is still a DM on the wire: `--to` wins,
+otherwise the card's **assignee**. With neither, it **refuses** rather than
+substituting a placeholder — the gateway accepts an unregistered `to_node` with a
+`200`, so a placeholder would be indistinguishable from delivery while being
+addressed to nobody.
+
+Attaching requires an explicit `propose` grant on the project, not merely read
+access: a message on a card publishes to everyone who can read that card, now and
+in future.
 
 ### `swarph bench` (v0.38.0)
 

@@ -2,6 +2,45 @@
 
 Notable changes to `swarph-cli`. Earlier history: `git log`.
 
+## 0.41.6 — 2026-08-05
+- **feat(board): `cards thread` + `cards say`** — the CLI half of card↔DM fusion.
+  The gateway had carried `GET /board/cards/{id}/thread` and the card-gated attach
+  path since earlier the same day and **nothing could reach them**: no CLI verb
+  existed, so the fusion lived in the database and the OpenAPI schema — shipped,
+  deployed, migrated across ~300 cards, invisible to every human and cell. Found
+  by trying to write a finding onto a card and having to send a DM instead.
+  `say` refuses when a card has no assignee and no `--to` rather than inventing a
+  placeholder recipient: the gateway accepts an unregistered `to_node` with a 200,
+  so a placeholder is byte-identical to delivery while addressed to nobody.
+- **fix(spawn): the Windows Terminal rescue is provider-generic.** It lived in
+  `ClaudeMembrane.pre_launch` — nothing in its body was claude-specific, only its
+  **call site** was — so codex and antigravity never inherited it. Those were
+  exactly the two cells the operator had been launching by hand for months.
+  `ClaudeMembrane.pre_launch` is deleted; it collapsed into the base.
+- **fix(spawn): codex + antigravity now `chdir`** like claude/grok/vibe, and pass
+  `-C .` / `--add-dir .` instead of the absolute cwd. Measured failure:
+  `swarph spawn` with a cwd of `C:/…/OneDrive - REDACTED_SENSITIVE_IDENTIFIER Groupe/Bureau/REDACTED_SENSITIVE_IDENTIFIER`
+  died with `error: unexpected argument 'REDACTED_SENSITIVE_IDENTIFIER' found` — the path re-split on
+  spaces crossing the exec boundary. Codex itself parses that path correctly;
+  the mangling was ours. Fixing by removing the dependency on quoting rather than
+  out-guessing which Windows layer re-tokenises.
+  >>> **VERIFICATION LIMIT, STATED:** CI is green on `windows-latest`, but the
+  suite mocks `_launch_via_tmux`, `_relaunch_in_windows_terminal` and `os.execve`
+  — the exact boundary this fixes. Windows CI proves the code imports and the
+  logic holds; it does **not** prove argv survives `execve`. A broken fix returns
+  the same green. Metal verification is outstanding. <<<
+- **fix(cli):** bound the shared pin (`swarph-shared>=0.4.0,!=0.6.0,<0.7`) so a
+  transitive break becomes an install-time resolver error, and `--help` shows the
+  real product surface (#308, #301).
+- **fix(monitor):** land `TmuxNotifySink`, which was **uncommitted and
+  load-bearing** on the shared editable clone (#309) — one `git checkout` from
+  deletion.
+- **note:** the three fixes above had been running in production on the lab-ovh
+  box for days via an editable clone parked on a WIP branch, and had never reached
+  `main` or PyPI. No version string showed it: `swarph --version` reported 0.41.5
+  (a claim the source makes about itself) while the installed dist-info said
+  0.41.4 and the executing code was neither.
+
 ## 0.39.4 — 2026-07-27
 - **fix(packaging):** ship `scripts/ensure_monitor.sh`. 0.39.3 shipped a README
   telling operators to run it while the wheel **did not contain it** — non-`.py`
