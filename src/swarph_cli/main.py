@@ -119,9 +119,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="swarph",
         description=(
-            "swarph — multi-LLM CLI with mesh-gateway integration. "
-            "Phase 2 one-shot mode."
+            "swarph — the mesh CLI: spawn and run agent cells, talk to the mesh, "
+            "and query the brain. Also a one-shot multi-LLM prompt tool."
         ),
+        epilog=(
+            "verbs: " + ", ".join(sorted(_VERB_HANDLERS)) + "\n\n"
+            "getting started:\n"
+            "  swarph init <name>        scaffold your own cell (no gateway needed)\n"
+            "  swarph spawn <name>       run it\n"
+            "  swarph gateway serve      run your own mesh-gateway "
+            "(needs: pip install 'swarph-cli[gateway]')\n"
+            "  swarph onboard <peer>     join an EXISTING mesh (needs its URL + a token)\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
         "prompt",
@@ -132,8 +142,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--provider",
         default="gemini",
-        help='LLM provider. Phase 1 ships "gemini" only; Phase 4+ adds '
-        "deepseek/claude/openai/grok.",
+        help="LLM provider for the one-shot path (default: gemini). "
+        "For agent CELLS see `swarph init --provider`, which lists the "
+        "spawn providers actually supported.",
     )
     p.add_argument(
         "--model",
