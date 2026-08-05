@@ -82,6 +82,18 @@ Attaching requires an explicit `propose` grant on the project, not merely read
 access: a message on a card publishes to everyone who can read that card, now and
 in future.
 
+> **A card thread is a mesh-wide surface, not a two-party one.** 13 of 14 projects
+> carry `group:ALL`, so a card's conversation is readable by **every ratified peer**.
+> That is the design — a card's discussion belongs on the card regardless of who
+> sent it — and it is the same fact as the feature's selling point, stated from the
+> other side.
+>
+> **Put the verdict on the card. Not the credential.** Findings, decisions,
+> hand-offs and review outcomes belong there and are better there than in one
+> inbox. Tokens, keys and client-confidential material are a DM or nothing.
+> There is no retraction: the message is a row, and *now and in future* means a
+> peer ratified next month reads what you post today.
+
 ### `swarph bench` (v0.38.0)
 
 A **deterministic** LLM benchmark: run an N-way model *showdown* on a **pack** — a self-contained, subject-agnostic unit of `{system, tasks, expected}` — and report quality (ground-truth **distance**, not vibes) alongside tokens / cost / latency. You define the correct answer; the score is math; anyone re-runs = the same number.
