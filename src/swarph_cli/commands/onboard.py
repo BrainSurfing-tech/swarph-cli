@@ -211,6 +211,19 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
         + (f"(SWARPH_SELF={self_name!r} -> not found)" if self_name
            else "(SWARPH_SELF IS UNSET — set it; this verb will not guess a peer name)")
         + "\n  The per-peer token is sufficient: POST /peers/register accepts it."
+        # >>> NAME THE ALTERNATIVE. `onboard` JOINS AN EXISTING MESH, so it needs
+        # that mesh's URL and a token ITS operators issue — an outsider cannot
+        # complete it, ever, without them. The command a newcomer actually wants
+        # is `init`, and nothing told them: reconstructed 2026-08-05 in a clean
+        # sandbox as the path our external paper reviewer would have hit.
+        # A refusal that knows the remedy and does not say it is a wall with no
+        # door.
+        + "\n\n  NOTE: `swarph onboard` JOINS AN EXISTING MESH — it needs that\n"
+          "  mesh's gateway URL and a token its operators issue for you.\n"
+          "  To stand up YOUR OWN instead, no token required:\n"
+          "      pip install 'swarph-cli[gateway]'\n"
+          "      swarph gateway serve --port 8788 --db ~/.swarph/mesh.db\n"
+          "      swarph init <name>        # scaffold a cell\n"
     )
 
 
