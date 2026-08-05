@@ -161,6 +161,71 @@ def _format_projects(data) -> str:
     return "\n".join(lines)
 
 
+# ── #181: the card IS a thread ────────────────────────────────────────────────
+# The gateway has carried `GET /board/cards/{id}/thread` and the card-gated attach
+# path since 2026-08-05, and NOTHING COULD REACH THEM. No CLI verb existed, so the
+# card↔DM fusion lived entirely in the database and the OpenAPI schema: shipped,
+# deployed, and invisible to every human and cell. Found the way these are always
+# found — I tried to write a finding onto a card and had to send a DM instead.
+
+def _thread_url(gateway: str, card_id: int, *, limit: Optional[int] = None) -> str:
+    base = f"{gateway.rstrip('/')}/board/cards/{card_id}/thread"
+    return f"{base}?limit={limit}" if limit else base
+
+
+def _thread_recipient(card: dict, explicit_to: Optional[str]) -> str:
+    """Who a card-thread post is addressed to. `--to` wins, else the assignee.
+
+    >>> RAISES RATHER THAN INVENTING A SENTINEL. <<< POST /messages requires
+    exactly one of {to_node, channel}, so a card post needs a real recipient. The
+    tempting move is a placeholder like "board" or "__card__" — but board card
+    #259 measured what the gateway does with an unregistered to_node: it returns
+    200 and the message is addressed to nobody, indistinguishable from delivery.
+    A placeholder here would manufacture that defect once per card post.
+    """
+    if explicit_to:
+        return explicit_to
+    assignee = card.get("assignee")
+    if assignee:
+        return assignee
+    raise RuntimeError(
+        f"card #{card.get('id')} has no assignee, so there is no default recipient "
+        f"for a thread post — pass --to <peer>. (A card post is still a DM on the "
+        f"wire; it needs someone to be addressed to.)"
+    )
+
+
+def _card_say_payload(from_node: str, to_node: str, kind: str, content: str,
+                      thread_uuid: str) -> dict:
+    return {
+        "from_node": from_node,
+        "to_node": to_node,
+        "kind": kind,
+        "content": content,
+        "thread_id": thread_uuid,
+    }
+
+
+def _format_thread(data) -> str:
+    msgs = data.get("messages", []) if isinstance(data, dict) else (data or [])
+    card_id = data.get("card_id") if isinstance(data, dict) else None
+    if not msgs:
+        # NOT "(no messages)" alone — an empty thread and an unreadable one must not
+        # render the same. The gateway 403s an unreadable card and 409s an unmigrated
+        # one, so reaching here with [] genuinely means nobody has posted yet.
+        return f"card #{card_id}: thread is empty — no messages posted yet"
+    lines = [f"card #{card_id} — {len(msgs)} message(s)"]
+    for m in msgs:
+        ts = (m.get("created_at") or "")[:16].replace("T", " ")
+        lines.append(
+            f"\n  [{m.get('id')}] {ts}  {_s(m.get('from_node'))} -> "
+            f"{_s(m.get('to_node'))}  ({_s(m.get('kind'))})"
+        )
+        for ln in (_s(m.get("content")) or "").splitlines():
+            lines.append(f"      {ln}")
+    return "\n".join(lines)
+
+
 # ── parser + dispatch ─────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -198,6 +263,18 @@ def _build_parser() -> argparse.ArgumentParser:
     cb.add_argument("action", choices=["add", "rm"])
     cb.add_argument("id", type=int); cb.add_argument("label")
     cb.add_argument("--json", action="store_true"); _add_common(cb)
+    ct = cards.add_parser("thread", help="show the card's conversation (#181: a card IS a thread)")
+    ct.add_argument("id", type=int)
+    ct.add_argument("--limit", type=int, default=None, help="max messages (gateway caps at 1000)")
+    _add_common(ct)
+    cy = cards.add_parser("say", help="post a message onto the card's thread")
+    cy.add_argument("id", type=int)
+    cy.add_argument("--content", required=True)
+    cy.add_argument("--kind", default="fyi", help="status|question|answer|unblock|fyi")
+    cy.add_argument("--to", dest="to_node", default=None,
+                    help="recipient peer (default: the card's assignee)")
+    _add_common(cy)
+
     cr = cards.add_parser("ready", help="flag a card ready-to-advance (move_ready) for the orchestrator")
     cr.add_argument("id", type=int); cr.add_argument("--clear", action="store_true", help="unset move_ready")
     cr.add_argument("--json", action="store_true"); _add_common(cr)
@@ -293,6 +370,48 @@ def run_board(argv: list[str]) -> int:
         if args.command == "assign":
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "assignee": args.assignee}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} assignee -> {x.get('assignee')}", aj)
+        if args.command == "thread":
+            st, d = _http_get_json(_thread_url(gw, args.id, limit=args.limit), token)
+            # NO special-casing of 403/409. `_out` already returns 1 and prints the
+            # gateway's `detail` verbatim for every non-2xx, so the refusal reaches
+            # the operator intact — a 409 ("predates #181a") and a 403 ("not
+            # readable") are never rendered as an empty thread.
+            # >>> A HAND-WRITTEN BRANCH HERE WAS DELETED: it re-printed the same
+            # detail under a different prefix, carried a comment asserting it
+            # prevented a flattening `_out` never did, and a mutation that removed
+            # it PASSED ALL 15 TESTS — the definition of a code path doing nothing.
+            # Reading it would not have found that; mutating it did. <<<
+            return _out(st, d, _format_thread, aj)
+        if args.command == "say":
+            st, card = _http_get_json(f"{gw}/board/cards/{args.id}", token)
+            if st != 200:
+                print(f"swarph board cards say: cannot read card #{args.id}: "
+                      f"{card.get('detail', card)}", file=sys.stderr)
+                return 1
+            thread_uuid = card.get("thread_uuid")
+            if not thread_uuid:
+                # Named refusal, not a silent no-op. Same reason the gateway 409s.
+                print(f"swarph board cards say: card #{args.id} has no bound thread "
+                      f"(it predates #181a). Run scripts/migrate_card_threads.py on "
+                      f"the gateway host.", file=sys.stderr)
+                return 1
+            try:
+                to_node = _thread_recipient(card, args.to_node)
+            except RuntimeError as exc:
+                print(f"swarph board cards say: {exc}", file=sys.stderr)
+                return 1
+            st, d = _post_json(
+                f"{gw}/messages",
+                _card_say_payload(self_name, to_node, args.kind, args.content, thread_uuid),
+                token,
+            )
+            # A 403 here carries the gateway's explanation that attaching PUBLISHES
+            # to everyone who can read the card, now and in future, so it needs an
+            # explicit `propose` grant. `_out` passes `detail` through whole; it does
+            # not need help, and a second copy of that logic is a second thing to
+            # keep in sync.
+            return _out(st, d, lambda x: f"posted id={x.get('id')} onto card "
+                                         f"#{args.id} (to {to_node})", aj)
         if args.command == "ready":
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "move_ready": not args.clear}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} move_ready -> {x.get('move_ready')}", aj)
