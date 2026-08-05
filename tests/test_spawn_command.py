@@ -144,12 +144,16 @@ def test_build_codex_argv_default_sandbox(tmp_path):
     assert argv == [
         "codex",
         "-C",
-        str(tmp_path),
+        ".",          # #314: relative, NOT str(tmp_path) — CodexMembrane.launch chdirs
         "-s",
         "workspace-write",
         "-a",
         "on-request",
     ]
+    # The point of `.` is that NOTHING path-shaped crosses the exec boundary, where
+    # Windows re-splits on spaces. Assert the property, not just the spelling — a
+    # future edit that reintroduces an absolute path fails HERE even if it keeps -C.
+    assert str(tmp_path) not in argv
     assert "--append-system-prompt" not in argv
     assert "--session-id" not in argv
     assert "--resume" not in argv
@@ -172,7 +176,7 @@ def test_build_codex_argv_explicit_sandbox_and_passthrough(tmp_path):
     assert argv == [
         "codex",
         "-C",
-        str(tmp_path),
+        ".",          # #314: relative — CodexMembrane.launch chdirs
         "-s",
         "read-only",
         "-a",
@@ -334,7 +338,12 @@ def test_run_spawn_codex_dry_run_prints_fresh_session_note(
     captured = capsys.readouterr()
     assert rc == 0
     assert captured.out.splitlines()[0] == "codex: fresh-session-per-spawn, no pinned id"
-    assert captured.out.splitlines()[1].startswith(f"codex -C {tmp_path}")
+    # #314: argv carries `.`, not the absolute cwd (CodexMembrane.launch chdirs).
+    assert captured.out.splitlines()[1].startswith("codex -C .")
+    assert str(tmp_path) not in captured.out          # no abs path crosses to stdout
+    # ...and the operator is told stdout is not runnable from anywhere:
+    assert f"cwd:         {tmp_path}" in captured.err
+    assert "argv paths are RELATIVE" in captured.err
     assert "-s workspace-write" in captured.out
     assert "-a on-request" in captured.out
     assert "--append-system-prompt" not in captured.out
@@ -384,7 +393,7 @@ def test_run_spawn_codex_execve_scrubs_env(
     assert captured["argv"] == [
         "codex",
         "-C",
-        str(tmp_path),
+        ".",          # #314: relative — CodexMembrane.launch chdirs
         "-s",
         "read-only",
         "-a",
@@ -859,7 +868,7 @@ def test_build_agy_argv_fresh(tmp_path):
         "--continue",
         "--sandbox",
         "--add-dir",
-        str(tmp_path),
+        ".",          # #314: relative — AntigravityMembrane.launch chdirs
         "--prompt-interactive",
         "Hello starter!",
         "--extra",

@@ -463,8 +463,12 @@ def _build_agy_argv(
     if is_sandbox is not False:
         argv.append("--sandbox")
     
-    # Pass --add-dir <cwd> for directory setup.
-    argv.extend(["--add-dir", str(cell.cwd)])
+    # `.` NOT the absolute path (#314), same reasoning as codex's `-C .`:
+    # AntigravityMembrane.launch now chdirs to cell.cwd first, so `.` resolves
+    # identically — but an absolute Windows path containing spaces gets re-split
+    # crossing the exec boundary ("unexpected argument 'REDACTED_SENSITIVE_IDENTIFIER'", measured on
+    # workstation-lc). The directory is still declared; only its SPELLING changes.
+    argv.extend(["--add-dir", "."])
     
     if not no_starter and cell.starter_prompt_path:
         starter = read_starter_prompt(cell)
@@ -518,8 +522,12 @@ def _build_codex_argv(cell: Cell, passthrough: list[str]) -> list[str]:
     else:
         argv = ["codex"]
     argv.extend([
+        # `.` NOT the absolute path (#314). CodexMembrane.launch chdirs to cell.cwd
+        # first, so `.` resolves identically — but an absolute Windows path with
+        # spaces gets re-split crossing the exec boundary, and `.` cannot. The
+        # workspace root stays explicitly declared; only its SPELLING changes.
         "-C",
-        str(cell.cwd),
+        ".",
         "-s",
         _codex_sandbox(cell),
         "-a",
@@ -789,6 +797,14 @@ def _print_dry_run(
     print(f"#   name:        {cell.name}", file=sys.stderr)
     print(f"#   role:        {cell.role}", file=sys.stderr)
     print(f"#   cwd:         {cell.cwd}", file=sys.stderr)
+    # #314: codex/antigravity argv now carry `.` rather than the absolute cwd, so
+    # the STDOUT line stopped being a self-sufficient command — pasted into a shell
+    # somewhere else it silently targets the WRONG directory instead of failing.
+    # The cwd is printed above, but on STDERR, and `--dry-run | sh` keeps only
+    # stdout. Say the precondition on the same stream as the header that carries it.
+    if any(a == "." for a in argv):
+        print(f"#   NOTE:        argv paths are RELATIVE — run this from the cwd above",
+              file=sys.stderr)
     if cell.provider == "codex":
         print(
             "#   session_id:  codex: fresh-session-per-spawn, no pinned id "
@@ -922,16 +938,29 @@ def _console_is_genuine_wt() -> bool:
 
 
 def _relaunch_in_windows_terminal(
-    claude_bin: str, claude_argv: list[str], cwd: Path,
+    binary: str, argv: list[str], cwd: Path,
 ) -> bool:
     """Auto-fix the conhost TUI bug by relaunching the session in Windows Terminal.
 
-    On legacy Windows console (``conhost.exe``), Claude Code's Ink TUI breaks: the
-    SGR terminator ``m`` leaks from the output stream into stdin, so pressing Enter
-    inserts a literal ``m`` instead of submitting (see docs/WINDOWS_KNOWN_ISSUES.md).
+    PROVIDER-GENERIC since the base-hoist. The parameters were named ``claude_bin``
+    / ``claude_argv`` while ClaudeMembrane was the only caller; nothing about the
+    body was claude-specific, and the names were the only thing saying otherwise.
+
+    On legacy Windows console (``conhost.exe``), a full-screen TUI breaks on input.
+    The measured instances differ per provider and BOTH are real:
+      * claude (Ink/node): the SGR terminator ``m`` leaks from the output stream
+        into stdin, so Enter inserts a literal ``m`` instead of submitting
+        (docs/WINDOWS_KNOWN_ISSUES.md);
+      * codex (Rust/ratatui): Enter EXITS the CLI at a prompt, and output from the
+        parent shell interleaves with the TUI's redraw, eating characters
+        (measured on workstation-lc 2026-08-05, board #314).
     Windows Terminal handles VT-input correctly. The DEFAULT is to relaunch (rescue):
     unless we can POSITIVELY confirm we're already in a genuine Windows Terminal, we
     pop a fresh WT window and return True (the caller should exit this console).
+
+    >>> DO NOT re-narrow this to one provider. It was claude-only for months purely
+    because the CALL SITE lived in ClaudeMembrane, and the two cells the commander
+    had to launch by hand all that time were exactly the two that never got it. <<<
 
     Genuine-WT detection is via process ancestry (``_console_is_genuine_wt``), NOT the
     inheritable ``WT_SESSION`` env var — which wrongly looked like "already in good WT"
@@ -980,8 +1009,12 @@ def _relaunch_in_windows_terminal(
         return False
     # Relaunch claude inside Windows Terminal, in the cell's cwd, carrying
     # SWARPH_SPAWN=1 so a SessionStart hook doesn't double-inject the starter.
-    # claude_argv[0] is the "claude" argv0; the real flags are claude_argv[1:].
-    wt_cmd = [wt, "-d", str(cwd), "--", claude_bin, *claude_argv[1:]]
+    # argv[0] is the provider's argv0 (e.g. "claude"/"codex"); the real flags are
+    # argv[1:]. The resolved BINARY path replaces argv0 because wt needs an
+    # executable, not a bare name. (Renamed from claude_bin/claude_argv with the
+    # #314 hoist — the body kept the old names and NameError'd until four existing
+    # tests caught it. A rename that stops at the signature is not a rename.)
+    wt_cmd = [wt, "-d", str(cwd), "--", binary, *argv[1:]]
     env = {**os.environ, "SWARPH_SPAWN": "1"}
     try:
         subprocess.Popen(wt_cmd, env=env)
@@ -1251,6 +1284,37 @@ class ProviderMembrane:
         # TUI's terminal queries so every provider's TUI renders correctly.
         if session_name and _launch_via_tmux(binary, argv, cell.cwd, session_name):
             return 0
+
+        # conhost TUI auto-fix fallback (no tmux), for EVERY provider. On a legacy
+        # Windows console, relaunch the session in Windows Terminal where VT-input
+        # works. Returns 0 (and we exit this console) only when it actually
+        # relaunched. HOISTED FROM ClaudeMembrane 2026-08-05 (#314): the rescue was
+        # never claude-specific — only its call site was — and codex + antigravity,
+        # the two providers that never inherited it, are exactly the two the
+        # commander had been launching by hand.
+        if _relaunch_in_windows_terminal(binary, argv, cell.cwd):
+            return 0
+
+        # Still in a broken console (conhost with no wt.exe, or operator acked).
+        # Warn unless suppressed. Inside a genuine Windows Terminal (confirmed by
+        # ancestry, NOT the inheritable WT_SESSION) the TUI works, so no warning
+        # fires there.
+        if (
+            sys.platform == "win32"
+            and not no_banner
+            and not os.environ.get("SWARPH_WIN_ACK")
+            and not _console_is_genuine_wt()
+        ):
+            print(
+                "swarph spawn: WARNING — legacy Windows console (conhost) and Windows "
+                "Terminal (wt.exe) was not found, so the session couldn't be "
+                "auto-relaunched. Agent TUIs mis-handle input here (claude: Enter "
+                "inserts literal 'm'; codex: Enter exits the CLI). Install Windows "
+                "Terminal (Microsoft Store) and re-run, or use WSL2. See "
+                "docs/WINDOWS_KNOWN_ISSUES.md. Set SWARPH_WIN_ACK=1 to suppress and "
+                "run here anyway.",
+                file=sys.stderr,
+            )
         return None
 
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
@@ -1305,46 +1369,10 @@ class ClaudeMembrane(ProviderMembrane):
             "or set PATH explicitly."
         )
 
-    def pre_launch(
-        self, cell: Cell, binary: str, argv: list[str], *, no_banner: bool,
-        session_name: Optional[str] = None,
-    ) -> Optional[int]:
-        # tmux launch is now provider-generic (base). Claude keeps ONLY its extra:
-        # the Windows-Terminal relaunch + legacy-conhost warning for the Ink-TUI/
-        # PowerShell Enter-inserts-'m' bug that is Claude-specific.
-        rc = super().pre_launch(
-            cell, binary, argv, no_banner=no_banner, session_name=session_name
-        )
-        if rc is not None:
-            return rc
-
-        # conhost TUI auto-fix fallback (no tmux): on legacy Windows console (not
-        # Windows Terminal), relaunch the claude session in Windows Terminal where
-        # the Ink TUI works. Returns 0 (and we exit this console) only when it
-        # actually relaunched.
-        if _relaunch_in_windows_terminal(binary, argv, cell.cwd):
-            return 0
-
-        # Still in a broken console (conhost with no wt.exe, or operator acked).
-        # Warn unless suppressed. Inside a genuine Windows Terminal (confirmed by
-        # ancestry, NOT the inheritable WT_SESSION) the TUI works, so no warning
-        # fires there.
-        if (
-            sys.platform == "win32"
-            and not no_banner
-            and not os.environ.get("SWARPH_WIN_ACK")
-            and not _console_is_genuine_wt()
-        ):
-            print(
-                "swarph spawn: WARNING — legacy Windows console (conhost) and Windows "
-                "Terminal (wt.exe) was not found, so the session couldn't be "
-                "auto-relaunched. Claude Code's TUI mis-handles input here (Enter "
-                "inserts literal 'm'). Install Windows Terminal (Microsoft Store) and "
-                "re-run, or use WSL2. See docs/WINDOWS_KNOWN_ISSUES.md. Set "
-                "SWARPH_WIN_ACK=1 to suppress and run here anyway.",
-                file=sys.stderr,
-            )
-        return None
+    # NO pre_launch OVERRIDE. It collapsed into the base 2026-08-05 (#314) when the
+    # Windows-Terminal rescue was hoisted: claude's "extra" was the whole body, and
+    # keeping an override that only calls super() is how a provider-generic step
+    # gets re-narrowed later. Same collapse GrokMembrane took in the #129 tmux hoist.
 
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
         try:
@@ -1438,6 +1466,17 @@ class CodexMembrane(ProviderMembrane):
         )
 
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
+        # chdir, like claude/grok/vibe. #314: codex was one of TWO membranes that
+        # never chdir'd, compensating by shipping the cwd as an argv string
+        # (`-C <abs path>`) — which re-splits on Windows when the path has spaces
+        # ("unexpected argument 'REDACTED_SENSITIVE_IDENTIFIER'", workstation-lc 2026-08-05). With the
+        # process cwd correct, _build_codex_argv passes `-C .` and no path-shaped
+        # string crosses the exec boundary at all.
+        try:
+            os.chdir(cell.cwd)
+        except OSError as exc:
+            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
+            return 1
         env = _scrubbed_codex_env()
         env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
         try:
@@ -1486,6 +1525,19 @@ class AntigravityMembrane(ProviderMembrane):
         )
 
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
+        # chdir, like claude/grok/vibe. #314: antigravity was the OTHER membrane
+        # that never chdir'd, AND it embeds the cwd in argv via `--add-dir` — so it
+        # carried BOTH halves of the codex defect, not the quieter half.
+        # >>> THE COMMENT HERE PREVIOUSLY SAID "its argv carries no path". THAT WAS
+        # FALSE. It came from grepping source for `str(cell.cwd)` against guessed
+        # function names and misfiling line 467 under claude; the argv-measuring
+        # test in test_spawn_base_hoist.py refuted it immediately. Claude embeds no
+        # path at all. Trust the built argv, not a read of the builder. <<<
+        try:
+            os.chdir(cell.cwd)
+        except OSError as exc:
+            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
+            return 1
         # execve carries exactly the scrubbed env to the child without mutating
         # this process's os.environ first (so a failed exec leaves us intact).
         env = _agy_env()
