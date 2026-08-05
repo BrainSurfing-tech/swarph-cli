@@ -57,6 +57,27 @@ def test_parse_sink_covers_the_shipped_axis():
     assert mesh.parse_sink("stdout").name == "stdout"
     tmux = mesh.parse_sink("tmux:lab:0.0")
     assert tmux.name == "tmux:lab:0.0" and tmux.target == "lab:0.0"
+    notify = mesh.parse_sink("tmux-notify:lab:0.0")
+    assert notify.name == "tmux-notify:lab:0.0" and notify.target == "lab:0.0"
+
+
+def test_tmux_notify_reports_delivery_without_waking_a_pane(monkeypatch, tmp_path):
+    """A status-line notice is distinct from a prompt injection."""
+    monkeypatch.setattr(mesh, "_http_get_json", _window(_dm(5000)))
+    notices = []
+    monkeypatch.setattr(
+        mesh, "_tmux_notify", lambda target, count: notices.append((target, count)) or True
+    )
+    monkeypatch.setattr(
+        mesh, "_tmux_wake", lambda target: (_ for _ in ()).throw(AssertionError("must not wake"))
+    )
+
+    sink = mesh.parse_sink("tmux-notify:lab:0.0")
+    state = _state(tmp_path, [sink])
+    mesh._monitor_iteration(state)
+
+    assert notices == [("lab:0.0", 1)]
+    assert state.ledger(sink.name)["last_delivered_id"] == 5000
 
 
 def test_pull_keeps_a_ledger_and_none_does_not():
