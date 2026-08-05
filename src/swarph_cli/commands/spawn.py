@@ -1533,6 +1533,20 @@ def _scrub_vibe_namespace(env: dict[str, str]) -> None:
     one WITHOUT ANY VISIBLE CHANGE — a billing leak that reads as working.
     Allowlist nothing: vibe falls back to its own defaults plus the linked
     credential.
+
+    >>> AND THIS DIRECTLY CONTRADICTS THE swarph-mesh 0.8.0 NOTE, WHICH SAYS
+    MISTRAL_API_KEY *IS* THE SUBSCRIPTION PATH AND SCRUBBING IT BREAKS THE LANE.
+    BOTH ARE RIGHT, BECAUSE THE CREDENTIAL ARRIVES BY A DIFFERENT CHANNEL IN
+    EACH: <<<
+      · swarph-mesh ADAPTER — a firejail worker with an EPHEMERAL VIBE_HOME and
+        the prompt on stdin. No persistent home, so ENV IS THE ONLY CHANNEL and
+        the key MUST survive.
+      · this CELL — an ISOLATED HOME with the operator's ~/.vibe/.env SYMLINKED
+        in (see _link_vibe_credential). A FILE channel, so env can and should go.
+    Same credential, two delivery paths, opposite correct answers.
+    THIS PARAGRAPH IS LOAD-BEARING: without it, a maintainer chasing a billing
+    bug reads the 0.8.0 note, sees this scrub as the cause, deletes it, and
+    silently un-isolates every vibe cell. (gpu-wsl, reviewing PR #181.)
     """
     for key in [k for k in env if k.startswith(("VIBE_", "MISTRAL_"))]:
         env.pop(key, None)
@@ -1544,18 +1558,40 @@ def _link_vibe_credential(dest: Path) -> None:
     The cell gets the operator's SUBSCRIPTION credential (the $0 path) while
     keeping its own history/config/sessions. Symlink, not copy: a copy is a
     second credential on disk that never rotates when the original does.
-    Absent source is NOT an error here — the cell then starts unauthenticated
-    and vibe says so itself, which is a better failure than a spawn that
-    refuses for a reason the operator cannot see.
+    ABSENT SOURCE IS NOT AN ERROR — the cell starts unauthenticated and vibe says
+    so itself, which is a better failure than a spawn refusing for a reason the
+    operator cannot see.
+
+    >>> BUT A FAILED SYMLINK IS NOT AN ABSENT SOURCE, AND THE FIRST DRAFT OF THIS
+    FUNCTION RENDERED THEM IDENTICALLY. <<< A bare `except OSError: pass` also
+    swallows permissions, cross-device, a dangling dest, a read-only cwd — real
+    errors — and the cell then starts unauthenticated WITH NO SIGNAL,
+    indistinguishable from the intended case. That is FAILURE RENDERED AS
+    ABSENCE, the family this mesh has been carding all week.
+    So the two are split: if the operator HAS a credential and we could not link
+    it, WE KNOW something went wrong and we say so. (gpu-wsl, reviewing PR #181 —
+    a defect I did not ask about.)
     """
     src = Path.home() / ".vibe" / ".env"
     try:
         if dest.exists() or dest.is_symlink():
             return
-        if src.exists():
-            dest.symlink_to(src)
     except OSError:
-        pass
+        return
+    if not src.exists():
+        return  # intended, documented: no operator credential to share
+    try:
+        dest.symlink_to(src)
+    except OSError as exc:
+        # LOUD, because the operator demonstrably had a credential and the cell
+        # did not get it. Not fatal — vibe will report unauthenticated itself —
+        # but never silent, or the two causes stay indistinguishable.
+        print(
+            f"swarph spawn: could not link the vibe credential "
+            f"{src} -> {dest}: {exc}. The cell will start UNAUTHENTICATED "
+            f"even though an operator credential exists.",
+            file=sys.stderr,
+        )
 
 
 def _vibe_env(cell: Cell) -> dict[str, str]:

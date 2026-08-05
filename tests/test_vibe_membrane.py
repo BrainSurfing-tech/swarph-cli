@@ -189,3 +189,49 @@ def test_guard_file_is_None_vibe_has_no_cwd_project_doc(tmp_path):
     """No CLAUDE.md/AGENTS.md sibling exists for vibe, so there is no empty-file
     clobber to guard against — always-sync is correct here (same as grok)."""
     assert MEMBRANES["vibe"].memory_guard_file(_cell(tmp_path)) is None
+
+
+# ── gpu-wsl's DEFECT: failure must not be rendered as absence ───────────────
+
+def test_a_FAILED_symlink_is_LOUD_not_swallowed_as_an_absent_credential(tmp_path, capsys, monkeypatch):
+    """>>> A FAILED SYMLINK IS NOT AN ABSENT SOURCE, AND THE FIRST DRAFT RENDERED
+    THEM IDENTICALLY. <<< (gpu-wsl, PR #181 — a defect I did not ask about.)
+
+    `except OSError: pass` swallowed permissions / cross-device / read-only cwd
+    alongside the intended no-credential case, so the cell started
+    unauthenticated with NO SIGNAL and the two causes were indistinguishable.
+    FAILURE RENDERED AS ABSENCE.
+
+    The discriminator is that we KNOW the operator had a credential: `src`
+    exists and the link still failed."""
+    from swarph_cli.commands import spawn as sp
+    fake_home = tmp_path / "op"
+    (fake_home / ".vibe").mkdir(parents=True)
+    (fake_home / ".vibe" / ".env").write_text("KEY=1")
+    monkeypatch.setattr(sp.Path, "home", staticmethod(lambda: fake_home))
+
+    real_symlink = Path.symlink_to
+    def boom(self, target, target_is_directory=False):
+        raise OSError(13, "Permission denied")
+    monkeypatch.setattr(sp.Path, "symlink_to", boom)
+
+    sp._link_vibe_credential(tmp_path / "cell" / ".vibe" / ".env")
+    err = capsys.readouterr().err
+    assert "could not link the vibe credential" in err, (
+        "a REAL link failure was silent — indistinguishable from 'operator has "
+        "no credential', which is the intended case")
+    assert "UNAUTHENTICATED" in err
+
+
+def test_an_ABSENT_credential_stays_QUIET_it_is_the_intended_case(tmp_path, capsys, monkeypatch):
+    """The positive leg. Without it the fix could warn on every spawn, and an
+    operator with deliberately no credential would be told they had a problem
+    they do not have — the inverse false signal."""
+    from swarph_cli.commands import spawn as sp
+    empty_home = tmp_path / "nobody"
+    empty_home.mkdir()
+    monkeypatch.setattr(sp.Path, "home", staticmethod(lambda: empty_home))
+    sp._link_vibe_credential(tmp_path / "cell" / ".vibe" / ".env")
+    assert capsys.readouterr().err == "", (
+        "warned about an absent credential, which is the DOCUMENTED intended "
+        "case — a false alarm on the normal path")
