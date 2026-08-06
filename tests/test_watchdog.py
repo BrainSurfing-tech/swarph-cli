@@ -1043,4 +1043,4 @@ def test_parser_defaults_process_name_claude_liveness_cmd_none():
 
 def test_version_matches_the_packaged_version():
     import swarph_cli
-    assert swarph_cli.__version__ == "0.41.6"
+    assert swarph_cli.__version__ == "0.41.7"
