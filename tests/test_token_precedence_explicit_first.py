@@ -142,4 +142,73 @@ def test_explicit_missing_file_raises_rather_than_falling_back(
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", STALE)
     with pytest.raises(Exception) as exc:
         resolve(str(tmp_path / "does-not-exist.token"))
-    assert STALE not in str(exc.value), "must not leak the ambient token"
+    msg = str(exc.value)
+    assert STALE not in msg, "must not leak the ambient token"
+    # gpt-ops' REVISE on PR #187: asserting only the non-leak lets a future edit
+    # delete the operator's MAP of what was skipped without failing anything.
+    # The pre-#332 refusal listed all four sources because the verb kept looking;
+    # it no longer does, so the contract is now "name the cause AND the doors
+    # deliberately left shut". Pin the contract, not just the absence of a leak.
+    assert "NO FALLBACK WAS ATTEMPTED" in msg
+    for untried in ("MESH_GATEWAY_TOKEN", "secrets.toml", "peer_token"):
+        assert untried in msg, f"refusal must name {untried} as deliberately untried"
+
+
+@pytest.mark.parametrize("resolve", DELEGATING_RESOLVERS)
+def test_explicit_scoped_file_beats_a_VALID_SHARED_ROOT_token(
+    resolve, tmp_path, monkeypatch
+):
+    """>>> THE SECURITY INVARIANT, NOT A RELIABILITY ONE. <<<
+
+    Every other case here uses a STALE env value, which frames the defect as
+    "the wrong credential produces a 401". That framing is wrong and gpt-ops
+    asked for this scenario by name so it cannot be missed.
+
+    The ambient $MESH_GATEWAY_TOKEN is the SHARED token, and the shared token is
+    ROOT at the gateway: `_is_root_token` is true for it, DM reads return an
+    empty WHERE clause (the firehose), board read+write bypass role/ownership/
+    grants, and it carries peer=None so nothing is attributable. So preferring
+    the ambient value over an explicit per-peer file is not a wrong-credential
+    bug — it is a SILENT ESCALATION FROM A SCOPED IDENTITY TO UNATTRIBUTABLE ROOT.
+
+    While the shared value was CURRENT, that escalation succeeded and everything
+    read green. It only became visible when rotation made the value stale — i.e.
+    the 401 was the good outcome. An operator who names a narrow credential must
+    get that credential, ESPECIALLY when a more powerful one is lying around.
+    """
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "VALID-SHARED-ROOT-TOKEN-grants-firehose")
+    scoped = tmp_path / "gpt-lc.peer_token"
+    scoped.write_text(WANTED, encoding="utf-8")
+    got = resolve(str(scoped))
+    assert got == WANTED
+    assert "SHARED-ROOT" not in got, (
+        "escalated to the shared ROOT credential despite an explicit scoped file"
+    )
+
+
+def test_token_file_help_does_not_advertise_a_removed_prompt():
+    """The help text is a CONTRACT WITH THE OPERATOR, and it had rotted twice.
+
+    Both strings still described `env -> secrets -> prompt` — an order that was
+    wrong after #332 AND a prompt that #243 deleted months earlier. Nothing fails
+    when help text lies, which is exactly why it drifts; this is the cheapest
+    thing that makes it fail.
+    """
+    import argparse
+
+    from swarph_cli.commands import onboard as onboard_cmd
+    from swarph_cli.commands import ratify as ratify_cmd
+
+    for build in (onboard_cmd._build_parser, ratify_cmd._build_parser):
+        helps = [
+            a.help for a in build()._actions
+            if getattr(a, "dest", None) == "token_file" and a.help
+        ]
+        assert helps, "no --token-file argument found to check"
+        for text in helps:
+            assert "prompt" not in text.lower().replace("never prompts", ""), (
+                "help still advertises a prompt removed in #243"
+            )
+            assert "peer_token" in text, (
+                "help omits the per-peer fallback that #243 added"
+            )
