@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from swarph_cli.commands import onboard
+from swarph_cli.tokens import read_token_file
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +47,15 @@ def test_resolve_token_warns_on_loose_mode(monkeypatch, tmp_path, capsys):
     err = capsys.readouterr().err
     assert "WARNING" in err
     assert "0o644" in err
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows uses ACLs, not POSIX file modes")
+def test_read_token_file_does_not_emit_posix_chmod_warning_on_windows(tmp_path, capsys):
+    token = tmp_path / "peer_token"
+    token.write_text("token-value\n", encoding="utf-8")
+
+    assert read_token_file(token) == "token-value"
+    assert "WARNING" not in capsys.readouterr().err
 
 
 def test_resolve_token_REFUSES_rather_than_prompting(monkeypatch, tmp_path):
