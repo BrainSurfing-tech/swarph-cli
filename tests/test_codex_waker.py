@@ -1,5 +1,6 @@
 import json
 import multiprocessing
+import os
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
@@ -15,6 +16,18 @@ def _hold_lock(path: str, ready, release) -> None:
         ready.put(acquired)
         if acquired:
             release.wait(10)
+
+
+def _crash_after_reset_state_save(args) -> None:
+    original = waker._append_reset_event
+
+    def interrupt_completion(state_dir, event):
+        if event["event"] == "completed":
+            os._exit(23)
+        original(state_dir, event)
+
+    waker._append_reset_event = interrupt_completion
+    waker.run_codex_waker(args)
 
 
 def test_next_dm_skips_self_and_old_messages(tmp_path):
@@ -221,12 +234,44 @@ def test_operator_reset_clears_only_thread_id_and_writes_audit_record(tmp_path, 
     assert waker.run_codex_waker(args) == 0
     assert _FakeAppServer.instances == []
     assert _load(state_path) == {"last_message_id": 8, "thread_id": None}
-    audit = json.loads((state_dir / "thread-reset.json").read_text(encoding="utf-8"))
-    assert audit["previous_thread_id"] == "expired-thread"
-    assert audit["reason"] == "App Server reported a stale thread"
+    audit = [json.loads(line) for line in (state_dir / "thread-reset.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [event["event"] for event in audit] == ["requested", "completed"]
+    assert audit[0]["operation_id"] == audit[1]["operation_id"]
+    assert audit[0]["previous_thread_id"] == "expired-thread"
+    assert audit[0]["reason"] == "App Server reported a stale thread"
+
+    second_args = args[:-1] + ["Operator repeated the reset"]
+    assert waker.run_codex_waker(second_args) == 0
+    audit = [json.loads(line) for line in (state_dir / "thread-reset.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [event["event"] for event in audit] == ["requested", "completed", "requested", "completed"]
+    assert audit[2]["operation_id"] == audit[3]["operation_id"]
+    assert audit[2]["operation_id"] != audit[0]["operation_id"]
 
     with pytest.raises(SystemExit):
         waker.run_codex_waker(args[:-3])
+
+
+def test_reset_crash_after_state_save_leaves_an_incomplete_audit_request(tmp_path):
+    inbox = tmp_path / "monitor" / "inbox.log"
+    inbox.parent.mkdir()
+    inbox.write_text("", encoding="utf-8")
+    state_dir = tmp_path / "controller"
+    state_path = state_dir / "cursor.json"
+    outbox = tmp_path / "outbox"
+    args = [
+        "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
+        "--cwd", str(tmp_path), "--outbox-dir", str(outbox), "--reset-thread",
+        "--acknowledge-thread-reset", "--reset-reason", "Controlled crash test",
+    ]
+    _save(state_path, {"last_message_id": 8, "thread_id": "expired-thread"})
+    context = multiprocessing.get_context("spawn")
+    child = context.Process(target=_crash_after_reset_state_save, args=(args,))
+    child.start()
+    child.join(timeout=10)
+    assert child.exitcode == 23
+    assert _load(state_path) == {"last_message_id": 8, "thread_id": None}
+    audit = [json.loads(line) for line in (state_dir / "thread-reset.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [event["event"] for event in audit] == ["requested"]
 
 
 def test_completed_turn_requires_a_valid_outbox_reply_before_acknowledging_dm(tmp_path, monkeypatch):
@@ -253,6 +298,36 @@ def test_completed_turn_requires_a_valid_outbox_reply_before_acknowledging_dm(tm
     with pytest.raises(RuntimeError, match="destination does not match"):
         waker.run_codex_waker(args)
     assert _load(state_path) == {"last_message_id": 0, "thread_id": None}
+
+
+@pytest.mark.parametrize(("payload", "error"), [
+    ("{", "invalid outbox JSON"),
+    ({"message_id": 99, "to_node": "lab", "kind": "answer", "content": "reply"}, "message_id does not match"),
+    ({"message_id": 11, "to_node": "lab", "kind": "decline", "content": "reply"}, "kind .* must be answer"),
+    ({"message_id": 11, "to_node": "lab", "kind": "answer", "content": ""}, "content .* non-empty"),
+    ({"message_id": 11, "to_node": "lab", "kind": "answer", "content": 42}, "content .* non-empty"),
+])
+def test_invalid_outbox_envelope_never_advances_state(tmp_path, monkeypatch, payload, error):
+    inbox = tmp_path / "monitor" / "inbox.log"
+    inbox.parent.mkdir()
+    inbox.write_text(json.dumps({"id": 11, "from_node": "lab", "to_node": "gpt-lc"}) + "\n", encoding="utf-8")
+    state_dir = tmp_path / "controller"
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    content = payload if isinstance(payload, str) else json.dumps(payload)
+    (outbox / "11.json").write_text(content, encoding="utf-8")
+    args = [
+        "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
+        "--cwd", str(tmp_path), "--outbox-dir", str(outbox),
+    ]
+    _FakeAppServer.instances = []
+    _FakeAppServer.fail_first_turn = False
+    _FakeAppServer.resume_error = None
+    monkeypatch.setattr(waker, "AppServer", _FakeAppServer)
+
+    with pytest.raises(RuntimeError, match=error):
+        waker.run_codex_waker(args)
+    assert _load(state_dir / "cursor.json") == {"last_message_id": 0, "thread_id": None}
 
 
 def test_wait_completed_ignores_a_completion_for_another_turn():
