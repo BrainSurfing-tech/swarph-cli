@@ -15,7 +15,6 @@ import hashlib
 import json
 import os
 import subprocess
-import sys
 import threading
 import time
 from queue import Empty, Queue
@@ -75,24 +74,14 @@ def _save(path: Path, value: dict) -> None:
     tmp.replace(path)
 
 
-def _thread_is_definitively_unavailable(exc: RuntimeError) -> bool:
-    """Only replace persisted threads on server-side invalidation, never a transient error."""
-    message = str(exc).lower()
-    return any(marker in message for marker in (
-        "thread not found", "unknown thread", "invalid thread", "thread expired", "does not exist",
-    ))
+class AppServerProtocolError(RuntimeError):
+    """A JSON-RPC response error, distinct from transport and turn failures."""
 
-
-def _record_resume_recovery(state_dir: Path, thread_id: str, exc: RuntimeError) -> None:
-    """Leave an operator-visible record when continuity has been deliberately reset."""
-    diagnostic = {
-        "event": "persisted_thread_replaced",
-        "thread_id": thread_id,
-        "reason": str(exc),
-        "recorded_at": time.time(),
-    }
-    _save(state_dir / "resume-recovery.json", diagnostic)
-    print(f"codex-waker: replacing unavailable persisted thread {thread_id}: {exc}", file=sys.stderr)
+    def __init__(self, error: dict) -> None:
+        self.code = error.get("code")
+        self.data = error.get("data")
+        self.message = str(error.get("message", "App Server protocol error"))
+        super().__init__(self.message)
 
 
 def _next_dm(inbox: Path, after: int, self_name: str) -> dict | None:
@@ -162,7 +151,7 @@ class AppServer:
             event = self._event(deadline)
             if event.get("id") == self.seq:
                 if "error" in event:
-                    raise RuntimeError(event["error"])
+                    raise AppServerProtocolError(event["error"])
                 return event["result"]
         raise TimeoutError(method)
 
@@ -222,11 +211,10 @@ def run_codex_waker(argv: list[str] | None = None) -> int:
             if thread_id:
                 try:
                     app.request("thread/resume", {"threadId": thread_id})
-                except RuntimeError as exc:
-                    if not _thread_is_definitively_unavailable(exc):
-                        raise
-                    _record_resume_recovery(state_dir, thread_id, exc)
-                    thread_id = None
+                except AppServerProtocolError:
+                    # No documented invalid-thread error code has been observed
+                    # yet, so retain state rather than guessing from error text.
+                    raise
             if not thread_id:
                 started = app.request("thread/start", {
                     "cwd": args.cwd,

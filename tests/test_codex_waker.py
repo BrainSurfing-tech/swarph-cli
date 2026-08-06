@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import swarph_cli.commands.codex_waker as waker
-from swarph_cli.commands.codex_waker import AppServer, _load, _next_dm, _save, _single_flight
+from swarph_cli.commands.codex_waker import AppServer, AppServerProtocolError, _load, _next_dm, _save, _single_flight
 
 
 def _hold_lock(path: str, ready, release) -> None:
@@ -160,7 +160,7 @@ def test_failed_first_turn_does_not_persist_or_resume_empty_thread(tmp_path, mon
     assert _load(state_dir / "cursor.json") == {"last_message_id": 7, "thread_id": "thread-2"}
 
 
-def test_invalid_persisted_thread_is_replaced_but_transient_resume_error_is_retained(tmp_path, monkeypatch):
+def test_unclassified_resume_protocol_error_retains_state(tmp_path, monkeypatch):
     inbox = tmp_path / "monitor" / "inbox.log"
     inbox.parent.mkdir()
     inbox.write_text(json.dumps({"id": 8, "from_node": "lab", "to_node": "gpt-lc"}) + "\n", encoding="utf-8")
@@ -174,14 +174,13 @@ def test_invalid_persisted_thread_is_replaced_but_transient_resume_error_is_reta
     monkeypatch.setattr(waker, "AppServer", _FakeAppServer)
     _FakeAppServer.instances = []
     _FakeAppServer.fail_first_turn = False
-    _FakeAppServer.resume_error = RuntimeError("thread not found")
+    _FakeAppServer.resume_error = AppServerProtocolError({"code": -32001, "message": "thread not found"})
     _save(state_path, {"last_message_id": 0, "thread_id": "expired-thread"})
 
-    assert waker.run_codex_waker(args) == 0
-    methods = [method for method, _params in _FakeAppServer.instances[-1].requests]
-    assert methods[:2] == ["thread/resume", "thread/start"]
-    assert _load(state_path) == {"last_message_id": 8, "thread_id": "thread-1"}
-    assert json.loads((state_dir / "resume-recovery.json").read_text())["thread_id"] == "expired-thread"
+    with pytest.raises(AppServerProtocolError, match="thread not found") as exc_info:
+        waker.run_codex_waker(args)
+    assert exc_info.value.code == -32001
+    assert _load(state_path) == {"last_message_id": 0, "thread_id": "expired-thread"}
 
     _save(state_path, {"last_message_id": 0, "thread_id": "transient-thread"})
     _FakeAppServer.resume_error = RuntimeError("temporary app-server fault")
