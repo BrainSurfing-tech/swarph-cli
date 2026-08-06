@@ -142,16 +142,26 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
     # >>> THIS BLOCK USED TO SIT BELOW THE $MESH_GATEWAY_TOKEN LOOKUP, so a
     # stale value in the environment silently overrode the credential the
     # operator NAMED on the command line. <<< It shipped in 0.41.6 and was
-    # inert until the shared token was retired on 2026-08-04: before that the
-    # env value and the file usually agreed, so the wrong order still produced
-    # the right credential. Retirement made them disagree, and the symptom was
-    # a 401 that says UNAUTHORIZED rather than "I ignored the file you gave me".
+    # inert until the shared token's VALUE was ROTATED on 2026-08-05: before
+    # that the env value and the file usually agreed, so the wrong order still
+    # produced a working credential. Rotation made them disagree, and the
+    # symptom was a 401 saying UNAUTHORIZED rather than "I ignored the file you
+    # gave me".
     #
-    # Note what retirement did NOT do: deleting the shared credential at the
-    # source does not remove the COPIES living in process environments across
-    # the fleet. Those copies are still presented — and, before this fix, still
-    # preferred. A retired credential stops being ACCEPTED; it does not stop
-    # being SENT.
+    # >>> BE PRECISE ABOUT WHAT ROTATION DID AND DID NOT DO, because the mesh
+    # spent two days believing the shared credential was RETIRED and it is not
+    # (gpt-ops caught this claim sitting in these very comments). Rotation
+    # invalidated the OLD VALUE. The shared-token REGIME is current, required
+    # and privileged: the gateway refuses to start without one configured, it is
+    # the FIRST auth branch checked — before per-peer — and it resolves to ROOT
+    # (unscoped DM reads, board authz bypass, peer=None so unattributable).
+    #
+    # WHICH IS WHY THIS ORDERING WAS A PRIVILEGE ESCALATION, NOT A RELIABILITY
+    # BUG: preferring the ambient value over an explicit per-peer file meant
+    # that whenever the environment held a CURRENT shared value, this verb ran
+    # as ROOT instead of as the scoped peer the operator named — silently, and
+    # reading green throughout. The 401 was the GOOD outcome; it appeared only
+    # once the value went stale. See board cards #332 and #333. <<<
     #
     # Parsing goes through the one shared reader (swarph_cli.tokens) so that a
     # bare-token file and an env-style file both work behind the one flag.
@@ -211,17 +221,30 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
             )
 
     # ── #243: THE PER-PEER TOKEN — THE CREDENTIAL THAT ACTUALLY EXISTS ──────
-    # >>> THIS VERB WAS LOOKING ONLY FOR THE CREDENTIAL THE R1 MIGRATION
-    # RETIRED. <<< Measured on lab-ovh 2026-08-03: $MESH_GATEWAY_TOKEN UNSET,
+    # >>> THIS VERB WAS LOOKING ONLY FOR THE CREDENTIAL THE R1 MIGRATION MOVED
+    # OFF OF. <<< (This comment said "RETIRED" until 2026-08-06. It was wrong,
+    # and it is where the mesh's two-day belief that the shared token was gone
+    # came from — a claim in a comment, restated until it read as settled. The
+    # shared credential is NOT retired: see the block above and card #333.)
+    # Measured on lab-ovh 2026-08-03: $MESH_GATEWAY_TOKEN UNSET,
     # ~/.swarph/secrets.toml ABSENT, and 10+ files present at
     # ~/.config/swarph/<peer>.peer_token. Every other verb resolves the per-peer
     # file; onboard (and ratify, which re-exports this function, and daemon,
     # which copied it) were left on the old path — classic mint-vs-cutover, the
     # credential moved and three consumers did not.
     #
-    # AND THE GATEWAY NEVER REQUIRED THE SHARED TOKEN: measured, POST
-    # /peers/register with a PER-PEER token returns 200 and mints. So this was
-    # never a permissions problem — only a lookup that never learned.
+    # AND THE GATEWAY NEVER REQUIRED A CALLER TO PRESENT THE SHARED TOKEN:
+    # measured, POST /peers/register with a PER-PEER token returns 200 and
+    # mints. So this was never a permissions problem — only a lookup that never
+    # learned.
+    #
+    # >>> THAT SENTENCE USED TO READ "THE GATEWAY NEVER REQUIRED THE SHARED
+    # TOKEN", FULL STOP — AND IT IS A DIFFERENT CLAIM. The measurement answered
+    # "what may a CLIENT present?"; the sentence generalised it to "what does
+    # the SERVER require?". Those diverge: server.py refuses to start at all
+    # without MESH_GATEWAY_TOKEN configured (`if not AUTH_TOKEN: raise 500`).
+    # One sentence answering two questions, correct on the half that was
+    # measured — which is exactly why nobody caught it for months. <<<
     #
     # Placed AFTER the existing two so a working operator-token setup is
     # unchanged; this only fills the hole where the verb used to prompt.

@@ -26,7 +26,12 @@ from swarph_cli.commands import mesh as mesh_cmd
 from swarph_cli.commands import onboard as onboard_cmd
 from swarph_cli.commands import ratify as ratify_cmd
 
-STALE = "stale-shared-token-retired-by-the-rotation"
+# The PRE-ROTATION shared value. Named for what it is — an OLD VALUE — because
+# the earlier name ("...retired-by-the-rotation") implied the shared-token
+# REGIME was gone. It is not: the gateway refuses to start without a shared
+# token configured, checks it BEFORE per-peer, and resolves it to ROOT.
+# Rotation invalidated a VALUE; it retired nothing. (gpt-ops, PR #187 review.)
+OLD_SHARED_VALUE = "pre-rotation-shared-root-value-no-longer-accepted"
 WANTED = "explicit-per-peer-token-the-operator-named"
 
 # Every resolver that takes `--token-file` as its sole positional concern.
@@ -49,7 +54,7 @@ def _clean_env(monkeypatch):
 @pytest.mark.parametrize("resolve", DELEGATING_RESOLVERS)
 def test_explicit_raw_token_file_beats_stale_env(resolve, tmp_path, monkeypatch):
     """gpt-ops case 1: stale env + valid explicit RAW file -> explicit wins."""
-    monkeypatch.setenv("MESH_GATEWAY_TOKEN", STALE)
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", OLD_SHARED_VALUE)
     f = tmp_path / "gpt-lc.peer_token"
     f.write_text(WANTED, encoding="utf-8")
     assert resolve(str(f)) == WANTED
@@ -62,7 +67,7 @@ def test_explicit_env_style_file_beats_stale_env(resolve, tmp_path, monkeypatch)
     Both file shapes must work behind the one flag; this is droplet's
     "one parser behind one flag" invariant, now also on the explicit path.
     """
-    monkeypatch.setenv("MESH_GATEWAY_TOKEN", STALE)
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", OLD_SHARED_VALUE)
     f = tmp_path / "mesh.env"
     f.write_text(
         "# deployment credential\n"
@@ -85,12 +90,12 @@ def test_explicit_file_is_selected_even_when_it_will_be_rejected(
     works — a green result produced by the very bug. Verifying only the
     positive branch cannot tell "fixed" from "still ignoring the argument".
     """
-    monkeypatch.setenv("MESH_GATEWAY_TOKEN", STALE)
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", OLD_SHARED_VALUE)
     f = tmp_path / "wrong.token"
     f.write_text("definitely-not-a-valid-token", encoding="utf-8")
     got = resolve(str(f))
     assert got == "definitely-not-a-valid-token"
-    assert got != STALE, "fell through to ambient env — the defect, wearing a pass"
+    assert got != OLD_SHARED_VALUE, "fell through to ambient env — the defect, wearing a pass"
 
 
 @pytest.mark.parametrize("resolve", DELEGATING_RESOLVERS)
@@ -100,8 +105,8 @@ def test_absent_explicit_preserves_env_fallback(resolve, monkeypatch):
     This is what keeps the change safe for every cell that is working today:
     behaviour only differs when --token-file was actually passed.
     """
-    monkeypatch.setenv("MESH_GATEWAY_TOKEN", STALE)
-    assert resolve(None) == STALE
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", OLD_SHARED_VALUE)
+    assert resolve(None) == OLD_SHARED_VALUE
 
 
 @pytest.mark.parametrize("resolve", DELEGATING_RESOLVERS)
@@ -124,7 +129,7 @@ def test_mesh_resolver_already_correct_and_stays_correct(tmp_path, monkeypatch):
     agree by breaking the correct one. It also records WHICH sites were already
     right, so the next reader does not re-audit them.
     """
-    monkeypatch.setenv("MESH_GATEWAY_TOKEN", STALE)
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", OLD_SHARED_VALUE)
     f = tmp_path / "raw.token"
     f.write_text(WANTED, encoding="utf-8")
     assert mesh_cmd._resolve_token("any-cell", str(f)) == WANTED
@@ -139,11 +144,11 @@ def test_explicit_missing_file_raises_rather_than_falling_back(
     Falling back here would resurrect the defect in its most confusing form:
     a typo'd --token-file that silently authenticates as somebody else.
     """
-    monkeypatch.setenv("MESH_GATEWAY_TOKEN", STALE)
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", OLD_SHARED_VALUE)
     with pytest.raises(Exception) as exc:
         resolve(str(tmp_path / "does-not-exist.token"))
     msg = str(exc.value)
-    assert STALE not in msg, "must not leak the ambient token"
+    assert OLD_SHARED_VALUE not in msg, "must not leak the ambient token"
     # gpt-ops' REVISE on PR #187: asserting only the non-leak lets a future edit
     # delete the operator's MAP of what was skipped without failing anything.
     # The pre-#332 refusal listed all four sources because the verb kept looking;
@@ -160,7 +165,7 @@ def test_explicit_scoped_file_beats_a_VALID_SHARED_ROOT_token(
 ):
     """>>> THE SECURITY INVARIANT, NOT A RELIABILITY ONE. <<<
 
-    Every other case here uses a STALE env value, which frames the defect as
+    Every other case here uses a OLD_SHARED_VALUE env value, which frames the defect as
     "the wrong credential produces a 401". That framing is wrong and gpt-ops
     asked for this scenario by name so it cannot be missed.
 
