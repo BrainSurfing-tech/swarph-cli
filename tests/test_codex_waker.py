@@ -1,6 +1,8 @@
 import json
 import multiprocessing
 from pathlib import Path
+from queue import Queue
+from types import SimpleNamespace
 
 import pytest
 
@@ -106,6 +108,7 @@ def test_timeout_kills_only_the_owned_app_server_child():
 class _FakeAppServer:
     instances = []
     fail_first_turn = False
+    resume_error = None
 
     def __init__(self, *_args):
         self.requests = []
@@ -115,6 +118,8 @@ class _FakeAppServer:
         self.requests.append((method, params))
         if method == "thread/start":
             return {"thread": {"id": f"thread-{len(type(self).instances)}"}}
+        if method == "thread/resume" and type(self).resume_error:
+            raise type(self).resume_error
         if method == "turn/start":
             if type(self).fail_first_turn:
                 type(self).fail_first_turn = False
@@ -141,6 +146,7 @@ def test_failed_first_turn_does_not_persist_or_resume_empty_thread(tmp_path, mon
     ]
     _FakeAppServer.instances = []
     _FakeAppServer.fail_first_turn = True
+    _FakeAppServer.resume_error = None
     monkeypatch.setattr(waker, "AppServer", _FakeAppServer)
 
     with pytest.raises(RuntimeError, match="simulated first-turn failure"):
@@ -152,3 +158,43 @@ def test_failed_first_turn_does_not_persist_or_resume_empty_thread(tmp_path, mon
     assert "thread/start" in retry_methods
     assert "thread/resume" not in retry_methods
     assert _load(state_dir / "cursor.json") == {"last_message_id": 7, "thread_id": "thread-2"}
+
+
+def test_invalid_persisted_thread_is_replaced_but_transient_resume_error_is_retained(tmp_path, monkeypatch):
+    inbox = tmp_path / "monitor" / "inbox.log"
+    inbox.parent.mkdir()
+    inbox.write_text(json.dumps({"id": 8, "from_node": "lab", "to_node": "gpt-lc"}) + "\n", encoding="utf-8")
+    state_dir = tmp_path / "controller"
+    state_path = state_dir / "cursor.json"
+    outbox = tmp_path / "outbox"
+    args = [
+        "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
+        "--cwd", str(tmp_path), "--outbox-dir", str(outbox),
+    ]
+    monkeypatch.setattr(waker, "AppServer", _FakeAppServer)
+    _FakeAppServer.instances = []
+    _FakeAppServer.fail_first_turn = False
+    _FakeAppServer.resume_error = RuntimeError("thread not found")
+    _save(state_path, {"last_message_id": 0, "thread_id": "expired-thread"})
+
+    assert waker.run_codex_waker(args) == 0
+    methods = [method for method, _params in _FakeAppServer.instances[-1].requests]
+    assert methods[:2] == ["thread/resume", "thread/start"]
+    assert _load(state_path) == {"last_message_id": 8, "thread_id": "thread-1"}
+    assert json.loads((state_dir / "resume-recovery.json").read_text())["thread_id"] == "expired-thread"
+
+    _save(state_path, {"last_message_id": 0, "thread_id": "transient-thread"})
+    _FakeAppServer.resume_error = RuntimeError("temporary app-server fault")
+    with pytest.raises(RuntimeError, match="temporary app-server fault"):
+        waker.run_codex_waker(args)
+    assert _load(state_path) == {"last_message_id": 0, "thread_id": "transient-thread"}
+
+
+def test_wait_completed_ignores_a_completion_for_another_turn():
+    app = AppServer.__new__(AppServer)
+    app.timeout = 1
+    app.proc = SimpleNamespace(stdout=True)
+    app.events = Queue()
+    app.events.put(json.dumps({"method": "turn/completed", "params": {"turn": {"id": "other", "status": "completed"}}}))
+    app.events.put(json.dumps({"method": "turn/completed", "params": {"turn": {"id": "wanted", "status": "completed"}}}))
+    app.wait_completed("thread-1", "wanted")
