@@ -2,6 +2,9 @@ import json
 import multiprocessing
 from pathlib import Path
 
+import pytest
+
+import swarph_cli.commands.codex_waker as waker
 from swarph_cli.commands.codex_waker import AppServer, _load, _next_dm, _save, _single_flight
 
 
@@ -98,3 +101,54 @@ def test_timeout_kills_only_the_owned_app_server_child():
     app.proc = _FakeProcess(456)
     app._kill_owned_child()
     assert app.proc.killed is False
+
+
+class _FakeAppServer:
+    instances = []
+    fail_first_turn = False
+
+    def __init__(self, *_args):
+        self.requests = []
+        type(self).instances.append(self)
+
+    def request(self, method, params):
+        self.requests.append((method, params))
+        if method == "thread/start":
+            return {"thread": {"id": f"thread-{len(type(self).instances)}"}}
+        if method == "turn/start":
+            if type(self).fail_first_turn:
+                type(self).fail_first_turn = False
+                raise RuntimeError("simulated first-turn failure")
+            return {"turn": {"id": "turn-1"}}
+        return {}
+
+    def wait_completed(self, *_args):
+        return None
+
+    def close(self):
+        return None
+
+
+def test_failed_first_turn_does_not_persist_or_resume_empty_thread(tmp_path, monkeypatch):
+    inbox = tmp_path / "monitor" / "inbox.log"
+    inbox.parent.mkdir()
+    inbox.write_text(json.dumps({"id": 7, "from_node": "lab", "to_node": "gpt-lc"}) + "\n", encoding="utf-8")
+    state_dir = tmp_path / "controller"
+    outbox = tmp_path / "outbox"
+    args = [
+        "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
+        "--cwd", str(tmp_path), "--outbox-dir", str(outbox),
+    ]
+    _FakeAppServer.instances = []
+    _FakeAppServer.fail_first_turn = True
+    monkeypatch.setattr(waker, "AppServer", _FakeAppServer)
+
+    with pytest.raises(RuntimeError, match="simulated first-turn failure"):
+        waker.run_codex_waker(args)
+    assert _load(state_dir / "cursor.json") == {"last_message_id": 0, "thread_id": None}
+
+    assert waker.run_codex_waker(args) == 0
+    retry_methods = [method for method, _params in _FakeAppServer.instances[-1].requests]
+    assert "thread/start" in retry_methods
+    assert "thread/resume" not in retry_methods
+    assert _load(state_dir / "cursor.json") == {"last_message_id": 7, "thread_id": "thread-2"}
