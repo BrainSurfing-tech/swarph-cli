@@ -148,16 +148,35 @@ def _resolve_token(token_file: Optional[str], self_name: str) -> Optional[str]:
     process-global one, or `--as <cell>` stops meaning what it says on a host
     running more than one cell.
 
-    Note this verb's self_name arrives already defaulted by its caller (see the
-    comment above about the fallback being ANOTHER CELL'S NAME). That default is
-    unchanged here — but it is now load-bearing in one more place, because a
-    guessed name selects which peer token gets read.
+    >>> A DEFAULTED NAME IS NOT AN EXPLICIT IDENTITY. <<< gpt-ops caught this
+    reviewing #190, and it is the sharpest kind of catch: I had noticed the
+    hazard, written a comment about it, and not handled it.
+
+    `_self_name()` NEVER returns empty — it falls back to _DEFAULT_SELF
+    ("lab-ovh"). So `bool(self_name)` is always true here, and passing that as
+    identity_is_explicit would promote `lab-ovh.peer_token` — ANOTHER CELL'S
+    CREDENTIAL — above GBRAIN_TOKEN on every invocation where nothing named the
+    cell. The comment above already says why that fallback is dangerous
+    ("harmless on lab-ovh, silently wrong everywhere else"); this would have
+    turned a last-resort lookup into a first-choice one.
+
+    gpt-ops' sharper point: it also made the resolver's "no explicit identity"
+    unit test UNREACHABLE through this caller. A negative test whose subject
+    cannot exhibit the positive is not a test — it passes and covers a branch
+    production cannot enter. Hence the integration tests in
+    tests/test_brain_ask_identity_explicitness.py, which exercise this function
+    rather than the resolver, because a unit test at the resolver cannot see
+    what the caller makes reachable.
+
+    Explicitness therefore comes from `_self_name_is_defaulted()`, not from
+    truthiness: a guessed name keeps the old env-first order exactly, and only a
+    name the operator actually supplied earns precedence over ambient values.
     """
     res = tokens.resolve_token(
         self_name or None,
         token_file,
         env_keys=("GBRAIN_TOKEN", "SWARPH_BRAIN_TOKEN"),
-        identity_is_explicit=bool(self_name),
+        identity_is_explicit=bool(self_name) and not _self_name_is_defaulted(),
     )
     return res.token if res is not None else None
 

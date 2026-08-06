@@ -171,15 +171,106 @@ def test_returns_none_when_nothing_configured(home):
     assert tokens.resolve_token("cell", identity_is_explicit=True) is None
 
 
-def test_empty_peer_token_file_is_not_a_credential(home, monkeypatch):
+def test_empty_peer_token_file_is_not_a_credential(home):
     """An empty file is 'nothing here', not 'the empty token' — otherwise a
-    truncated write silently sends `Authorization: Bearer `."""
+    truncated write silently sends `Authorization: Bearer `.
+
+    NOTE this test previously asserted a fallback to $MESH_GATEWAY_TOKEN. That
+    assertion was WRONG and is reversed below — see the unflattering-branch
+    section for why a fallback that succeeds is the defect wearing a pass.
+    """
     _write_peer(home, "cell", "   \n")
-    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "ENV-TOKEN")
+
+    assert tokens.resolve_token("cell", identity_is_explicit=True) is None
+
+
+# ── THE UNFLATTERING BRANCH ──────────────────────────────────────────────────
+# lab-ovh's review lens on #190 (DM 17155, item 2), turned on this module, found
+# a real defect in it: an earlier revision fell through to the AMBIENT credential
+# when the NAMED identity's file existed but was unusable. That fallback
+# SUCCEEDS — the call works, the operator believes it ran as the named cell, and
+# the only trace is a warning nobody reads. It is the exact escalation shape this
+# PR exists to close, reintroduced one branch lower down. These keep it closed.
+
+def test_unusable_peer_file_does_NOT_fall_back_to_ambient(home, monkeypatch):
+    """Naming a cell is a decision. A present-but-empty credential for that cell
+    must NOT silently hand the caller the ambient one."""
+    _write_peer(home, "cell", "")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "AMBIENT")
 
     res = tokens.resolve_token("cell", identity_is_explicit=True)
 
-    assert res.token == "ENV-TOKEN"
+    assert res is None, "fell back to the ambient credential for a NAMED identity"
+
+
+def test_the_refusal_says_no_fallback_was_attempted(home, monkeypatch):
+    """A refusal that does not say what it declined to try reads as a bug."""
+    _write_peer(home, "cell", "")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "AMBIENT")
+    seen: list[str] = []
+
+    tokens.resolve_token("cell", identity_is_explicit=True, warn=seen.append)
+
+    assert any("NO AMBIENT FALLBACK" in m for m in seen)
+
+
+def test_a_MISSING_peer_file_still_falls_through(home, monkeypatch):
+    """The boundary. Nothing was named-and-present, so there is no decision to
+    honour — this must keep working or every unprovisioned cell breaks."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "AMBIENT")
+
+    res = tokens.resolve_token("cell", identity_is_explicit=True)
+
+    assert res.token == "AMBIENT"
+
+
+def test_a_WRONG_peer_token_is_SELECTED_not_worked_around(home, monkeypatch):
+    """>>> A FALLBACK THAT SUCCEEDS IS THE DEFECT WEARING A PASS. <<<
+
+    If the named cell's credential is present and parseable but WRONG, it must
+    still be the one selected — so the gateway rejects it and the operator learns
+    the file is wrong. Quietly substituting a credential that happens to work
+    turns a visible 403 into a silent identity swap.
+    """
+    _write_peer(home, "cell", "WRONG-BUT-PARSEABLE")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "AMBIENT-THAT-WOULD-WORK")
+
+    res = tokens.resolve_token("cell", identity_is_explicit=True)
+
+    assert res.token == "WRONG-BUT-PARSEABLE"
+    assert res.source == "peer-token"
+
+
+# ── PRECEDENCE COMPLETENESS (lab's item 1) ───────────────────────────────────
+# Asserted explicitly rather than trusting that the happy paths imply the rest.
+
+@pytest.mark.parametrize("has_file,has_peer,has_env,explicit,expect", [
+    (True,  True,  True,  True,  "FILE"),
+    (True,  True,  True,  False, "FILE"),
+    (True,  False, False, True,  "FILE"),
+    (False, True,  True,  True,  "PEER"),
+    (False, True,  True,  False, "ENV"),   # identity NOT named -> ambient wins
+    (False, True,  False, True,  "PEER"),
+    (False, True,  False, False, "PEER"),
+    (False, False, True,  True,  "ENV"),
+    (False, False, True,  False, "ENV"),
+    (False, False, False, True,  None),
+])
+def test_precedence_matrix(home, monkeypatch, tmp_path,
+                           has_file, has_peer, has_env, explicit, expect):
+    arg = None
+    if has_file:
+        f = tmp_path / "explicit.token"
+        f.write_text("FILE", encoding="utf-8")
+        arg = str(f)
+    if has_peer:
+        _write_peer(home, "cell", "PEER")
+    if has_env:
+        monkeypatch.setenv("MESH_GATEWAY_TOKEN", "ENV")
+
+    res = tokens.resolve_token("cell", arg, identity_is_explicit=explicit)
+
+    assert (res.token if res else None) == expect
 
 
 def test_brain_ask_env_keys_are_honoured(home, monkeypatch):
