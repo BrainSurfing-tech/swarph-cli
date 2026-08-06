@@ -29,6 +29,8 @@ import json
 import os
 import sys
 import urllib.request
+
+from swarph_cli import tokens
 from pathlib import Path
 from typing import Optional
 
@@ -137,20 +139,27 @@ def env_diagnosis() -> str:
 
 
 def _resolve_token(token_file: Optional[str], self_name: str) -> Optional[str]:
-    """Read token precedence: --token-file > GBRAIN_TOKEN > SWARPH_BRAIN_TOKEN > peer token."""
-    if token_file:
-        return Path(token_file).expanduser().read_text(encoding="utf-8").strip()
-    for var in ("GBRAIN_TOKEN", "SWARPH_BRAIN_TOKEN"):
-        val = os.environ.get(var)
-        if val and val.strip():
-            return val.strip()
-    try:
-        tok = _peer_token_path(self_name).read_text(encoding="utf-8").strip()
-        if tok:
-            return tok
-    except OSError:
-        pass
-    return None
+    """--token-file > per-identity peer token > GBRAIN_TOKEN > SWARPH_BRAIN_TOKEN.
+
+    The env vars stay brain-specific on purpose — unifying the ORDER does not
+    mean pretending every verb wants the same variables. What changed is that
+    the peer token now outranks them when self_name is known, for the reason set
+    out in swarph_cli.tokens: a per-identity secret must never lose to a
+    process-global one, or `--as <cell>` stops meaning what it says on a host
+    running more than one cell.
+
+    Note this verb's self_name arrives already defaulted by its caller (see the
+    comment above about the fallback being ANOTHER CELL'S NAME). That default is
+    unchanged here — but it is now load-bearing in one more place, because a
+    guessed name selects which peer token gets read.
+    """
+    res = tokens.resolve_token(
+        self_name or None,
+        token_file,
+        env_keys=("GBRAIN_TOKEN", "SWARPH_BRAIN_TOKEN"),
+        identity_is_explicit=bool(self_name),
+    )
+    return res.token if res is not None else None
 
 
 def _http_post(url: str, body: dict, token: str,

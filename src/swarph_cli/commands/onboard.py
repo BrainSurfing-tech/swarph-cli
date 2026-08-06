@@ -32,6 +32,7 @@ import urllib.request
 from getpass import getpass
 from pathlib import Path
 from typing import Optional
+from swarph_cli import tokens
 from swarph_cli.console_safe import print_safe
 
 
@@ -192,7 +193,37 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
                 "  Fix the path, or omit --token-file to use those fallbacks."
             ) from exc
 
+    # ── THE NAMED CELL'S OWN CREDENTIAL OUTRANKS THE AMBIENT ROOT ONE ───────
+    # >>> #332's PRINCIPLE, APPLIED TO THE OTHER WAY A CALLER NAMES SOMETHING.
+    # <<< #332 established that an explicit --token-file must beat an ambient
+    # shared value, because preferring the ambient one silently runs as ROOT
+    # rather than as the scoped credential the operator named. SWARPH_SELF is
+    # the same kind of statement — it says WHICH CELL THIS IS — so the
+    # credential that identity owns deserves the same standing. Reported from
+    # workstation-lc against 0.41.6 as the general case; cards #332/#333.
+    #
+    # The stale-value symptom (401 while a valid peer token sits unread) is the
+    # GOOD outcome. The dangerous one reads green: where the ambient value is
+    # CURRENT, this verb ran as ROOT while the operator believed it ran as the
+    # named cell. And one process-global variable cannot be the credential for
+    # more than one cell, so on a multi-cell host naming a cell selected an
+    # IDENTITY WITHOUT CARRYING ITS CREDENTIAL — workstation-lc runs three.
+    #
+    # Scoped to "SWARPH_SELF is set", so an operator who names no cell is
+    # unaffected and #243's additivity guarantee survives for that population.
     env_tok = os.environ.get("MESH_GATEWAY_TOKEN")
+    self_name = os.environ.get("SWARPH_SELF", "").strip()
+    if self_name:
+        res = tokens.resolve_token(
+            self_name,
+            None,
+            env_keys=("MESH_GATEWAY_TOKEN",),
+            identity_is_explicit=True,
+            warn=lambda m: print_safe(f"swarph onboard: {m}", file=sys.stderr),
+        )
+        if res is not None and res.source in ("peer-token", "legacy-peer-token"):
+            return res.token
+
     if env_tok:
         return env_tok
 
