@@ -134,6 +134,16 @@ class _FakeAppServer:
         return None
 
 
+def _write_reply(outbox, message_id, to_node="lab"):
+    outbox.mkdir(parents=True, exist_ok=True)
+    (outbox / f"{message_id}.json").write_text(json.dumps({
+        "message_id": message_id,
+        "to_node": to_node,
+        "kind": "answer",
+        "content": "Synthetic reply",
+    }), encoding="utf-8")
+
+
 def test_failed_first_turn_does_not_persist_or_resume_empty_thread(tmp_path, monkeypatch):
     inbox = tmp_path / "monitor" / "inbox.log"
     inbox.parent.mkdir()
@@ -153,6 +163,7 @@ def test_failed_first_turn_does_not_persist_or_resume_empty_thread(tmp_path, mon
         waker.run_codex_waker(args)
     assert _load(state_dir / "cursor.json") == {"last_message_id": 0, "thread_id": None}
 
+    _write_reply(outbox, 7)
     assert waker.run_codex_waker(args) == 0
     retry_methods = [method for method, _params in _FakeAppServer.instances[-1].requests]
     assert "thread/start" in retry_methods
@@ -216,6 +227,32 @@ def test_operator_reset_clears_only_thread_id_and_writes_audit_record(tmp_path, 
 
     with pytest.raises(SystemExit):
         waker.run_codex_waker(args[:-3])
+
+
+def test_completed_turn_requires_a_valid_outbox_reply_before_acknowledging_dm(tmp_path, monkeypatch):
+    inbox = tmp_path / "monitor" / "inbox.log"
+    inbox.parent.mkdir()
+    inbox.write_text(json.dumps({"id": 10, "from_node": "lab", "to_node": "gpt-lc"}) + "\n", encoding="utf-8")
+    state_dir = tmp_path / "controller"
+    state_path = state_dir / "cursor.json"
+    outbox = tmp_path / "outbox"
+    args = [
+        "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
+        "--cwd", str(tmp_path), "--outbox-dir", str(outbox),
+    ]
+    _FakeAppServer.instances = []
+    _FakeAppServer.fail_first_turn = False
+    _FakeAppServer.resume_error = None
+    monkeypatch.setattr(waker, "AppServer", _FakeAppServer)
+
+    with pytest.raises(RuntimeError, match="missing outbox reply"):
+        waker.run_codex_waker(args)
+    assert _load(state_path) == {"last_message_id": 0, "thread_id": None}
+
+    _write_reply(outbox, 10, to_node="wrong-recipient")
+    with pytest.raises(RuntimeError, match="destination does not match"):
+        waker.run_codex_waker(args)
+    assert _load(state_path) == {"last_message_id": 0, "thread_id": None}
 
 
 def test_wait_completed_ignores_a_completion_for_another_turn():
