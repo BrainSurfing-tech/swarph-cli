@@ -133,6 +133,91 @@ class MeteredGeminiBackend:
         )
 
 
+class MeteredMistralBackend:
+    """Mistral AI's own API — the fifth bench lane (card #323).
+
+    WHY THIS EXISTS: ``swarph bench`` could already PRICE mistral (90
+    mistral/devstral entries in ``data/llm_prices.json``, including
+    ``mistral-medium-3-5`` and ``devstral-small``) and had no way to CALL it.
+    The cost half of the question was answerable and the quality half was not
+    reachable at all — the number was available, the measurement was not.
+
+    Shaped deliberately like :class:`MeteredGeminiBackend`: lazy import inside
+    :meth:`generate`, credentials checked by :meth:`missing_creds` BEFORE any
+    network call, and provider/network errors returned in ``BackendResult.error``
+    rather than raised — a failed arm must not abort a multi-arm run, and it must
+    not silently score as an empty answer either.
+
+    >>> ``tokens_thought`` IS REPORTED AS 0 AND ``estimated`` STAYS False. <<<
+    That pair is a deliberate, honest claim and not an oversight: Mistral's chat
+    completions return ``usage`` with prompt/completion counts only — there is no
+    thinking-token field to read. So the in/out numbers are MEASURED (estimated
+    False) while thought is genuinely ABSENT rather than estimated-as-zero. A
+    reader comparing lanes must not mistake "this provider does not report it"
+    for "this model did no thinking"; the runner should surface thought as
+    unavailable for this backend rather than as a zero it can average.
+    """
+
+    #: env var checked when no api_key is passed to __init__.
+    ENV_VARS = ("MISTRAL_API_KEY",)
+
+    def __init__(self, api_key: Optional[str] = None):
+        self._api_key = api_key
+
+    def missing_creds(self) -> list[str]:
+        if self._api_key or any(os.environ.get(v) for v in self.ENV_VARS):
+            return []
+        return [self.ENV_VARS[0]]
+
+    def credentials_ok(self) -> bool:
+        return not self.missing_creds()
+
+    def generate(self, model_id: str, prompt: str, system: str = "") -> BackendResult:
+        try:
+            from mistralai import Mistral
+        except ImportError as exc:
+            return BackendResult(
+                text="", tokens_in=0, tokens_thought=0, tokens_out=0,
+                latency_s=0.0, estimated=False,
+                error=f"mistralai not installed: {exc} (pip install mistralai)",
+            )
+        api_key = self._api_key or os.environ.get("MISTRAL_API_KEY")
+        if not api_key:
+            return BackendResult(
+                text="", tokens_in=0, tokens_thought=0, tokens_out=0,
+                latency_s=0.0, estimated=False,
+                error="no API key: set MISTRAL_API_KEY",
+            )
+        # system threads as a leading system message — Mistral has no separate
+        # system_instruction field, so this is the provider-shaped equivalent of
+        # the Gemini backend's `system_instruction`, NOT a prompt-prepend hack.
+        messages = ([{"role": "system", "content": system}] if system else []) + [
+            {"role": "user", "content": prompt}
+        ]
+        t0 = time.time()
+        try:
+            resp = Mistral(api_key=api_key).chat.complete(model=model_id, messages=messages)
+        except Exception as exc:   # surface, never swallow — a silent empty answer
+            return BackendResult(  # would score as a wrong answer rather than a failure
+                text="", tokens_in=0, tokens_thought=0, tokens_out=0,
+                latency_s=round(time.time() - t0, 2), estimated=False, error=str(exc),
+            )
+        latency_s = round(time.time() - t0, 2)
+        usage = getattr(resp, "usage", None)
+        choices = getattr(resp, "choices", None) or []
+        text = ""
+        if choices:
+            text = getattr(getattr(choices[0], "message", None), "content", "") or ""
+        return BackendResult(
+            text=text,
+            tokens_in=(getattr(usage, "prompt_tokens", 0) or 0) if usage else 0,
+            tokens_thought=0,          # not reported by this provider — see class docstring
+            tokens_out=(getattr(usage, "completion_tokens", 0) or 0) if usage else 0,
+            latency_s=latency_s,
+            estimated=False,
+        )
+
+
 class SubscriptionBackend:
     """STUB/interface-only backend for a $0 subscription path (e.g. a node's
     own CLI/OIDC lane). Deliberately NOT coupled to the reference stack's
