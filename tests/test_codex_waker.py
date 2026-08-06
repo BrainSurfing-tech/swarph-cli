@@ -54,10 +54,13 @@ def test_next_dm_ignores_other_recipient_and_malformed_id(tmp_path):
     inbox = tmp_path / "inbox.log"
     inbox.write_text("\n".join([
         json.dumps({"id": "bad", "from_node": "lab", "to_node": "gpt-lc"}),
+        json.dumps({"id": True, "from_node": "lab", "to_node": "gpt-lc"}),
         json.dumps({"id": 12, "from_node": "lab", "to_node": "another"}),
-        json.dumps({"id": 13, "from_node": "lab", "to_node": "gpt-lc"}),
+        json.dumps({"id": "13", "from_node": "lab", "to_node": "gpt-lc"}),
     ]), encoding="utf-8")
-    assert _next_dm(inbox, 0, "gpt-lc")["id"] == 13
+    dm = _next_dm(inbox, 0, "gpt-lc")
+    assert dm["id"] == 13
+    assert isinstance(dm["id"], int)
 
 
 def test_single_flight_refuses_overlapping_holder(tmp_path):
@@ -302,6 +305,7 @@ def test_completed_turn_requires_a_valid_outbox_reply_before_acknowledging_dm(tm
 
 @pytest.mark.parametrize(("payload", "error"), [
     ("{", "invalid outbox JSON"),
+    ({"message_id": 10, "to_node": "lab", "kind": "answer", "content": "stale reply"}, "message_id does not match"),
     ({"message_id": 99, "to_node": "lab", "kind": "answer", "content": "reply"}, "message_id does not match"),
     ({"message_id": 11, "to_node": "lab", "kind": "decline", "content": "reply"}, "kind .* must be answer"),
     ({"message_id": 11, "to_node": "lab", "kind": "answer", "content": ""}, "content .* non-empty"),
