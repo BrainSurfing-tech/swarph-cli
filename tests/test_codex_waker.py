@@ -181,12 +181,41 @@ def test_unclassified_resume_protocol_error_retains_state(tmp_path, monkeypatch)
         waker.run_codex_waker(args)
     assert exc_info.value.code == -32001
     assert _load(state_path) == {"last_message_id": 0, "thread_id": "expired-thread"}
+    assert [method for method, _params in _FakeAppServer.instances[-1].requests] == ["thread/resume"]
 
     _save(state_path, {"last_message_id": 0, "thread_id": "transient-thread"})
     _FakeAppServer.resume_error = RuntimeError("temporary app-server fault")
     with pytest.raises(RuntimeError, match="temporary app-server fault"):
         waker.run_codex_waker(args)
     assert _load(state_path) == {"last_message_id": 0, "thread_id": "transient-thread"}
+    assert [method for method, _params in _FakeAppServer.instances[-1].requests] == ["thread/resume"]
+
+
+def test_operator_reset_clears_only_thread_id_and_writes_audit_record(tmp_path, monkeypatch):
+    inbox = tmp_path / "monitor" / "inbox.log"
+    inbox.parent.mkdir()
+    inbox.write_text(json.dumps({"id": 9, "from_node": "lab", "to_node": "gpt-lc"}) + "\n", encoding="utf-8")
+    state_dir = tmp_path / "controller"
+    state_path = state_dir / "cursor.json"
+    outbox = tmp_path / "outbox"
+    args = [
+        "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
+        "--cwd", str(tmp_path), "--outbox-dir", str(outbox), "--reset-thread",
+        "--acknowledge-thread-reset", "--reset-reason", "App Server reported a stale thread",
+    ]
+    _save(state_path, {"last_message_id": 8, "thread_id": "expired-thread"})
+    _FakeAppServer.instances = []
+    monkeypatch.setattr(waker, "AppServer", _FakeAppServer)
+
+    assert waker.run_codex_waker(args) == 0
+    assert _FakeAppServer.instances == []
+    assert _load(state_path) == {"last_message_id": 8, "thread_id": None}
+    audit = json.loads((state_dir / "thread-reset.json").read_text(encoding="utf-8"))
+    assert audit["previous_thread_id"] == "expired-thread"
+    assert audit["reason"] == "App Server reported a stale thread"
+
+    with pytest.raises(SystemExit):
+        waker.run_codex_waker(args[:-3])
 
 
 def test_wait_completed_ignores_a_completion_for_another_turn():

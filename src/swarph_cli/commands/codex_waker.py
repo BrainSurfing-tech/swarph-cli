@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from queue import Empty, Queue
@@ -72,6 +73,16 @@ def _save(path: Path, value: dict) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def _record_thread_reset(state_dir: Path, thread_id: str | None, reason: str) -> None:
+    """Record an explicit continuity reset without exposing message contents."""
+    _save(state_dir / "thread-reset.json", {
+        "event": "operator_thread_reset",
+        "previous_thread_id": thread_id,
+        "reason": reason,
+        "recorded_at": time.time(),
+    })
 
 
 class AppServerProtocolError(RuntimeError):
@@ -185,9 +196,16 @@ def run_codex_waker(argv: list[str] | None = None) -> int:
     p.add_argument("--state-dir", required=True)
     p.add_argument("--self", required=True)
     p.add_argument("--cwd", required=True)
-    p.add_argument("--codex-bin", default="codex")
+    p.add_argument(
+        "--codex-bin",
+        default="codex.cmd" if os.name == "nt" else "codex",
+        help="Codex App Server launcher (defaults to codex.cmd on Windows)",
+    )
     p.add_argument("--timeout-s", type=float, default=300)
     p.add_argument("--outbox-dir", required=True)
+    p.add_argument("--reset-thread", action="store_true", help="clear the persisted App Server thread without processing a DM")
+    p.add_argument("--acknowledge-thread-reset", action="store_true", help="confirm that conversation continuity will be reset")
+    p.add_argument("--reset-reason", help="operator audit reason required with --reset-thread")
     args = p.parse_args(argv)
     state_dir = Path(args.state_dir)
     if state_dir.resolve() in {Path(args.inbox_log).parent.resolve(), Path(args.inbox_log).parent.parent.resolve()}:
@@ -196,12 +214,21 @@ def run_codex_waker(argv: list[str] | None = None) -> int:
     if outbox.resolve() in {state_dir.resolve(), Path(args.inbox_log).parent.resolve()}:
         p.error("--outbox-dir must be separate from monitor and waker state")
     outbox.mkdir(parents=True, exist_ok=True)
+    if args.reset_thread and (not args.acknowledge_thread_reset or not args.reset_reason):
+        p.error("--reset-thread requires --acknowledge-thread-reset and --reset-reason")
     lock = state_dir / "controller.lock"
     state_path = state_dir / "cursor.json"
     with _single_flight(lock) as acquired:
         if not acquired:
             return 0
         state = _load(state_path)
+        if args.reset_thread:
+            previous_thread_id = state.get("thread_id")
+            state["thread_id"] = None
+            _save(state_path, state)
+            _record_thread_reset(state_dir, previous_thread_id, args.reset_reason)
+            print("codex-waker: persisted thread reset; last_message_id was retained", file=sys.stderr)
+            return 0
         dm = _next_dm(Path(args.inbox_log), int(state["last_message_id"]), args.self)
         if not dm:
             return 0
@@ -211,9 +238,14 @@ def run_codex_waker(argv: list[str] | None = None) -> int:
             if thread_id:
                 try:
                     app.request("thread/resume", {"threadId": thread_id})
-                except AppServerProtocolError:
-                    # No documented invalid-thread error code has been observed
-                    # yet, so retain state rather than guessing from error text.
+                except (AppServerProtocolError, TimeoutError, RuntimeError) as exc:
+                    print(
+                        "codex-waker: cannot resume persisted thread; state retained. "
+                        "After investigation, run again with --reset-thread "
+                        "--acknowledge-thread-reset --reset-reason <reason>. "
+                        f"Error: {exc}",
+                        file=sys.stderr,
+                    )
                     raise
             if not thread_id:
                 started = app.request("thread/start", {
