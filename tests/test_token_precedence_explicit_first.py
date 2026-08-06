@@ -172,7 +172,10 @@ def test_explicit_scoped_file_beats_a_VALID_SHARED_ROOT_token(
     The ambient $MESH_GATEWAY_TOKEN is the SHARED token, and the shared token is
     ROOT at the gateway: `_is_root_token` is true for it, DM reads return an
     empty WHERE clause (the firehose), board read+write bypass role/ownership/
-    grants, and it carries peer=None so nothing is attributable. So preferring
+    grants [LAB-VERIFIED ONLY — the reviewing peer's gateway fork has no board
+    layer and could not reverify this leg; the firehose and boot-precondition
+    legs WERE independently confirmed], and it carries peer=None so nothing is
+    attributable. So preferring
     the ambient value over an explicit per-peer file is not a wrong-credential
     bug — it is a SILENT ESCALATION FROM A SCOPED IDENTITY TO UNATTRIBUTABLE ROOT.
 

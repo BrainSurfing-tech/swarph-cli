@@ -156,6 +156,14 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
     # the FIRST auth branch checked — before per-peer — and it resolves to ROOT
     # (unscoped DM reads, board authz bypass, peer=None so unattributable).
     #
+    # EVIDENCE BOUNDARY, stated here because a claim in source outlives the
+    # thread that produced it (gpt-ops, PR #187 review): the DM-firehose and
+    # boot-precondition claims were confirmed by TWO independent readers. THE
+    # BOARD-AUTHZ BYPASS WAS NOT — it is LAB-VERIFIED ONLY, read at
+    # mesh-gateway/server.py:1626 and :1665 on the DEPLOYED gateway. The peer
+    # who reviewed this change could not reverify it because its gateway fork
+    # HAS NO BOARD LAYER. Treat it as one reader's finding, not consensus.
+    #
     # WHICH IS WHY THIS ORDERING WAS A PRIVILEGE ESCALATION, NOT A RELIABILITY
     # BUG: preferring the ambient value over an explicit per-peer file meant
     # that whenever the environment held a CURRENT shared value, this verb ran
