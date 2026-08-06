@@ -125,12 +125,12 @@ def _next_dm(inbox: Path, after: int, self_name: str) -> dict | None:
             dm = json.loads(line)
         except json.JSONDecodeError:
             continue
-        try:
-            raw_id = dm.get("id", 0)
-            if isinstance(raw_id, bool):
-                continue
+        raw_id = dm.get("id", 0)
+        if isinstance(raw_id, int) and not isinstance(raw_id, bool):
+            dm_id = raw_id
+        elif isinstance(raw_id, str) and raw_id.isascii() and raw_id.isdecimal():
             dm_id = int(raw_id)
-        except (TypeError, ValueError):
+        else:
             continue
         if dm_id > after and dm.get("from_node") != self_name and dm.get("to_node") == self_name:
             dm["id"] = dm_id
