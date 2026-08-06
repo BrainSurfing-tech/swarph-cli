@@ -63,8 +63,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--token-file",
         default=None,
-        help="explicit path to a secrets file (mode 0600 expected). "
-        "Default: $MESH_GATEWAY_TOKEN env → ~/.swarph/secrets.toml → prompt.",
+        help="explicit credential file (bare token or env-style; mode 0600 "
+        "expected). WHEN GIVEN IT WINS OUTRIGHT — no fallback is attempted, and "
+        "an unreadable path is an error, not a hint to guess (#332). When NOT "
+        "given: $MESH_GATEWAY_TOKEN → ~/.swarph/secrets.toml → "
+        "~/.config/swarph/<self>.peer_token. This verb never prompts (#243). "
+        "Resolution is delegated to onboard's resolver, so this order is that "
+        "order BY CONSTRUCTION, not by two docs agreeing.",
     )
     return p
 
