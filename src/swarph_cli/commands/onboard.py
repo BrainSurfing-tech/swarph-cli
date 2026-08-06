@@ -109,8 +109,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--token-file",
         default=None,
-        help="explicit path to a secrets file (mode 0600 expected). "
-        "Default resolution order: $MESH_GATEWAY_TOKEN env → ~/.swarph/secrets.toml → prompt.",
+        help="explicit credential file (bare token or env-style; mode 0600 "
+        "expected). WHEN GIVEN IT WINS OUTRIGHT — no fallback is attempted, and "
+        "an unreadable path is an error, not a hint to guess (#332). When NOT "
+        "given: $MESH_GATEWAY_TOKEN → ~/.swarph/secrets.toml → "
+        "~/.config/swarph/<self>.peer_token. This verb never prompts (#243).",
     )
     p.add_argument(
         "--state-dir",
@@ -135,15 +138,65 @@ def _build_parser() -> argparse.ArgumentParser:
 def _resolve_token(token_file_arg: Optional[str]) -> str:
     """Step 3 — token resolution per §15.4. Read-only on the secrets file
     (does not auto-create per drop DM #726 #3 — privilege boundary)."""
+    # ── #332: AN EXPLICIT ARGUMENT IS A DECISION, NOT A HINT ────────────────
+    # >>> THIS BLOCK USED TO SIT BELOW THE $MESH_GATEWAY_TOKEN LOOKUP, so a
+    # stale value in the environment silently overrode the credential the
+    # operator NAMED on the command line. <<< It shipped in 0.41.6 and was
+    # inert until the shared token's VALUE was ROTATED on 2026-08-05: before
+    # that the env value and the file usually agreed, so the wrong order still
+    # produced a working credential. Rotation made them disagree, and the
+    # symptom was a 401 saying UNAUTHORIZED rather than "I ignored the file you
+    # gave me".
+    #
+    # >>> BE PRECISE ABOUT WHAT ROTATION DID AND DID NOT DO, because the mesh
+    # spent two days believing the shared credential was RETIRED and it is not
+    # (gpt-ops caught this claim sitting in these very comments). Rotation
+    # invalidated the OLD VALUE. The shared-token REGIME is current, required
+    # and privileged: the gateway refuses to start without one configured, it is
+    # the FIRST auth branch checked — before per-peer — and it resolves to ROOT
+    # (unscoped DM reads, board authz bypass, peer=None so unattributable).
+    #
+    # WHICH IS WHY THIS ORDERING WAS A PRIVILEGE ESCALATION, NOT A RELIABILITY
+    # BUG: preferring the ambient value over an explicit per-peer file meant
+    # that whenever the environment held a CURRENT shared value, this verb ran
+    # as ROOT instead of as the scoped peer the operator named — silently, and
+    # reading green throughout. The 401 was the GOOD outcome; it appeared only
+    # once the value went stale. See board cards #332 and #333. <<<
+    #
+    # Parsing goes through the one shared reader (swarph_cli.tokens) so that a
+    # bare-token file and an env-style file both work behind the one flag.
+    # Reordering alone would have broken raw-token users: onboard's own parser
+    # only ever understood KEY=VALUE, so an explicit bare-token file would have
+    # matched nothing and fallen through — turning a silent WRONG credential
+    # into a silent MISSING one. gpt-ops caught that in review before it shipped.
+    if token_file_arg:
+        from swarph_cli.tokens import read_token_file
+
+        explicit = Path(token_file_arg).expanduser()
+        try:
+            return read_token_file(explicit)
+        except RuntimeError as exc:
+            # NAME WHAT WAS NOT TRIED, AND WHY. The pre-#332 refusal listed all
+            # four credential sources, which was right when this verb kept
+            # searching. It no longer does — so a bare "cannot read file" would
+            # drop the operator from a four-item map to a one-line dead end, and
+            # a silent fallback would authenticate them as somebody else on a
+            # typo. Say both: the cause, and the doors deliberately left shut.
+            raise RuntimeError(
+                f"{exc}\n"
+                "  NO FALLBACK WAS ATTEMPTED. --token-file names a specific "
+                "credential, and an explicit argument is a decision, not a hint.\n"
+                "  NOT TRIED (in the order they would have been): "
+                "$MESH_GATEWAY_TOKEN, ~/.swarph/secrets.toml, "
+                "~/.config/swarph/<self>.peer_token\n"
+                "  Fix the path, or omit --token-file to use those fallbacks."
+            ) from exc
+
     env_tok = os.environ.get("MESH_GATEWAY_TOKEN")
     if env_tok:
         return env_tok
 
-    secrets_path = (
-        Path(token_file_arg).expanduser()
-        if token_file_arg
-        else Path.home() / ".swarph" / "secrets.toml"
-    )
+    secrets_path = Path.home() / ".swarph" / "secrets.toml"
     if secrets_path.exists():
         try:
             mode = secrets_path.stat().st_mode & 0o777
@@ -168,17 +221,30 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
             )
 
     # ── #243: THE PER-PEER TOKEN — THE CREDENTIAL THAT ACTUALLY EXISTS ──────
-    # >>> THIS VERB WAS LOOKING ONLY FOR THE CREDENTIAL THE R1 MIGRATION
-    # RETIRED. <<< Measured on lab-ovh 2026-08-03: $MESH_GATEWAY_TOKEN UNSET,
+    # >>> THIS VERB WAS LOOKING ONLY FOR THE CREDENTIAL THE R1 MIGRATION MOVED
+    # OFF OF. <<< (This comment said "RETIRED" until 2026-08-06. It was wrong,
+    # and it is where the mesh's two-day belief that the shared token was gone
+    # came from — a claim in a comment, restated until it read as settled. The
+    # shared credential is NOT retired: see the block above and card #333.)
+    # Measured on lab-ovh 2026-08-03: $MESH_GATEWAY_TOKEN UNSET,
     # ~/.swarph/secrets.toml ABSENT, and 10+ files present at
     # ~/.config/swarph/<peer>.peer_token. Every other verb resolves the per-peer
     # file; onboard (and ratify, which re-exports this function, and daemon,
     # which copied it) were left on the old path — classic mint-vs-cutover, the
     # credential moved and three consumers did not.
     #
-    # AND THE GATEWAY NEVER REQUIRED THE SHARED TOKEN: measured, POST
-    # /peers/register with a PER-PEER token returns 200 and mints. So this was
-    # never a permissions problem — only a lookup that never learned.
+    # AND THE GATEWAY NEVER REQUIRED A CALLER TO PRESENT THE SHARED TOKEN:
+    # measured, POST /peers/register with a PER-PEER token returns 200 and
+    # mints. So this was never a permissions problem — only a lookup that never
+    # learned.
+    #
+    # >>> THAT SENTENCE USED TO READ "THE GATEWAY NEVER REQUIRED THE SHARED
+    # TOKEN", FULL STOP — AND IT IS A DIFFERENT CLAIM. The measurement answered
+    # "what may a CLIENT present?"; the sentence generalised it to "what does
+    # the SERVER require?". Those diverge: server.py refuses to start at all
+    # without MESH_GATEWAY_TOKEN configured (`if not AUTH_TOKEN: raise 500`).
+    # One sentence answering two questions, correct on the half that was
+    # measured — which is exactly why nobody caught it for months. <<<
     #
     # Placed AFTER the existing two so a working operator-token setup is
     # unchanged; this only fills the hole where the verb used to prompt.
