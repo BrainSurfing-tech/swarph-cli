@@ -135,15 +135,55 @@ def _build_parser() -> argparse.ArgumentParser:
 def _resolve_token(token_file_arg: Optional[str]) -> str:
     """Step 3 — token resolution per §15.4. Read-only on the secrets file
     (does not auto-create per drop DM #726 #3 — privilege boundary)."""
+    # ── #332: AN EXPLICIT ARGUMENT IS A DECISION, NOT A HINT ────────────────
+    # >>> THIS BLOCK USED TO SIT BELOW THE $MESH_GATEWAY_TOKEN LOOKUP, so a
+    # stale value in the environment silently overrode the credential the
+    # operator NAMED on the command line. <<< It shipped in 0.41.6 and was
+    # inert until the shared token was retired on 2026-08-04: before that the
+    # env value and the file usually agreed, so the wrong order still produced
+    # the right credential. Retirement made them disagree, and the symptom was
+    # a 401 that says UNAUTHORIZED rather than "I ignored the file you gave me".
+    #
+    # Note what retirement did NOT do: deleting the shared credential at the
+    # source does not remove the COPIES living in process environments across
+    # the fleet. Those copies are still presented — and, before this fix, still
+    # preferred. A retired credential stops being ACCEPTED; it does not stop
+    # being SENT.
+    #
+    # Parsing goes through the one shared reader (swarph_cli.tokens) so that a
+    # bare-token file and an env-style file both work behind the one flag.
+    # Reordering alone would have broken raw-token users: onboard's own parser
+    # only ever understood KEY=VALUE, so an explicit bare-token file would have
+    # matched nothing and fallen through — turning a silent WRONG credential
+    # into a silent MISSING one. gpt-ops caught that in review before it shipped.
+    if token_file_arg:
+        from swarph_cli.tokens import read_token_file
+
+        explicit = Path(token_file_arg).expanduser()
+        try:
+            return read_token_file(explicit)
+        except RuntimeError as exc:
+            # NAME WHAT WAS NOT TRIED, AND WHY. The pre-#332 refusal listed all
+            # four credential sources, which was right when this verb kept
+            # searching. It no longer does — so a bare "cannot read file" would
+            # drop the operator from a four-item map to a one-line dead end, and
+            # a silent fallback would authenticate them as somebody else on a
+            # typo. Say both: the cause, and the doors deliberately left shut.
+            raise RuntimeError(
+                f"{exc}\n"
+                "  NO FALLBACK WAS ATTEMPTED. --token-file names a specific "
+                "credential, and an explicit argument is a decision, not a hint.\n"
+                "  NOT TRIED (in the order they would have been): "
+                "$MESH_GATEWAY_TOKEN, ~/.swarph/secrets.toml, "
+                "~/.config/swarph/<self>.peer_token\n"
+                "  Fix the path, or omit --token-file to use those fallbacks."
+            ) from exc
+
     env_tok = os.environ.get("MESH_GATEWAY_TOKEN")
     if env_tok:
         return env_tok
 
-    secrets_path = (
-        Path(token_file_arg).expanduser()
-        if token_file_arg
-        else Path.home() / ".swarph" / "secrets.toml"
-    )
+    secrets_path = Path.home() / ".swarph" / "secrets.toml"
     if secrets_path.exists():
         try:
             mode = secrets_path.stat().st_mode & 0o777
