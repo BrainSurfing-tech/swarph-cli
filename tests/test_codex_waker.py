@@ -8,7 +8,7 @@ def test_next_dm_skips_self_and_old_messages(tmp_path):
     inbox.write_text(
         "\n".join([
             json.dumps({"id": 10, "from_node": "gpt-lc"}),
-            json.dumps({"id": 11, "from_node": "lab-ovh", "kind": "question"}),
+            json.dumps({"id": 11, "from_node": "lab-ovh", "to_node": "gpt-lc", "kind": "question"}),
         ]) + "\n",
         encoding="utf-8",
     )
