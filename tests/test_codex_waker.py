@@ -55,6 +55,10 @@ def test_next_dm_ignores_other_recipient_and_malformed_id(tmp_path):
     inbox.write_text("\n".join([
         json.dumps({"id": "bad", "from_node": "lab", "to_node": "gpt-lc"}),
         json.dumps({"id": True, "from_node": "lab", "to_node": "gpt-lc"}),
+        json.dumps({"id": 1.5, "from_node": "lab", "to_node": "gpt-lc"}),
+        json.dumps({"id": "\u0667", "from_node": "lab", "to_node": "gpt-lc"}),
+        json.dumps({"id": " 7 ", "from_node": "lab", "to_node": "gpt-lc"}),
+        json.dumps({"id": "7.0", "from_node": "lab", "to_node": "gpt-lc"}),
         json.dumps({"id": 12, "from_node": "lab", "to_node": "another"}),
         json.dumps({"id": "13", "from_node": "lab", "to_node": "gpt-lc"}),
     ]), encoding="utf-8")
