@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll for Swarph DMs and wake Codex (%i)
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=true
+Unit=swarph-codex-waker@%i.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Swarph Codex App Server wake controller (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=6min
+EnvironmentFile=%h/.config/swarph/codex-waker-%i.env
+ExecStart=/usr/local/bin/swarph codex-waker --self %i --inbox-log ${SWARPH_MONITOR_STATE_DIR}/inbox.log --state-dir ${SWARPH_WAKER_STATE_DIR} --cwd ${SWARPH_WAKER_CWD} --outbox-dir ${SWARPH_OUTBOX_DIR} --codex-bin ${CODEX_BIN} --timeout-s ${SWARPH_WAKER_TIMEOUT_S}

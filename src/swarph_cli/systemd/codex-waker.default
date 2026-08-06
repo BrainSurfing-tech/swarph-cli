@@ -1,0 +1,10 @@
+# Copy to ~/.config/swarph/codex-waker-<cell>.env for systemd --user units.
+# Monitor, waker, and daemon state directories must be distinct.
+SWARPH_MONITOR_STATE_DIR=%h/swarph_state/%i/mesh-sidecar
+SWARPH_WAKER_STATE_DIR=%h/swarph_state/%i/codex-waker
+SWARPH_OUTBOX_DIR=%h/swarph_state/%i/codex-outbox
+SWARPH_WAKER_CWD=%h/%i
+SWARPH_WAKER_TIMEOUT_S=300
+CODEX_BIN=codex
+SWARPH_GATEWAY=http://lab-ovh:8788
+SWARPH_TOKEN_FILE=%h/.config/swarph/%i.peer_token
