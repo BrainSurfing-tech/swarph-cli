@@ -1,6 +1,15 @@
 import json
+import multiprocessing
+from pathlib import Path
 
 from swarph_cli.commands.codex_waker import AppServer, _load, _next_dm, _save, _single_flight
+
+
+def _hold_lock(path: str, ready, release) -> None:
+    with _single_flight(Path(path)) as acquired:
+        ready.put(acquired)
+        if acquired:
+            release.wait(10)
 
 
 def test_next_dm_skips_self_and_old_messages(tmp_path):
@@ -39,6 +48,31 @@ def test_single_flight_refuses_overlapping_holder(tmp_path):
         assert first is True
         with _single_flight(path) as second:
             assert second is False
+
+
+def test_single_flight_recovers_after_holder_termination(tmp_path):
+    """The OS, not a stale PID probe, releases the controller lock on death."""
+    context = multiprocessing.get_context("spawn")
+    ready = context.Queue()
+    release = context.Event()
+    path = tmp_path / "controller.lock"
+    holder = context.Process(target=_hold_lock, args=(str(path), ready, release))
+    holder.start()
+    try:
+        assert ready.get(timeout=5) is True
+        assert holder.is_alive()
+        with _single_flight(path) as contender:
+            assert contender is False
+
+        holder.terminate()  # This test owns the holder process.
+        holder.join(timeout=5)
+        assert not holder.is_alive()
+        with _single_flight(path) as later_contender:
+            assert later_contender is True
+    finally:
+        if holder.is_alive():
+            holder.terminate()
+        holder.join(timeout=5)
 
 
 class _FakeProcess:
