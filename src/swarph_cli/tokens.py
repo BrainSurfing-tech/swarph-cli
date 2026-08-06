@@ -78,16 +78,19 @@ def read_token_file(path: Path) -> str:
     # all. A credential file readable by every account on the host is worth
     # saying out loud on EVERY path that reads one, not just the one path whose
     # author happened to think of it.
-    try:
-        mode = path.stat().st_mode & 0o777
-    except OSError:
-        mode = None
-    if mode is not None and mode != 0o600:
-        print_safe(
-            f"swarph: WARNING: {path} mode is {oct(mode)}, expected 0600. "
+    # Windows exposes synthetic POSIX mode bits for NTFS files. Security there
+    # is enforced by ACLs, so a chmod instruction is misleading and inactionable.
+    if sys.platform != "win32":
+        try:
+            mode = path.stat().st_mode & 0o777
+        except OSError:
+            mode = None
+        if mode is not None and mode != 0o600:
+            print_safe(
+                f"swarph: WARNING: {path} mode is {oct(mode)}, expected 0600. "
             f"Continuing — fix manually with `chmod 600 {path}`.",
-            file=sys.stderr,
-        )
+                file=sys.stderr,
+            )
 
     try:
         raw = path.read_text(encoding="utf-8")
