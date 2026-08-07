@@ -33,6 +33,7 @@ from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Optional
 
+from .. import tokens
 from ._display import sanitize_terminal
 
 
@@ -185,19 +186,32 @@ def _resolve_token(
     token_file_arg: Optional[str],
     *,
     allow_peer_token: bool = True,
+    identity_is_explicit: bool = True,
 ) -> str:
-    if token_file_arg:
-        return _read_token_file(Path(token_file_arg).expanduser())
-    env = os.environ.get("MESH_GATEWAY_TOKEN")
-    if env:
-        return env
-    if allow_peer_token:
-        peer_token = _peer_token_path(self_name)
-        if peer_token.exists():
-            return _read_token_file(peer_token)
-    secrets = _read_secrets_token(Path.home() / ".swarph" / "secrets.toml")
-    if secrets:
-        return secrets
+    """Delegates to swarph_cli.tokens.resolve_token — see that module for why
+    three separate resolvers was the defect, not three separate bugs.
+
+    `identity_is_explicit` defaults True here because every mesh verb reaches
+    this through _resolve_self_name, which either took --as, took SWARPH_SELF,
+    or derived the name from the state dir the operator pointed at. In all three
+    the caller has said which cell it is, so that cell's own credential outranks
+    an ambient MESH_GATEWAY_TOKEN — which is the whole fix.
+
+    Parsing goes through tokens.read_token_file — the same strict reader #332
+    extracted, which validates latin-1 encodability and names the offending file
+    and line. mesh._read_token_file remains as a delegating shim because the
+    sidecar suites monkeypatch that name.
+    """
+    res = tokens.resolve_token(
+        self_name,
+        token_file_arg,
+        env_keys=("MESH_GATEWAY_TOKEN",),
+        identity_is_explicit=identity_is_explicit,
+        allow_peer_token=allow_peer_token,
+        secrets_path=Path.home() / ".swarph" / "secrets.toml",
+    )
+    if res is not None:
+        return res.token
     raise RuntimeError(
         "cannot resolve mesh token; set MESH_GATEWAY_TOKEN or create "
         f"{_peer_token_path(self_name)}"

@@ -29,6 +29,8 @@ import json
 import os
 import sys
 import urllib.request
+
+from swarph_cli import tokens
 from pathlib import Path
 from typing import Optional
 
@@ -137,20 +139,46 @@ def env_diagnosis() -> str:
 
 
 def _resolve_token(token_file: Optional[str], self_name: str) -> Optional[str]:
-    """Read token precedence: --token-file > GBRAIN_TOKEN > SWARPH_BRAIN_TOKEN > peer token."""
-    if token_file:
-        return Path(token_file).expanduser().read_text(encoding="utf-8").strip()
-    for var in ("GBRAIN_TOKEN", "SWARPH_BRAIN_TOKEN"):
-        val = os.environ.get(var)
-        if val and val.strip():
-            return val.strip()
-    try:
-        tok = _peer_token_path(self_name).read_text(encoding="utf-8").strip()
-        if tok:
-            return tok
-    except OSError:
-        pass
-    return None
+    """--token-file > per-identity peer token > GBRAIN_TOKEN > SWARPH_BRAIN_TOKEN.
+
+    The env vars stay brain-specific on purpose — unifying the ORDER does not
+    mean pretending every verb wants the same variables. What changed is that
+    the peer token now outranks them when self_name is known, for the reason set
+    out in swarph_cli.tokens: a per-identity secret must never lose to a
+    process-global one, or `--as <cell>` stops meaning what it says on a host
+    running more than one cell.
+
+    >>> A DEFAULTED NAME IS NOT AN EXPLICIT IDENTITY. <<< gpt-ops caught this
+    reviewing #190, and it is the sharpest kind of catch: I had noticed the
+    hazard, written a comment about it, and not handled it.
+
+    `_self_name()` NEVER returns empty — it falls back to _DEFAULT_SELF
+    ("lab-ovh"). So `bool(self_name)` is always true here, and passing that as
+    identity_is_explicit would promote `lab-ovh.peer_token` — ANOTHER CELL'S
+    CREDENTIAL — above GBRAIN_TOKEN on every invocation where nothing named the
+    cell. The comment above already says why that fallback is dangerous
+    ("harmless on lab-ovh, silently wrong everywhere else"); this would have
+    turned a last-resort lookup into a first-choice one.
+
+    gpt-ops' sharper point: it also made the resolver's "no explicit identity"
+    unit test UNREACHABLE through this caller. A negative test whose subject
+    cannot exhibit the positive is not a test — it passes and covers a branch
+    production cannot enter. Hence the integration tests in
+    tests/test_brain_ask_identity_explicitness.py, which exercise this function
+    rather than the resolver, because a unit test at the resolver cannot see
+    what the caller makes reachable.
+
+    Explicitness therefore comes from `_self_name_is_defaulted()`, not from
+    truthiness: a guessed name keeps the old env-first order exactly, and only a
+    name the operator actually supplied earns precedence over ambient values.
+    """
+    res = tokens.resolve_token(
+        self_name or None,
+        token_file,
+        env_keys=("GBRAIN_TOKEN", "SWARPH_BRAIN_TOKEN"),
+        identity_is_explicit=bool(self_name) and not _self_name_is_defaulted(),
+    )
+    return res.token if res is not None else None
 
 
 def _http_post(url: str, body: dict, token: str,

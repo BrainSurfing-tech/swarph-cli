@@ -62,14 +62,45 @@ def test_it_does_NOT_guess_a_peer_name(_no_ambient_credentials):
         onboard._resolve_token(None)                        # SWARPH_SELF unset
 
 
-def test_the_SHARED_token_still_wins_when_present(_no_ambient_credentials, monkeypatch):
-    """NON-VACUITY. The per-peer path is ADDITIVE — an operator with a working
-    shared-token setup must be unaffected, or the fix trades one broken
-    population for another."""
-    _write_peer_token(_no_ambient_credentials, "lab-ovh", "tok-per-peer")
+def test_the_SHARED_token_still_wins_when_no_peer_token_exists(
+        _no_ambient_credentials, monkeypatch):
+    """NON-VACUITY, in the form that SURVIVES the precedence change.
+
+    #243's guarantee was "an operator with a working shared-token setup must be
+    unaffected, or the fix trades one broken population for another". Still
+    right, still tested — but its scope narrowed. Where no per-cell credential
+    exists, the shared token is the only credential and must win.
+    """
     monkeypatch.setenv("SWARPH_SELF", "lab-ovh")
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok-shared")
     assert onboard._resolve_token(None) == "tok-shared"
+
+
+def test_per_peer_token_now_OUTRANKS_the_shared_one_when_the_cell_is_named(
+        _no_ambient_credentials, monkeypatch):
+    """>>> THIS REVERSES A DELIBERATE ORDERING FROM #243, ON PURPOSE. <<<
+
+    #243 placed the per-peer lookup AFTER $MESH_GATEWAY_TOKEN so the change would
+    be purely additive. That was the safe call then and it is the wrong call now,
+    for a reason #243 could not have seen: the R1 enforce-flip RETIRED the shared
+    token, so on a box still carrying it in the environment "additive" means
+    authenticating with a corpse while the valid credential sits unread on disk.
+    Reported from workstation-lc against 0.41.6, reproduced by lab-ovh on main.
+
+    And the sharper half: a process-global env var cannot vary per cell, so on a
+    host running several (workstation-lc runs three, with three distinct peer
+    tokens) `--as <cell>` selected an identity WITHOUT carrying its credential —
+    every call authenticated as whatever the env held, whichever cell was named,
+    and nothing warned.
+
+    The flip is scoped to "the identity is explicit" precisely to keep as much of
+    #243's additivity as possible: an operator who names no cell is unaffected,
+    which the test above still asserts.
+    """
+    _write_peer_token(_no_ambient_credentials, "lab-ovh", "tok-per-peer")
+    monkeypatch.setenv("SWARPH_SELF", "lab-ovh")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok-shared-RETIRED")
+    assert onboard._resolve_token(None) == "tok-per-peer"
 
 
 def test_ratify_and_daemon_resolve_through_THE_SAME_function():
