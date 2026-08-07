@@ -2,6 +2,32 @@
 
 Notable changes to `swarph-cli`. Earlier history: `git log`.
 
+## 0.41.9 — 2026-08-07
+- **fix(tokens): a NAMED cell's credential outranks the ambient one (#190).** On a
+  multi-cell host a process-global `MESH_GATEWAY_TOKEN` cannot be the credential for
+  more than one cell, so naming a cell selected an IDENTITY WITHOUT CARRYING ITS
+  CREDENTIAL. Deliberately narrow: the flip applies only when the identity is
+  EXPLICIT — a defaulted name keeps the old env-first order, so nothing changes for
+  an operator who names no cell. A named cell whose credential file exists but
+  yields no usable token now REFUSES rather than falling back to the ambient one:
+  naming a cell is a decision, not a hint.
+  - The refusal names the file it tells you to fix. It previously rendered the path
+    as the literal `(None)` — `peer_src` is assigned only on a successful read, and
+    that branch is reachable only when every read failed. The behaviour was correct
+    and the diagnostic was useless, which is the worse of the two to ship.
+  - Known gap, carded not fixed (#374): presence is tested with `exists()`, so a
+    credential that is a BROKEN SYMLINK still falls through to the ambient token
+    silently. A dead symlink is a provisioning error, not an absence.
+- **feat(waker): portable Codex App Server controller + Linux supervisor (#193, #195).**
+  Merged after 0.41.8 was cut, so this is their first release.
+
+### Changelog gap, recorded rather than quietly closed
+0.41.7 and 0.41.8 shipped to PyPI with **no entry here**. What they contained:
+- **0.41.7** — `fix: an explicit SCOPED --token-file must beat an ambient SHARED-ROOT
+  token` (#332), a silent privilege escalation. Same family as #190 above; #190
+  generalises it from `--token-file` to peer identity.
+- **0.41.8** — `fix(tokens): skip the POSIX mode warning on Windows` (#192).
+
 ## 0.41.6 — 2026-08-05
 - **feat(board): `cards thread` + `cards say`** — the CLI half of card↔DM fusion.
   The gateway had carried `GET /board/cards/{id}/thread` and the card-gated attach
