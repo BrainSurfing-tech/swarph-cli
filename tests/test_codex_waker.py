@@ -1,6 +1,8 @@
 import json
 import multiprocessing
 import os
+import subprocess
+import threading
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
@@ -8,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import swarph_cli.commands.codex_waker as waker
-from swarph_cli.commands.codex_waker import AppServer, AppServerProtocolError, _load, _next_dm, _save, _single_flight
+from swarph_cli.commands.codex_waker import AppServer, AppServerProtocolError, _authorize_outbox_reply, _drain_outbox, _load, _next_dm, _save, _single_flight
 
 
 def _hold_lock(path: str, ready, release) -> None:
@@ -172,7 +174,7 @@ def test_failed_first_turn_does_not_persist_or_resume_empty_thread(tmp_path, mon
     outbox = tmp_path / "outbox"
     args = [
         "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
-        "--cwd", str(tmp_path), "--outbox-dir", str(outbox),
+        "--cwd", str(tmp_path / "workspace"), "--outbox-dir", str(outbox),
     ]
     _FakeAppServer.instances = []
     _FakeAppServer.fail_first_turn = True
@@ -200,7 +202,7 @@ def test_unclassified_resume_protocol_error_retains_state(tmp_path, monkeypatch)
     outbox = tmp_path / "outbox"
     args = [
         "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
-        "--cwd", str(tmp_path), "--outbox-dir", str(outbox),
+        "--cwd", str(tmp_path / "workspace"), "--outbox-dir", str(outbox),
     ]
     monkeypatch.setattr(waker, "AppServer", _FakeAppServer)
     _FakeAppServer.instances = []
@@ -231,7 +233,7 @@ def test_operator_reset_clears_only_thread_id_and_writes_audit_record(tmp_path, 
     outbox = tmp_path / "outbox"
     args = [
         "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
-        "--cwd", str(tmp_path), "--outbox-dir", str(outbox), "--reset-thread",
+        "--cwd", str(tmp_path / "workspace"), "--outbox-dir", str(outbox), "--reset-thread",
         "--acknowledge-thread-reset", "--reset-reason", "App Server reported a stale thread",
     ]
     _save(state_path, {"last_message_id": 8, "thread_id": "expired-thread"})
@@ -267,7 +269,7 @@ def test_reset_crash_after_state_save_leaves_an_incomplete_audit_request(tmp_pat
     outbox = tmp_path / "outbox"
     args = [
         "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
-        "--cwd", str(tmp_path), "--outbox-dir", str(outbox), "--reset-thread",
+        "--cwd", str(tmp_path / "workspace"), "--outbox-dir", str(outbox), "--reset-thread",
         "--acknowledge-thread-reset", "--reset-reason", "Controlled crash test",
     ]
     _save(state_path, {"last_message_id": 8, "thread_id": "expired-thread"})
@@ -290,7 +292,7 @@ def test_completed_turn_requires_a_valid_outbox_reply_before_acknowledging_dm(tm
     outbox = tmp_path / "outbox"
     args = [
         "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
-        "--cwd", str(tmp_path), "--outbox-dir", str(outbox),
+        "--cwd", str(tmp_path / "workspace"), "--outbox-dir", str(outbox),
     ]
     _FakeAppServer.instances = []
     _FakeAppServer.fail_first_turn = False
@@ -326,7 +328,7 @@ def test_invalid_outbox_envelope_never_advances_state(tmp_path, monkeypatch, pay
     (outbox / "11.json").write_text(content, encoding="utf-8")
     args = [
         "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
-        "--cwd", str(tmp_path), "--outbox-dir", str(outbox),
+        "--cwd", str(tmp_path / "workspace"), "--outbox-dir", str(outbox),
     ]
     _FakeAppServer.instances = []
     _FakeAppServer.fail_first_turn = False
@@ -346,3 +348,160 @@ def test_wait_completed_ignores_a_completion_for_another_turn():
     app.events.put(json.dumps({"method": "turn/completed", "params": {"turn": {"id": "other", "status": "completed"}}}))
     app.events.put(json.dumps({"method": "turn/completed", "params": {"turn": {"id": "wanted", "status": "completed"}}}))
     app.wait_completed("thread-1", "wanted")
+
+
+def test_outbox_deletes_only_after_mesh_send_succeeds(tmp_path, monkeypatch):
+    outbox = tmp_path / "outbox"
+    state_dir = tmp_path / "state"
+    _write_reply(outbox, 21, to_node="peer")
+    _save(state_dir / "cursor.json", {"last_message_id": 21, "thread_id": "thread-1"})
+    _authorize_outbox_reply(state_dir, {"id": 21, "from_node": "peer"})
+    calls = []
+    monkeypatch.setattr(
+        "swarph_cli.commands.codex_waker.subprocess.run",
+        lambda args, check, timeout: calls.append((args, timeout)),
+    )
+    _drain_outbox(outbox, state_dir, "self", "http://gateway", "/token", "swarph")
+    assert calls and not (outbox / "21.json").exists()
+    assert not (state_dir / "outbox-authorizations" / "21.json").exists()
+    assert calls[0][0][calls[0][0].index("--content") + 1] == "Synthetic reply"
+    assert calls[0][1] == waker._OUTBOX_SEND_TIMEOUT_S
+
+
+def test_outbox_retains_reply_when_mesh_send_fails(tmp_path, monkeypatch):
+    outbox = tmp_path / "outbox"
+    state_dir = tmp_path / "state"
+    _write_reply(outbox, 22, to_node="peer")
+    entry = outbox / "22.json"
+    _save(state_dir / "cursor.json", {"last_message_id": 22, "thread_id": "thread-1"})
+    _authorize_outbox_reply(state_dir, {"id": 22, "from_node": "peer"})
+    monkeypatch.setattr(
+        "swarph_cli.commands.codex_waker.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(subprocess.CalledProcessError(1, "swarph")),
+    )
+    _drain_outbox(outbox, state_dir, "self", "http://gateway", "/token", "swarph")
+    assert entry.exists()
+
+
+def test_timed_out_send_retains_its_entry_and_continues_to_later_reply(tmp_path, monkeypatch):
+    outbox = tmp_path / "outbox"
+    state_dir = tmp_path / "state"
+    _write_reply(outbox, 23, to_node="peer")
+    _write_reply(outbox, 24, to_node="peer")
+    _save(state_dir / "cursor.json", {"last_message_id": 24, "thread_id": "thread-1"})
+    _authorize_outbox_reply(state_dir, {"id": 23, "from_node": "peer"})
+    _authorize_outbox_reply(state_dir, {"id": 24, "from_node": "peer"})
+    calls = []
+
+    def send(args, check, timeout):
+        calls.append(args)
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(args, timeout)
+
+    monkeypatch.setattr("swarph_cli.commands.codex_waker.subprocess.run", send)
+    _drain_outbox(outbox, state_dir, "self", "http://gateway", "/token", "swarph")
+    assert (outbox / "23.json").exists()
+    assert not (outbox / "24.json").exists()
+    assert len(calls) == 2
+
+
+def test_overlapping_drainers_do_not_double_send(tmp_path, monkeypatch):
+    outbox = tmp_path / "outbox"
+    state_dir = tmp_path / "state"
+    _write_reply(outbox, 25, to_node="peer")
+    _save(state_dir / "cursor.json", {"last_message_id": 25, "thread_id": "thread-1"})
+    _authorize_outbox_reply(state_dir, {"id": 25, "from_node": "peer"})
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def send(args, check, timeout):
+        calls.append(args)
+        started.set()
+        assert release.wait(5)
+
+    monkeypatch.setattr("swarph_cli.commands.codex_waker.subprocess.run", send)
+    first = threading.Thread(
+        target=_drain_outbox,
+        args=(outbox, state_dir, "self", "http://gateway", "/token", "swarph"),
+    )
+    first.start()
+    assert started.wait(5)
+    _drain_outbox(outbox, state_dir, "self", "http://gateway", "/token", "swarph")
+    assert len(calls) == 1
+    release.set()
+    first.join(timeout=5)
+    assert not first.is_alive()
+    assert not (outbox / "25.json").exists()
+
+
+def test_outbox_rejects_noncanonical_message_filename(tmp_path):
+    outbox = tmp_path / "outbox"
+    state_dir = tmp_path / "state"
+    _write_reply(outbox, 23, to_node="peer")
+    (outbox / "23.json").rename(outbox / "023.json")
+    _drain_outbox(outbox, state_dir, "self", "http://gateway", "/token", "swarph")
+    assert (outbox / "invalid" / "023.json").exists()
+
+
+def test_outbox_rejects_agent_asserted_destination(tmp_path, monkeypatch):
+    outbox = tmp_path / "outbox"
+    state_dir = tmp_path / "state"
+    _write_reply(outbox, 24, to_node="other-peer")
+    _save(state_dir / "cursor.json", {"last_message_id": 24, "thread_id": "thread-1"})
+    _authorize_outbox_reply(state_dir, {"id": 24, "from_node": "peer"})
+    calls = []
+    monkeypatch.setattr(
+        "swarph_cli.commands.codex_waker.subprocess.run",
+        lambda args, check, timeout: calls.append(args),
+    )
+    _drain_outbox(outbox, state_dir, "self", "http://gateway", "/token", "swarph")
+    assert calls == []
+    assert (outbox / "invalid" / "24.json").exists()
+
+
+def test_invalid_outbox_entry_does_not_block_later_authorized_reply(tmp_path, monkeypatch):
+    outbox = tmp_path / "outbox"
+    state_dir = tmp_path / "state"
+    _write_reply(outbox, 25, to_node="peer")
+    (outbox / "25.json").rename(outbox / "001.json")
+    _write_reply(outbox, 26, to_node="peer")
+    _save(state_dir / "cursor.json", {"last_message_id": 26, "thread_id": "thread-1"})
+    _authorize_outbox_reply(state_dir, {"id": 26, "from_node": "peer"})
+    calls = []
+    monkeypatch.setattr(
+        "swarph_cli.commands.codex_waker.subprocess.run",
+        lambda args, check, timeout: calls.append(args),
+    )
+    _drain_outbox(outbox, state_dir, "self", "http://gateway", "/token", "swarph")
+    assert (outbox / "invalid" / "001.json").exists()
+    assert not (outbox / "26.json").exists()
+    assert len(calls) == 1
+
+
+def test_drain_mode_does_not_require_wake_mode_arguments(tmp_path):
+    assert waker.run_codex_waker([
+        "--drain-outbox", "--self", "gpt-lc", "--state-dir", str(tmp_path / "state"),
+        "--cwd", str(tmp_path / "cwd"), "--outbox-dir", str(tmp_path / "outbox"), "--gateway", "http://gateway",
+        "--token-file", str(tmp_path / "token"),
+    ]) == 0
+
+
+def test_drain_mode_rejects_state_dir_inside_agent_cwd(tmp_path):
+    cwd = tmp_path / "workspace"
+    with pytest.raises(SystemExit):
+        waker.run_codex_waker([
+            "--drain-outbox", "--self", "gpt-lc", "--state-dir", str(cwd / "state"),
+            "--cwd", str(cwd), "--outbox-dir", str(tmp_path / "outbox"),
+            "--gateway", "http://gateway", "--token-file", str(tmp_path / "token"),
+        ])
+
+
+def test_normal_mode_rejects_nested_state_and_outbox_paths(tmp_path):
+    state_dir = tmp_path / "state"
+    with pytest.raises(SystemExit):
+        waker.run_codex_waker([
+            "--self", "gpt-lc", "--state-dir", str(state_dir), "--cwd", str(tmp_path / "cwd"),
+            "--inbox-log", str(tmp_path / "monitor" / "inbox.log"),
+            "--outbox-dir", str(state_dir / "outbox"),
+        ])

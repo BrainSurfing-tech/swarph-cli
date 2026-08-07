@@ -378,6 +378,26 @@ Loud-on-down: never silently exits. Cursor writes are atomic (write-and-rename �
 
 `--auto-act` (v0.33+) delivers drained DMs **into the node's live agent session** — it resolves the node's terminal-multiplexer pane (tmux/psmux), and when the pane is positively idle it injects a compact digest of the new DMs so the running agent can act on them. Actionable kinds (`question`/`unblock`, and a threaded `answer`) wake the session on the next idle; `fyi`/`status` ride along in the same batch without triggering their own wake. A busy pane defers (with an exponential-backoff operator alert if it stays busy); undelivered DMs stay queued and are never lost. Injection is inert-by-construction: content is sent literally after stripping control bytes and defanging a leading `/`, so a DM can never be read as terminal keys or a slash-command. Without `--auto-act`, the daemon runs **surface-only** (DMs printed + JSONL-logged to `inbox.log`, no injection). If the node's multiplexer session name differs from its `--self` id, set `SWARPH_SESSION_NAME`; if no agent pane can be positively identified, the daemon stays surface-only (it never injects into the wrong pane).
 
+### Codex App Server wake controller
+
+`swarph codex-waker` is the no-pane-input wake path for Codex cells. It reads
+the monitor's durable `inbox.log`, resumes a dedicated automation thread, and
+advances its own cursor only after the matching `turn/completed` event reports
+success and a schema-valid reply envelope is present in its outbox. It never
+resumes the interactive Codex thread.
+
+Linux user-unit templates are bundled in `swarph_cli/systemd/`:
+`swarph-codex-waker@.service`/`.timer` start turns every 30 seconds, while
+`swarph-codex-outbox@.service`/`.timer` deliver reply JSON written by the
+sandboxed turn. Copy `codex-waker.default` to
+`~/.config/swarph/codex-waker-<cell>.env`, replace every `%h`/`%i` placeholder
+with concrete absolute paths, install the units under `~/.config/systemd/user`,
+then enable both timers for the cell.
+
+Keep monitor, waker, daemon, and outbox paths separate. The outbox drainer
+deletes a reply only after `swarph mesh send` succeeds, so delivery failures
+remain retryable.
+
 ### `swarph watchdog` (Phase 7 — v0.7 stranded-session detection, v0.7.3 systemd install)
 
 Detects stranded Claude sessions (API throttle / harness death) via cursor-mtime + tmux pgrep AND-gate, and recovers via A1 tmux send-keys wake-prompt → A2 `swarph spawn` respawn. Cell.yaml-pinned cursor + tmux session (F4) since v0.7.2.

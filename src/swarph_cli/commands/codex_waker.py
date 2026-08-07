@@ -23,6 +23,9 @@ from queue import Empty, Queue
 from pathlib import Path
 
 
+_OUTBOX_SEND_TIMEOUT_S = 60
+
+
 @contextlib.contextmanager
 def _single_flight(path: Path):
     """Kernel-released single-flight lock for one scheduler session."""
@@ -76,6 +79,28 @@ def _save(path: Path, value: dict) -> None:
     tmp.replace(path)
 
 
+def _paths_overlap(left: Path, right: Path) -> bool:
+    """Whether two resolved paths share any directory subtree."""
+    return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+
+def _validate_paths(
+    state_dir: Path,
+    outbox: Path,
+    cwd: Path,
+    inbox_log: Path | None = None,
+) -> None:
+    state_dir, outbox, cwd = state_dir.resolve(), outbox.resolve(), cwd.resolve()
+    if _paths_overlap(state_dir, outbox):
+        raise ValueError("--state-dir and --outbox-dir must not overlap")
+    if _paths_overlap(state_dir, cwd):
+        raise ValueError("--state-dir must not overlap --cwd")
+    if inbox_log is not None:
+        monitor_state = inbox_log.resolve().parent
+        if _paths_overlap(state_dir, monitor_state) or _paths_overlap(outbox, monitor_state):
+            raise ValueError("--state-dir and --outbox-dir must not overlap monitor state")
+
+
 def _append_reset_event(state_dir: Path, event: dict) -> None:
     """Durably append reset evidence; requests must survive a later process death."""
     path = state_dir / "thread-reset.jsonl"
@@ -86,7 +111,7 @@ def _append_reset_event(state_dir: Path, event: dict) -> None:
         os.fsync(fp.fileno())
 
 
-def _require_outbox_reply(outbox: Path, dm: dict) -> None:
+def _require_outbox_reply(outbox: Path, dm: dict, *, check_destination: bool = True) -> None:
     """Validate the agent's final atomic reply before acknowledging its source DM."""
     path = outbox / f"{dm['id']}.json"
     try:
@@ -99,12 +124,107 @@ def _require_outbox_reply(outbox: Path, dm: dict) -> None:
         raise RuntimeError(f"outbox reply for mesh DM {dm['id']} must be an object")
     if reply.get("message_id") != dm["id"]:
         raise RuntimeError(f"outbox reply message_id does not match mesh DM {dm['id']}")
-    if reply.get("to_node") != dm["from_node"]:
+    if check_destination and reply.get("to_node") != dm["from_node"]:
         raise RuntimeError(f"outbox reply destination does not match mesh DM {dm['id']}")
     if reply.get("kind") != "answer":
         raise RuntimeError(f"outbox reply kind for mesh DM {dm['id']} must be answer")
     if not isinstance(reply.get("content"), str) or not reply["content"].strip():
         raise RuntimeError(f"outbox reply content for mesh DM {dm['id']} must be non-empty text")
+
+
+class PendingOutboxReply(RuntimeError):
+    """A reply whose controller authorization has not committed yet."""
+
+
+def _authorization_path(state_dir: Path, message_id: int) -> Path:
+    return state_dir / "outbox-authorizations" / f"{message_id}.json"
+
+
+def _authorize_outbox_reply(state_dir: Path, dm: dict) -> None:
+    """Persist the controller-derived destination before acknowledging a DM."""
+    _save(_authorization_path(state_dir, dm["id"]), {
+        "message_id": dm["id"],
+        "to_node": dm["from_node"],
+    })
+
+
+def _authorized_destination(state_dir: Path, message_id: int) -> str:
+    state = _load(state_dir / "cursor.json")
+    if int(state.get("last_message_id", 0)) < message_id:
+        raise PendingOutboxReply("controller cursor has not acknowledged this reply")
+    path = _authorization_path(state_dir, message_id)
+    try:
+        authorization = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise PendingOutboxReply("controller authorization is not available") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("controller authorization is invalid JSON") from exc
+    if not isinstance(authorization, dict):
+        raise RuntimeError("controller authorization must be an object")
+    if authorization.get("message_id") != message_id:
+        raise RuntimeError("controller authorization message_id does not match filename")
+    to_node = authorization.get("to_node")
+    if not isinstance(to_node, str) or not to_node:
+        raise RuntimeError("controller authorization destination is invalid")
+    return to_node
+
+
+def _quarantine_outbox_entry(outbox: Path, path: Path, reason: str) -> None:
+    quarantine = outbox / "invalid"
+    quarantine.mkdir(parents=True, exist_ok=True)
+    target = quarantine / path.name
+    if target.exists():
+        target = quarantine / f"{path.name}.{time.time_ns()}"
+    path.replace(target)
+    print(f"codex-waker: quarantined invalid outbox entry {path.name}: {reason}", file=sys.stderr)
+
+
+def _drain_outbox(
+    outbox: Path, state_dir: Path, self_name: str, gateway: str, token_file: str, swarph_bin: str
+) -> None:
+    """Deliver authorized reply envelopes without allowing one bad file to stall later work."""
+    outbox.mkdir(parents=True, exist_ok=True)
+    with _single_flight(state_dir / "outbox-drainer.lock") as acquired:
+        if not acquired:
+            print("codex-waker: outbox drainer is already active", file=sys.stderr)
+            return
+        _drain_outbox_locked(outbox, state_dir, self_name, gateway, token_file, swarph_bin)
+
+
+def _drain_outbox_locked(
+    outbox: Path, state_dir: Path, self_name: str, gateway: str, token_file: str, swarph_bin: str
+) -> None:
+    for path in sorted(outbox.glob("*.json")):
+        try:
+            if not path.stem.isascii() or not path.stem.isdecimal():
+                raise RuntimeError("filename must be an integer message ID")
+            message_id = int(path.stem)
+            if str(message_id) != path.stem:
+                raise RuntimeError("filename must use a canonical message ID")
+            to_node = _authorized_destination(state_dir, message_id)
+            _require_outbox_reply(outbox, {"id": message_id, "from_node": to_node})
+            message = json.loads(path.read_text(encoding="utf-8"))
+        except PendingOutboxReply as exc:
+            print(f"codex-waker: deferred outbox entry {path.name}: {exc}", file=sys.stderr)
+            continue
+        except RuntimeError as exc:
+            _quarantine_outbox_entry(outbox, path, str(exc))
+            continue
+        try:
+            subprocess.run(
+                [
+                    swarph_bin, "mesh", "send", message["to_node"], "--kind", message["kind"],
+                    "--content", message["content"], "--as", self_name, "--gateway", gateway,
+                    "--token-file", token_file,
+                ],
+                check=True,
+                timeout=_OUTBOX_SEND_TIMEOUT_S,
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            print(f"codex-waker: retaining outbox entry {path.name}: {exc}", file=sys.stderr)
+            continue
+        path.unlink()
+        _authorization_path(state_dir, message_id).unlink(missing_ok=True)
 
 
 class AppServerProtocolError(RuntimeError):
@@ -218,10 +338,10 @@ def run_codex_waker(argv: list[str] | None = None) -> int:
         "Windows deployment: run one Task Scheduler principal/session for each --state-dir. "
         "The Windows single-flight mutex is intentionally scoped to that Terminal Services session."
     )
-    p.add_argument("--inbox-log", required=True)
+    p.add_argument("--inbox-log")
     p.add_argument("--state-dir", required=True)
     p.add_argument("--self", required=True)
-    p.add_argument("--cwd", required=True)
+    p.add_argument("--cwd")
     p.add_argument(
         "--codex-bin",
         default="codex.cmd" if os.name == "nt" else "codex",
@@ -232,13 +352,27 @@ def run_codex_waker(argv: list[str] | None = None) -> int:
     p.add_argument("--reset-thread", action="store_true", help="clear the persisted App Server thread without processing a DM")
     p.add_argument("--acknowledge-thread-reset", action="store_true", help="confirm that conversation continuity will be reset")
     p.add_argument("--reset-reason", help="operator audit reason required with --reset-thread")
+    p.add_argument("--drain-outbox", action="store_true")
+    p.add_argument("--gateway")
+    p.add_argument("--token-file")
+    p.add_argument("--swarph-bin", default="swarph")
     args = p.parse_args(argv)
     state_dir = Path(args.state_dir)
-    if state_dir.resolve() in {Path(args.inbox_log).parent.resolve(), Path(args.inbox_log).parent.parent.resolve()}:
-        p.error("--state-dir must be separate from monitor state")
     outbox = Path(args.outbox_dir)
-    if outbox.resolve() in {state_dir.resolve(), Path(args.inbox_log).parent.resolve()}:
-        p.error("--outbox-dir must be separate from monitor and waker state")
+    if not args.cwd:
+        p.error("--cwd is required to protect controller state from the sandbox")
+    cwd = Path(args.cwd)
+    try:
+        _validate_paths(state_dir, outbox, cwd, Path(args.inbox_log) if args.inbox_log else None)
+    except ValueError as exc:
+        p.error(str(exc))
+    if args.drain_outbox:
+        if not args.gateway or not args.token_file:
+            p.error("--drain-outbox requires --gateway and --token-file")
+        _drain_outbox(outbox, state_dir, args.self, args.gateway, args.token_file, args.swarph_bin)
+        return 0
+    if not args.inbox_log:
+        p.error("normal wake mode requires --inbox-log")
     outbox.mkdir(parents=True, exist_ok=True)
     if args.reset_thread and (not args.acknowledge_thread_reset or not args.reset_reason):
         p.error("--reset-thread requires --acknowledge-thread-reset and --reset-reason")
@@ -302,6 +436,7 @@ def run_codex_waker(argv: list[str] | None = None) -> int:
             started = app.request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]})
             app.wait_completed(thread_id, started["turn"]["id"])
             _require_outbox_reply(outbox, dm)
+            _authorize_outbox_reply(state_dir, dm)
             state["thread_id"] = thread_id
             state["last_message_id"] = dm["id"]
             _save(state_path, state)
