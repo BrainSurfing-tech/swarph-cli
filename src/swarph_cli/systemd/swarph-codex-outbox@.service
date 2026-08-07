@@ -1,0 +1,10 @@
+[Unit]
+Description=Deliver queued Swarph Codex replies (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=75s
+EnvironmentFile=%h/.config/swarph/codex-waker-%i.env
+ExecStart=/usr/local/bin/swarph codex-waker --drain-outbox --self %i --state-dir ${SWARPH_WAKER_STATE_DIR} --cwd ${SWARPH_WAKER_CWD} --outbox-dir ${SWARPH_OUTBOX_DIR} --gateway ${SWARPH_GATEWAY} --token-file ${SWARPH_TOKEN_FILE}
