@@ -1042,5 +1042,27 @@ def test_parser_defaults_process_name_claude_liveness_cmd_none():
 
 
 def test_version_matches_the_packaged_version():
+    """__version__ must equal the version pyproject actually ships.
+
+    >>> THIS USED TO ASSERT A HARDCODED LITERAL, SO IT DID NOT TEST ITS OWN NAME.
+    <<< It tested whether someone had remembered to edit this file too — a fourth
+    version site that no release checklist listed, and it failed the 0.41.9
+    release PR after pyproject and __init__ were both correctly bumped. A test
+    that must be edited on every release is not a check, it is a chore that
+    fails closed.
+
+    Compare against pyproject, which is the source of truth the wheel is built
+    from. Now a version bump needs exactly two edits and this test verifies they
+    agree, which is what its name promised all along.
+    """
+    import pathlib
+    import tomllib
+
     import swarph_cli
-    assert swarph_cli.__version__ == "0.41.8"
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    packaged = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert swarph_cli.__version__ == packaged["project"]["version"], (
+        f"__init__ says {swarph_cli.__version__}, pyproject says "
+        f"{packaged['project']['version']} — a release ships the pyproject value"
+    )
