@@ -248,12 +248,21 @@ def resolve_token(
 
     peer_tok, peer_src, peer_label = "", None, "peer-token"
     peer_present = False   # a file EXISTED, whether or not it yielded a token
+    # >>> peer_seen IS SEPARATE FROM peer_src ON PURPOSE. <<< peer_src is only set
+    # once a candidate YIELDS a token, so it is None on every path where reading
+    # failed — which is exactly the refusal branch below, whose whole job is to
+    # name the file to fix. Tracking the path independently of the read
+    # succeeding is what lets that message say WHICH file. (lab-ovh, review of
+    # #190, reproduced by execution: the message rendered "(None)".)
+    peer_seen = None
     if allow_peer_token and self_name:
         for candidate, label in ((peer_token_path(self_name), "peer-token"),
                                  (legacy_peer_token_path(self_name), "legacy-peer-token")):
             if not candidate.exists():
                 continue
             peer_present = True
+            if peer_seen is None:
+                peer_seen = candidate
             tok = _try_read(candidate, warn)
             if not tok:
                 continue
@@ -314,7 +323,7 @@ def resolve_token(
     if identity_is_explicit and peer_present:
         _warn(
             f"identity {self_name!r} was named and its credential file exists but "
-            f"yields no usable token ({peer_src}). NO AMBIENT FALLBACK WAS "
+            f"yields no usable token ({peer_seen}). NO AMBIENT FALLBACK WAS "
             f"ATTEMPTED — naming a cell is a decision, not a hint. Fix the file, "
             f"or unset the identity to use ambient credentials.",
             warn,

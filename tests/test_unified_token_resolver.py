@@ -214,6 +214,36 @@ def test_the_refusal_says_no_fallback_was_attempted(home, monkeypatch):
     assert any("NO AMBIENT FALLBACK" in m for m in seen)
 
 
+def test_the_refusal_NAMES_THE_FILE_it_tells_you_to_fix(home, monkeypatch):
+    """The message says "Fix the file" — so it must say WHICH file.
+
+    >>> THIS IS THE TEST THE PREVIOUS ONE COULD NOT BE. <<< The refusal above
+    asserts only that the phrase "NO AMBIENT FALLBACK" appears, and it passed
+    unchanged while the path rendered as the literal "(None)" — `peer_src` is
+    assigned only on a SUCCESSFUL read, and this branch is reachable only when
+    every read FAILED, so it was None on every execution. A defect that ships in
+    the cannot-evaluate branch is invisible to an assertion about the happy
+    string; only asserting on the payload the operator actually needs can see it.
+
+    Found by lab-ovh reviewing #190, reproduced by execution before being
+    written down. Guard: `str(None)` must never satisfy this.
+    """
+    peer = _write_peer(home, "cell", "")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "AMBIENT")
+    seen: list[str] = []
+
+    tokens.resolve_token("cell", identity_is_explicit=True, warn=seen.append)
+
+    refusals = [m for m in seen if "NO AMBIENT FALLBACK" in m]
+    assert refusals, "the refusal warning did not fire at all"
+    assert all("None" not in r.split("NO AMBIENT FALLBACK")[0] for r in refusals), (
+        "the refusal rendered its path as 'None' — it names no file to fix"
+    )
+    assert any(str(peer) in r for r in refusals), (
+        f"the refusal must name {peer}; got: {refusals}"
+    )
+
+
 def test_a_MISSING_peer_file_still_falls_through(home, monkeypatch):
     """The boundary. Nothing was named-and-present, so there is no decision to
     honour — this must keep working or every unprovisioned cell breaks."""
