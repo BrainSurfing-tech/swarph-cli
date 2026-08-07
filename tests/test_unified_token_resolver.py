@@ -236,11 +236,49 @@ def test_the_refusal_NAMES_THE_FILE_it_tells_you_to_fix(home, monkeypatch):
 
     refusals = [m for m in seen if "NO AMBIENT FALLBACK" in m]
     assert refusals, "the refusal warning did not fire at all"
-    assert all("None" not in r.split("NO AMBIENT FALLBACK")[0] for r in refusals), (
-        "the refusal rendered its path as 'None' — it names no file to fix"
-    )
+    # The POSITIVE assertion is what makes this test real; the None-guard below
+    # is a garnish that catches a partially-correct message (names the path AND
+    # still interpolates a None elsewhere), which the positive one would wave
+    # through. droplet's review of e466a15: a negative-only version of this test
+    # would be VACUOUS — "()" or "(unknown)" or "" all satisfy it.
     assert any(str(peer) in r for r in refusals), (
         f"the refusal must name {peer}; got: {refusals}"
+    )
+    assert all("None" not in r for r in refusals), (
+        "the refusal interpolated a None — it names no file to fix"
+    )
+
+
+def test_refusal_names_CANONICAL_when_both_candidates_are_unusable(home, monkeypatch):
+    """Both files present and broken: the message must name CANONICAL.
+
+    >>> NOT CONVENTION — THE ONLY CHOICE WHOSE REMEDY TERMINATES. <<< The
+    resolver prefers canonical over legacy, so an operator who repairs the
+    LEGACY file still has the broken canonical one shadowing it and a still-
+    broken cell. Naming legacy issues an instruction that cannot fix the problem
+    even when followed exactly. (droplet, reviewing e466a15 — my own reasoning
+    was merely "canonical is the one to fix", which is weaker.)
+
+    Written because the case I was UNSURE about was the one case I had not
+    tested: the single-candidate fixture pins nothing about ordering, so
+    reordering that tuple in a year would leave every test passing.
+    """
+    canonical = _write_peer(home, "cell", "")
+    legacy = _write_peer(home, "cell", "", legacy=True)
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "AMBIENT")
+    seen: list[str] = []
+
+    res = tokens.resolve_token("cell", identity_is_explicit=True, warn=seen.append)
+
+    assert res is None, "fell back to ambient with a NAMED identity"
+    refusals = [m for m in seen if "NO AMBIENT FALLBACK" in m]
+    assert refusals, "the refusal warning did not fire at all"
+    assert any(str(canonical) in r for r in refusals), (
+        f"must name the CANONICAL path {canonical}; got: {refusals}"
+    )
+    assert all(str(legacy) not in r for r in refusals), (
+        "named the LEGACY path — repairing it cannot fix the cell, because "
+        "canonical still shadows it"
     )
 
 
