@@ -58,6 +58,60 @@ def test_next_dm_responds_only_to_questions(tmp_path):
     assert _next_dm(inbox, 10, "gpt-lc")["id"] == 14
 
 
+@pytest.mark.parametrize("kind", ["answer", "fyi"])
+def test_non_question_dm_never_starts_a_turn_or_advances_controller_state(tmp_path, monkeypatch, kind):
+    inbox = tmp_path / "monitor" / "inbox.log"
+    inbox.parent.mkdir()
+    inbox.write_text(
+        json.dumps({"id": 7, "from_node": "lab", "to_node": "gpt-lc", "kind": kind}) + "\n",
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / "controller"
+    outbox = tmp_path / "outbox"
+    args = [
+        "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
+        "--cwd", str(tmp_path / "workspace"), "--outbox-dir", str(outbox),
+    ]
+    _FakeAppServer.instances = []
+    monkeypatch.setattr(waker, "AppServer", _FakeAppServer)
+
+    assert waker.run_codex_waker(args) == 0
+    assert _FakeAppServer.instances == []
+    assert _load(state_dir / "cursor.json") == {"last_message_id": 0, "thread_id": None}
+    assert not list(outbox.glob("*.json"))
+    assert not (state_dir / "outbox-authorizations").exists()
+
+
+def test_non_question_dm_does_not_block_a_later_question(tmp_path, monkeypatch):
+    inbox = tmp_path / "monitor" / "inbox.log"
+    inbox.parent.mkdir()
+    inbox.write_text(
+        "\n".join([
+            json.dumps({"id": 7, "from_node": "lab", "to_node": "gpt-lc", "kind": "answer"}),
+            json.dumps({"id": 8, "from_node": "lab", "to_node": "gpt-lc", "kind": "fyi"}),
+            json.dumps({"id": 9, "from_node": "lab", "to_node": "gpt-lc", "kind": "question"}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / "controller"
+    outbox = tmp_path / "outbox"
+    _write_reply(outbox, 9)
+    args = [
+        "--inbox-log", str(inbox), "--state-dir", str(state_dir), "--self", "gpt-lc",
+        "--cwd", str(tmp_path / "workspace"), "--outbox-dir", str(outbox),
+    ]
+    _FakeAppServer.instances = []
+    _FakeAppServer.fail_first_turn = False
+    _FakeAppServer.resume_error = None
+    monkeypatch.setattr(waker, "AppServer", _FakeAppServer)
+
+    assert waker.run_codex_waker(args) == 0
+    assert len(_FakeAppServer.instances) == 1
+    assert _load(state_dir / "cursor.json")["last_message_id"] == 9
+    assert not (state_dir / "outbox-authorizations" / "7.json").exists()
+    assert not (state_dir / "outbox-authorizations" / "8.json").exists()
+
+
 def test_state_round_trip_is_atomic_and_defaults_when_missing(tmp_path):
     path = tmp_path / "controller" / "cursor.json"
     assert _load(path) == {"last_message_id": 0, "thread_id": None}
