@@ -398,6 +398,29 @@ Keep monitor, waker, daemon, and outbox paths separate. The outbox drainer
 deletes a reply only after `swarph mesh send` succeeds, so delivery failures
 remain retryable.
 
+**Windows Task Scheduler:** the packaged installer creates per-peer hidden
+`wscript.exe` runners. It uses direct executable invocation rather than the
+PowerShell-to-`cmd.exe` boundary, starts only while the owner is logged in, and
+keeps the drainer opt-in.
+
+```powershell
+# Preview the per-peer task layout without writing files or registering tasks.
+$installer = swarph codex-waker --windows-installer-path
+& $installer `
+  -Peer gpt-lc `
+  -MonitorInboxLog "$HOME\swarph_state\gpt-lc\monitor\inbox.log" `
+  -WakerStateDir "$HOME\swarph_state\gpt-lc\codex-waker" `
+  -WorkspaceDir "C:\tmp\gpt-lc-waker-workspace" `
+  -OutboxDir "C:\tmp\gpt-lc-waker-workspace\outbox" `
+  -Gateway "http://lab-ovh:8788" `
+  -TokenFile "$HOME\.config\swarph\gpt-lc.peer_token" `
+  -WhatIf
+```
+
+Run the same command without `-WhatIf -Start` to register and start the Waker.
+Add `-EnableDrainer` only after a controlled Waker envelope has been inspected
+for content, destination, and authorization.
+
 ### `swarph watchdog` (Phase 7 — v0.7 stranded-session detection, v0.7.3 systemd install)
 
 Detects stranded Claude sessions (API throttle / harness death) via cursor-mtime + tmux pgrep AND-gate, and recovers via A1 tmux send-keys wake-prompt → A2 `swarph spawn` respawn. Cell.yaml-pinned cursor + tmux session (F4) since v0.7.2.

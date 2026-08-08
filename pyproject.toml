@@ -119,7 +119,7 @@ where = ["src"]
 # wheel did NOT contain it -- non-.py files need declaring here, and a
 # clean-room install is what caught it.
 swarph_cli = ["systemd/*.service", "systemd/*.timer", "systemd/*.default",
-              "scripts/*.sh"]
+              "scripts/*.sh", "scripts/*.ps1"]
 # v0.15: ship the bundled mesh-gateway schema so `swarph gateway serve`
 # can apply it at startup via MESH_SCHEMA_PATH (defaults next to server.py).
 "swarph_cli.gateway" = ["*.sql"]
