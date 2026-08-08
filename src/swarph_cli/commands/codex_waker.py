@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+from importlib import resources
 import json
 import os
 import subprocess
@@ -252,7 +253,12 @@ def _next_dm(inbox: Path, after: int, self_name: str) -> dict | None:
             dm_id = int(raw_id)
         else:
             continue
-        if dm_id > after and dm.get("from_node") != self_name and dm.get("to_node") == self_name:
+        if (
+            dm_id > after
+            and dm.get("from_node") != self_name
+            and dm.get("to_node") == self_name
+            and dm.get("kind") == "question"
+        ):
             dm["id"] = dm_id
             return dm
     return None
@@ -339,8 +345,8 @@ def run_codex_waker(argv: list[str] | None = None) -> int:
         "The Windows single-flight mutex is intentionally scoped to that Terminal Services session."
     )
     p.add_argument("--inbox-log")
-    p.add_argument("--state-dir", required=True)
-    p.add_argument("--self", required=True)
+    p.add_argument("--state-dir")
+    p.add_argument("--self")
     p.add_argument("--cwd")
     p.add_argument(
         "--codex-bin",
@@ -348,15 +354,26 @@ def run_codex_waker(argv: list[str] | None = None) -> int:
         help="Codex App Server launcher (defaults to codex.cmd on Windows)",
     )
     p.add_argument("--timeout-s", type=float, default=300)
-    p.add_argument("--outbox-dir", required=True)
+    p.add_argument("--outbox-dir")
     p.add_argument("--reset-thread", action="store_true", help="clear the persisted App Server thread without processing a DM")
     p.add_argument("--acknowledge-thread-reset", action="store_true", help="confirm that conversation continuity will be reset")
     p.add_argument("--reset-reason", help="operator audit reason required with --reset-thread")
     p.add_argument("--drain-outbox", action="store_true")
+    p.add_argument(
+        "--windows-installer-path",
+        action="store_true",
+        help="print the packaged Windows Task Scheduler installer path and exit",
+    )
     p.add_argument("--gateway")
     p.add_argument("--token-file")
     p.add_argument("--swarph-bin", default="swarph")
     args = p.parse_args(argv)
+    if args.windows_installer_path:
+        print(resources.files("swarph_cli").joinpath("scripts", "install_codex_waker_windows.ps1"))
+        return 0
+    for option, value in (("--state-dir", args.state_dir), ("--self", args.self), ("--outbox-dir", args.outbox_dir)):
+        if not value:
+            p.error(f"{option} is required")
     state_dir = Path(args.state_dir)
     outbox = Path(args.outbox_dir)
     if not args.cwd:
