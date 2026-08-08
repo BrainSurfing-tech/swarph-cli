@@ -2,7 +2,7 @@
 
 Notable changes to `swarph-cli`. Earlier history: `git log`.
 
-## 0.50.0 - 2026-08-08
+## 0.42.0 - 2026-08-08
 - **fix(waker): only addressed question DMs may create a Codex App Server turn (#199).**
   `answer` and `fyi` messages remain in the monitor ledger but cannot advance the
   controller cursor, create an outbox authorization, or start an App Server turn.
