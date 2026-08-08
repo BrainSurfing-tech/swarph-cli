@@ -2,6 +2,15 @@
 
 Notable changes to `swarph-cli`. Earlier history: `git log`.
 
+## 0.50.0 - 2026-08-08
+- **fix(waker): only addressed question DMs may create a Codex App Server turn (#199).**
+  `answer` and `fyi` messages remain in the monitor ledger but cannot advance the
+  controller cursor, create an outbox authorization, or start an App Server turn.
+- **feat(waker): package the Windows Task Scheduler installer (#199).** The
+  installer creates per-peer hidden direct-executable runners, keeps the outbox
+  drainer opt-in, and exposes its installed script path through `swarph
+  codex-waker --windows-installer-path`.
+
 ## 0.41.9 — 2026-08-07
 - **fix(tokens): a NAMED cell's credential outranks the ambient one (#190).** On a
   multi-cell host a process-global `MESH_GATEWAY_TOKEN` cannot be the credential for
