@@ -252,7 +252,12 @@ def _next_dm(inbox: Path, after: int, self_name: str) -> dict | None:
             dm_id = int(raw_id)
         else:
             continue
-        if dm_id > after and dm.get("from_node") != self_name and dm.get("to_node") == self_name:
+        if (
+            dm_id > after
+            and dm.get("from_node") != self_name
+            and dm.get("to_node") == self_name
+            and dm.get("kind") == "question"
+        ):
             dm["id"] = dm_id
             return dm
     return None

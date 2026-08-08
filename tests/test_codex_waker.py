@@ -45,6 +45,19 @@ def test_next_dm_skips_self_and_old_messages(tmp_path):
     assert _next_dm(inbox, 11, "gpt-lc") is None
 
 
+def test_next_dm_responds_only_to_questions(tmp_path):
+    inbox = tmp_path / "inbox.log"
+    inbox.write_text(
+        "\n".join([
+            json.dumps({"id": 12, "from_node": "lab-ovh", "to_node": "gpt-lc", "kind": "answer"}),
+            json.dumps({"id": 13, "from_node": "lab-ovh", "to_node": "gpt-lc", "kind": "fyi"}),
+            json.dumps({"id": 14, "from_node": "lab-ovh", "to_node": "gpt-lc", "kind": "question"}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    assert _next_dm(inbox, 10, "gpt-lc")["id"] == 14
+
+
 def test_state_round_trip_is_atomic_and_defaults_when_missing(tmp_path):
     path = tmp_path / "controller" / "cursor.json"
     assert _load(path) == {"last_message_id": 0, "thread_id": None}
@@ -62,7 +75,7 @@ def test_next_dm_ignores_other_recipient_and_malformed_id(tmp_path):
         json.dumps({"id": " 7 ", "from_node": "lab", "to_node": "gpt-lc"}),
         json.dumps({"id": "7.0", "from_node": "lab", "to_node": "gpt-lc"}),
         json.dumps({"id": 12, "from_node": "lab", "to_node": "another"}),
-        json.dumps({"id": "13", "from_node": "lab", "to_node": "gpt-lc"}),
+        json.dumps({"id": "13", "from_node": "lab", "to_node": "gpt-lc", "kind": "question"}),
     ]), encoding="utf-8")
     dm = _next_dm(inbox, 0, "gpt-lc")
     assert dm["id"] == 13
@@ -169,7 +182,7 @@ def _write_reply(outbox, message_id, to_node="lab"):
 def test_failed_first_turn_does_not_persist_or_resume_empty_thread(tmp_path, monkeypatch):
     inbox = tmp_path / "monitor" / "inbox.log"
     inbox.parent.mkdir()
-    inbox.write_text(json.dumps({"id": 7, "from_node": "lab", "to_node": "gpt-lc"}) + "\n", encoding="utf-8")
+    inbox.write_text(json.dumps({"id": 7, "from_node": "lab", "to_node": "gpt-lc", "kind": "question"}) + "\n", encoding="utf-8")
     state_dir = tmp_path / "controller"
     outbox = tmp_path / "outbox"
     args = [
@@ -196,7 +209,7 @@ def test_failed_first_turn_does_not_persist_or_resume_empty_thread(tmp_path, mon
 def test_unclassified_resume_protocol_error_retains_state(tmp_path, monkeypatch):
     inbox = tmp_path / "monitor" / "inbox.log"
     inbox.parent.mkdir()
-    inbox.write_text(json.dumps({"id": 8, "from_node": "lab", "to_node": "gpt-lc"}) + "\n", encoding="utf-8")
+    inbox.write_text(json.dumps({"id": 8, "from_node": "lab", "to_node": "gpt-lc", "kind": "question"}) + "\n", encoding="utf-8")
     state_dir = tmp_path / "controller"
     state_path = state_dir / "cursor.json"
     outbox = tmp_path / "outbox"
@@ -286,7 +299,7 @@ def test_reset_crash_after_state_save_leaves_an_incomplete_audit_request(tmp_pat
 def test_completed_turn_requires_a_valid_outbox_reply_before_acknowledging_dm(tmp_path, monkeypatch):
     inbox = tmp_path / "monitor" / "inbox.log"
     inbox.parent.mkdir()
-    inbox.write_text(json.dumps({"id": 10, "from_node": "lab", "to_node": "gpt-lc"}) + "\n", encoding="utf-8")
+    inbox.write_text(json.dumps({"id": 10, "from_node": "lab", "to_node": "gpt-lc", "kind": "question"}) + "\n", encoding="utf-8")
     state_dir = tmp_path / "controller"
     state_path = state_dir / "cursor.json"
     outbox = tmp_path / "outbox"
@@ -320,7 +333,7 @@ def test_completed_turn_requires_a_valid_outbox_reply_before_acknowledging_dm(tm
 def test_invalid_outbox_envelope_never_advances_state(tmp_path, monkeypatch, payload, error):
     inbox = tmp_path / "monitor" / "inbox.log"
     inbox.parent.mkdir()
-    inbox.write_text(json.dumps({"id": 11, "from_node": "lab", "to_node": "gpt-lc"}) + "\n", encoding="utf-8")
+    inbox.write_text(json.dumps({"id": 11, "from_node": "lab", "to_node": "gpt-lc", "kind": "question"}) + "\n", encoding="utf-8")
     state_dir = tmp_path / "controller"
     outbox = tmp_path / "outbox"
     outbox.mkdir()
