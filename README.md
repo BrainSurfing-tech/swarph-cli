@@ -7,6 +7,25 @@ pip install swarph-cli
 swarph --version
 ```
 
+## Releasing
+
+PyPI releases are published by GitHub Actions when a version tag is pushed. After
+the release PR is merged, tag that exact commit with the package version and push
+the tag:
+
+```bash
+git tag v0.42.0
+git push origin v0.42.0
+```
+
+The workflow refuses a tag that does not match `[project].version` in
+`pyproject.toml`, builds and validates the wheel and source distribution, then
+publishes through PyPI Trusted Publishing. Before the first release, create a
+PyPI pending publisher for the `swarph-cli` project that trusts the
+`BrainSurfing-tech/swarph-cli` repository, `pypi-publish.yml` workflow, and
+`pypi` environment. Protecting the GitHub `pypi` environment adds an approval
+gate before publication.
+
 > **System requirement — a terminal multiplexer.** The session verbs (`spawn`, `cell`, `watchdog`) drive a `tmux`-compatible multiplexer. On **Linux/macOS** install `tmux` (`apt install tmux` / `brew install tmux`). On **Windows** there is no native tmux — install [**psmux**](https://github.com/psmux/psmux) (a Rust tmux-for-Windows, MIT) with `swarph install-multiplexer` (fetches the pinned, checksum-verified binary into `~/.swarph/bin`) or `winget install marlocarlo.psmux`.
 
 **What it is:** a multi-provider LLM command line. Run one-shot prompts or an interactive REPL against any supported provider; spawn long-lived agent *cells* that persist across restarts and coordinate over a mesh; install hooks, MCP servers, and skills by content-addressed URI. An open, inspectable substrate — not a closed orchestration platform.
