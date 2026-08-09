@@ -1557,6 +1557,14 @@ class CodexMembrane(ProviderMembrane):
             return 1
         env = _scrubbed_codex_env()
         env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
+        # Windows os.execve spawns Codex and exits this process instead of replacing
+        # it. Keep the psmux pane root alive until Codex exits, matching Claude.
+        if sys.platform == "win32":
+            try:
+                return subprocess.run([binary, *argv[1:]], env=env).returncode
+            except OSError as exc:
+                print(f"swarph spawn: launch failed: {exc}", file=sys.stderr)
+                return 1
         try:
             os.execve(binary, argv, env)
         except OSError as exc:

@@ -154,6 +154,25 @@ def test_all_membranes_chdir_before_exec(monkeypatch, tmp_path):
         assert seen and seen[0] == tmp_path, f"{key}: did not chdir to cell.cwd"
 
 
+def test_codex_windows_launch_blocks_until_codex_exits(monkeypatch, tmp_path):
+    cell = types.SimpleNamespace(cwd=tmp_path, name="codex", git_identity=None)
+    run = MagicMock(return_value=types.SimpleNamespace(returncode=17))
+    monkeypatch.setattr(spawn.sys, "platform", "win32")
+    monkeypatch.setattr(spawn.os, "chdir", lambda _cwd: None)
+    monkeypatch.setattr(spawn.subprocess, "run", run)
+    execve = MagicMock()
+    monkeypatch.setattr(spawn.os, "execve", execve)
+
+    result = spawn.MEMBRANES["codex"].launch(
+        cell, "C:/bin/codex.exe", ["codex", "-C", "."],
+    )
+
+    assert result == 17
+    run.assert_called_once()
+    assert run.call_args.args[0] == ["C:/bin/codex.exe", "-C", "."]
+    execve.assert_not_called()
+
+
 def test_argv_path_embedders_measured_from_ACTUAL_ARGV(tmp_path):
     """DELIBERATE SCOPE LIMIT, PINNED SO IT CANNOT GROW SILENTLY.
 
