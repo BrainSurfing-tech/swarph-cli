@@ -1052,6 +1052,19 @@ def _tmux_has_session(tmux: str, name: str) -> bool:
     return result.returncode == 0
 
 
+def _swarph_reentry_binary() -> str:
+    """Return this installation's console script when it is available.
+
+    A psmux session is a new process, so a bare ``swarph`` command can resolve a
+    stale global install ahead of the pipx executable that launched the session.
+    Prefer the entry point beside the active Python environment; system installs
+    without that sibling retain the portable PATH fallback.
+    """
+    suffix = ".exe" if sys.platform == "win32" else ""
+    candidate = Path(sys.executable).with_name(f"swarph{suffix}")
+    return str(candidate) if candidate.is_file() else "swarph"
+
+
 def _tmux_create_session(tmux: str, name: str, cwd: Path) -> bool:
     """Create the durable detached session that runs ``swarph spawn <name>``.
 
@@ -1074,7 +1087,7 @@ def _tmux_create_session(tmux: str, name: str, cwd: Path) -> bool:
     create_cmd = [
         tmux, "new-session", "-d", "-s", name,
         "-c", str(cwd), "-e", "SWARPH_SPAWN=1",
-        "swarph", "spawn", name,
+        _swarph_reentry_binary(), "spawn", name,
     ]
     # Clear a stale (server-less) registration; harmless if the name is truly absent.
     try:
