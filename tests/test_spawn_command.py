@@ -351,7 +351,7 @@ def test_run_spawn_codex_dry_run_prints_fresh_session_note(
     assert "cell.yaml session_id ignored" in captured.err
 
 
-def test_run_spawn_codex_execve_scrubs_env(
+def test_run_spawn_codex_launch_scrubs_env(
     isolated_xdg, tmp_path, monkeypatch
 ):
     payload = {
@@ -376,7 +376,17 @@ def test_run_spawn_codex_execve_scrubs_env(
         captured["argv"] = argv
         captured["env"] = env
 
+    class _RunResult:
+        returncode = 0
+
+    def fake_run(argv, env, **_kwargs):
+        captured["path"] = argv[0]
+        captured["argv"] = ["codex", *argv[1:]]
+        captured["env"] = env
+        return _RunResult()
+
     monkeypatch.setattr("os.execve", fake_execve)
+    monkeypatch.setattr("subprocess.run", fake_run)
     for key in (
         "OPENAI_API_KEY",
         "OPENAI_API_BASE",
@@ -1005,12 +1015,23 @@ def test_run_spawn_codex_assisted_memory_injects_agents_md(tmp_path, isolated_xd
     
     import swarph_cli.commands.memory_sync
     monkeypatch.setattr(swarph_cli.commands.memory_sync, "perform_restore", lambda c: "Restore Task text")
-    monkeypatch.setattr("shutil.which", lambda name: "/bin/fake-codex")
+    monkeypatch.setattr(
+        "shutil.which", lambda name: "/bin/fake-codex" if name == "codex" else None
+    )
     
     exec_args = []
     def fake_execve(path, argv, env):
         exec_args.append((path, argv, env))
+
+    class _RunResult:
+        returncode = 0
+
+    def fake_run(argv, env, **_kwargs):
+        exec_args.append((argv[0], ["codex", *argv[1:]], env))
+        return _RunResult()
+
     monkeypatch.setattr("os.execve", fake_execve)
+    monkeypatch.setattr("subprocess.run", fake_run)
     
     run_spawn([])
     
@@ -1432,6 +1453,16 @@ def test_run_spawn_codex_launch_sets_git_identity(isolated_xdg, tmp_path, monkey
     )
     captured = {}
     monkeypatch.setattr("os.execve", lambda path, argv, env: captured.update(env=env))
+
+    class _RunResult:
+        returncode = 0
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda argv, env, **_kwargs: (
+            captured.update(env=env) or _RunResult()
+        ),
+    )
     rc = run_spawn(argv=[str(p), "--no-banner"])
     assert rc == 0
     assert captured["env"]["GIT_AUTHOR_NAME"] == "gpt-ops"
