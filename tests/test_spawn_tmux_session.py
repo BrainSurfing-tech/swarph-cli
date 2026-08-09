@@ -59,7 +59,8 @@ class _FakeStdout:
 
 def _drive(monkeypatch, *, platform="win32", tmux=TMUX, wt=WT, in_tmux=None,
            spawn_marker=None, isatty=True, session_exists=False,
-           new_session_exc=None, create_succeeds=True, create_succeeds_after=1):
+           new_session_exc=None, create_succeeds=True, create_succeeds_after=1,
+           genuine_wt=True):
     """Drive `_launch_via_tmux` with tmux/subprocess/execv mocked.
 
     `run` dispatches on the subcommand and is STATEFUL to model reality after the
@@ -85,11 +86,14 @@ def _drive(monkeypatch, *, platform="win32", tmux=TMUX, wt=WT, in_tmux=None,
             monkeypatch.delenv(var, raising=False)
         else:
             monkeypatch.setenv(var, val)
+    monkeypatch.delenv("SWARPH_WIN_ACK", raising=False)
+    monkeypatch.delenv("SWARPH_FORCE_WT", raising=False)
 
     def _which(name):
         return {"tmux": tmux, "wt": wt}.get(name)
 
     monkeypatch.setattr(spawn.shutil, "which", _which)
+    monkeypatch.setattr(spawn, "_console_is_genuine_wt", lambda: genuine_wt)
 
     state = {"new_calls": 0, "created": False}
 
@@ -108,6 +112,8 @@ def _drive(monkeypatch, *, platform="win32", tmux=TMUX, wt=WT, in_tmux=None,
 
     run = MagicMock(side_effect=_run)
     monkeypatch.setattr(spawn.subprocess, "run", run)
+    run.popen = MagicMock()
+    monkeypatch.setattr(spawn.subprocess, "Popen", run.popen)
 
     execv = MagicMock(side_effect=_ExecvReplaced())
     monkeypatch.setattr(spawn.os, "execv", execv)
@@ -188,6 +194,37 @@ def test_existing_session_attaches_no_create_windows(monkeypatch):
     assert not any("new-session" in c for c in cmds)
     assert _attached_via_run(run)
     execv.assert_not_called()  # Windows never uses os.execv
+
+
+def test_windows_conhost_attaches_psmux_in_fresh_windows_terminal(monkeypatch):
+    # An unverified console may be a corporate conhost even when WT_SESSION was
+    # inherited. Move only the viewport to fresh WT; the durable cell is unchanged.
+    r, run, execv = _drive(
+        monkeypatch,
+        platform="win32",
+        session_exists=True,
+        genuine_wt=False,
+    )
+    assert r is True
+    run.popen.assert_called_once_with(
+        [WT, "-d", str(CWD), "--", TMUX, "attach", "-t", SESSION],
+    )
+    assert not _attached_via_run(run)
+    execv.assert_not_called()
+
+
+def test_windows_conhost_falls_back_to_blocking_attach_without_wt(monkeypatch):
+    r, run, execv = _drive(
+        monkeypatch,
+        platform="win32",
+        wt=None,
+        session_exists=True,
+        genuine_wt=False,
+    )
+    assert r is True
+    run.popen.assert_not_called()
+    assert _attached_via_run(run)
+    execv.assert_not_called()
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin"])
