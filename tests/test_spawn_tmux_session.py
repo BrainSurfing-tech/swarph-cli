@@ -94,6 +94,7 @@ def _drive(monkeypatch, *, platform="win32", tmux=TMUX, wt=WT, in_tmux=None,
 
     monkeypatch.setattr(spawn.shutil, "which", _which)
     monkeypatch.setattr(spawn, "_console_is_genuine_wt", lambda: genuine_wt)
+    monkeypatch.setattr(spawn, "_swarph_reentry_binary", lambda: "swarph")
 
     state = {"new_calls": 0, "created": False}
 
@@ -145,6 +146,19 @@ def _attached_via_execv(execv):
     return execv.call_args is not None and execv.call_args.args == (
         TMUX, [TMUX, "attach", "-t", SESSION]
     )
+
+
+def test_tmux_reentry_uses_active_windows_venv_entrypoint(monkeypatch, tmp_path):
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    python = scripts / "python.exe"
+    reentry = scripts / "swarph.exe"
+    python.touch()
+    reentry.touch()
+    monkeypatch.setattr(spawn.sys, "platform", "win32")
+    monkeypatch.setattr(spawn.sys, "executable", str(python))
+
+    assert spawn._swarph_reentry_binary() == str(reentry)
 
 
 # --- gates that skip tmux entirely (OS-agnostic) -------------------------
