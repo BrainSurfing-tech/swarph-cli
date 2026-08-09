@@ -1065,6 +1065,36 @@ def _swarph_reentry_binary() -> str:
     return str(candidate) if candidate.is_file() else "swarph"
 
 
+def _powershell_quote(value: str) -> str:
+    """Quote a literal for the PowerShell command passed to psmux."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _tmux_session_command(tmux: str, name: str, cwd: Path) -> list[str]:
+    """Build the create command for real tmux or Windows psmux.
+
+    psmux accepts ``-- <cmd> [args]`` but not tmux's ``-c`` and ``-e`` flags.
+    Set the working directory and loop-guard in its PowerShell child instead.
+    """
+    reentry = _swarph_reentry_binary()
+    if sys.platform == "win32":
+        command = (
+            "$env:SWARPH_SPAWN='1'; "
+            f"Set-Location -LiteralPath {_powershell_quote(str(cwd))}; "
+            f"& {_powershell_quote(reentry)} spawn {_powershell_quote(name)}"
+        )
+        return [
+            tmux, "new-session", "-d", "-s", name, "--",
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-Command", command,
+        ]
+    return [
+        tmux, "new-session", "-d", "-s", name,
+        "-c", str(cwd), "-e", "SWARPH_SPAWN=1",
+        reentry, "spawn", name,
+    ]
+
+
 def _tmux_create_session(tmux: str, name: str, cwd: Path) -> bool:
     """Create the durable detached session that runs ``swarph spawn <name>``.
 
@@ -1084,11 +1114,7 @@ def _tmux_create_session(tmux: str, name: str, cwd: Path) -> bool:
     the silent no-op): VERIFY with ``has-session`` and retry until it actually
     materialises. Returns True once the session exists, False if it never appears.
     """
-    create_cmd = [
-        tmux, "new-session", "-d", "-s", name,
-        "-c", str(cwd), "-e", "SWARPH_SPAWN=1",
-        _swarph_reentry_binary(), "spawn", name,
-    ]
+    create_cmd = _tmux_session_command(tmux, name, cwd)
     # Clear a stale (server-less) registration; harmless if the name is truly absent.
     try:
         subprocess.run(

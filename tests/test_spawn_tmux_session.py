@@ -148,6 +148,23 @@ def _attached_via_execv(execv):
     )
 
 
+def _assert_create_command(create, platform):
+    assert create[:5] == [TMUX, "new-session", "-d", "-s", SESSION]
+    if platform == "win32":
+        assert create[5:11] == [
+            "--", "powershell.exe", "-NoProfile", "-ExecutionPolicy",
+            "Bypass", "-Command",
+        ]
+        command = create[-1]
+        assert "SWARPH_SPAWN='1'" in command
+        assert str(CWD) in command
+        assert "swarph" in command and "spawn" in command
+    else:
+        assert "-c" in create and str(CWD) in create
+        assert "-e" in create and "SWARPH_SPAWN=1" in create
+        assert create[-3:] == ["swarph", "spawn", SESSION]
+
+
 def test_tmux_reentry_uses_active_windows_venv_entrypoint(monkeypatch, tmp_path):
     scripts = tmp_path / "Scripts"
     scripts.mkdir()
@@ -261,9 +278,7 @@ def test_absent_session_creates_then_attaches_windows(monkeypatch):
     create = next(c for c in cmds if "new-session" in c)
     # detached, named, cwd-pinned, re-enters `swarph spawn <name>` with the
     # SWARPH_SPAWN guard injected into the session env.
-    assert create[:5] == [TMUX, "new-session", "-d", "-s", SESSION]
-    assert "-e" in create and "SWARPH_SPAWN=1" in create
-    assert create[-3:] == ["swarph", "spawn", SESSION]
+    _assert_create_command(create, "win32")
     assert _attached_via_run(run)  # then blocking-subprocess.run attach
     execv.assert_not_called()
 
@@ -276,9 +291,7 @@ def test_absent_session_creates_then_attaches_posix(monkeypatch, platform):
     assert r is _EXECV
     cmds = _cmds(run)
     create = next(c for c in cmds if "new-session" in c)
-    assert create[:5] == [TMUX, "new-session", "-d", "-s", SESSION]
-    assert "-e" in create and "SWARPH_SPAWN=1" in create
-    assert create[-3:] == ["swarph", "spawn", SESSION]
+    _assert_create_command(create, platform)
     assert _attached_via_execv(execv)  # os.execv attach
     assert not _attached_via_run(run)
 
