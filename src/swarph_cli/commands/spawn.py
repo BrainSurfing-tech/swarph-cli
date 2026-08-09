@@ -1100,6 +1100,43 @@ def _tmux_create_session(tmux: str, name: str, cwd: Path) -> bool:
     return False
 
 
+def _attach_tmux_in_windows_terminal(
+    tmux: str, session_name: str, cwd: Path,
+) -> bool:
+    """Open a psmux viewport in a fresh Windows Terminal when needed.
+
+    The cell remains in its existing named psmux session. Only the viewport moves
+    out of an untrusted parent console, where psmux and the caller can otherwise
+    contend for keyboard input. This is provider-generic: the same path serves
+    Claude, Codex, and every other membrane launched through ``swarph spawn``.
+    """
+    if sys.platform != "win32" or not sys.stdout.isatty():
+        return False
+    if os.environ.get("SWARPH_WIN_ACK"):
+        return False
+    if not os.environ.get("SWARPH_FORCE_WT") and _console_is_genuine_wt():
+        return False
+    wt = shutil.which("wt")
+    if not wt:
+        return False
+    try:
+        subprocess.Popen(
+            [wt, "-d", str(cwd), "--", tmux, "attach", "-t", session_name],
+        )
+    except OSError as exc:
+        print(
+            f"swarph spawn: Windows Terminal attach failed ({exc}); ",
+            file=sys.stderr,
+        )
+        return False
+    print(
+        "swarph spawn: opened the psmux viewport in Windows Terminal "
+        "to avoid parent-console input contention.",
+        file=sys.stderr,
+    )
+    return True
+
+
 def _launch_via_tmux(
     binary: str, argv: list[str], cwd: Path, session_name: str,
 ) -> bool:
@@ -1195,6 +1232,8 @@ def _launch_via_tmux(
     # running detached — the sidecar/watchdog reach it via send-keys, no attach.
     if interactive:
         if sys.platform == "win32":
+            if _attach_tmux_in_windows_terminal(tmux, session_name, cwd):
+                return True
             # Blocking child: Windows os.exec* is spawn-and-exit, so a true
             # in-place replace is unavailable — the blocking run keeps ONE shared
             # console (parent PowerShell -> swarph -> tmux). Returns True once the
