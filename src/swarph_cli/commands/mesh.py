@@ -641,9 +641,20 @@ class CodexTmuxSink(Sink):
         super().__init__(f"codex-tmux:{target}{suffix}")
 
     def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
+        # `dms` is a bounded replay window. Scan the entire owed range before
+        # acknowledging it: otherwise an older selected DM followed by enough
+        # non-selected DMs could be silently skipped by the replay cap.
+        selected = _owed_range_has_kind(
+            state.inbox_log_path,
+            int(state.ledger(self.name)["last_delivered_id"]),
+            self.wake_kinds,
+        )
+        if selected is None:
+            state.delivery_deferred_reason = "owed-log-unreadable"
+            return None
         # Non-selected kinds never open a Codex turn. They are still satisfied
         # for this sink so they cannot indefinitely hold the delivery ledger.
-        if not any(dm.get("kind") in self.wake_kinds for dm in dms):
+        if not selected:
             return True
         pane_state = session_bridge.codex_stable_state(self.target)
         if pane_state != "idle":
@@ -654,6 +665,31 @@ class CodexTmuxSink(Sink):
     def pending_label(self, count: int) -> str:
         plural = "s" if count != 1 else ""
         return f"{count} DM{plural} awaiting an idle Codex pane for {self.name}"
+
+
+def _owed_range_has_kind(
+    inbox_log_path: Path, after_id: int, kinds: frozenset[str]
+) -> Optional[bool]:
+    """Return whether any complete owed inbox-log entry has a selected kind.
+
+    The monitor delivers only the newest bounded replay window to sinks. An
+    interactive wake needs no DM body, but it must not acknowledge past an
+    older selected kind that fell outside that window. Any unreadable record is
+    uncertainty, not absence, and therefore defers delivery.
+    """
+    try:
+        with inbox_log_path.open("r", encoding="utf-8") as fp:
+            for raw in fp:
+                if not raw.strip():
+                    continue
+                dm = json.loads(raw)
+                if not isinstance(dm, dict) or int(dm.get("id", 0)) <= after_id:
+                    continue
+                if dm.get("kind") in kinds:
+                    return True
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    return False
 
 
 class StdoutSink(Sink):

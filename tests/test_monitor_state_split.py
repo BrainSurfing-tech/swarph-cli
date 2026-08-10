@@ -167,6 +167,26 @@ def test_codex_tmux_can_explicitly_wake_for_an_answer(monkeypatch, tmp_path):
     assert state.ledger(sink.name)["last_delivered_id"] == 5006
 
 
+def test_codex_tmux_scans_past_the_replay_cap_for_selected_questions(monkeypatch, tmp_path):
+    messages = [_dm(1)]
+    messages.extend(_dm(i) for i in range(2, 53))
+    for dm in messages[1:]:
+        dm["kind"] = "fyi"
+    monkeypatch.setattr(mesh, "_http_get_json", _window(*messages))
+    monkeypatch.setattr(mesh.session_bridge, "codex_stable_state", lambda pane: "idle")
+    injected = []
+    monkeypatch.setattr(
+        mesh.session_bridge, "inject", lambda pane, text: injected.append(text) or True
+    )
+
+    sink = mesh.parse_sink("codex-tmux:cell:0.0")
+    state = _state(tmp_path, [sink], replay_limit=50)
+    mesh._monitor_iteration(state)
+
+    assert injected == [mesh.CodexTmuxSink._PROMPT]
+    assert state.ledger(sink.name)["last_delivered_id"] == 52
+
+
 def test_pull_keeps_a_ledger_and_none_does_not():
     """The whole naming ruling (droplet DM #8532) in one assertion.
 
