@@ -128,7 +128,7 @@ def test_all_membranes_chdir_before_exec(monkeypatch, tmp_path):
 
     BOTH compensated by putting the cwd in argv — codex via `-C <abs>`, antigravity
     via `--add-dir <abs>` — and an absolute Windows path with spaces re-splits
-    crossing the exec boundary (measured: "unexpected argument 'REDACTED_SENSITIVE_IDENTIFIER'").
+    crossing the exec boundary, producing an unexpected-argument error.
     An earlier draft of this docstring said antigravity "carries no path, the
     quieter half of the defect". That was false, from a source-grep that misfiled
     `--add-dir` under claude; the argv-measuring test below refuted it in seconds.
