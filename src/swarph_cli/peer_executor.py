@@ -99,18 +99,45 @@ class PeerSpool:
             _canonical_id(receipt.get(key), key)
         if not isinstance(receipt.get("fencing_token"), int):
             raise PeerExecutorError("receipt fencing_token must be an integer")
+        if not isinstance(receipt.get("source_dm_id"), int) or isinstance(receipt["source_dm_id"], bool):
+            raise PeerExecutorError("receipt source_dm_id must be an integer")
         if not isinstance(receipt.get("output_digest"), str) or not receipt["output_digest"]:
             raise PeerExecutorError("receipt output_digest must be non-empty")
         claim = _read_object(self.claims / f"{receipt['job_id']}.json")
         job = _read_object(self.running / f"{receipt['job_id']}.json")
         if (claim["destination_peer"], claim["fencing_token"]) != (
             receipt["destination_peer"], receipt["fencing_token"]
-        ) or job.get("destination_peer") != receipt["destination_peer"]:
+        ) or (job.get("destination_peer"), job.get("source_dm_id")) != (
+            receipt["destination_peer"], receipt["source_dm_id"]
+        ):
             raise PeerExecutorError("stale or wrong-peer receipt")
         path = self.receipts / f"{receipt['job_id']}.json"
         if path.exists():
             raise PeerExecutorError("receipt already accepted")
         _write_atomic(path, receipt)
+
+    def receipt_accepted(self, job_id: str) -> bool:
+        """Whether this job has a validated durable receipt, not merely a file."""
+        job_id = _canonical_id(job_id, "job_id")
+        path = self.receipts / f"{job_id}.json"
+        if not path.exists():
+            return False
+        try:
+            receipt = _read_object(path)
+            self._validate_accepted_receipt(receipt)
+        except PeerExecutorError:
+            return False
+        return True
+
+    def _validate_accepted_receipt(self, receipt: dict) -> None:
+        self.initialize()
+        job_id = _canonical_id(receipt.get("job_id"), "job_id")
+        running = _read_object(self.running / f"{job_id}.json")
+        claim = _read_object(self.claims / f"{job_id}.json")
+        if (receipt.get("destination_peer"), receipt.get("source_dm_id"), receipt.get("fencing_token")) != (
+            running.get("destination_peer"), running.get("source_dm_id"), claim.get("fencing_token")
+        ):
+            raise PeerExecutorError("receipt no longer matches current claim")
 
 
 def output_digest(text: str) -> str:
