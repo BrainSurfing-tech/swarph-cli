@@ -32,10 +32,9 @@ dependencies = [
     # Phase 5 REPL exercises all five adapters; bumped to 0.5.0 for
     # OpenAI + Grok availability in /provider switch.
     "swarph-mesh>=0.5.0",
-    # 0.7.0 is the compatibility boundary that whitelists Muse, whose membrane
-    # ships in this release. The upper bound is load-bearing: it turns a future
-    # unpaired provider whitelist change into a resolver conflict rather than an
-    # import-time failure in spawn.py's `VALID_PROVIDERS ⊆ MEMBRANES` guard.
+    # 0.7.0 adds the provider-extension API used to enable Muse alongside its
+    # matching membrane. The upper bound is load-bearing: it turns an unknown
+    # future shared API into a resolver conflict before startup.
     "swarph-shared>=0.7.0,<0.8",
     # Phase 7 spawn — cell.yaml parser. PyYAML 6.x is the standard.
     # Stays a swarph-cli dep since file I/O is operator-tooling-layer
