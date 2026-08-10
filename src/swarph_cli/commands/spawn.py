@@ -466,8 +466,8 @@ def _build_agy_argv(
     # `.` NOT the absolute path (#314), same reasoning as codex's `-C .`:
     # AntigravityMembrane.launch now chdirs to cell.cwd first, so `.` resolves
     # identically — but an absolute Windows path containing spaces gets re-split
-    # crossing the exec boundary ("unexpected argument 'REDACTED_SENSITIVE_IDENTIFIER'", measured on
-    # workstation-lc). The directory is still declared; only its SPELLING changes.
+    # crossing the exec boundary and produces an unexpected-argument error. The
+    # directory is still declared; only its SPELLING changes.
     argv.extend(["--add-dir", "."])
     
     if not no_starter and cell.starter_prompt_path:
@@ -1546,8 +1546,8 @@ class CodexMembrane(ProviderMembrane):
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
         # chdir, like claude/grok/vibe. #314: codex was one of TWO membranes that
         # never chdir'd, compensating by shipping the cwd as an argv string
-        # (`-C <abs path>`) — which re-splits on Windows when the path has spaces
-        # ("unexpected argument 'REDACTED_SENSITIVE_IDENTIFIER'", workstation-lc 2026-08-05). With the
+        # (`-C <abs path>`) — which re-splits on Windows when the path has spaces,
+        # producing an unexpected-argument error. With the
         # process cwd correct, _build_codex_argv passes `-C .` and no path-shaped
         # string crosses the exec boundary at all.
         try:
