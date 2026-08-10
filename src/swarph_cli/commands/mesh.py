@@ -33,6 +33,7 @@ from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Optional
 
+from ..peer_executor import PeerExecutorError, PeerSpool
 from .. import tokens
 from ._display import sanitize_terminal
 
@@ -505,7 +506,7 @@ class Sink:
     def __init__(self, name: str):
         self.name = name
 
-    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> bool:
+    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
         """Push `dms` (may be a bounded/empty replay). True == delivered."""
         raise NotImplementedError
 
@@ -622,6 +623,51 @@ class TmuxNotifySink(Sink):
         return f"{count} DM{plural} not yet notified to {self.name}"
 
 
+class PeerServiceSink(Sink):
+    """Durably hand selected DMs to the addressed peer's service session.
+
+    This sink has no terminal control.  It advances only after durable receipts
+    validate through ``PeerSpool``; ``None`` means normal queued work, not a
+    dead delivery target.
+    """
+
+    is_push = True
+
+    def __init__(self, peer: str, spool_root: Path):
+        self.peer = peer
+        self.spool = PeerSpool(spool_root)
+        super().__init__(f"peer-service:{peer}|{spool_root}")
+
+    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
+        after = int(state.ledger(self.name)["last_delivered_id"])
+        owed = _all_owed_from_inbox_log(state.inbox_log_path, after)
+        if owed is None:
+            state.delivery_deferred_reason = "owed-log-unreadable"
+            return None
+        selected = [dm for dm in owed if dm.get("kind") == "question"]
+        try:
+            for dm in selected:
+                msg_id = int(dm["id"])
+                job = {
+                    "job_id": f"mesh-{state.self_name}-{msg_id}",
+                    "source_dm_id": msg_id,
+                    "destination_peer": self.peer,
+                    "delivery_ref": f"mesh:{state.self_name}:{msg_id}",
+                }
+                self.spool.enqueue(job)
+            if all(self.spool.receipt_accepted(f"mesh-{state.self_name}-{int(dm['id'])}")
+                   for dm in selected):
+                return True
+        except (KeyError, TypeError, ValueError, PeerExecutorError):
+            state.delivery_deferred_reason = "peer-service-spool-error"
+            return None
+        state.delivery_deferred_reason = "awaiting-peer-receipt"
+        return None
+
+    def pending_label(self, count: int) -> str:
+        return f"{count} DM(s) awaiting peer-service receipts for {self.peer}"
+
+
 class StdoutSink(Sink):
     """Write the DM to stdout. Delivery always succeeds."""
 
@@ -663,6 +709,13 @@ def parse_sink(spec: str) -> Sink:
                 "sink 'tmux-notify:' needs a target, e.g. tmux-notify:lab:0.0"
             )
         return TmuxNotifySink(target)
+    if spec.startswith("peer-service:"):
+        peer, sep, spool = spec[len("peer-service:"):].partition("|")
+        if not peer or not sep or not spool:
+            raise MonitorSinkError(
+                "peer-service needs peer|spool, e.g. peer-service:gpt-ops|/var/lib/swarph/jobs"
+            )
+        return PeerServiceSink(peer, Path(spool))
     if spec.startswith("tmux:"):
         target = spec[len("tmux:"):]
         if not target:
@@ -689,6 +742,8 @@ def _new_ledger() -> dict:
         "last_delivered_id": 0,
         "last_delivery_at": 0.0,
         "consecutive_failures": 0,
+        "last_deferred_at": 0.0,
+        "last_deferred_reason": "",
         "created_at": time.time(),
     }
 
@@ -756,6 +811,23 @@ def _replay_from_inbox_log(
     return list(keep), total - len(keep)
 
 
+def _all_owed_from_inbox_log(path: Path, after_id: int) -> Optional[list]:
+    """Complete durable owed range; unlike replay, never silently caps work."""
+    try:
+        owed = []
+        with path.open("r", encoding="utf-8") as fp:
+            for raw in fp:
+                if not raw.strip():
+                    continue
+                dm = json.loads(raw)
+                if not isinstance(dm, dict) or int(dm.get("id", 0)) <= after_id:
+                    continue
+                owed.append(dm)
+        return owed
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 class MonitorState:
     def __init__(
         self,
@@ -797,6 +869,7 @@ class MonitorState:
         self.new_ledgers = {s.name for s in self.sinks
                             if s.keeps_ledger and s.name not in self.ledgers}
         self.deliveries: dict = {}
+        self.delivery_deferred_reason = ""
         self.consecutive_empty = 0
         self.disconnect_since: Optional[float] = None
         self.shutdown_requested = False
@@ -929,11 +1002,16 @@ def _monitor_deliver(state: MonitorState) -> None:
                       f"delivering the newest {len(dms)} (limit "
                       f"{state.replay_limit}) -- see {state.inbox_log_path}",
                       file=sys.stderr, flush=True)
-            if sink.deliver(state, dms, observed):
+            state.delivery_deferred_reason = ""
+            result = sink.deliver(state, dms, observed)
+            if result is True:
                 led["last_delivered_id"] = observed
                 led["last_delivery_at"] = now
                 led["consecutive_failures"] = 0
                 state.deliveries[sink.name] = state.deliveries.get(sink.name, 0) + 1
+            elif result is None:
+                led["last_deferred_at"] = now
+                led["last_deferred_reason"] = state.delivery_deferred_reason or "deferred"
             else:
                 # A dead sink is VISIBLE instead of silently freezing anything.
                 led["consecutive_failures"] = int(led["consecutive_failures"]) + 1
