@@ -20,8 +20,8 @@ from typing import Optional
 
 import yaml
 
-from swarph_shared.cell import PEER_NAME_RE, VALID_PROVIDERS, parse_cell_dict
-from swarph_cli.cell import CellError, cells_dir
+from swarph_shared.cell import PEER_NAME_RE, parse_cell_dict
+from swarph_cli.cell import CLI_ENABLED_PROVIDERS, CellError, cells_dir
 
 _DEFAULT_GATEWAY = os.environ.get("MESH_GATEWAY_URL", "http://lab-ovh:8788")
 _CODEX_SANDBOX_DEFAULT = "workspace-write"
@@ -70,7 +70,7 @@ def _ask_llm() -> str:
             ans = "1"
         if ans.isdigit() and 1 <= int(ans) <= len(_LLM_CHOICES):
             return _LLM_CHOICES[int(ans) - 1][0]
-        if ans in VALID_PROVIDERS:
+        if ans in CLI_ENABLED_PROVIDERS:
             return ans
         print("  (enter 1, 2, or 3)")
 
@@ -91,7 +91,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("name", nargs="?", default=None,
                    help="kebab-case mesh peer name (prompted if omitted)")
-    p.add_argument("--provider", choices=sorted(VALID_PROVIDERS), default=None,
+    p.add_argument("--provider", choices=sorted(CLI_ENABLED_PROVIDERS), default=None,
                    help="spawn provider/membrane (prompted if omitted)")
     p.add_argument("--role", default=None)
     p.add_argument("--cwd", default=None)
@@ -188,7 +188,9 @@ def run_init(argv: list[str]) -> int:
 
     # ── validate BEFORE writing (parse_cell_dict mutates → deepcopy) ──
     try:
-        parse_cell_dict(copy.deepcopy(cell))
+        parse_cell_dict(
+            copy.deepcopy(cell), allowed_providers=CLI_ENABLED_PROVIDERS
+        )
     except CellError as exc:
         print(f"swarph init: refusing to write an invalid cell.yaml: {exc}", file=sys.stderr)
         return 2

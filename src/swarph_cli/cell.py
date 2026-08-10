@@ -61,6 +61,9 @@ _VALID_SCHEMA_VERSIONS = VALID_SCHEMA_VERSIONS
 _VALID_PROVIDERS_V0_6 = VALID_PROVIDERS  # historical name for the v0.6 frozenset
 _validate_uuid = validate_uuid_str  # historical helper name
 
+# Providers enabled by this CLI runtime beyond swarph-shared's legacy policy.
+CLI_ENABLED_PROVIDERS = VALID_PROVIDERS | {"muse"}
+
 
 def _config_root() -> Path:
     """Return the active config root for cell lookups.
@@ -254,7 +257,12 @@ def load_cell(path: Path) -> Cell:
     except yaml.YAMLError as exc:
         raise CellError(f"cell.yaml is not valid YAML ({path}): {exc}") from exc
 
-    cell = parse_cell_dict(raw, source=str(path), base_dir=path.parent)
+    cell = parse_cell_dict(
+        raw,
+        source=str(path),
+        base_dir=path.parent,
+        allowed_providers=CLI_ENABLED_PROVIDERS,
+    )
     # File-I/O wrapper concern: post-validate cwd reachability + tag source
     # path. swarph-shared parse_cell_dict intentionally doesn't touch the
     # filesystem (kernel-tier discipline); the live cwd.is_dir() check is
@@ -430,6 +438,7 @@ __all__ = [
     "PEER_NAME_RE",
     "SCHEMA_VERSION_V1",
     "VALID_PROVIDERS",
+    "CLI_ENABLED_PROVIDERS",
     "VALID_SCHEMA_VERSIONS",
     "parse_cell_dict",
     "validate_uuid_str",

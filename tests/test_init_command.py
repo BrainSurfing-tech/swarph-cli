@@ -42,6 +42,12 @@ def test_init_writes_validated_cell(tmp_path):
     )
 
 
+def test_init_noninteractive_muse_uses_the_cli_enabled_provider_set(tmp_path):
+    rc = _run("muse-test", "--provider", "muse", "--cwd", str(tmp_path), "-y")
+    assert rc == 0
+    assert load_cell(cells_dir() / "muse-test.yaml").provider == "muse"
+
+
 def test_init_rejects_underscore_name(tmp_path):
     assert _run("bad_name", "--provider", "codex", "--cwd", str(tmp_path), "-y") == 2
     assert not (cells_dir() / "bad_name.yaml").exists()
