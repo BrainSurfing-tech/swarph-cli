@@ -1318,7 +1318,6 @@ class ProviderMembrane:
     """
 
     name: str = ""
-    supports_assisted_memory: bool = True
 
     def uses_pinned_session(self) -> bool:
         """True if ``run_spawn`` should mint/resume a pinned UUID.
@@ -2057,7 +2056,6 @@ class MuseMembrane(ClaudeMembrane):
     """
 
     name = "muse"
-    supports_assisted_memory = False
 
 
 MEMBRANES: dict[str, ProviderMembrane] = {
@@ -2260,16 +2258,7 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
     if pre is not None:
         return pre
 
-    if (
-        cell.assisted_memory
-        and cell.assisted_memory.get("enabled")
-        and not membrane.supports_assisted_memory
-    ):
-        print(
-            f"swarph spawn: assisted memory is disabled for {cell.provider}",
-            file=sys.stderr,
-        )
-    elif cell.assisted_memory and cell.assisted_memory.get("enabled"):
+    if cell.assisted_memory and cell.assisted_memory.get("enabled"):
         try:
             from swarph_cli.commands.memory_sync import perform_restore
             current_task_text = perform_restore(cell)
@@ -2279,7 +2268,7 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                 print(f"swarph spawn: restored current-task: {first_line}", file=sys.stderr)
                 
                 inject_text = f"Your active task is in CURRENT_TASK.md — read it first:\n\n{current_task_text}"
-                if cell.provider == "claude":
+                if isinstance(membrane, ClaudeMembrane):
                     spawn_argv.extend(["--append-system-prompt", inject_text])
                 elif cell.provider == "grok":
                     # --rules (extra rules appended to the system prompt), NOT a

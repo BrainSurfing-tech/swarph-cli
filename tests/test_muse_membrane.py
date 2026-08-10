@@ -33,8 +33,43 @@ def test_muse_routes_through_anthropic(tmp_path):
         _validate_routing(load_cell(path))
 
 
-def test_muse_explicitly_disables_assisted_memory_restore():
-    assert MEMBRANES["muse"].supports_assisted_memory is False
+def test_muse_inherits_claude_assisted_memory_restore_behavior():
+    assert isinstance(MEMBRANES["muse"], ClaudeMembrane)
+
+
+def test_muse_injects_restored_task_with_claude_system_prompt(
+    tmp_path, monkeypatch
+):
+    from swarph_cli.commands import memory_sync, spawn
+
+    path = tmp_path / "cell.yaml"
+    path.write_text(
+        "schema_version: v1\nname: muse-1\nrole: worker\ncwd: .\n"
+        "provider: muse\nassisted_memory:\n  enabled: true\n  repo: test-repo\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(memory_sync, "perform_restore", lambda _cell: "Restored task")
+    monkeypatch.setattr(spawn.shutil, "which", lambda name: "claude" if name == "claude" else None)
+    monkeypatch.setattr(spawn, "_launch_via_tmux", lambda *_args: False)
+    monkeypatch.setattr(spawn, "_relaunch_in_windows_terminal", lambda *_args: False)
+
+    launched = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr(
+        spawn.subprocess,
+        "run",
+        lambda argv, **_kwargs: launched.append(argv) or Result(),
+    )
+
+    assert spawn.run_spawn([]) == 0
+    claude_argv = next(argv for argv in launched if argv[0] == "claude")
+    assert "--append-system-prompt" in claude_argv
+    assert any("Restored task" in arg for arg in claude_argv)
 
 
 def test_muse_release_requires_the_shared_compatibility_boundary():
