@@ -515,8 +515,15 @@ def _newest_codex_session_for_cwd(cwd, sessions_root=None):
     return None
 
 
-def _build_codex_argv(cell: Cell, passthrough: list[str]) -> list[str]:
-    sid = _newest_codex_session_for_cwd(cell.cwd)
+def _build_codex_argv(
+    cell: Cell,
+    passthrough: list[str],
+    *,
+    session_id: Optional[str] = None,
+) -> list[str]:
+    # Codex cannot mint a caller-supplied UUID.  An explicit cell binding is
+    # therefore authoritative; cwd discovery is only a best-effort fallback.
+    sid = session_id or _newest_codex_session_for_cwd(cell.cwd)
     if sid:
         argv = ["codex", "resume", sid]
     else:
@@ -806,11 +813,14 @@ def _print_dry_run(
         print(f"#   NOTE:        argv paths are RELATIVE — run this from the cwd above",
               file=sys.stderr)
     if cell.provider == "codex":
-        print(
-            "#   session_id:  codex: fresh-session-per-spawn, no pinned id "
-            "(cell.yaml session_id ignored)",
-            file=sys.stderr,
-        )
+        if session_id:
+            print(f"#   session_id:  codex: resume session {session_id}",
+                  file=sys.stderr)
+        else:
+            print(
+                "#   session_id:  codex: cwd-discovered resume or fresh session",
+                file=sys.stderr,
+            )
     else:
         print(
             f"#   session_id:  {session_id} ({sid_label})",
@@ -1532,7 +1542,7 @@ class CodexMembrane(ProviderMembrane):
         passthrough: list[str],
         effective_role: Optional[str],
     ) -> list[str]:
-        return _build_codex_argv(cell, passthrough)
+        return _build_codex_argv(cell, passthrough, session_id=session_id)
 
     def resolve_binary(self) -> Optional[str]:
         return shutil.which("codex")
@@ -2189,7 +2199,10 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         sidecar_role = requested_role if requested_role else cell.role
         effective_role = sidecar_role
     else:  # codex
-        session_id = None
+        # Unlike Claude, Codex cannot create a session from an arbitrary UUID.
+        # A configured UUID is a real, user-owned resume target; without one,
+        # _build_codex_argv falls back to session discovery for this workspace.
+        session_id = cell.session_id or _newest_codex_session_for_cwd(cell.cwd)
 
     try:
         spawn_argv = membrane.build_argv(
@@ -2205,7 +2218,7 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
 
     if args.print_id:
         if cell.provider == "codex":
-            print(_CODEX_PRINT_ID_NOTE)
+            print(session_id or _CODEX_PRINT_ID_NOTE)
         else:
             print(session_id)
 

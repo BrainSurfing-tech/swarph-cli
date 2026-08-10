@@ -320,7 +320,7 @@ def test_run_spawn_passthrough_args_after_double_dash(
     assert "--resume" in captured.out
 
 
-def test_run_spawn_codex_dry_run_prints_fresh_session_note(
+def test_run_spawn_codex_dry_run_resumes_explicit_session(
     isolated_xdg, tmp_path, capsys
 ):
     payload = {
@@ -337,9 +337,11 @@ def test_run_spawn_codex_dry_run_prints_fresh_session_note(
     rc = run_spawn(argv=[str(p), "--dry-run", "--print-id"])
     captured = capsys.readouterr()
     assert rc == 0
-    assert captured.out.splitlines()[0] == "codex: fresh-session-per-spawn, no pinned id"
+    assert captured.out.splitlines()[0] == "550e8400-e29b-41d4-a716-446655440000"
     # #314: argv carries `.`, not the absolute cwd (CodexMembrane.launch chdirs).
-    assert captured.out.splitlines()[1].startswith("codex -C .")
+    assert captured.out.splitlines()[1].startswith(
+        "codex resume 550e8400-e29b-41d4-a716-446655440000 -C ."
+    )
     assert str(tmp_path) not in captured.out          # no abs path crosses to stdout
     # ...and the operator is told stdout is not runnable from anywhere:
     assert f"cwd:         {tmp_path}" in captured.err
@@ -347,8 +349,7 @@ def test_run_spawn_codex_dry_run_prints_fresh_session_note(
     assert "-s workspace-write" in captured.out
     assert "-a on-request" in captured.out
     assert "--append-system-prompt" not in captured.out
-    assert "session_id:  codex: fresh-session-per-spawn" in captured.err
-    assert "cell.yaml session_id ignored" in captured.err
+    assert "session_id:  codex: resume session 550e8400-e29b-41d4-a716-446655440000" in captured.err
 
 
 def test_run_spawn_codex_launch_scrubs_env(
@@ -1531,6 +1532,19 @@ def test_build_codex_argv_fresh_when_no_session(monkeypatch, tmp_path):
     cell = type("C", (), {"cwd": tmp_path, "extra": {}})()
     argv = spawn._build_codex_argv(cell, [])
     assert "resume" not in argv and argv[0] == "codex"
+
+
+def test_build_codex_argv_explicit_session_takes_precedence(monkeypatch, tmp_path):
+    from swarph_cli.commands import spawn
+
+    monkeypatch.setattr(
+        spawn,
+        "_newest_codex_session_for_cwd",
+        lambda cwd, **k: (_ for _ in ()).throw(AssertionError("must not discover")),
+    )
+    cell = type("C", (), {"cwd": tmp_path, "extra": {}})()
+    argv = spawn._build_codex_argv(cell, [], session_id="pinned-codex-session")
+    assert argv[:3] == ["codex", "resume", "pinned-codex-session"]
 
 
 def test_build_agy_argv_always_continues(tmp_path):
