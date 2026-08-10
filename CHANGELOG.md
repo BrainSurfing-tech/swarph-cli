@@ -54,8 +54,8 @@ Notable changes to `swarph-cli`. Earlier history: `git log`.
   `ClaudeMembrane.pre_launch` is deleted; it collapsed into the base.
 - **fix(spawn): codex + antigravity now `chdir`** like claude/grok/vibe, and pass
   `-C .` / `--add-dir .` instead of the absolute cwd. Measured failure:
-  `swarph spawn` with a cwd of `C:/…/OneDrive - REDACTED_SENSITIVE_IDENTIFIER Groupe/Bureau/REDACTED_SENSITIVE_IDENTIFIER`
-  died with `error: unexpected argument 'REDACTED_SENSITIVE_IDENTIFIER' found` — the path re-split on
+  `swarph spawn` with a cwd of `C:/…/synced workspace/project folder`
+  died with an unexpected-argument error — the path re-split on
   spaces crossing the exec boundary. Codex itself parses that path correctly;
   the mangling was ours. Fixing by removing the dependency on quoting rather than
   out-guessing which Windows layer re-tokenises.
