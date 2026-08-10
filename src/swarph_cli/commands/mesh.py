@@ -33,7 +33,7 @@ from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Optional
 
-from .. import tokens
+from .. import session_bridge, tokens
 from ._display import sanitize_terminal
 
 
@@ -505,8 +505,8 @@ class Sink:
     def __init__(self, name: str):
         self.name = name
 
-    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> bool:
-        """Push `dms` (may be a bounded/empty replay). True == delivered."""
+    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
+        """Push dms. True == delivered, False == failed, None == deferred."""
         raise NotImplementedError
 
     def observe(self, state: "MonitorState", ledger: dict, window: list) -> bool:
@@ -622,6 +622,40 @@ class TmuxNotifySink(Sink):
         return f"{count} DM{plural} not yet notified to {self.name}"
 
 
+class CodexTmuxSink(Sink):
+    """Safely wake an existing interactive Codex pane for selected DM kinds."""
+
+    is_push = True
+    _VALID_KINDS = frozenset({"status", "question", "answer", "unblock", "fyi"})
+    _PROMPT = (
+        "Mesh review pending. Read the latest actionable DMs and execute the "
+        "required review workflow."
+    )
+
+    def __init__(self, target: str, wake_kinds: frozenset[str] = frozenset({"question"})):
+        self.target = target
+        self.wake_kinds = wake_kinds
+        suffix = "" if wake_kinds == frozenset({"question"}) else (
+            "?kinds=" + ",".join(sorted(wake_kinds))
+        )
+        super().__init__(f"codex-tmux:{target}{suffix}")
+
+    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
+        # Non-selected kinds never open a Codex turn. They are still satisfied
+        # for this sink so they cannot indefinitely hold the delivery ledger.
+        if not any(dm.get("kind") in self.wake_kinds for dm in dms):
+            return True
+        pane_state = session_bridge.codex_stable_state(self.target)
+        if pane_state != "idle":
+            state.delivery_deferred_reason = pane_state
+            return None
+        return session_bridge.inject(self.target, self._PROMPT)
+
+    def pending_label(self, count: int) -> str:
+        plural = "s" if count != 1 else ""
+        return f"{count} DM{plural} awaiting an idle Codex pane for {self.name}"
+
+
 class StdoutSink(Sink):
     """Write the DM to stdout. Delivery always succeeds."""
 
@@ -663,6 +697,23 @@ def parse_sink(spec: str) -> Sink:
                 "sink 'tmux-notify:' needs a target, e.g. tmux-notify:lab:0.0"
             )
         return TmuxNotifySink(target)
+    if spec.startswith("codex-tmux:"):
+        target_spec = spec[len("codex-tmux:"):]
+        target, marker, kinds_spec = target_spec.partition("?kinds=")
+        if not target:
+            raise MonitorSinkError(
+                "sink 'codex-tmux:' needs a pane target, e.g. codex-tmux:lab:0.0"
+            )
+        wake_kinds = frozenset({"question"})
+        if marker:
+            wake_kinds = frozenset(k.strip() for k in kinds_spec.split(",") if k.strip())
+            invalid = wake_kinds - CodexTmuxSink._VALID_KINDS
+            if not wake_kinds or invalid:
+                allowed = ", ".join(sorted(CodexTmuxSink._VALID_KINDS))
+                raise MonitorSinkError(
+                    f"codex-tmux kinds must be drawn from: {allowed}"
+                )
+        return CodexTmuxSink(target, wake_kinds)
     if spec.startswith("tmux:"):
         target = spec[len("tmux:"):]
         if not target:
@@ -680,7 +731,7 @@ def parse_sink(spec: str) -> Sink:
         )
     raise MonitorSinkError(
         f"unknown sink {spec!r}; expected pull, none, stdout, tmux:<target>, "
-        "or tmux-notify:<target>"
+        "tmux-notify:<target>, or codex-tmux:<target>"
     )
 
 
@@ -689,6 +740,8 @@ def _new_ledger() -> dict:
         "last_delivered_id": 0,
         "last_delivery_at": 0.0,
         "consecutive_failures": 0,
+        "last_deferred_at": 0.0,
+        "last_deferred_reason": "",
         "created_at": time.time(),
     }
 
@@ -797,6 +850,7 @@ class MonitorState:
         self.new_ledgers = {s.name for s in self.sinks
                             if s.keeps_ledger and s.name not in self.ledgers}
         self.deliveries: dict = {}
+        self.delivery_deferred_reason = ""
         self.consecutive_empty = 0
         self.disconnect_since: Optional[float] = None
         self.shutdown_requested = False
@@ -929,14 +983,26 @@ def _monitor_deliver(state: MonitorState) -> None:
                       f"delivering the newest {len(dms)} (limit "
                       f"{state.replay_limit}) -- see {state.inbox_log_path}",
                       file=sys.stderr, flush=True)
-            if sink.deliver(state, dms, observed):
+            state.delivery_deferred_reason = ""
+            result = sink.deliver(state, dms, observed)
+            if result is True:
                 led["last_delivered_id"] = observed
                 led["last_delivery_at"] = now
                 led["consecutive_failures"] = 0
+                led["last_deferred_at"] = 0.0
+                led["last_deferred_reason"] = ""
                 state.deliveries[sink.name] = state.deliveries.get(sink.name, 0) + 1
+            elif result is None:
+                led["last_deferred_at"] = now
+                led["last_deferred_reason"] = state.delivery_deferred_reason or "deferred"
+                print(f"{state.log_prefix} DELIVERY DEFERRED for {sink.name} "
+                      f"({led['last_deferred_reason']}) -- retaining DMs up to "
+                      f"id {observed}", flush=True)
             else:
                 # A dead sink is VISIBLE instead of silently freezing anything.
                 led["consecutive_failures"] = int(led["consecutive_failures"]) + 1
+                led["last_deferred_at"] = 0.0
+                led["last_deferred_reason"] = ""
                 print(f"{state.log_prefix} DELIVERY FAILED to {sink.name} "
                       f"({led['consecutive_failures']} consecutive) -- DMs up to "
                       f"id {observed} were still observed and archived; the sink "

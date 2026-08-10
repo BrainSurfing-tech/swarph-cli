@@ -57,6 +57,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="SINK",
         help="repeatable; pull (default) | tmux:<target> | tmux-notify:<target> "
+        "| codex-tmux:<target>[?kinds=question,answer,...] "
         "| stdout | none. "
         "Each sink gets its OWN delivery ledger.",
     )
@@ -406,6 +407,8 @@ def _collect(args: argparse.Namespace) -> dict:
             "last_delivered_id": delivered,
             "last_delivery_at": float(led["last_delivery_at"]) if led else 0.0,
             "consecutive_failures": int(led["consecutive_failures"]) if led else 0,
+            "last_deferred_at": float(led["last_deferred_at"]) if led else 0.0,
+            "last_deferred_reason": str(led["last_deferred_reason"]) if led else "",
             "ledger_missing": led is None,
             "pending": len(dms) + skipped,
             "pending_from": sorted({str(d.get("from_node")) for d in dms}),
@@ -494,6 +497,8 @@ def _print_status(info: dict, pending: int) -> None:
         print(f"  {row['name']}: {row['label']}{who} "
               f"[last_delivered_id={row['last_delivered_id']} "
               f"failures={row['consecutive_failures']}]")
+        if row["last_deferred_reason"]:
+            print(f"    deferred: {row['last_deferred_reason']}")
         if row["ledger_missing"] and row["is_push"]:
             print(f"    NOTE: no ledger on disk for {row['name']} yet — ledgers "
                   "are keyed by the sink STRING, so a renamed target starts "

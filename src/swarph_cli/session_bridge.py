@@ -30,6 +30,8 @@ _SAFE_DISMISSABLE_MODALS = (
 
 _WS_RUN = re.compile(r"\s+")
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_CODEX_COMPOSER = "›"
 
 
 def _mux() -> Optional[str]:
@@ -75,6 +77,48 @@ def probe_pane(pane_id: str) -> str:
     if non_empty and non_empty[-1].strip() == ">":
         return "idle"
     return "busy"
+
+
+def _codex_composer_state(content: Optional[str]) -> str:
+    """Classify only the current Codex composer: idle, draft, or busy.
+
+    The final non-empty line is the only safe evidence of the active composer.
+    Looking elsewhere in the capture could mistake an old transcript prompt for
+    an idle input buffer. Anything without the literal Codex prompt is busy.
+    """
+    if content is None:
+        return "busy"
+    lines = [_ANSI.sub("", line).rstrip() for line in content.splitlines()]
+    current = next((line for line in reversed(lines) if line.strip()), "")
+    stripped = current.lstrip()
+    if stripped == _CODEX_COMPOSER:
+        return "idle"
+    if stripped.startswith(_CODEX_COMPOSER):
+        return "draft"
+    return "busy"
+
+
+def probe_codex_pane(pane_id: str) -> str:
+    """Return Codex composer state: ``idle`` | ``draft`` | ``busy``.
+
+    ``capture-pane`` is deliberately the sole input. An unreadable or ambiguous
+    capture is busy, so callers defer rather than modify an input buffer.
+    """
+    return _codex_composer_state(_capture(pane_id))
+
+
+def codex_stable_state(pane_id: str, *, settle_s: float = 0.2) -> str:
+    """Use exactly two captures to confirm a blank Codex composer.
+
+    A non-idle first observation is returned as-is. A changed second observation
+    becomes ``unstable-idle`` rather than being mistaken for failed delivery.
+    """
+    first = probe_codex_pane(pane_id)
+    if first != "idle":
+        return first
+    time.sleep(settle_s)
+    second = probe_codex_pane(pane_id)
+    return "idle" if second == "idle" else "unstable-idle"
 
 
 def _send_key(pane_id: str, key: str) -> bool:

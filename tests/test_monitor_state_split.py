@@ -59,6 +59,10 @@ def test_parse_sink_covers_the_shipped_axis():
     assert tmux.name == "tmux:lab:0.0" and tmux.target == "lab:0.0"
     notify = mesh.parse_sink("tmux-notify:lab:0.0")
     assert notify.name == "tmux-notify:lab:0.0" and notify.target == "lab:0.0"
+    codex = mesh.parse_sink("codex-tmux:lab:0.0")
+    assert codex.name == "codex-tmux:lab:0.0" and codex.target == "lab:0.0"
+    answer_wake = mesh.parse_sink("codex-tmux:lab:0.0?kinds=question,answer")
+    assert answer_wake.wake_kinds == frozenset({"question", "answer"})
 
 
 def test_tmux_notify_reports_delivery_without_waking_a_pane(monkeypatch, tmp_path):
@@ -80,6 +84,89 @@ def test_tmux_notify_reports_delivery_without_waking_a_pane(monkeypatch, tmp_pat
     assert state.ledger(sink.name)["last_delivered_id"] == 5000
 
 
+def test_codex_tmux_preserves_a_typed_draft_and_defers(monkeypatch, tmp_path):
+    monkeypatch.setattr(mesh, "_http_get_json", _window(_dm(5002)))
+    injected = []
+    monkeypatch.setattr(mesh.session_bridge, "codex_stable_state", lambda pane: "draft")
+    monkeypatch.setattr(
+        mesh.session_bridge, "inject", lambda pane, text: injected.append((pane, text)) or True
+    )
+
+    sink = mesh.parse_sink("codex-tmux:cell:0.0")
+    state = _state(tmp_path, [sink])
+    mesh._monitor_iteration(state)
+
+    ledger = state.ledger(sink.name)
+    assert injected == []
+    assert ledger["last_delivered_id"] == 0
+    assert ledger["consecutive_failures"] == 0
+    assert ledger["last_deferred_reason"] == "draft"
+
+
+def test_codex_tmux_injects_one_fixed_prompt_after_stable_idle(monkeypatch, tmp_path):
+    monkeypatch.setattr(mesh, "_http_get_json", _window(_dm(5003, content="untrusted text")))
+    monkeypatch.setattr(mesh.session_bridge, "codex_stable_state", lambda pane: "idle")
+    injected = []
+    monkeypatch.setattr(
+        mesh.session_bridge, "inject", lambda pane, text: injected.append((pane, text)) or True
+    )
+
+    sink = mesh.parse_sink("codex-tmux:cell:0.0")
+    state = _state(tmp_path, [sink])
+    mesh._monitor_iteration(state)
+
+    assert injected == [("cell:0.0", mesh.CodexTmuxSink._PROMPT)]
+    assert "untrusted text" not in injected[0][1]
+    assert state.ledger(sink.name)["last_delivered_id"] == 5003
+
+
+def test_codex_tmux_retains_question_when_injection_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(mesh, "_http_get_json", _window(_dm(5004)))
+    monkeypatch.setattr(mesh.session_bridge, "codex_stable_state", lambda pane: "idle")
+    monkeypatch.setattr(mesh.session_bridge, "inject", lambda pane, text: False)
+
+    sink = mesh.parse_sink("codex-tmux:cell:0.0")
+    state = _state(tmp_path, [sink])
+    mesh._monitor_iteration(state)
+
+    assert state.ledger(sink.name)["last_delivered_id"] == 0
+    assert state.ledger(sink.name)["consecutive_failures"] == 1
+
+
+def test_codex_tmux_does_not_open_a_turn_for_answer_or_fyi(monkeypatch, tmp_path):
+    answer = _dm(5005)
+    answer["kind"] = "answer"
+    monkeypatch.setattr(mesh, "_http_get_json", _window(answer))
+    monkeypatch.setattr(
+        mesh.session_bridge, "codex_stable_state",
+        lambda pane: (_ for _ in ()).throw(AssertionError("must not probe")),
+    )
+
+    sink = mesh.parse_sink("codex-tmux:cell:0.0")
+    state = _state(tmp_path, [sink])
+    mesh._monitor_iteration(state)
+
+    assert state.ledger(sink.name)["last_delivered_id"] == 5005
+
+
+def test_codex_tmux_can_explicitly_wake_for_an_answer(monkeypatch, tmp_path):
+    answer = _dm(5006)
+    answer["kind"] = "answer"
+    monkeypatch.setattr(mesh, "_http_get_json", _window(answer))
+    monkeypatch.setattr(mesh.session_bridge, "codex_stable_state", lambda pane: "idle")
+    injected = []
+    monkeypatch.setattr(
+        mesh.session_bridge, "inject", lambda pane, text: injected.append(text) or True
+    )
+
+    sink = mesh.parse_sink("codex-tmux:cell:0.0?kinds=question,answer")
+    state = _state(tmp_path, [sink])
+    mesh._monitor_iteration(state)
+
+    assert injected == [mesh.CodexTmuxSink._PROMPT]
+    assert state.ledger(sink.name)["last_delivered_id"] == 5006
+
+
 def test_pull_keeps_a_ledger_and_none_does_not():
     """The whole naming ruling (droplet DM #8532) in one assertion.
 
@@ -97,6 +184,15 @@ def test_unknown_sink_is_rejected_not_ignored():
         assert "carrier-pigeon" in str(exc)
     else:
         raise AssertionError("an unknown sink must not be silently dropped")
+
+
+def test_codex_tmux_rejects_unknown_wake_kinds():
+    try:
+        mesh.parse_sink("codex-tmux:lab:0.0?kinds=question,review")
+    except mesh.MonitorSinkError as exc:
+        assert "kinds" in str(exc)
+    else:
+        raise AssertionError("unknown wake kinds must be rejected")
 
 
 def test_webhook_sink_is_held_and_says_so():

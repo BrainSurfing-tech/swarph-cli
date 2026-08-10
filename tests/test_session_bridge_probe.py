@@ -48,3 +48,28 @@ def test_probe_busy_when_no_mux(monkeypatch):
 def test_dismiss_returns_false_when_no_safe_modal(monkeypatch):
     _fake_capture(monkeypatch, 0, "esc to interrupt\n")
     assert sb.try_dismiss_safe_modal("%1") is False
+
+
+def test_codex_probe_uses_only_the_current_composer_line(monkeypatch):
+    assert sb._codex_composer_state("old output\n›\nnot a composer\n") == "busy"
+    assert sb._codex_composer_state("old output\n›\n") == "idle"
+    assert sb._codex_composer_state("old output\n› preserve this draft\n") == "draft"
+
+
+def test_codex_probe_defers_on_unreadable_capture(monkeypatch):
+    monkeypatch.setattr(sb, "_capture", lambda pane: None)
+    assert sb.probe_codex_pane("%1") == "busy"
+
+
+def test_codex_requires_two_blank_idle_captures(monkeypatch):
+    captures = iter(["›\n", "›\n"])
+    monkeypatch.setattr(sb, "_capture", lambda pane: next(captures))
+    monkeypatch.setattr(sb.time, "sleep", lambda _: None)
+    assert sb.codex_stable_state("%1") == "idle"
+
+
+def test_codex_changed_second_capture_is_not_idle(monkeypatch):
+    captures = iter(["›\n", "› keep my draft\n"])
+    monkeypatch.setattr(sb, "_capture", lambda pane: next(captures))
+    monkeypatch.setattr(sb.time, "sleep", lambda _: None)
+    assert sb.codex_stable_state("%1") == "unstable-idle"
