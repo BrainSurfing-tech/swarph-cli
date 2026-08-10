@@ -65,6 +65,11 @@ def test_muse_injects_restored_task_with_claude_system_prompt(
         "run",
         lambda argv, **_kwargs: launched.append(argv) or Result(),
     )
+    monkeypatch.setattr(
+        spawn.os,
+        "execve",
+        lambda _binary, argv, _env: launched.append(argv),
+    )
 
     assert spawn.run_spawn([]) == 0
     claude_argv = next(argv for argv in launched if argv[0] == "claude")
