@@ -2045,6 +2045,18 @@ class VibeMembrane(ProviderMembrane):
         return None
 
 
+class MuseMembrane(ClaudeMembrane):
+    """Muse (Meta) lane — same binary as Claude, distinct mesh peer identity.
+
+    Reuses the Claude CLI (``claude``) binary, billing scrub, and
+    tmux/session plumbing verbatim via ``ClaudeMembrane``; only the
+    membrane ``name`` differs so mesh attribution and the /resume
+    picker show ``muse`` while the underlying CLI is identical.
+    """
+
+    name = "muse"
+
+
 MEMBRANES: dict[str, ProviderMembrane] = {
     "claude": ClaudeMembrane(),
     "codex": CodexMembrane(),
@@ -2056,6 +2068,7 @@ MEMBRANES: dict[str, ProviderMembrane] = {
     # extra membrane is inert and harmless; the reverse order raises at import
     # and kills `swarph spawn` for every fresh install (2026-08-05, ~5h).
     "vibe": VibeMembrane(),
+    "muse": MuseMembrane(),
 }
 
 # Defensive coupling: every shared-whitelisted provider MUST have a membrane,
