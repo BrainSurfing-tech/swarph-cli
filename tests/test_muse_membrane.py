@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from swarph_cli.cell import load_cell
 from swarph_cli.commands.spawn import ClaudeMembrane, MEMBRANES, MuseMembrane
 from swarph_shared.cell import VALID_PROVIDERS
 
@@ -10,6 +11,15 @@ def test_muse_membrane_matches_the_shared_provider_whitelist():
     assert isinstance(MEMBRANES["muse"], MuseMembrane)
     assert isinstance(MEMBRANES["muse"], ClaudeMembrane)
     assert VALID_PROVIDERS <= set(MEMBRANES)
+
+
+def test_cli_explicitly_enables_muse_for_its_matching_membrane(tmp_path):
+    path = tmp_path / "cell.yaml"
+    path.write_text(
+        "schema_version: v1\nname: muse-1\nrole: worker\ncwd: .\nprovider: muse\n",
+        encoding="utf-8",
+    )
+    assert load_cell(path).provider == "muse"
 
 
 def test_muse_release_requires_the_shared_compatibility_boundary():

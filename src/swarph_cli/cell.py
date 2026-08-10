@@ -254,7 +254,12 @@ def load_cell(path: Path) -> Cell:
     except yaml.YAMLError as exc:
         raise CellError(f"cell.yaml is not valid YAML ({path}): {exc}") from exc
 
-    cell = parse_cell_dict(raw, source=str(path), base_dir=path.parent)
+    cell = parse_cell_dict(
+        raw,
+        source=str(path),
+        base_dir=path.parent,
+        allowed_providers=VALID_PROVIDERS | {"muse"},
+    )
     # File-I/O wrapper concern: post-validate cwd reachability + tag source
     # path. swarph-shared parse_cell_dict intentionally doesn't touch the
     # filesystem (kernel-tier discipline); the live cwd.is_dir() check is
