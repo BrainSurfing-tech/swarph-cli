@@ -26,6 +26,20 @@ PyPI pending publisher for the `swarph-cli` project that trusts the
 `pypi` environment. Protecting the GitHub `pypi` environment adds an approval
 gate before publication.
 
+## Sensitive-content checks
+
+Install the local guard before contributing:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+It scans staged text for blocked organization/customer identifiers and uses
+Gitleaks to detect hardcoded secrets. GitHub Actions repeats both checks for every
+pull request and merge, so a skipped local hook cannot publish sensitive content.
+Run `pre-commit run --all-files` to check the complete working tree.
+
 > **System requirement — a terminal multiplexer.** The session verbs (`spawn`, `cell`, `watchdog`) drive a `tmux`-compatible multiplexer. On **Linux/macOS** install `tmux` (`apt install tmux` / `brew install tmux`). On **Windows** there is no native tmux — install [**psmux**](https://github.com/psmux/psmux) (a Rust tmux-for-Windows, MIT) with `swarph install-multiplexer` (fetches the pinned, checksum-verified binary into `~/.swarph/bin`) or `winget install marlocarlo.psmux`.
 
 **What it is:** a multi-provider LLM command line. Run one-shot prompts or an interactive REPL against any supported provider; spawn long-lived agent *cells* that persist across restarts and coordinate over a mesh; install hooks, MCP servers, and skills by content-addressed URI. An open, inspectable substrate — not a closed orchestration platform.
