@@ -181,3 +181,37 @@ def test_reinstall_MIGRATES_a_legacy_entry_instead_of_duplicating_it():
     actions = settings["hooks"]["Stop"][0]["hooks"]
     assert len(actions) == 1, f"expected one binding after migration, got {actions}"
     assert actions[0]["command"] == CANONICAL
+
+
+def test_list_reports_a_LEGACY_install_as_INSTALLED():
+    """#216 review, 2nd pass: THE THIRD MATCH SITE.
+
+    `list`/`status` asks "is this bundle installed?" by comparing commands. With
+    exact matching a legacy backslash binding reads as NOT installed, so a
+    Windows cell whose hooks are present and working is told nothing is there —
+    and the operator's natural next step is to install again, producing the
+    duplicate binding the merge fix exists to prevent.
+    """
+    bundle = hooks.BUILTIN_HOOKS["cell-resilience"]
+    settings = {"hooks": {}}
+    for b in bundle.bindings:
+        settings["hooks"].setdefault(b.event, []).append(
+            {"matcher": b.matcher, "hooks": [{"type": "command", "command": LEGACY}]})
+    # THE COMMAND ASKED ABOUT IS THE CANONICAL ONE — that is what the caller
+    # derives from _installed_command today — while what is STORED is the
+    # legacy form. Passing LEGACY here (the first version of this test) made
+    # both sides identical, so exact matching succeeded and the test passed
+    # under the mutation. A SUBJECT THAT CANNOT EXHIBIT THE POSITIVE IS NOT A
+    # SUBJECT; the two strings must differ for the comparison to mean anything.
+    assert LEGACY != CANONICAL, "precondition: the two forms must differ"
+    assert hooks._is_installed(settings, CANONICAL, bundle) is True, (
+        "a legacy backslash binding reported as NOT installed"
+    )
+
+
+def test_list_still_reports_an_ABSENT_bundle_as_absent():
+    """>>> THE CONTROL. <<< Broadened matching must not make everything look
+    installed — a status check that always says yes is worse than one that says
+    no, because it removes the operator's reason to look."""
+    bundle = hooks.BUILTIN_HOOKS["cell-resilience"]
+    assert hooks._is_installed({"hooks": {}}, CANONICAL, bundle) is False

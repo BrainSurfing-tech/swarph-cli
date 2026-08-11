@@ -752,8 +752,18 @@ def _is_installed(settings: dict, command: str, bundle: HookBundle) -> bool:
         found = False
         for entry in event_list:
             if entry.get("matcher", "") == b.matcher:
+                # #216 review (Copilot, 2nd pass): THE THIRD SITE. Exact
+                # matching here makes a LEGACY backslash binding read as NOT
+                # INSTALLED, so a Windows cell's real, working hooks list as
+                # "unavailable" — the operator is told nothing is installed
+                # while the bindings sit right there in settings.json.
+                # The previous commit said "one helper, BOTH callers". There
+                # were THREE. A rule applied at N-1 sites is the defect this
+                # class keeps producing, and it produced it again inside the
+                # fix for it.
+                _known = _command_variants_for(command)
                 if any(
-                    a.get("command") == command for a in entry.get("hooks", [])
+                    a.get("command") in _known for a in entry.get("hooks", [])
                 ):
                     found = True
                 break
