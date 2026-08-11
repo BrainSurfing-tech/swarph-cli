@@ -1,0 +1,20 @@
+# gitleaks configuration for swarph-cli.
+#
+# WHY THIS FILE EXISTS: the default `generic-api-key` rule flags the TEST FIXTURE
+# in tests/test_token_file_one_parser.py — a deliberately fake, visibly-repeating
+# token used to exercise the token-file parser. Left unallowlisted, the sensitive-
+# content gate ships PERMANENTLY RED on a string that is not a secret, and a check
+# that always fails is a check everyone learns to ignore and then disables.
+#
+# THE ALLOWLIST IS PATH-SCOPED, NOT RULE-DISABLED: generic-api-key stays ACTIVE
+# everywhere else in the tree. Disabling the rule globally would trade one false
+# positive for blindness to every real one.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+[rules.allowlist]
+paths = [
+  '''tests/test_token_file_one_parser\.py''',
+]

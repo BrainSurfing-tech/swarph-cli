@@ -23,6 +23,7 @@ _FORBIDDEN_TERMS = tuple(
         "U3RlbGxhbnRpcw==",
         "UmVuYXVsdA==",
         "Tmlzc2Fu",
+        "RWRlbnJlZA==",
     )
 )
 
