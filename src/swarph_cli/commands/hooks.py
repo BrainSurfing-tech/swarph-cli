@@ -521,7 +521,7 @@ def install_hook(
     """
     hooks_home_p = Path(hooks_home).expanduser()
     script_dst = (hooks_home_p / bundle.script_name).resolve()
-    command = str(script_dst)
+    command = _hook_command_path(script_dst)
 
     # ---- show-before-write preview ----
     out(f"hook: {bundle.name}  (trust={bundle.trust}, publisher={bundle.publisher})")
@@ -628,13 +628,38 @@ def init_hooks(
 # --------------------------------------------------------------------------- #
 
 
+def _hook_command_path(path) -> str:
+    """The installed script path AS A HOOK COMMAND STRING — bash-safe on win32.
+
+    >>> CLAUDE CODE RUNS HOOK COMMANDS THROUGH BASH, WHERE BACKSLASH IS AN
+    ESCAPE CHARACTER. <<< ``str(WindowsPath)`` yields ``C:\\Users\\x\\.swarph\\hooks\\
+    cell-resilience.sh``; bash consumes each backslash and the path COLLAPSES to
+    ``C:Usersx.swarphhookscell-resilience.sh``, which cannot exist. Every hook a
+    Windows cell installs fails this way, silently, at every fire.
+
+    REPORTED AND VERIFIED ON METAL by razorpeter (win32 reference box,
+    2026-08-11, swarph-cli 0.42.5): both the activity-marker and cell-resilience
+    hooks failed with `No such file or directory`; rewriting the same paths with
+    forward slashes made both exit 0 and cell-resilience write idle_since.json.
+    bash on Windows resolves forward-slash absolute paths fine, drive letter
+    included.
+
+    ONE HELPER, TWO CALLERS, AND THAT IS THE POINT: install writes this string
+    and uninstall/list MATCH ON IT. If the two constructions ever diverge,
+    uninstall stops finding what install wrote and silently removes nothing —
+    so the fix cannot be applied at one site only. The invariant is asserted in
+    tests, not just stated here.
+    """
+    return str(path).replace("\\", "/") if sys.platform == "win32" else str(path)
+
+
 def _installed_command(bundle: HookBundle, hooks_home) -> str:
     """The absolute installed-script path written into settings for ``bundle``.
 
     SAME construction ``install_hook`` uses, so unmerge/list match what install
     merged: ``(hooks_home/script_name).expanduser().resolve()`` as a string.
     """
-    return str((Path(hooks_home).expanduser() / bundle.script_name).resolve())
+    return _hook_command_path((Path(hooks_home).expanduser() / bundle.script_name).resolve())
 
 
 def uninstall_hook(

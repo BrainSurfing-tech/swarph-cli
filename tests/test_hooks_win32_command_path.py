@@ -1,0 +1,126 @@
+"""Hook command paths must be BASH-SAFE on win32 — forward slashes, not backslashes.
+
+REPORTED AND VERIFIED ON METAL by razorpeter (the win32 reference box,
+2026-08-11, swarph-cli 0.42.5). Claude Code runs hook commands through bash,
+where backslash is an ESCAPE character, so a Windows path written by
+``str(WindowsPath)`` collapses:
+
+    C:\\Users\\pierr\\.swarph\\hooks\\cell-resilience.sh
+      -> bash: C:Userspierr.swarphhookscell-resilience.sh: No such file or directory
+
+Every hook a Windows cell installs fails that way, silently, at every fire.
+Rewriting the same paths with forward slashes made both the activity-marker and
+cell-resilience hooks exit 0 and cell-resilience write idle_since.json.
+
+>>> WHY THIS IS A TWO-SITE FIX AND THE INVARIANT IS THE REAL TEST. <<<
+``_installed_command``'s own docstring states the contract: it uses the SAME
+construction as ``install_hook`` "so unmerge/list match what install merged".
+Fixing only the install side would leave uninstall searching for a backslash
+string that is no longer written — it would find nothing, remove nothing, and
+report success. A HALF-APPLIED FIX HERE IS WORSE THAN THE BUG, because the bug
+at least fails loudly at hook-fire time.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from swarph_cli.commands import hooks
+
+WINDOWS_STYLE = r"C:\Users\pierr\.swarph\hooks\cell-resilience.sh"
+
+
+def test_backslashes_become_forward_slashes_on_win32(monkeypatch):
+    monkeypatch.setattr(hooks.sys, "platform", "win32")
+    out = hooks._hook_command_path(WINDOWS_STYLE)
+    assert out == "C:/Users/pierr/.swarph/hooks/cell-resilience.sh"
+
+
+def test_no_backslash_survives_on_win32(monkeypatch):
+    """The property, stated directly: bash must never see a backslash.
+
+    Asserted separately from the exact-string test because THIS is the thing
+    that breaks at runtime — an implementation that converted some separators
+    and not others would pass a laxer equality check.
+    """
+    monkeypatch.setattr(hooks.sys, "platform", "win32")
+    assert "\\" not in hooks._hook_command_path(WINDOWS_STYLE)
+
+
+def test_drive_letter_is_preserved(monkeypatch):
+    """Forward-slash conversion must not damage the absolute-path anchor.
+
+    bash on Windows resolves ``C:/Users/...`` fine; it cannot resolve a path
+    whose drive letter was mangled, so a "fix" that produced ``/Users/...``
+    would trade a loud failure for a wrong one.
+    """
+    monkeypatch.setattr(hooks.sys, "platform", "win32")
+    assert hooks._hook_command_path(WINDOWS_STYLE).startswith("C:/")
+
+
+def test_posix_paths_are_untouched(monkeypatch):
+    """>>> THE CONTROL. <<< Without it, an implementation that rewrote separators
+    unconditionally would pass every assertion above while corrupting the POSIX
+    path that carries 100% of today's traffic."""
+    monkeypatch.setattr(hooks.sys, "platform", "linux")
+    posix = "/home/ubuntu/.swarph/hooks/cell-resilience.sh"
+    assert hooks._hook_command_path(posix) == posix
+
+
+def test_posix_backslash_is_left_alone(monkeypatch):
+    """On POSIX a backslash is a LEGAL FILENAME CHARACTER, not a separator.
+
+    Rewriting it there would corrupt a real (if unusual) path. This pins the
+    conversion to the platform where it is correct, rather than to the presence
+    of the character.
+    """
+    monkeypatch.setattr(hooks.sys, "platform", "linux")
+    odd = "/home/ubuntu/weird\\name.sh"
+    assert hooks._hook_command_path(odd) == odd
+
+
+def test_install_and_uninstall_construct_the_same_string(monkeypatch, tmp_path):
+    """>>> THE LOAD-BEARING INVARIANT. <<<
+
+    ``_installed_command`` is what uninstall/list match against; ``install_hook``
+    writes ``_hook_command_path(script_dst)``. If those two diverge, uninstall
+    silently removes nothing and reports success. Asserted on BOTH platforms,
+    because a platform-gated helper is exactly the shape that can agree on one
+    OS and disagree on the other.
+    """
+    # The registry is BUILTIN_HOOKS. Named explicitly and asserted non-empty:
+    # the first version guessed `BUNDLES`, found nothing, took an early return,
+    # and PASSED WHILE ASSERTING NOTHING.
+    bundles = list(hooks.BUILTIN_HOOKS.values())
+    assert bundles, "BUILTIN_HOOKS is empty — this test has no subject"
+
+    # >>> AND THE SECOND VERSION WAS ALSO VACUOUS, FOR A SUBTLER REASON. <<<
+    # It built the path with pathlib on a LINUX runner, where Path never yields
+    # a backslash — so `str(p)` and `_hook_command_path(p)` were identical even
+    # under the win32 monkeypatch, and reverting the uninstall site left the
+    # suite GREEN. Mutation-checked; that is how it was caught.
+    #
+    # A NEGATIVE TEST WHOSE SUBJECT CANNOT EXHIBIT THE POSITIVE IS NOT A TEST.
+    # The hooks_home below therefore carries real backslashes, so the two
+    # constructions CAN diverge — which is the only condition under which their
+    # agreement means anything.
+    windows_home = r"C:\Users\pierr\.swarph\hooks"
+    checked = 0
+    for bundle in bundles:
+        for platform in ("linux", "win32"):
+            monkeypatch.setattr(hooks.sys, "platform", platform)
+            via_installed = hooks._installed_command(bundle, windows_home)
+            via_install = hooks._hook_command_path(
+                (Path(windows_home).expanduser() / bundle.script_name).resolve()
+            )
+            assert via_installed == via_install, (
+                f"install and uninstall disagree for {bundle.script_name} on "
+                f"{platform}: {via_install!r} != {via_installed!r}"
+            )
+            checked += 1
+    assert checked == len(bundles) * 2, "the loop did not run over every bundle"
+
+    # The precondition, asserted rather than assumed: under win32 the subject
+    # MUST actually be transformed, or the equality above is trivially true.
+    monkeypatch.setattr(hooks.sys, "platform", "win32")
+    sample = hooks._installed_command(bundles[0], windows_home)
+    assert "\\" not in sample, "the win32 subject was never transformed"
