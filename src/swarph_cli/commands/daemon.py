@@ -102,10 +102,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--auto-act",
         action="store_true",
-        help="deliver drained DMs into the node's live agent session pane "
-        "(resolve pane -> inject on positive-idle; defer on busy; wake only on "
-        "actionable kinds). Without it, surface-only (drained + logged, no "
-        "injection). Set SWARPH_SESSION_NAME if the session name != --self.",
+        help="deprecated compatibility flag. Direct terminal delivery is disabled; "
+        "DMs remain in the receipt-gated DeliveryQueue for a service executor.",
     )
     p.add_argument(
         "--once",
@@ -317,11 +315,8 @@ _print_safe = print_safe
 
 
 def _route_to_handler(state: DaemonState, dm: dict) -> None:
-    """Under --auto-act, enqueue the DM for delivery into the live session
-    (attempt_delivery runs each tick). Surface-only (no auto-act) is unchanged
-    — the DM is already logged by _log_dm; nothing further here."""
-    if state.auto_act:
-        state.queue.enqueue(dm)
+    """Record every drained DM in the authoritative owed-work ledger."""
+    state.queue.enqueue(dm)
 
 
 _MAX_CONTENT = 2000  # per-DM content cap in the injected block — bounds the
@@ -345,10 +340,12 @@ def _render_delivery_block(entries: list) -> str:
     return " ".join(lines)
 
 
-def attempt_delivery(state: DaemonState) -> None:
-    """Try to deliver queued DMs into the cell's live session pane. Runs every
-    tick. NEVER raises (the daemon must keep draining). Opt-in: no-op unless
-    --auto-act. Fail-safe toward defer: only inject on POSITIVE idle."""
+def _legacy_attempt_delivery_removed(state: DaemonState) -> None:
+    """Retained temporarily for source archaeology; never call this function."""
+    # The legacy implementation follows, but the unconditional return keeps
+    # an accidental import from restoring pane injection during the migration.
+    return
+    """
     if not state.auto_act:
         return
     try:
@@ -389,6 +386,18 @@ def attempt_delivery(state: DaemonState) -> None:
     except Exception as exc:  # noqa: BLE001 — bridge must never crash the loop
         _print_safe(f"[swarph-daemon] delivery error (continuing): "
               f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+
+    """
+
+
+def attempt_delivery(state: DaemonState) -> None:
+    """Fail closed until the card #378 service executor can receipt work.
+
+    This compatibility shim intentionally does not resolve, probe, or inject
+    into a human-owned pane. The DeliveryQueue remains the owed-work ledger.
+    """
+    return
 
 
 def _select_next_poll_seconds(state: DaemonState) -> int:
