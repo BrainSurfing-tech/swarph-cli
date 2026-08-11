@@ -24,6 +24,13 @@ class DeliveryQueueError(RuntimeError):
 
 _ELIGIBILITY = {"eligible", "ineligible", "cannot_evaluate"}
 _SERVICE_STATES = {"unassigned", "claimed", "capacity_refused"}
+_OBLIGATION_STATES = {
+    "owed",
+    "ineligible",
+    "cannot_evaluate",
+    "capacity_refused",
+    "expired",
+}
 
 
 def wake_for(kind: str, thread_id) -> bool:
@@ -102,6 +109,7 @@ class DeliveryQueue:
                 "queued_at": time.time(),
                 "eligibility": "cannot_evaluate",
                 "eligibility_reason": "awaiting policy evaluation",
+                "obligation_state": "cannot_evaluate",
                 "service_state": "unassigned",
                 "job": None,
                 "source_read_state": "unread",
@@ -124,6 +132,18 @@ class DeliveryQueue:
         entry = self._entry(dm_id)
         entry["eligibility"] = state
         entry["eligibility_reason"] = reason
+        entry["obligation_state"] = "owed" if state == "eligible" else state
+        self._persist()
+
+    def record_expired(self, dm_id: int, reason: str) -> None:
+        """Record expiry explicitly; expiry never silently becomes completion."""
+        if not isinstance(reason, str) or not reason:
+            raise DeliveryQueueError("expiry reason is required")
+        entry = self._entry(dm_id)
+        if entry["service_state"] == "claimed":
+            raise DeliveryQueueError("an active service claim cannot be expired")
+        entry["obligation_state"] = "expired"
+        entry["expiry_reason"] = reason
         self._persist()
 
     def claim_for_service(
@@ -135,7 +155,10 @@ class DeliveryQueue:
         if not isinstance(destination_peer, str) or not destination_peer:
             raise DeliveryQueueError("destination_peer is required")
         entry = self._entry(dm_id)
-        if entry["eligibility"] != "eligible":
+        if entry["eligibility"] != "eligible" or entry["obligation_state"] not in {
+            "owed",
+            "capacity_refused",
+        }:
             raise DeliveryQueueError("only eligible work may be claimed")
         if entry["service_state"] == "claimed":
             raise DeliveryQueueError("source DM already has an active service claim")
@@ -143,6 +166,7 @@ class DeliveryQueue:
         active = sum(entry.get("service_state") == "claimed" for entry in self._pending)
         if active >= max_active:
             entry["service_state"] = "capacity_refused"
+            entry["obligation_state"] = "capacity_refused"
             entry["capacity_refusal"] = (
                 f"service capacity exhausted: {active}/{max_active} active"
             )
@@ -164,6 +188,7 @@ class DeliveryQueue:
         }
         entry["job"] = job
         entry["service_state"] = "claimed"
+        entry["obligation_state"] = "owed"
         entry.pop("capacity_refusal", None)
         self._persist()
         return deepcopy(job)
@@ -227,6 +252,10 @@ class DeliveryQueue:
                 state: sum(entry.get("service_state") == state for entry in self._pending)
                 for state in sorted(_SERVICE_STATES)
             },
+            "obligation_state": {
+                state: sum(entry.get("obligation_state") == state for entry in self._pending)
+                for state in sorted(_OBLIGATION_STATES)
+            },
         }
 
     def accepted_receipts(self) -> List[dict]:
@@ -260,6 +289,10 @@ class DeliveryQueue:
         migrated.setdefault("queued_at", time.time())
         migrated.setdefault("eligibility", "cannot_evaluate")
         migrated.setdefault("eligibility_reason", "awaiting policy evaluation")
+        migrated.setdefault(
+            "obligation_state",
+            "owed" if migrated["eligibility"] == "eligible" else migrated["eligibility"],
+        )
         migrated.setdefault("service_state", "unassigned")
         migrated.setdefault("job", None)
         migrated.setdefault("source_read_state", "unread")
@@ -267,4 +300,6 @@ class DeliveryQueue:
             raise ValueError("queue entry has an unsupported eligibility state")
         if migrated["service_state"] not in _SERVICE_STATES:
             raise ValueError("queue entry has an unsupported service state")
+        if migrated["obligation_state"] not in _OBLIGATION_STATES:
+            raise ValueError("queue entry has an unsupported obligation state")
         return migrated

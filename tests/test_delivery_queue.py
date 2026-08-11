@@ -105,7 +105,17 @@ def test_cannot_evaluate_is_surfaceable_with_oldest_age(tmp_path):
     queued_at = q.pending()[0]["queued_at"]
     status = q.status(now=queued_at + 12.5)
     assert status["eligibility"]["cannot_evaluate"] == 1
+    assert status["obligation_state"]["cannot_evaluate"] == 1
     assert status["oldest_age_seconds"] == 12.5
+
+
+def test_expired_is_a_visible_obligation_state_not_completion(tmp_path):
+    q = DeliveryQueue(tmp_path / "q.json")
+    q.enqueue(_dm(1, "question"))
+    q.record_expired(1, "deadline elapsed")
+    assert q.status()["owed"] == 1
+    assert q.status()["obligation_state"]["expired"] == 1
+    assert q.pending()[0]["expiry_reason"] == "deadline elapsed"
 
 
 def test_legacy_queue_entries_migrate_to_unread_cannot_evaluate(tmp_path):
@@ -114,6 +124,7 @@ def test_legacy_queue_entries_migrate_to_unread_cannot_evaluate(tmp_path):
     q = DeliveryQueue(path)
     entry = q.pending()[0]
     assert entry["eligibility"] == "cannot_evaluate"
+    assert entry["obligation_state"] == "cannot_evaluate"
     assert entry["service_state"] == "unassigned"
     assert entry["source_read_state"] == "unread"
 
