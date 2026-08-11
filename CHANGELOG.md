@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.42.7 — 2026-08-11
+
+Windows cells were running 0.42.6 and hitting defects already fixed in source. A fix that
+exists and cannot be installed is, from the affected cell's position, not a fix.
+
+**Two distinct defects, different scopes — stated separately because conflating them is how the
+wrong one gets believed fixed.**
+
+- **Wake injection was not literal (cross-provider).** `tmux send-keys` without `-l` is a
+  KEY-PARSING interface: tokens are read as key names and recognised ones are consumed, so an
+  injected prompt is chunk-deleted. `_tmux_wake` now sends the payload with `-l` and submits with
+  a separate `Enter`. Latent on Linux — real tmux passes an unrecognised key-name argument
+  through as literal characters; psmux does not. Hit Claude and codex cells alike. (#219)
+- **Hook commands could not execute on Windows (provider-specific).** `swarph hooks add` wrote
+  Windows-native paths into settings.json, and Claude Code runs hook commands through bash, where
+  each backslash is consumed: `C:\Users\x\.swarph\hooks\activity-marker.sh` collapsed to
+  `C:Usersx.swarphhooksactivity-marker.sh`. Every hook a Windows cell installed failed, silently,
+  at every fire. Now emitted with forward slashes, with a migration for settings.json files
+  already holding backslash bindings and a third match site so `hooks list` stops reporting
+  legacy bindings as absent. (#216)
+
+Also:
+
+- `ensure_monitor.sh` no longer starts a monitor under a GUESSED identity — an unset
+  `SWARPH_SELF` used to default to a specific peer name, so a cell with no identity started a
+  monitor as that peer and drained its DMs. Refuses the action, loudly, and still exits 0,
+  because a hook that can wedge a session is worse than the deafness it prevents. (#217, #360)
+- `MeteredMistralBackend` — the fifth bench lane, wired with a declared dependency. (#191)
+
 Notable changes to `swarph-cli`. Earlier history: `git log`.
 
 ## 0.42.6 — 2026-08-11
