@@ -359,6 +359,17 @@ def _save_settings(path, obj) -> None:
         raise
 
 
+def _command_variants_for(command: str) -> frozenset:
+    """The canonical command plus the legacy form of THE SAME path.
+
+    Derived from the command string itself so the merge/unmerge helpers stay
+    pure functions of their argument — they never learn about bundles or
+    hooks_home. On POSIX the two coincide and this is a one-element set, so
+    nothing changes on the platform carrying today's traffic.
+    """
+    return frozenset({command, command.replace("/", "\\"), command.replace("\\", "/")})
+
+
 def _merge_hook(settings: dict, event: str, matcher: str, command: str) -> dict:
     """Merge one ``{event, matcher, command}`` hook into ``settings``.
 
@@ -375,9 +386,12 @@ def _merge_hook(settings: dict, event: str, matcher: str, command: str) -> dict:
     for entry in event_list:
         if entry.get("matcher", "") == matcher:
             actions = entry.setdefault("hooks", [])
-            # Dedup on command — idempotent re-install.
-            if not any(a.get("command") == command for a in actions):
-                actions.append(action)
+            # Dedup on command — idempotent re-install. #216: also drop any
+            # LEGACY-form entry for the same script, so re-installing MIGRATES
+            # it instead of leaving two bindings that both fire.
+            _known = _command_variants_for(command)
+            actions[:] = [a for a in actions if a.get("command") not in _known]
+            actions.append(action)
             return settings
 
     # No entry for this matcher yet — append a fresh one.
@@ -404,8 +418,14 @@ def _unmerge_hook(settings: dict, event: str, matcher: str, command: str) -> dic
     for entry in event_list:
         if entry.get("matcher", "") == matcher:
             actions = entry.get("hooks", [])
+            # #216 review (Copilot): remove EVERY variant this bundle may be
+            # installed under, not just the canonical one. A Windows cell that
+            # ran `hooks add` before the forward-slash fix has a BACKSLASH entry
+            # here; matching only the canonical form would leave it orphaned
+            # forever while reporting success.
+            _drop = _command_variants_for(command)
             entry["hooks"] = [
-                a for a in actions if a.get("command") != command
+                a for a in actions if a.get("command") not in _drop
             ]
             if not entry["hooks"]:
                 event_list.remove(entry)
@@ -651,6 +671,29 @@ def _hook_command_path(path) -> str:
     tests, not just stated here.
     """
     return str(path).replace("\\", "/") if sys.platform == "win32" else str(path)
+
+
+def _installed_command_variants(bundle: HookBundle, hooks_home) -> tuple:
+    """Every command string this bundle may ALREADY be installed under.
+
+    >>> THE MIGRATION HOLE THE FORWARD-SLASH FIX OPENED. <<< Every Windows cell
+    that ran ``hooks add`` before this change has BACKSLASH commands sitting in
+    its settings.json. Match only the new canonical form and uninstall/list
+    silently miss them: the entry is ORPHANED FOREVER while the command reports
+    success — a dead hook binding nobody can remove and nothing reports.
+
+    That is strictly worse than the bug being fixed, which at least fails loudly
+    at hook-fire time. Found in review by Copilot on PR #216; I had made install
+    and uninstall agree GOING FORWARD and never asked what was already on disk.
+
+    Canonical form FIRST (it is what install now writes); the legacy form is
+    appended only when it actually differs, so POSIX — where the two are
+    identical — gets exactly one candidate and no behaviour change at all.
+    """
+    resolved = (Path(hooks_home).expanduser() / bundle.script_name).resolve()
+    canonical = _hook_command_path(resolved)
+    legacy = str(resolved)
+    return (canonical,) if canonical == legacy else (canonical, legacy)
 
 
 def _installed_command(bundle: HookBundle, hooks_home) -> str:

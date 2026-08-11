@@ -124,3 +124,60 @@ def test_install_and_uninstall_construct_the_same_string(monkeypatch, tmp_path):
     monkeypatch.setattr(hooks.sys, "platform", "win32")
     sample = hooks._installed_command(bundles[0], windows_home)
     assert "\\" not in sample, "the win32 subject was never transformed"
+
+
+# --- THE MIGRATION, raised in review by Copilot on PR #216 -------------------
+# The forward-slash fix OPENED A HOLE it did not close: every Windows cell that
+# ran `hooks add` before it has a BACKSLASH command in settings.json. Matching
+# only the new canonical form would leave those entries orphaned forever while
+# uninstall reported success -- a dead binding nobody can remove and nothing
+# reports. STRICTLY WORSE THAN THE BUG, which at least fails loudly at fire time.
+LEGACY = r"C:\Users\pierr\.swarph\hooks\cell-resilience.sh"
+CANONICAL = "C:/Users/pierr/.swarph/hooks/cell-resilience.sh"
+
+
+def _settings_with(command):
+    return {"hooks": {"Stop": [{"matcher": "", "hooks": [
+        {"type": "command", "command": command}]}]}}
+
+
+def test_uninstall_removes_a_LEGACY_backslash_entry():
+    """The migration itself: uninstall must find what the OLD code wrote."""
+    settings = _settings_with(LEGACY)
+    hooks._unmerge_hook(settings, "Stop", "", CANONICAL)
+    assert settings["hooks"].get("Stop", []) == [], (
+        "a legacy backslash entry survived uninstall — orphaned forever"
+    )
+
+
+def test_uninstall_still_removes_the_CANONICAL_entry():
+    """>>> CONTROL. <<< Without it, an implementation that removed only legacy
+    forms — or removed everything indiscriminately — would pass the test above."""
+    settings = _settings_with(CANONICAL)
+    hooks._unmerge_hook(settings, "Stop", "", CANONICAL)
+    assert settings["hooks"].get("Stop", []) == []
+
+
+def test_uninstall_does_NOT_remove_an_UNRELATED_entry():
+    """The other control, and the one that matters for a variant-matching rule:
+    broadening what uninstall matches must not broaden it to other people's
+    hooks. A migration that eats unrelated bindings is a worse defect than the
+    orphan it fixes."""
+    other = "C:/Users/pierr/.swarph/hooks/some-other-hook.sh"
+    settings = _settings_with(other)
+    hooks._unmerge_hook(settings, "Stop", "", CANONICAL)
+    assert settings["hooks"]["Stop"][0]["hooks"][0]["command"] == other
+
+
+def test_reinstall_MIGRATES_a_legacy_entry_instead_of_duplicating_it():
+    """Re-installing over a legacy entry must leave ONE binding, not two.
+
+    Two bindings for the same script both fire, so the hook runs twice per
+    event — and the operator sees a working hook, which is why nobody would
+    report it.
+    """
+    settings = _settings_with(LEGACY)
+    hooks._merge_hook(settings, "Stop", "", CANONICAL)
+    actions = settings["hooks"]["Stop"][0]["hooks"]
+    assert len(actions) == 1, f"expected one binding after migration, got {actions}"
+    assert actions[0]["command"] == CANONICAL
