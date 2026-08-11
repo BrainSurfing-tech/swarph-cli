@@ -31,7 +31,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import quote
 
 from swarph_cli import __version__
@@ -968,6 +968,7 @@ def _console_is_genuine_wt() -> bool:
 
 def _relaunch_in_windows_terminal(
     binary: str, argv: list[str], cwd: Path,
+    env_factory: Callable[[], dict[str, str]],
 ) -> bool:
     """Auto-fix the conhost TUI bug by relaunching the session in Windows Terminal.
 
@@ -1044,7 +1045,25 @@ def _relaunch_in_windows_terminal(
     # #314 hoist — the body kept the old names and NameError'd until four existing
     # tests caught it. A rename that stops at the signature is not a rename.)
     wt_cmd = [wt, "-d", str(cwd), "--", binary, *argv[1:]]
-    env = {**os.environ, "SWARPH_SPAWN": "1"}
+    # LAZY ON PURPOSE: some providers' env builders have SIDE EFFECTS
+    # (grok and vibe create the cell-home tree and link auth). Building
+    # eagerly at the call site would fire them on every spawn, including
+    # the paths that never relaunch. The factory is invoked only once the
+    # relaunch is committed.
+    env = env_factory()
+    # >>> THIS PATH USED TO BUILD ``{**os.environ, "SWARPH_SPAWN": "1"}`` AND
+    # LAUNCH THE PROVIDER BINARY DIRECTLY WITH IT. <<< Two things rode on
+    # that, and neither was visible from the call site:
+    #   * THE BILLING-REDIRECT SCRUB WAS BYPASSED. An ANTHROPIC_BASE_URL /
+    #     ANTHROPIC_AUTH_TOKEN in the operator env reached the relaunched
+    #     cell untouched — the adversarial-sweep CRIT that _claude_env's
+    #     docstring says the scrub exists to prevent, alive on the fallback
+    #     path. Reachable on Windows whenever tmux/psmux is absent.
+    #   * #360's identity stamp never arrived, so the relaunched cell wore
+    #     the SPAWNING cell's SWARPH_SELF.
+    # The env is now passed IN by the membrane, which is the only layer that
+    # knows the provider AND the cell. Found by enumerating launch paths for
+    # #360 rather than by reading this function, which had been reviewed.
     try:
         subprocess.Popen(wt_cmd, env=env)
     except OSError as exc:
@@ -1374,6 +1393,24 @@ class ProviderMembrane:
     def binary_not_found_message(self) -> str:
         raise NotImplementedError
 
+    #: The provider's env builder. Declared per membrane so every launch path
+    #: obtains a SCRUBBED AND IDENTITY-STAMPED env from one place. The base
+    #: default is deliberately the safe one: a membrane that forgets to declare
+    #: it still gets the scrub and the #360 stamp, just not its provider-specific
+    #: extras. FAILING TOWARD "scrubbed and stamped" is the only direction a
+    #: default may fail in here.
+    env_builder = staticmethod(_spawn_env_base)
+
+    def spawn_env(self, cell: Cell) -> dict[str, str]:
+        """The env this membrane hands to ANY path that starts the provider.
+
+        Exists because ``_relaunch_in_windows_terminal`` built its own
+        ``{**os.environ}`` and launched the binary directly, bypassing both the
+        billing scrub and the identity stamp. One accessor means a new launch
+        path cannot silently invent a third env.
+        """
+        return type(self).env_builder(cell)
+
     def pre_launch(
         self, cell: Cell, binary: str, argv: list[str], *, no_banner: bool,
         session_name: Optional[str] = None,
@@ -1399,7 +1436,9 @@ class ProviderMembrane:
         # never claude-specific — only its call site was — and codex + antigravity,
         # the two providers that never inherited it, are exactly the two the
         # commander had been launching by hand.
-        if _relaunch_in_windows_terminal(binary, argv, cell.cwd):
+        if _relaunch_in_windows_terminal(
+            binary, argv, cell.cwd, lambda: self.spawn_env(cell)
+        ):
             return 0
 
         # Still in a broken console (conhost with no wt.exe, or operator acked).
@@ -1448,6 +1487,8 @@ class ProviderMembrane:
 class ClaudeMembrane(ProviderMembrane):
     name = "claude"
 
+
+    env_builder = staticmethod(_claude_env)
     def uses_pinned_session(self) -> bool:
         return True
 
@@ -1552,6 +1593,8 @@ class ClaudeMembrane(ProviderMembrane):
 class CodexMembrane(ProviderMembrane):
     name = "codex"
 
+
+    env_builder = staticmethod(_scrubbed_codex_env)
     def build_argv(
         self,
         cell: Cell,
@@ -1614,6 +1657,8 @@ class CodexMembrane(ProviderMembrane):
 class AntigravityMembrane(ProviderMembrane):
     name = "antigravity"
 
+
+    env_builder = staticmethod(_agy_env)
     def build_argv(
         self,
         cell: Cell,
@@ -1885,6 +1930,8 @@ class GrokMembrane(ProviderMembrane):
 
     name = "grok"
 
+
+    env_builder = staticmethod(_grok_env)
     def uses_pinned_session(self) -> bool:
         return False
 
@@ -1979,6 +2026,8 @@ class VibeMembrane(ProviderMembrane):
 
     name = "vibe"
 
+
+    env_builder = staticmethod(_vibe_env)
     def uses_pinned_session(self) -> bool:
         return False
 
