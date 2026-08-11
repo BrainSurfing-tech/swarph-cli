@@ -546,6 +546,80 @@ def _newest_codex_session_for_cwd(cwd, sessions_root=None):
     return None
 
 
+#: muse keeps a workspace-keyed session index. Read-only, and consulted ONLY to
+#: decide whether `resume` is safe — never written.
+_MUSE_SESSION_INDEX = "~/.local/share/muse/session-index.db"
+
+
+def _muse_has_session_for(cwd: Path) -> bool:
+    """Has muse recorded a session for THIS workspace?
+
+    >>> WHY THIS EXISTS AT ALL: `muse resume` WITH NO ARGUMENT OPENS AN
+    INTERACTIVE PICKER. <<< On a spawned cell there is nobody to pick, so it
+    would hang the session forever — the failure mode is a silent stall, not an
+    error. `--last` avoids the picker but FAILS when the workspace has no prior
+    session. So the membrane must know which case it is in before it builds argv.
+
+    Answered from muse's OWN index (``sessions.workspace_root``) rather than by
+    scanning session files: the index is the thing muse itself resolves
+    "most recent session in this workspace" against, so this asks the same
+    question the CLI will.
+
+    FAILS TOWARD "NO SESSION", DELIBERATELY. A missing, locked, or
+    schema-changed index yields False, and the cell starts FRESH. Getting that
+    wrong costs continuity; getting it wrong in the other direction costs a hung
+    pane that looks alive. Losing a resume is recoverable; a stalled cell is the
+    deafness class this fleet keeps paying for.
+    """
+    db = Path(os.path.expanduser(_MUSE_SESSION_INDEX))
+    if not db.is_file():
+        return False
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2.0)
+        try:
+            row = con.execute(
+                "SELECT 1 FROM sessions WHERE workspace_root = ? LIMIT 1",
+                (str(cwd),),
+            ).fetchone()
+        finally:
+            con.close()
+        return row is not None
+    except Exception:
+        # sqlite3 raises a family of errors (locked, corrupt, missing table).
+        # None of them mean "resume is safe", and all of them mean the same
+        # thing to the caller.
+        return False
+
+
+def _build_muse_argv(cell: Cell, passthrough: list[str]) -> list[str]:
+    """muse's argv. ITS GRAMMAR IS NOT CLAUDE'S, WHICH IS WHY THIS EXISTS.
+
+    MuseMembrane previously subclassed ClaudeMembrane with only ``name = "muse"``
+    and therefore launched the ``claude`` binary — the membrane was a LABEL, and
+    `swarph spawn` on a muse cell started Claude Code wearing muse's mesh
+    identity. The live cell was running ``muse-bin`` started by hand.
+
+    The grammars differ structurally, not cosmetically:
+      * claude PINS a session UUID at creation (``--session-id``); MUSE HAS NO
+        SUCH FLAG. It resumes via ``resume --last`` / ``<uuid>`` / a picker, so
+        muse belongs on codex's resume-by-discovery pattern, not claude's.
+      * ``resume`` is a SUBCOMMAND, not a flag, and must precede its options.
+
+    SAFETY DEFAULTS ARE LEFT ALONE. muse ships approval and sandboxing ON
+    (``--approval-mode on-request``, sandbox enabled); ``--yolo`` would disable
+    both. A membrane is the wrong place to weaken a provider's safety posture
+    silently — an operator who wants it can pass it through explicitly, where it
+    is visible in the spawn command rather than buried in a library default.
+    """
+    if _muse_has_session_for(cell.cwd):
+        argv = ["muse", "resume", "--last"]
+    else:
+        argv = ["muse"]
+    argv.extend(passthrough)
+    return argv
+
+
 def _build_codex_argv(cell: Cell, passthrough: list[str]) -> list[str]:
     sid = _newest_codex_session_for_cwd(cell.cwd)
     if sid:
@@ -2122,16 +2196,48 @@ class VibeMembrane(ProviderMembrane):
         return None
 
 
-class MuseMembrane(ClaudeMembrane):
-    """Muse (Meta) lane — same binary as Claude, distinct mesh peer identity.
+class MuseMembrane(ProviderMembrane):
+    """Muse (Meta) lane — ITS OWN CLI, not Claude's.
 
-    Reuses the Claude CLI (``claude``) binary, billing scrub, and
-    tmux/session plumbing verbatim via ``ClaudeMembrane``; only the
-    membrane ``name`` differs so mesh attribution and the /resume
-    picker show ``muse`` while the underlying CLI is identical.
+    >>> THIS USED TO SUBCLASS ClaudeMembrane WITH ONLY ``name = "muse"``. <<<
+    That made the membrane a LABEL: `swarph spawn` on a muse cell launched the
+    ``claude`` binary wearing muse's mesh identity, while the real cell on this
+    box was running ``muse-bin`` started by hand. Mesh attribution said muse;
+    the process was Claude Code.
+
+    The two CLIs are not interchangeable. muse has NO ``--session-id``: it
+    resumes via a ``resume`` SUBCOMMAND (``--last`` / ``<uuid>`` / an
+    interactive picker), so it belongs on codex's resume-by-discovery pattern
+    rather than claude's pin-a-UUID one. Subclassing ClaudeMembrane was wrong
+    about more than the binary path.
     """
 
     name = "muse"
+
+    def build_argv(
+        self,
+        cell: Cell,
+        *,
+        session_id: Optional[str],
+        no_starter: bool,
+        passthrough: list[str],
+        effective_role: Optional[str],
+    ) -> list[str]:
+        # session_id is accepted and IGNORED: muse cannot pin one at creation.
+        # Silently ignoring a caller-supplied id would be worse than not taking
+        # it, so the reason is stated here rather than implied by absence.
+        return _build_muse_argv(cell, passthrough)
+
+    def resolve_binary(self) -> Optional[str]:
+        return shutil.which("muse")
+
+    def binary_not_found_message(self) -> str:
+        return (
+            "swarph spawn: 'muse' binary not found on PATH. Install the Muse "
+            "CLI (Meta) or set PATH explicitly. NOTE: this membrane no longer "
+            "falls back to `claude` — a muse cell that silently ran Claude Code "
+            "is the defect this replaced."
+        )
 
 
 MEMBRANES: dict[str, ProviderMembrane] = {
