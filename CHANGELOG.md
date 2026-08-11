@@ -2,6 +2,31 @@
 
 Notable changes to `swarph-cli`. Earlier history: `git log`.
 
+## 0.42.6 — 2026-08-11
+- **feat(spawn): the launcher stamps the cell's identity into the spawned env (#360).**
+  Identity failed TOWARD `lab-ovh` rather than closed. The root sat one layer above
+  the three known defaults: `swarph spawn` KNEW which cell it was creating and never
+  said so, so every cell had to INFER itself from a config file keyed on cwd — and
+  cwd is not a cell identifier (two Claude-family cells run with `cwd=$HOME`, where
+  the "project" settings file IS the user settings file). One `_spawn_env_base(cell)`
+  now performs the scrub, the spawn marker and `SWARPH_SELF = cell.name`, and all
+  five provider env builders route through it. `cell` is positional and required, so
+  a future provider's omission does not compile.
+  **This is inert until `env.SWARPH_SELF` is removed from `~/.claude/settings.json`:**
+  measured, Claude Code's settings env OVERRIDES the inherited process env, so the
+  package half and the config half must land together.
+- **fix(spawn): the Windows Terminal fallback bypassed BOTH the billing scrub and the
+  identity stamp (#360).** `_relaunch_in_windows_terminal` built `{**os.environ}` and
+  launched the provider binary DIRECTLY, so an `ANTHROPIC_BASE_URL` /
+  `ANTHROPIC_AUTH_TOKEN` in the operator env reached the relaunched cell untouched —
+  the adversarial-sweep CRIT, alive on the fallback path, reachable on Windows
+  whenever tmux/psmux is absent. The membrane now hands its env down through one
+  accessor, passed as a factory because grok/vibe builders create directories.
+  Found independently by Copilot in review and by path enumeration.
+- **ci(publish): the tag/version guard checked only `pyproject.toml`.** A bump that
+  missed `src/swarph_cli/__init__.py` would publish a wheel whose `__version__`
+  disagreed with its own metadata. Both declarations are now verified against the tag.
+
 ## 0.42.0 - 2026-08-08
 - **fix(waker): only addressed question DMs may create a Codex App Server turn (#199).**
   `answer` and `fyi` messages remain in the monitor ledger but cannot advance the

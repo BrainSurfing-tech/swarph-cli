@@ -34,6 +34,21 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match package version $version"
             exit 1
           }
+          # The package declares its version TWICE. Checking only pyproject.toml
+          # lets a half-finished bump publish a wheel whose __version__ disagrees
+          # with its own metadata -- and a version STRING is the thing operators
+          # read to decide whether an upgrade landed. Verify both against the tag.
+          dunder="$(python - <<'PY'
+          import pathlib, re
+          text = pathlib.Path("src/swarph_cli/__init__.py").read_text()
+          match = re.search(r'^__version__ = "([^"]+)"', text, re.M)
+          print(match.group(1) if match else "MISSING")
+          PY
+          )"
+          test "$dunder" = "$version" || {
+            echo "__version__ ($dunder) does not match pyproject version ($version)"
+            exit 1
+          }
 
       - name: Build and validate distribution
         run: |
