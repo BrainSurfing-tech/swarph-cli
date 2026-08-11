@@ -359,6 +359,17 @@ def _save_settings(path, obj) -> None:
         raise
 
 
+def _command_variants_for(command: str) -> frozenset:
+    """The canonical command plus the legacy form of THE SAME path.
+
+    Derived from the command string itself so the merge/unmerge helpers stay
+    pure functions of their argument — they never learn about bundles or
+    hooks_home. On POSIX the two coincide and this is a one-element set, so
+    nothing changes on the platform carrying today's traffic.
+    """
+    return frozenset({command, command.replace("/", "\\"), command.replace("\\", "/")})
+
+
 def _merge_hook(settings: dict, event: str, matcher: str, command: str) -> dict:
     """Merge one ``{event, matcher, command}`` hook into ``settings``.
 
@@ -375,9 +386,12 @@ def _merge_hook(settings: dict, event: str, matcher: str, command: str) -> dict:
     for entry in event_list:
         if entry.get("matcher", "") == matcher:
             actions = entry.setdefault("hooks", [])
-            # Dedup on command — idempotent re-install.
-            if not any(a.get("command") == command for a in actions):
-                actions.append(action)
+            # Dedup on command — idempotent re-install. #216: also drop any
+            # LEGACY-form entry for the same script, so re-installing MIGRATES
+            # it instead of leaving two bindings that both fire.
+            _known = _command_variants_for(command)
+            actions[:] = [a for a in actions if a.get("command") not in _known]
+            actions.append(action)
             return settings
 
     # No entry for this matcher yet — append a fresh one.
@@ -404,8 +418,14 @@ def _unmerge_hook(settings: dict, event: str, matcher: str, command: str) -> dic
     for entry in event_list:
         if entry.get("matcher", "") == matcher:
             actions = entry.get("hooks", [])
+            # #216 review (Copilot): remove EVERY variant this bundle may be
+            # installed under, not just the canonical one. A Windows cell that
+            # ran `hooks add` before the forward-slash fix has a BACKSLASH entry
+            # here; matching only the canonical form would leave it orphaned
+            # forever while reporting success.
+            _drop = _command_variants_for(command)
             entry["hooks"] = [
-                a for a in actions if a.get("command") != command
+                a for a in actions if a.get("command") not in _drop
             ]
             if not entry["hooks"]:
                 event_list.remove(entry)
@@ -521,7 +541,7 @@ def install_hook(
     """
     hooks_home_p = Path(hooks_home).expanduser()
     script_dst = (hooks_home_p / bundle.script_name).resolve()
-    command = str(script_dst)
+    command = _hook_command_path(script_dst)
 
     # ---- show-before-write preview ----
     out(f"hook: {bundle.name}  (trust={bundle.trust}, publisher={bundle.publisher})")
@@ -628,13 +648,61 @@ def init_hooks(
 # --------------------------------------------------------------------------- #
 
 
+def _hook_command_path(path) -> str:
+    """The installed script path AS A HOOK COMMAND STRING — bash-safe on win32.
+
+    >>> CLAUDE CODE RUNS HOOK COMMANDS THROUGH BASH, WHERE BACKSLASH IS AN
+    ESCAPE CHARACTER. <<< ``str(WindowsPath)`` yields ``C:\\Users\\x\\.swarph\\hooks\\
+    cell-resilience.sh``; bash consumes each backslash and the path COLLAPSES to
+    ``C:Usersx.swarphhookscell-resilience.sh``, which cannot exist. Every hook a
+    Windows cell installs fails this way, silently, at every fire.
+
+    REPORTED AND VERIFIED ON METAL by razorpeter (win32 reference box,
+    2026-08-11, swarph-cli 0.42.5): both the activity-marker and cell-resilience
+    hooks failed with `No such file or directory`; rewriting the same paths with
+    forward slashes made both exit 0 and cell-resilience write idle_since.json.
+    bash on Windows resolves forward-slash absolute paths fine, drive letter
+    included.
+
+    ONE HELPER, TWO CALLERS, AND THAT IS THE POINT: install writes this string
+    and uninstall/list MATCH ON IT. If the two constructions ever diverge,
+    uninstall stops finding what install wrote and silently removes nothing —
+    so the fix cannot be applied at one site only. The invariant is asserted in
+    tests, not just stated here.
+    """
+    return str(path).replace("\\", "/") if sys.platform == "win32" else str(path)
+
+
+def _installed_command_variants(bundle: HookBundle, hooks_home) -> tuple:
+    """Every command string this bundle may ALREADY be installed under.
+
+    >>> THE MIGRATION HOLE THE FORWARD-SLASH FIX OPENED. <<< Every Windows cell
+    that ran ``hooks add`` before this change has BACKSLASH commands sitting in
+    its settings.json. Match only the new canonical form and uninstall/list
+    silently miss them: the entry is ORPHANED FOREVER while the command reports
+    success — a dead hook binding nobody can remove and nothing reports.
+
+    That is strictly worse than the bug being fixed, which at least fails loudly
+    at hook-fire time. Found in review by Copilot on PR #216; I had made install
+    and uninstall agree GOING FORWARD and never asked what was already on disk.
+
+    Canonical form FIRST (it is what install now writes); the legacy form is
+    appended only when it actually differs, so POSIX — where the two are
+    identical — gets exactly one candidate and no behaviour change at all.
+    """
+    resolved = (Path(hooks_home).expanduser() / bundle.script_name).resolve()
+    canonical = _hook_command_path(resolved)
+    legacy = str(resolved)
+    return (canonical,) if canonical == legacy else (canonical, legacy)
+
+
 def _installed_command(bundle: HookBundle, hooks_home) -> str:
     """The absolute installed-script path written into settings for ``bundle``.
 
     SAME construction ``install_hook`` uses, so unmerge/list match what install
     merged: ``(hooks_home/script_name).expanduser().resolve()`` as a string.
     """
-    return str((Path(hooks_home).expanduser() / bundle.script_name).resolve())
+    return _hook_command_path((Path(hooks_home).expanduser() / bundle.script_name).resolve())
 
 
 def uninstall_hook(
@@ -684,8 +752,18 @@ def _is_installed(settings: dict, command: str, bundle: HookBundle) -> bool:
         found = False
         for entry in event_list:
             if entry.get("matcher", "") == b.matcher:
+                # #216 review (Copilot, 2nd pass): THE THIRD SITE. Exact
+                # matching here makes a LEGACY backslash binding read as NOT
+                # INSTALLED, so a Windows cell's real, working hooks list as
+                # "unavailable" — the operator is told nothing is installed
+                # while the bindings sit right there in settings.json.
+                # The previous commit said "one helper, BOTH callers". There
+                # were THREE. A rule applied at N-1 sites is the defect this
+                # class keeps producing, and it produced it again inside the
+                # fix for it.
+                _known = _command_variants_for(command)
                 if any(
-                    a.get("command") == command for a in entry.get("hooks", [])
+                    a.get("command") in _known for a in entry.get("hooks", [])
                 ):
                     found = True
                 break

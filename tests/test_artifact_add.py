@@ -42,7 +42,12 @@ def test_builtin_hook_installs(tmp_path):
     if sys.platform != "win32":  # POSIX file-mode bits not representable on Windows
         assert os.stat(script).st_mode & 0o111
 
-    expected_command = str(script.resolve())
+    # #216: install now writes a BASH-SAFE command (forward slashes on win32,
+    # because Claude Code runs hooks through bash and backslash is an escape
+    # char). `Path.as_posix()` is pathlib's OWN normalisation, used here as an
+    # INDEPENDENT ORACLE — asserting against `hooks._hook_command_path` would
+    # compare the implementation with itself and pass however wrong it was.
+    expected_command = script.resolve().as_posix()
     settings = _load_settings(settings_path)
     hooks = settings["hooks"]
 
