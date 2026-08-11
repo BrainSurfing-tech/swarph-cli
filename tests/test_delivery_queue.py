@@ -1,4 +1,6 @@
-from swarph_cli.delivery_queue import DeliveryQueue, wake_for
+import pytest
+
+from swarph_cli.delivery_queue import DeliveryQueue, DeliveryQueueError, wake_for
 
 
 def _dm(i, kind="fyi", thread_id=None):
@@ -42,14 +44,87 @@ def test_persist_across_reload(tmp_path):
     assert q2.deferred_ticks == 1
 
 
-def test_remove_and_reset(tmp_path):
+def test_id_only_remove_is_forbidden_and_reset_is_available(tmp_path):
     q = DeliveryQueue(tmp_path / "q.json")
     q.enqueue(_dm(1)); q.enqueue(_dm(2))
     q.bump_deferred(); q.bump_deferred()
-    q.remove({1})
+    with pytest.raises(DeliveryQueueError, match="ID-only"):
+        q.remove({1})
     q.reset_deferred()
-    assert [e["id"] for e in q.pending()] == [2]
+    assert [e["id"] for e in q.pending()] == [1, 2]
     assert q.deferred_ticks == 0
+
+
+def test_unreceipted_job_remains_owed_and_unread(tmp_path):
+    q = DeliveryQueue(tmp_path / "q.json")
+    q.enqueue(_dm(17, "question"))
+    q.record_eligibility(17, "eligible", "question is assigned to the service")
+    job = q.claim_for_service(17, "gpt-lc", max_active=1)
+
+    assert job["source_dm_id"] == 17
+    assert q.pending()[0]["source_read_state"] == "unread"
+    assert q.status(now=q.pending()[0]["queued_at"] + 5)["owed"] == 1
+    assert q.accepted_receipts() == []
+
+
+def test_receipt_must_bind_job_dm_peer_token_digest_and_provenance(tmp_path):
+    q = DeliveryQueue(tmp_path / "q.json")
+    q.enqueue(_dm(17, "question"))
+    q.record_eligibility(17, "eligible", "question is assigned to the service")
+    job = q.claim_for_service(17, "gpt-lc", max_active=1)
+    receipt = job | {"output_digest": "a" * 64}
+
+    with pytest.raises(DeliveryQueueError, match="does not match"):
+        q.remove_on_receipt(receipt | {"fencing_token": 2})
+    assert q.status()["owed"] == 1
+
+    q.remove_on_receipt(receipt)
+    assert q.status()["owed"] == 0
+    assert q.accepted_receipts() == [receipt]
+
+
+def test_cannot_evaluate_and_capacity_refusal_are_loud_and_persisted(tmp_path):
+    q = DeliveryQueue(tmp_path / "q.json")
+    q.enqueue(_dm(1, "question"))
+    q.enqueue(_dm(2, "question"))
+    q.record_eligibility(1, "eligible", "service policy permits it")
+    q.record_eligibility(2, "eligible", "service policy permits it")
+    q.claim_for_service(1, "gpt-lc", max_active=1)
+    assert q.claim_for_service(2, "gpt-lc", max_active=1) is None
+
+    status = q.status()
+    assert status["eligibility"]["cannot_evaluate"] == 0
+    assert status["service_state"]["claimed"] == 1
+    assert status["service_state"]["capacity_refused"] == 1
+    assert "capacity exhausted" in q.pending()[1]["capacity_refusal"]
+
+
+def test_cannot_evaluate_is_surfaceable_with_oldest_age(tmp_path):
+    q = DeliveryQueue(tmp_path / "q.json")
+    q.enqueue(_dm(1, "question"))
+    queued_at = q.pending()[0]["queued_at"]
+    status = q.status(now=queued_at + 12.5)
+    assert status["eligibility"]["cannot_evaluate"] == 1
+    assert status["oldest_age_seconds"] == 12.5
+
+
+def test_legacy_queue_entries_migrate_to_unread_cannot_evaluate(tmp_path):
+    path = tmp_path / "q.json"
+    path.write_text('{"pending": [{"id": 1}], "deferred_ticks": 0}')
+    q = DeliveryQueue(path)
+    entry = q.pending()[0]
+    assert entry["eligibility"] == "cannot_evaluate"
+    assert entry["service_state"] == "unassigned"
+    assert entry["source_read_state"] == "unread"
+
+
+def test_returned_job_cannot_mutate_the_authoritative_provenance(tmp_path):
+    q = DeliveryQueue(tmp_path / "q.json")
+    q.enqueue(_dm(1, "question"))
+    q.record_eligibility(1, "eligible", "service policy permits it")
+    job = q.claim_for_service(1, "gpt-lc", max_active=1)
+    job["reply_provenance"]["actor_id"] = "forged"
+    assert q.pending()[0]["job"]["reply_provenance"]["actor_id"] == "gpt-lc/service"
 
 
 def test_corrupt_file_is_empty_failsafe(tmp_path):
