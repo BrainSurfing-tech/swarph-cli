@@ -22,7 +22,12 @@ from pathlib import Path
 from typing import Optional
 
 from swarph_cli.bench import prices as prices_mod
-from swarph_cli.bench.backends import Backend, MeteredGeminiBackend, SubscriptionBackend
+from swarph_cli.bench.backends import (
+    Backend,
+    MeteredGeminiBackend,
+    MeteredMistralBackend,
+    SubscriptionBackend,
+)
 from swarph_cli.bench.pack import PackError, load_pack, slugify_theme, validate_schema
 from swarph_cli.bench.runner import ModelSpec, parse_models, preflight, run_pack
 from swarph_cli.bench.validate import validate_pack
@@ -32,7 +37,23 @@ from swarph_cli.commands._display import sanitize_terminal as _s
 # ── backend wiring (the real, network-capable seam; tests monkeypatch this) ──
 
 def _default_backends() -> dict[str, Backend]:
-    return {"metered": MeteredGeminiBackend(), "subscription": SubscriptionBackend()}
+    """The selectable lanes. >>> A BACKEND ABSENT FROM THIS DICT CANNOT BE
+    CHOSEN, however complete its implementation. <<<
+
+    MeteredMistralBackend shipped in #323 and was NOT here: a producer with zero
+    consumers, which reads as "the lane exists" on every summary and cannot be
+    run by anyone. `swarph bench` could PRICE mistral and could not CALL it —
+    the number was available, the measurement was not — and adding the adapter
+    without this line reproduced exactly that gap one layer over.
+
+    `metered` stays bound to Gemini so existing `id:metered` specs keep their
+    meaning; mistral is its own key rather than a redefinition.
+    """
+    return {
+        "metered": MeteredGeminiBackend(),
+        "mistral": MeteredMistralBackend(),
+        "subscription": SubscriptionBackend(),
+    }
 
 
 # ── formatters ─────────────────────────────────────────────────────────────
