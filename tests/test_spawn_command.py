@@ -20,6 +20,18 @@ from swarph_cli.commands.spawn import (
 from swarph_cli.cell import load_cell
 
 
+def _identity_cell(name: str = "cell-under-test"):
+    """#360: the env builders now REQUIRE the cell, because the launcher is the
+    only layer that knows which cell it is creating. These tests assert the
+    BILLING SCRUB, which is unchanged; the cell is threaded through so the
+    scrub assertions keep running."""
+    import types as _types
+    from pathlib import Path as _Path
+    return _types.SimpleNamespace(name=name, cwd=_Path("/tmp/cell-under-test"))
+
+
+
+
 @pytest.fixture
 def isolated_xdg(tmp_path, monkeypatch) -> Iterator[Path]:
     config_root = tmp_path / "config"
@@ -215,7 +227,7 @@ def test_scrubbed_codex_env_drops_openai_billing_keys(monkeypatch):
         monkeypatch.setenv(key, f"leak-{key}")
     monkeypatch.setenv("KEEP_ME", "ok")
 
-    env = _scrubbed_codex_env()
+    env = _scrubbed_codex_env(_identity_cell())
     assert "KEEP_ME" in env
     assert env["SWARPH_SPAWN"] == "1"
     for key in (
@@ -937,7 +949,7 @@ def test_agy_env_scrub(monkeypatch):
     monkeypatch.setenv("GEMINI_BASE_URL", "https://metered.example")
     monkeypatch.setenv("KEEP_ME", "ok")
 
-    env = _agy_env()
+    env = _agy_env(_identity_cell())
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
     assert "GOOGLE_CLOUD_PROJECT" not in env
     assert "VERTEX_PROJECT" not in env
@@ -962,7 +974,7 @@ def test_claude_env_scrubs_billing_redirect(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.setenv("KEEP_ME", "ok")
 
-    env = _claude_env()
+    env = _claude_env(_identity_cell())
     assert "ANTHROPIC_API_KEY" not in env
     assert "ANTHROPIC_AUTH_TOKEN" not in env
     assert "ANTHROPIC_BASE_URL" not in env
@@ -1385,7 +1397,7 @@ def test_claude_env_disables_feedback_survey(monkeypatch):
     disable it at the source via env."""
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     from swarph_cli.commands.spawn import _claude_env
-    env = _claude_env()
+    env = _claude_env(_identity_cell())
     assert env.get("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY") == "1"
 
 

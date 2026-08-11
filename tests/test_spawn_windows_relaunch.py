@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import os
+
 import pytest
 
 from swarph_cli.commands import spawn
@@ -65,7 +67,9 @@ def _call(monkeypatch, *, platform="win32", genuine_wt=False, wt_session=None,
                         lambda name: wt_path if name == "wt" else None)
     pop = popen or MagicMock()
     monkeypatch.setattr(spawn.subprocess, "Popen", pop)
-    result = spawn._relaunch_in_windows_terminal(CLAUDE_BIN, CLAUDE_ARGV, CWD)
+    result = spawn._relaunch_in_windows_terminal(
+        CLAUDE_BIN, CLAUDE_ARGV, CWD, lambda: {'SWARPH_SPAWN': '1', 'SWARPH_SELF': 'cell-under-test'}
+    )
     return result, pop
 
 
@@ -80,6 +84,12 @@ def test_non_windows_never_relaunches(monkeypatch):
 
 def test_conhost_with_wt_relaunches_in_windows_terminal(monkeypatch):
     # #1 the rescue: NOT a genuine WT (conhost) + wt.exe present => relaunch.
+    # THE PRECONDITION THAT MAKES THE SCRUB ASSERTION MEANINGFUL: plant a
+    # billing-redirect key in the operator env. Without this the "not in env"
+    # check below is vacuous — a negative test whose subject cannot exhibit the
+    # positive proves nothing.
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://metered.invalid/v1")
+    assert os.environ["ANTHROPIC_BASE_URL"] == "https://metered.invalid/v1"
     r, pop = _call(monkeypatch, genuine_wt=False)
     assert r is True
     pop.assert_called_once()
@@ -88,7 +98,27 @@ def test_conhost_with_wt_relaunches_in_windows_terminal(monkeypatch):
     assert cmd[:5] == [WT, "-d", str(CWD), "--", CLAUDE_BIN]
     assert cmd[5:] == CLAUDE_ARGV[1:]   # claude_argv[1:] passed through (not argv0)
     # carries SWARPH_SPAWN=1 so the SessionStart hook doesn't double-inject
-    assert pop.call_args.kwargs["env"]["SWARPH_SPAWN"] == "1"
+    env = pop.call_args.kwargs["env"]
+    assert env["SWARPH_SPAWN"] == "1"
+    # >>> THE ASSERTION ABOVE IS A PROXY AND WAS THE ONLY ONE HERE. <<< The old
+    # implementation built {**os.environ, "SWARPH_SPAWN": "1"} and launched the
+    # provider DIRECTLY, so SWARPH_SPAWN=="1" reads TRUE whether or not the
+    # membrane's scrubbed+stamped env is used. Mutation-checked: reverting this
+    # path to raw os.environ left all 26 tests in this file GREEN. Same value
+    # under both hypotheses = measuring nothing.
+    #
+    # These two discriminate, and they are the properties that actually matter:
+    #   * the env is THE MEMBRANE'S, carrying this cell's identity (#360)
+    #   * the BILLING SCRUB reached this path. The fallback used to inherit
+    #     ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN straight from the operator
+    #     env, flipping the relaunched cell to a metered endpoint while still
+    #     reporting cost_usd 0.0 — the adversarial-sweep CRIT, alive on the one
+    #     path nobody threaded the scrub into. Reachable on Windows whenever
+    #     tmux/psmux is absent.
+    assert env["SWARPH_SELF"] == "cell-under-test"
+    assert "ANTHROPIC_BASE_URL" not in env, (
+        "the billing-redirect scrub did not reach the Windows Terminal fallback"
+    )
 
 
 def test_genuine_wt_no_force_skips_relaunch(monkeypatch):

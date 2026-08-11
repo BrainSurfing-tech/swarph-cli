@@ -17,7 +17,9 @@ ARGV = ["claude", "--name", "lab"]
 
 
 def _cell():
-    return types.SimpleNamespace(cwd=Path("/home/ubuntu/lab"))
+    # #360: pre_launch now hands the membrane's SCRUBBED+STAMPED env to the
+    # Windows-Terminal relaunch, so the cell must carry its identity.
+    return types.SimpleNamespace(name="cell-under-test", cwd=Path("/home/ubuntu/lab"))
 
 
 def _call(membrane, monkeypatch, *, session_name, tmux_ok=True, wt_ok=False):
@@ -98,7 +100,14 @@ def test_every_membrane_reaches_wt_when_base_tmux_declines(monkeypatch):
             m, monkeypatch, session_name="lab", tmux_ok=False, wt_ok=True
         )
         assert rc == 0, f"{key}: WT rescue did not take over"
-        wt.assert_called_once_with(BIN, ARGV, Path("/home/ubuntu/lab"))
+        # #360: a 4th argument now carries the membrane's env AS A FACTORY (lazy,
+    # because grok/vibe builders create directories). Assert the first three
+    # positionally AND that the factory yields an env stamped with THIS cell —
+    # checking only arity would pass a factory returning an unstamped env.
+    args, _kw = wt.call_args
+    assert args[:3] == (BIN, ARGV, Path("/home/ubuntu/lab"))
+    assert callable(args[3]), "the env must arrive as a lazy factory"
+    assert args[3]()["SWARPH_SELF"] == "cell-under-test"
 
 
 def test_every_membrane_declines_when_neither_tmux_nor_wt(monkeypatch):
