@@ -15,7 +15,30 @@
 # NEVER FAILS THE CALLER. A hook that can block a session is worse than the
 # deafness it prevents — exit 0 unconditionally, report on stdout.
 set -u
-SELF="${SWARPH_SELF:-lab-ovh}"
+# >>> #360: NO PEER DEFAULT. An unset identity is UNKNOWN, not lab-ovh. <<<
+# `${SWARPH_SELF:-lab-ovh}` took the state UNKNOWN and rendered it as a
+# DETERMINATE, SPECIFIC, WRONG PEER — so a cell that never set the variable
+# started a monitor AS lab-ovh, draining lab's DMs and marking them read.
+# A wrong identity behaves identically to a right one until an audit, which is
+# why this survived: it fails in the reassuring direction. On a mesh that
+# hardens caller-binding with 403s, a default that makes you someone else is the
+# same hole with better manners. (Found on a peer box by gridiron, confirmed by
+# science-claude, msgs 22344/22346.)
+#
+# THE FIX HONOURS BOTH CONSTRAINTS, WHICH LOOK OPPOSED AND ARE NOT. This script
+# promises above that it NEVER FAILS THE CALLER — a hook that can block a
+# session is worse than the deafness it prevents — so `${SWARPH_SELF:?...}`,
+# the obvious fix, is WRONG HERE: it exits non-zero and hands a SessionStart
+# hook the power to wedge a session.
+# REFUSE THE ACTION, NOT THE CALLER. Say so loudly, do nothing, exit 0.
+SELF="${SWARPH_SELF:-}"
+if [ -z "$SELF" ]; then
+  echo "[monitor] SWARPH_SELF is unset — REFUSING to start a monitor under a" \
+       "guessed identity. Set it in the LAST process boundary before the agent" \
+       "(the per-cell launcher; a systemd Environment= is two boundaries too" \
+       "early for a tmux-hosted cell), or pass --as <peer> explicitly."
+  exit 0
+fi
 SW="$(command -v swarph || echo /home/ubuntu/.local/bin/swarph)"
 [ -x "$SW" ] || { echo "[monitor] swarph not found — skipping"; exit 0; }
 
