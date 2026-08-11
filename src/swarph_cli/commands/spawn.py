@@ -409,7 +409,39 @@ def _codex_sandbox(cell: Cell) -> str:
     return sandbox
 
 
-def _claude_env() -> dict[str, str]:
+def _spawn_env_base(cell: Cell) -> dict[str, str]:
+    """The scrub, the spawn marker, and >>> THE CELL'S OWN IDENTITY <<<.
+
+    #360. Identity used to fail TOWARD ``lab-ovh`` rather than closed, through
+    three independent defaults each masking the others. The root was one layer
+    above all three: THE LAUNCHER KNEW EXACTLY WHICH CELL IT WAS CREATING AND
+    NEVER SAID SO, so every cell had to INFER itself from a config file keyed on
+    cwd — and cwd is not a cell identifier. Two Claude-family cells on this box
+    (lab-ovh and meta-muse) run with cwd=$HOME, where the "project" settings file
+    IS the user settings file, so no per-project override can tell them apart.
+    A field at the point of creation is the only fix that reaches them.
+
+    >>> ``cell`` IS REQUIRED, AND THAT IS THE WHOLE MECHANISM. <<< A rule
+    repeated at N call sites is a rule applied at N-1; this was already true here
+    (four env builders, four hand-copied ``SWARPH_SPAWN`` lines, and only grok's
+    took the cell). A stamp that a future provider's env builder COULD forget is
+    a stamp that a future provider WILL forget. Taking the cell positionally
+    means the omission does not compile, rather than merely being wrong.
+
+    MEASURED, and it constrains deployment: Claude Code's ``settings.json`` env
+    OVERRIDES the inherited process env (probe, 2026-08-11 — parent said
+    FROM-PARENT-ENV, settings said FROM-SETTINGS, the hook observed
+    FROM-SETTINGS). So this stamp is INERT until ``env.SWARPH_SELF`` is removed
+    from ~/.claude/settings.json. The stamp and that removal are ATOMIC, not
+    sequential — shipping either alone changes nothing or fails cells closed.
+    """
+    env = scrub_env_for_subprocess()
+    env["SWARPH_SPAWN"] = "1"
+    env["SWARPH_SELF"] = cell.name
+    return env
+
+
+def _claude_env(cell: Cell) -> dict[str, str]:
     """Subscription-billing env for an interactive ``claude`` session.
 
     The canonical billing-redirect scrub plus the SWARPH_SPAWN marker. Without
@@ -418,8 +450,7 @@ def _claude_env() -> dict[str, str]:
     ``claude`` and silently flip it off subscription auth to a metered endpoint
     while still reporting ``cost_usd`` 0.0 — the adversarial-sweep CRIT.
     """
-    env = scrub_env_for_subprocess()
-    env["SWARPH_SPAWN"] = "1"
+    env = _spawn_env_base(cell)
     # Disable the Claude Code in-session rating survey ("How is Claude doing this
     # session?"). On a headless/automated cell it pops up as a modal that the
     # wake-injector refuses to type into, so it stalls scheduled wakes
@@ -430,7 +461,7 @@ def _claude_env() -> dict[str, str]:
     return env
 
 
-def _agy_env() -> dict[str, str]:
+def _agy_env(cell: Cell) -> dict[str, str]:
     """Subscription-billing env for an ``agy`` (antigravity/Gemini) session.
 
     Delegates to the shared scrub, which strips the full billing-redirect class
@@ -438,8 +469,7 @@ def _agy_env() -> dict[str, str]:
     CREDENTIALS / GOOGLE_CLOUD_PROJECT / VERTEX_*) — a superset of the four GCP
     keys this previously popped by hand.
     """
-    env = scrub_env_for_subprocess()
-    env["SWARPH_SPAWN"] = "1"
+    env = _spawn_env_base(cell)
     return env
 
 
@@ -538,16 +568,15 @@ def _build_codex_argv(cell: Cell, passthrough: list[str]) -> list[str]:
     return argv
 
 
-def _scrubbed_codex_env() -> dict[str, str]:
+def _scrubbed_codex_env(cell: Cell) -> dict[str, str]:
     """Subscription-billing env for a ``codex`` (GPT) session.
 
     The shared billing-redirect scrub plus the codex-specific org-scoping keys
     (see ``_CODEX_EXTRA_LEAK_KEYS``) that the shared denylist does not cover.
     """
-    env = scrub_env_for_subprocess()
+    env = _spawn_env_base(cell)
     for key in _CODEX_EXTRA_LEAK_KEYS:
         env.pop(key, None)
-    env["SWARPH_SPAWN"] = "1"
     return env
 
 
@@ -626,9 +655,8 @@ def _grok_env(cell: Cell) -> dict[str, str]:
     membrane does not do, so popping the shared token here would silently mute
     the cell on the mesh.)
     """
-    env = scrub_env_for_subprocess()
+    env = _spawn_env_base(cell)
     _scrub_grok_namespace(env)
-    env["SWARPH_SPAWN"] = "1"
 
     cell_home = cell.cwd / _GROK_CELL_HOME_SUBDIR
     grok_dir = cell_home / ".grok"
@@ -1466,7 +1494,7 @@ class ClaudeMembrane(ProviderMembrane):
         # _claude_env) tells a `swarph install-hook` SessionStart hook the prompt
         # was already injected via --append-system-prompt, so it skips double-
         # injection. The env carries to the child either way.
-        env = _claude_env()
+        env = _claude_env(cell)
         env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
 
         # Per-OS launch mechanism — the SAME split as the tmux attach, for the
@@ -1556,7 +1584,7 @@ class CodexMembrane(ProviderMembrane):
         except OSError as exc:
             print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
             return 1
-        env = _scrubbed_codex_env()
+        env = _scrubbed_codex_env(cell)
         env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
         # Windows os.execve spawns Codex and exits this process instead of replacing
         # it. Keep the psmux pane root alive until Codex exits, matching Claude.
@@ -1627,7 +1655,7 @@ class AntigravityMembrane(ProviderMembrane):
             return 1
         # execve carries exactly the scrubbed env to the child without mutating
         # this process's os.environ first (so a failed exec leaves us intact).
-        env = _agy_env()
+        env = _agy_env(cell)
         env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
         try:
             os.execve(binary, argv, env)
@@ -1768,9 +1796,8 @@ def _vibe_env(cell: Cell) -> dict[str, str]:
     other membranes: the cell inherits the gateway token so its mesh DMs work
     out of the box, and popping it here would silently MUTE the cell.
     """
-    env = scrub_env_for_subprocess()
+    env = _spawn_env_base(cell)
     _scrub_vibe_namespace(env)
-    env["SWARPH_SPAWN"] = "1"
     # >>> VIBE_HOME, **NOT** A FAKE $HOME — AND THIS IS WHAT CLOSES BLOCKER C
     # RATHER THAN DOCUMENTING IT. (drop-on-meta-edge seat-A; the mechanism was
     # already written in the cell genome at ~/.config/swarph/cells/mistral.yaml:
