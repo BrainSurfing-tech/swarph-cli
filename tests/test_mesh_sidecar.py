@@ -21,6 +21,25 @@ def _state(tmp_path: Path) -> mesh.MeshSidecarState:
     )
 
 
+def test_tmux_wake_sends_literal_prompt_then_submits(monkeypatch):
+    calls = []
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr(
+        mesh.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs)) or Result(),
+    )
+
+    assert mesh._tmux_wake("gpt-lc:0.0") is True
+    assert [command for command, _ in calls] == [
+        ["tmux", "send-keys", "-t", "gpt-lc:0.0", "-l", "check mesh"],
+        ["tmux", "send-keys", "-t", "gpt-lc:0.0", "Enter"],
+    ]
+
+
 def test_sidecar_wakes_on_new_mail_and_advances_cursor(tmp_path, monkeypatch):
     state = _state(tmp_path)
     captured = {}
