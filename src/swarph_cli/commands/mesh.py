@@ -851,9 +851,17 @@ def _log_dm(state: MonitorState, dm: dict) -> None:
 
 
 def _tmux_wake(target: str) -> bool:
+    """Inject the fixed wake prompt, then submit it as a separate key event."""
     try:
         subprocess.run(
-            ["tmux", "send-keys", "-t", target, "check mesh", "Enter"],
+            ["tmux", "send-keys", "-t", target, "-l", "check mesh"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        subprocess.run(
+            ["tmux", "send-keys", "-t", target, "Enter"],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
