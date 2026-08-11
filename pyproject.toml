@@ -60,6 +60,13 @@ mcp = ["mcp>=1.0"]
 # it; MeteredGeminiBackend prints a `pip install swarph-cli[bench]` hint via
 # its ImportError message when it's absent.
 bench = ["google-genai>=0.3"]
+# `swarph bench run --models <id>:mistral` calls Mistral AI's API directly. Same
+# reasoning as `bench` above: an extra, so every other verb stays installable
+# without it, and MeteredMistralBackend returns a `pip install swarph-cli[mistral]`
+# hint in BackendResult.error rather than raising. NOTE THE LANE IS METERED —
+# unlike the subscription lanes, every call is a real charge, which is why no
+# test in this repo may make one.
+mistral = ["mistralai>=1.0"]
 # `swarph gateway serve` runs the bundled mesh-gateway HTTP server. The
 # FastAPI/uvicorn stack is an extra so the core client paths stay
 # dependency-light; the verb prints a `pip install swarph-cli[gateway]`

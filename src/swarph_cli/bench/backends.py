@@ -179,7 +179,8 @@ class MeteredMistralBackend:
             return BackendResult(
                 text="", tokens_in=0, tokens_thought=0, tokens_out=0,
                 latency_s=0.0, estimated=False,
-                error=f"mistralai not installed: {exc} (pip install mistralai)",
+                error=f"mistralai not installed: {exc} "
+                      f"(pip install swarph-cli[mistral] or `pip install mistralai`)",
             )
         api_key = self._api_key or os.environ.get("MISTRAL_API_KEY")
         if not api_key:
