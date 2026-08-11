@@ -1,0 +1,13 @@
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 6eaad039603a4de39fddd1cf5f727391efe9974e # v8.30.0
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: sensitive-content
+        name: Reject sensitive organization and customer identifiers
+        entry: python3 scripts/check_sensitive_content.py
+        language: system
+        types: [text]

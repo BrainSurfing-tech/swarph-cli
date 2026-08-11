@@ -1,0 +1,41 @@
+name: Sensitive content
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan secrets and sensitive identifiers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      # gitleaks-action requires a PAID ORG LICENSE ("[BrainSurfing-tech] is an
+      # organization. License key is required."), which turned this required check
+      # permanently red the moment the repo moved into the org. The gitleaks TOOL is
+      # MIT and free; only the Action wrapper is licensed. Run the binary directly.
+      # --redact is not optional: a scanner that PRINTS the secret it found re-emits
+      # it into a public Actions log, which is a store.
+      - name: Scan for hardcoded secrets
+        env:
+          GITLEAKS_VERSION: 8.28.0
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks --version
+          /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml
+
+      - name: Scan for sensitive identifiers
+        run: python3 scripts/check_sensitive_content.py --all
