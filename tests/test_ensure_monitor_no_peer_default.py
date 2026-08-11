@@ -23,8 +23,30 @@ that exercises the real side-effecting path is a live action, not a test.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
+
+# >>> WINDOWS CI HAS NO USABLE `bash`. <<< On the GitHub windows-latest runner
+# `bash` resolves to the WSL STUB, which prints (in UTF-16)
+#   "Windows Subsystem for Linux has no installed distributions..."
+# and never runs the script. The tests below then compare that banner against
+# the refusal text and fail — measured on run 31492002559, both py3.11 and 3.12.
+#
+# SKIPPED, NOT DELETED, AND NOT SILENTLY: ensure_monitor.sh is a POSIX shell
+# hook. A Windows cell that has git-bash runs it fine; the RUNNER is what lacks
+# an interpreter. Skipping states "this environment cannot evaluate the claim",
+# which is the honest verdict — deleting the tests would remove the claim, and
+# asserting on the stub's banner would be a test of the stub.
+_BASH = shutil.which("bash")
+_NEEDS_POSIX_SHELL = pytest.mark.skipif(
+    sys.platform == "win32" or _BASH is None,
+    reason="no POSIX shell to run ensure_monitor.sh (windows-latest's `bash` is "
+           "the WSL stub); the script itself is unchanged and is exercised on POSIX",
+)
 
 SCRIPT = Path(__file__).resolve().parents[1] / "src" / "swarph_cli" / "scripts" / "ensure_monitor.sh"
 
@@ -58,12 +80,14 @@ def _run(tmp_path: Path, *, self_name: str | None):
     return proc, calls
 
 
+@_NEEDS_POSIX_SHELL
 def test_unset_identity_refuses_and_says_so(tmp_path):
     proc, _ = _run(tmp_path, self_name=None)
     assert "REFUSING" in proc.stdout
     assert "SWARPH_SELF" in proc.stdout
 
 
+@_NEEDS_POSIX_SHELL
 def test_unset_identity_STARTS_NOTHING(tmp_path):
     """>>> THE LOAD-BEARING ASSERTION. <<< Printing a warning and starting the
     monitor anyway would pass the test above while leaving the defect intact.
@@ -72,6 +96,7 @@ def test_unset_identity_STARTS_NOTHING(tmp_path):
     assert calls == "", f"swarph was invoked despite an unknown identity: {calls!r}"
 
 
+@_NEEDS_POSIX_SHELL
 def test_the_caller_is_never_failed(tmp_path):
     """The script's own contract, which the obvious fix would have broken.
 
@@ -82,6 +107,7 @@ def test_the_caller_is_never_failed(tmp_path):
     assert proc.returncode == 0, f"refusal must still exit 0, got {proc.returncode}"
 
 
+@_NEEDS_POSIX_SHELL
 def test_a_KNOWN_identity_still_starts_the_monitor(tmp_path):
     """>>> THE CONTROL. <<< Without it, a script that refused unconditionally —
     or one that had simply stopped working — passes every assertion above."""
