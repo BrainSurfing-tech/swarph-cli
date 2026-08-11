@@ -50,7 +50,9 @@ def test_muse_injects_restored_task_with_claude_system_prompt(
     )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(memory_sync, "perform_restore", lambda _cell: "Restored task")
-    monkeypatch.setattr(spawn.shutil, "which", lambda name: "claude" if name == "claude" else None)
+    # muse resolves ITS OWN binary now; this stub said "claude" only, which was
+    # the old label-membrane contract.
+    monkeypatch.setattr(spawn.shutil, "which", lambda name: name if name == "muse" else None)
     monkeypatch.setattr(spawn, "_launch_via_tmux", lambda *_args: False)
     monkeypatch.setattr(spawn, "_relaunch_in_windows_terminal", lambda *_args: False)
 
@@ -72,9 +74,12 @@ def test_muse_injects_restored_task_with_claude_system_prompt(
     )
 
     assert spawn.run_spawn([]) == 0
-    claude_argv = next(argv for argv in launched if argv[0] == "claude")
-    assert "--append-system-prompt" in claude_argv
-    assert any("Restored task" in arg for arg in claude_argv)
+    muse_argv = next(argv for argv in launched if argv[0] == "muse")
+    # muse has NO --append-system-prompt; it takes the prompt POSITIONALLY.
+    # The behaviour under test — the restored task REACHES the session — is
+    # unchanged; only the CLI grammar carrying it differs.
+    assert "--append-system-prompt" not in muse_argv
+    assert any("Restored task" in arg for arg in muse_argv), muse_argv
 
 
 def test_muse_release_requires_the_shared_compatibility_boundary():

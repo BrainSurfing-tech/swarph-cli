@@ -592,7 +592,7 @@ def _muse_has_session_for(cwd: Path) -> bool:
         return False
 
 
-def _build_muse_argv(cell: Cell, passthrough: list[str]) -> list[str]:
+def _build_muse_argv(cell: Cell, no_starter: bool, passthrough: list[str]) -> list[str]:
     """muse's argv. ITS GRAMMAR IS NOT CLAUDE'S, WHICH IS WHY THIS EXISTS.
 
     MuseMembrane previously subclassed ClaudeMembrane with only ``name = "muse"``
@@ -613,9 +613,25 @@ def _build_muse_argv(cell: Cell, passthrough: list[str]) -> list[str]:
     is visible in the spawn command rather than buried in a library default.
     """
     if _muse_has_session_for(cell.cwd):
-        argv = ["muse", "resume", "--last"]
-    else:
-        argv = ["muse"]
+        # >>> RESUME HAS NO PROMPT SLOT, AND THAT IS A REAL LIMITATION, NOT AN
+        # OVERSIGHT. <<< `muse resume` accepts only --last / <uuid>; there is
+        # nowhere to put the starter. claude appends it on BOTH branches via
+        # --append-system-prompt, so muse's assisted-memory starter reaches a
+        # FRESH session only. Recorded here rather than left to be discovered:
+        # a resumed muse cell keeps its own continuity but does NOT receive the
+        # restored-task text. `muse session-message` may be the eventual answer;
+        # it is a separate integration, not a silent workaround.
+        return ["muse", "resume", "--last", *passthrough]
+
+    argv = ["muse"]
+    if not no_starter:
+        starter = read_starter_prompt(cell)
+        if starter:
+            # muse takes the prompt POSITIONALLY (`muse [OPTIONS] [PROMPT]`).
+            # It has no --append-system-prompt; using claude's flag here would
+            # be rejected by the CLI, and using none would silently drop the
+            # assisted-memory restore that a muse cell already depends on.
+            argv.append(starter)
     argv.extend(passthrough)
     return argv
 
@@ -1475,6 +1491,27 @@ class ProviderMembrane:
     #: default may fail in here.
     env_builder = staticmethod(_spawn_env_base)
 
+    def apply_task_injection(self, cell: Cell, argv: list[str], text: str) -> None:
+        """Deliver the assisted-memory restored task to THIS provider.
+
+        Each CLI carries an out-of-band instruction differently, and the
+        differences are not cosmetic: claude concatenates repeated
+        ``--append-system-prompt``; grok's clap REJECTS a repeated flag;
+        antigravity uses ``--prompt-interactive``; codex has no flag at all and
+        takes it through AGENTS.md; muse has no such flag either and takes the
+        prompt POSITIONALLY.
+
+        >>> THIS WAS AN ``isinstance(membrane, ClaudeMembrane)`` / ``cell.provider
+        == ...`` CHAIN IN run_spawn. <<< MuseMembrane subclasses ClaudeMembrane
+        for its launch plumbing, so it matched the claude branch and was handed
+        ``--append-system-prompt`` — A FLAG muse WOULD REJECT. An isinstance test
+        answers "what is this built from", never "what does this accept", and
+        the two stopped agreeing the moment a membrane reused another's
+        plumbing. Base = deliver nothing, so a new provider is INERT rather than
+        mis-injected.
+        """
+        return None
+
     def spawn_env(self, cell: Cell) -> dict[str, str]:
         """The env this membrane hands to ANY path that starts the provider.
 
@@ -1563,6 +1600,9 @@ class ClaudeMembrane(ProviderMembrane):
 
 
     env_builder = staticmethod(_claude_env)
+    def apply_task_injection(self, cell: Cell, argv: list[str], text: str) -> None:
+        argv.extend(["--append-system-prompt", text])
+
     def uses_pinned_session(self) -> bool:
         return True
 
@@ -1669,6 +1709,18 @@ class CodexMembrane(ProviderMembrane):
 
 
     env_builder = staticmethod(_scrubbed_codex_env)
+    def apply_task_injection(self, cell: Cell, argv: list[str], text: str) -> None:
+        # codex has NO flag for this: the instruction goes through AGENTS.md.
+        # A file, not argv — which is why this seam takes `argv` and returns
+        # None rather than returning a list.
+        agents_md = cell.cwd / "AGENTS.md"
+        if agents_md.exists():
+            content = agents_md.read_text(encoding="utf-8")
+            if "CURRENT_TASK.md" not in content:
+                agents_md.write_text(text + "\n\n" + content, encoding="utf-8")
+        else:
+            agents_md.write_text(text, encoding="utf-8")
+
     def build_argv(
         self,
         cell: Cell,
@@ -1733,6 +1785,9 @@ class AntigravityMembrane(ProviderMembrane):
 
 
     env_builder = staticmethod(_agy_env)
+    def apply_task_injection(self, cell: Cell, argv: list[str], text: str) -> None:
+        argv.extend(["--prompt-interactive", text])
+
     def build_argv(
         self,
         cell: Cell,
@@ -2006,6 +2061,11 @@ class GrokMembrane(ProviderMembrane):
 
 
     env_builder = staticmethod(_grok_env)
+    def apply_task_injection(self, cell: Cell, argv: list[str], text: str) -> None:
+        # --rules, NOT a second --system-prompt-override: grok's clap REJECTS a
+        # repeated flag and _build_grok_argv may already have emitted one.
+        argv.extend(["--rules", text])
+
     def uses_pinned_session(self) -> bool:
         return False
 
@@ -2196,8 +2256,8 @@ class VibeMembrane(ProviderMembrane):
         return None
 
 
-class MuseMembrane(ProviderMembrane):
-    """Muse (Meta) lane — ITS OWN CLI, not Claude's.
+class MuseMembrane(ClaudeMembrane):
+    """Muse (Meta) lane — ITS OWN CLI, on Claude's plumbing.
 
     >>> THIS USED TO SUBCLASS ClaudeMembrane WITH ONLY ``name = "muse"``. <<<
     That made the membrane a LABEL: `swarph spawn` on a muse cell launched the
@@ -2207,12 +2267,28 @@ class MuseMembrane(ProviderMembrane):
 
     The two CLIs are not interchangeable. muse has NO ``--session-id``: it
     resumes via a ``resume`` SUBCOMMAND (``--last`` / ``<uuid>`` / an
-    interactive picker), so it belongs on codex's resume-by-discovery pattern
-    rather than claude's pin-a-UUID one. Subclassing ClaudeMembrane was wrong
-    about more than the binary path.
+    interactive picker), so its ARGV follows codex's resume-by-discovery pattern
+    rather than claude's pin-a-UUID one.
+
+    >>> IT STILL INHERITS ClaudeMembrane, AND THAT IS DELIBERATE — I GOT THIS
+    WRONG FIRST. <<< My first fix re-parented to ProviderMembrane, treating the
+    inheritance as the defect. It was the MECHANISM, not the defect: the defect
+    was "launches the claude binary". Re-parenting also discarded the launch()
+    chdir/exec-replace path and the assisted-memory restore, which are
+    provider-AGNOSTIC plumbing muse needs exactly as much as claude does — four
+    existing tests said so immediately. Only the three CLI-shaped methods are
+    overridden here.
     """
 
     name = "muse"
+
+    def apply_task_injection(self, cell: Cell, argv: list[str], text: str) -> None:
+        # muse has no --append-system-prompt; the prompt is POSITIONAL. Appended
+        # only when this is a FRESH session — `muse resume` takes no prompt, so
+        # on the resume path there is nowhere to put it (stated in
+        # _build_muse_argv, not silently dropped here).
+        if "resume" not in argv:
+            argv.append(text)
 
     def build_argv(
         self,
@@ -2226,7 +2302,7 @@ class MuseMembrane(ProviderMembrane):
         # session_id is accepted and IGNORED: muse cannot pin one at creation.
         # Silently ignoring a caller-supplied id would be worse than not taking
         # it, so the reason is stated here rather than implied by absence.
-        return _build_muse_argv(cell, passthrough)
+        return _build_muse_argv(cell, no_starter, passthrough)
 
     def resolve_binary(self) -> Optional[str]:
         return shutil.which("muse")
@@ -2450,26 +2526,10 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                 print(f"swarph spawn: restored current-task: {first_line}", file=sys.stderr)
                 
                 inject_text = f"Your active task is in CURRENT_TASK.md — read it first:\n\n{current_task_text}"
-                if isinstance(membrane, ClaudeMembrane):
-                    spawn_argv.extend(["--append-system-prompt", inject_text])
-                elif cell.provider == "grok":
-                    # --rules (extra rules appended to the system prompt), NOT a
-                    # second --system-prompt-override: grok's clap REJECTS a
-                    # repeated flag, and _build_grok_argv may already have emitted
-                    # --system-prompt-override for the starter → a second one
-                    # would refuse to launch. (claude concatenates repeated
-                    # --append-system-prompt; grok rejects-on-repeat — the delta.)
-                    spawn_argv.extend(["--rules", inject_text])
-                elif cell.provider == "antigravity":
-                    spawn_argv.extend(["--prompt-interactive", inject_text])
-                elif cell.provider == "codex":
-                    agents_md = cell.cwd / "AGENTS.md"
-                    if agents_md.exists():
-                        content = agents_md.read_text(encoding="utf-8")
-                        if "CURRENT_TASK.md" not in content:
-                            agents_md.write_text(inject_text + "\n\n" + content, encoding="utf-8")
-                    else:
-                        agents_md.write_text(inject_text, encoding="utf-8")
+                # #218: the membrane decides HOW its provider receives this.
+                # Was an isinstance/provider if-elif chain here — see
+                # ProviderMembrane.apply_task_injection for why that broke muse.
+                membrane.apply_task_injection(cell, spawn_argv, inject_text)
         except Exception as exc:
             print(f"swarph spawn: restore failed: {exc}", file=sys.stderr)
 

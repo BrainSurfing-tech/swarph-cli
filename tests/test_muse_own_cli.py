@@ -65,14 +65,23 @@ def test_the_membrane_targets_the_MUSE_binary_not_claude(monkeypatch):
     assert seen == ["muse"], f"looked for {seen}, not 'muse'"
 
 
-def test_it_is_no_longer_a_claude_subclass():
-    """The defect was inheritance, so the fix is asserted against inheritance.
+def test_it_overrides_the_CLI_methods_while_keeping_claude_plumbing():
+    """>>> I ASSERTED THE WRONG THING FIRST. <<<
 
-    A future refactor that re-parents this to ClaudeMembrane would silently
-    restore claude's binary and claude's --session-id assumption at once.
+    The original version asserted `not issubclass(MuseMembrane, ClaudeMembrane)`
+    — treating the INHERITANCE as the defect. It was the MECHANISM. The defect
+    was "launches the claude binary", and re-parenting also threw away launch()'s
+    chdir/exec-replace and the assisted-memory restore, which are
+    provider-AGNOSTIC. Four existing tests failed instantly and were right.
+
+    So the property is: the CLI-shaped methods are muse's OWN, and everything
+    else is still inherited.
     """
-    assert not issubclass(spawn.MuseMembrane, spawn.ClaudeMembrane)
-    assert issubclass(spawn.MuseMembrane, spawn.ProviderMembrane)
+    own = vars(spawn.MuseMembrane)
+    for method in ("build_argv", "resolve_binary", "binary_not_found_message"):
+        assert method in own, f"{method} must be muse's own, not claude's"
+    assert "launch" not in own, "launch() is provider-agnostic plumbing; do not fork it"
+    assert issubclass(spawn.MuseMembrane, spawn.ClaudeMembrane)
 
 
 def test_a_workspace_with_NO_prior_session_starts_fresh(tmp_path, monkeypatch):
@@ -152,3 +161,58 @@ def test_the_stamp_still_applies_to_muse(tmp_path):
     env = spawn.MEMBRANES["muse"].spawn_env(_cell(tmp_path, "meta-muse"))
     assert env["SWARPH_SELF"] == "meta-muse"
     assert env["SWARPH_SPAWN"] == "1"
+
+
+# --- THE INJECTION SEAM, hoisted out of run_spawn's if/elif chain -----------
+def test_muse_does_NOT_get_claudes_append_system_prompt(tmp_path):
+    """>>> THE BUG THIS PR ALMOST SHIPPED. <<<
+
+    MuseMembrane subclasses ClaudeMembrane for its launch plumbing, and
+    run_spawn decided the assisted-memory injection with
+    `isinstance(membrane, ClaudeMembrane)`. So muse matched claude's branch and
+    was handed `--append-system-prompt` — A FLAG muse WOULD REJECT.
+
+    An isinstance test answers "what is this built from", never "what does this
+    accept". The two stopped agreeing the moment a membrane reused another's
+    plumbing.
+    """
+    argv = ["muse"]
+    spawn.MEMBRANES["muse"].apply_task_injection(_cell(tmp_path), argv, "TASK")
+    assert "--append-system-prompt" not in argv
+    assert argv == ["muse", "TASK"], f"expected a POSITIONAL prompt, got {argv}"
+
+
+def test_claude_still_gets_its_flag(tmp_path):
+    """>>> THE CONTROL. <<< Hoisting the chain must not quietly disable the
+    injection for the provider it already worked for."""
+    argv = ["claude"]
+    spawn.MEMBRANES["claude"].apply_task_injection(_cell(tmp_path), argv, "TASK")
+    assert argv == ["claude", "--append-system-prompt", "TASK"]
+
+
+def test_muse_RESUME_gets_no_positional_prompt(tmp_path):
+    """`muse resume` takes no prompt. Appending one would be a CLI error, so the
+    restored task cannot reach a resumed session — stated as a limitation rather
+    than silently producing an argv the binary rejects."""
+    argv = ["muse", "resume", "--last"]
+    spawn.MEMBRANES["muse"].apply_task_injection(_cell(tmp_path), argv, "TASK")
+    assert argv == ["muse", "resume", "--last"]
+
+
+def test_every_membrane_declares_how_it_receives_an_injection():
+    """The surface property. A provider added later inherits the BASE — which
+    delivers NOTHING — so it is inert rather than mis-injected with a flag
+    borrowed from whichever membrane it happened to subclass.
+    """
+    base = spawn.ProviderMembrane.apply_task_injection
+    inherits_base = [
+        name for name, m in spawn.MEMBRANES.items()
+        if type(m).apply_task_injection is base
+    ]
+    assert spawn.MEMBRANES, "empty registry — the enumeration is broken"
+    # vibe legitimately has none yet; assert the KNOWN lanes declare one.
+    for lane in ("claude", "codex", "antigravity", "grok", "muse"):
+        assert lane not in inherits_base, (
+            f"{lane} silently inherits the no-op injection — its restored task "
+            f"would never arrive"
+        )
