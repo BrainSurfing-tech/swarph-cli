@@ -419,13 +419,34 @@ def _save_dm_wake_state(path: Path, state: dict) -> None:
 def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Optional[int]:
     """Query gateway for unread DM count addressed to peer.
 
-    Returns int count on success; None on any failure (treat as "don't
-    know — assume unread" so watchdog still tries to wake).
+    Returns int count on success; None on any failure — an unreachable gateway,
+    a missing/rejected token (no Authorization header is sent when token is
+    falsy, so the gateway 401s and that is caught here too), a malformed
+    response.
+
+    THIS DOES NOT MEAN "ASSUME UNREAD." The caller's decision matrix treats
+    None as F2 FAIL-CLOSED: cursor_stale + process_alive + unread=None -> noop,
+    can't verify work, don't poke. A prior version of this docstring claimed
+    the opposite ("assume unread, still tries to wake") and was wrong about
+    the code it was documenting — found 2026-08-12 when the contradiction
+    caused a real reader to conclude a gateway/token outage makes A1 MORE
+    eager, when it makes A1 permanently inert for that cell instead.
     """
     url = f"{gateway.rstrip('/')}/messages?to_node={peer}&unread_only=true&limit=1"
     req = urllib.request.Request(url)
     if token:
         req.add_header("Authorization", f"Bearer {token}")
+    else:
+        # A missing token and a network outage both surface as None to the
+        # caller (correctly — the decision matrix treats them the same way),
+        # but they are different FACTS an operator would want to know apart.
+        # No token means A1 is permanently inert for this cell until one is
+        # configured, not just this tick. Recurrence of the 2026-05-27
+        # "watchdog inert for 12 days, no token in service env" incident —
+        # loud here so it cannot silently repeat a third time.
+        print(f"swarph watchdog: no MESH_GATEWAY_TOKEN for peer={peer} — "
+              f"unread-count check will 401 and A1 stays inert until one is set",
+              file=sys.stderr)
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))

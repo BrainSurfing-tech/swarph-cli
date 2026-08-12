@@ -1055,6 +1055,43 @@ def test_cell_default_prefers_swarph_self_over_swarph_cell(monkeypatch):
     assert ns.cell == "workstation-lc"
 
 
+def test_gateway_unread_count_warns_loudly_when_token_missing(monkeypatch, capsys):
+    """Recurrence of the 2026-05-27 incident (watchdog inert 12 days, no
+    MESH_GATEWAY_TOKEN in its service env): a missing token and a network
+    outage both return None to the caller (correct — the decision matrix
+    treats them identically), but an operator needs to be able to tell them
+    apart. No token means A1 is permanently inert until one is configured,
+    not a transient blip."""
+    from swarph_cli.commands import watchdog
+
+    class _FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"messages": []}'
+
+    monkeypatch.setattr(watchdog.urllib.request, "urlopen", lambda req, timeout=5: _FakeResp())
+    watchdog._gateway_unread_count("http://gw:8788", "lab-ovh", None)
+    err = capsys.readouterr().err
+    assert "no MESH_GATEWAY_TOKEN" in err
+    assert "lab-ovh" in err
+
+
+def test_gateway_unread_count_silent_when_token_present(monkeypatch, capsys):
+    """The loud warning is specific to the missing-token case — a real token
+    present (even if the call later fails for some other reason) must not
+    trigger the same message, or it stops meaning anything."""
+    from swarph_cli.commands import watchdog
+
+    class _FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"messages": []}'
+
+    monkeypatch.setattr(watchdog.urllib.request, "urlopen", lambda req, timeout=5: _FakeResp())
+    watchdog._gateway_unread_count("http://gw:8788", "lab-ovh", "real-token")
+    assert "no MESH_GATEWAY_TOKEN" not in capsys.readouterr().err
+
+
 def test_gateway_default_reads_mesh_gateway_url(monkeypatch):
     """--gateway's default silently ignored MESH_GATEWAY_URL — every other gateway-reading
     default in this file (and every other command module) checks the env var first;
