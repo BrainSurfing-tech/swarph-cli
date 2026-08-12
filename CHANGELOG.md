@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.42.8 — 2026-08-12
+
+- **tmux wakes now submit on Codex.** `_tmux_wake` sends the payload literally (`-l`, since 0.42.7)
+  and then submits with **two** `Enter` key events. Codex's multiline composer requires the second
+  to submit; in single-submit composers the first already sent and the second reaches an empty
+  composer. Confirmed on Windows: codex CLI submit works. Without this, a literal-but-unsubmitted
+  wake sat in the pane looking delivered. (#223)
+
+  A wake failure now also says the pane **may hold an unsubmitted wake**, so a partial failure is
+  diagnosable rather than silent.
+
+  KNOWN AND UNTESTED, recorded rather than implied away: the "second Enter is a no-op" rationale
+  holds when a composer has focus. On a numbered menu — the Claude Code rating modal is
+  `1: Bad 2: Fine 3: Good 0: Dismiss` — Enter is a SELECTION. `_tmux_wake` does not probe pane
+  state, unlike lab-orchestrator's `wake_cell`, which refuses to inject into a menu for exactly
+  that reason. Board card #421 carries the two measurements that would close it.
+
 ## 0.42.7 — 2026-08-11
 
 Windows cells were running 0.42.6 and hitting defects already fixed in source. A fix that
