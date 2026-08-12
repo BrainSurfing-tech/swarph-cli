@@ -34,10 +34,15 @@ SAMPLE = "┐ début — coût 12€ ✓ fin"
 _SUBPROCESS_FUNCS = {"run", "Popen", "check_output", "call", "check_call"}
 _DECODE_KWARGS = {"text", "universal_newlines"}
 
-# Call sites intentionally exempt from the encoding= requirement. Empty by
-# design: if a site genuinely needs the platform default, add it here WITH a
-# reason, so the exemption is a decision on the record rather than an omission.
-_EXEMPT: set[tuple[str, int]] = set()
+# Required literal values. Presence of the keyword is NOT sufficient:
+# encoding="cp1252" or a dropped errors= would restore the Windows failure path
+# while still "declaring an encoding", so the guard asserts the VALUES.
+_REQUIRED = {"encoding": "utf-8", "errors": "replace"}
+
+# Call sites intentionally exempt, mapped to the REASON. Empty by design: an
+# exemption must be a decision on the record, not an omission, so adding one
+# costs a sentence explaining why that site may differ.
+_EXEMPT: dict[tuple[str, int], str] = {}
 
 
 def test_sample_actually_exercises_the_failure_mode() -> None:
@@ -93,10 +98,15 @@ def test_malformed_bytes_degrade_instead_of_raising() -> None:
     assert proc.stdout.endswith("tail")
 
 
-def _decoding_call_sites() -> list[tuple[str, int, bool]]:
-    """Every subprocess call that decodes, as (relpath, lineno, declares_encoding)."""
+def _decoding_call_sites() -> list[tuple[str, int, dict[str, object]]]:
+    """Every subprocess call that decodes, as (relpath, lineno, literal kwargs).
+
+    Values are captured, not merely presence. A non-literal (``encoding=SOME_VAR``)
+    is recorded as ``None`` so it cannot masquerade as a correct literal -- it is
+    unverifiable statically and must be exempted with a reason if intended.
+    """
     root = Path(swarph_cli.__file__).parent
-    found: list[tuple[str, int, bool]] = []
+    found: list[tuple[str, int, dict[str, object]]] = []
     for path in sorted(root.rglob("*.py")):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -113,11 +123,17 @@ def _decoding_call_sites() -> list[tuple[str, int, bool]]:
             )
             if name not in _SUBPROCESS_FUNCS:
                 continue
-            kwargs = {kw.arg for kw in node.keywords if kw.arg}
-            if not (kwargs & _DECODE_KWARGS):
+            names = {kw.arg for kw in node.keywords if kw.arg}
+            if not (names & _DECODE_KWARGS):
                 continue
+            literals: dict[str, object] = {}
+            for kw in node.keywords:
+                if kw.arg in _REQUIRED:
+                    literals[kw.arg] = (
+                        kw.value.value if isinstance(kw.value, ast.Constant) else None
+                    )
             rel = path.relative_to(root).as_posix()
-            found.append((rel, node.lineno, "encoding" in kwargs))
+            found.append((rel, node.lineno, literals))
     return found
 
 
@@ -130,15 +146,27 @@ def test_ast_guard_finds_call_sites_at_all() -> None:
     assert len(_decoding_call_sites()) >= 20
 
 
-def test_every_decoding_subprocess_call_declares_encoding() -> None:
-    """No text-capturing subprocess call may rely on the platform's ANSI page."""
-    offenders = [
-        f"{rel}:{lineno}"
-        for rel, lineno, declares in _decoding_call_sites()
-        if not declares and (rel, lineno) not in _EXEMPT
-    ]
+def test_every_decoding_subprocess_call_uses_utf8_and_replace() -> None:
+    """Every text-capturing subprocess call must declare the required VALUES.
+
+    Presence of an ``encoding`` keyword is not the property being guarded --
+    ``encoding="cp1252"``, or a dropped ``errors="replace"``, would restore the
+    Windows reader-thread failure while still "declaring an encoding". So the
+    literal values are asserted, and a non-literal is treated as unverified.
+    """
+    offenders: list[str] = []
+    for rel, lineno, literals in _decoding_call_sites():
+        if (rel, lineno) in _EXEMPT:
+            continue
+        for kwarg, want in _REQUIRED.items():
+            got = literals.get(kwarg, "<missing>")
+            if got != want:
+                offenders.append(f"{rel}:{lineno} {kwarg}={got!r} (want {want!r})")
     assert not offenders, (
-        "subprocess calls decode with locale.getpreferredencoding(False) unless "
-        'encoding= is given -- the ANSI code page on Windows. Add encoding="utf-8", '
-        'errors="replace" at:\n  ' + "\n  ".join(offenders)
+        "subprocess text capture must decode as utf-8 and degrade rather than "
+        "raise: without encoding= Python uses locale.getpreferredencoding(False), "
+        "the ANSI code page on Windows, and the resulting UnicodeDecodeError is "
+        "raised in subprocess's reader thread -- so run() returns rc=0 with "
+        "stdout=None and the caller fails somewhere else entirely.\n  "
+        + "\n  ".join(offenders)
     )
