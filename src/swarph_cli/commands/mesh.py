@@ -851,7 +851,7 @@ def _log_dm(state: MonitorState, dm: dict) -> None:
 
 
 def _tmux_wake(target: str) -> bool:
-    """Inject the fixed wake prompt, then submit it as a separate key event."""
+    """Inject the wake prompt and submit it using Codex's double-Enter gesture."""
     try:
         subprocess.run(
             ["tmux", "send-keys", "-t", target, "-l", "check mesh"],
@@ -860,6 +860,15 @@ def _tmux_wake(target: str) -> bool:
             stderr=subprocess.PIPE,
             text=True,
         )
+        subprocess.run(
+            ["tmux", "send-keys", "-t", target, "Enter"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        # In Codex's multiline composer the first Enter creates a line boundary;
+        # a consecutive Enter submits the prompt.
         subprocess.run(
             ["tmux", "send-keys", "-t", target, "Enter"],
             check=True,
