@@ -593,7 +593,7 @@ def _process_alive(tmux_session: str, process_name: str = "claude") -> bool:
     try:
         panes = subprocess.run(
             ["tmux", "list-panes", "-t", tmux_session, "-F", "#{pane_pid}"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         if panes.returncode != 0:
             # list-panes fails for TWO very different reasons:
@@ -606,7 +606,7 @@ def _process_alive(tmux_session: str, process_name: str = "claude") -> bool:
             # Distinguish by probing the server itself.
             server = subprocess.run(
                 ["tmux", "list-sessions"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             if server.returncode != 0:
                 return True  # no reachable tmux server here → can't tell → assume alive
@@ -617,7 +617,7 @@ def _process_alive(tmux_session: str, process_name: str = "claude") -> bool:
 
         pg = subprocess.run(
             ["pgrep", "-f", process_name],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         if pg.returncode != 0:
             return False  # no matching process anywhere on the host
@@ -669,7 +669,7 @@ def _resolve_send_target(name: str, process_name: str = "claude") -> str:
         result = subprocess.run(
             ["tmux", "list-panes", "-t", name, "-F",
              "#{pane_id} #{pane_current_command}"],
-            capture_output=True, timeout=5, text=True,
+            capture_output=True, timeout=5, text=True, encoding="utf-8", errors="replace",
         )
         if result.returncode != 0:
             return name
@@ -763,7 +763,7 @@ def _pane_activity_age_sec(name: str) -> Optional[int]:
         result = subprocess.run(
             ["tmux", "display", "-p", "-t", name,
              "#{pane_activity}|#{window_activity}|#{session_activity}"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
         )
         if result.returncode != 0:
             return None

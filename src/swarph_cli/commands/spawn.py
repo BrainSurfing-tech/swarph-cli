@@ -344,7 +344,7 @@ def _current_tmux_session() -> Optional[str]:
     try:
         out = subprocess.run(
             ["tmux", "display-message", "-p", "#S"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
     except (OSError, subprocess.SubprocessError):
         return None
