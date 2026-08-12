@@ -851,7 +851,7 @@ def _log_dm(state: MonitorState, dm: dict) -> None:
 
 
 def _tmux_wake(target: str) -> bool:
-    """Inject the fixed wake prompt, then submit it as a separate key event."""
+    """Inject the wake prompt and submit it using Codex's double-Enter gesture."""
     try:
         subprocess.run(
             ["tmux", "send-keys", "-t", target, "-l", "check mesh"],
@@ -867,9 +867,23 @@ def _tmux_wake(target: str) -> bool:
             stderr=subprocess.PIPE,
             text=True,
         )
+        # Codex needs a second Enter to submit its multiline composer. In
+        # single-submit composers the first Enter already sends the prompt and
+        # the second reaches an empty composer, where it is a no-op.
+        subprocess.run(
+            ["tmux", "send-keys", "-t", target, "Enter"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         return True
     except (OSError, subprocess.CalledProcessError) as exc:
-        print(f"[monitor] tmux wake failed: {exc}", file=sys.stderr, flush=True)
+        print(
+            f"[monitor] tmux wake failed; pane may hold an unsubmitted wake: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
         return False
 
 

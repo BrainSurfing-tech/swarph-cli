@@ -21,7 +21,7 @@ def _state(tmp_path: Path) -> mesh.MeshSidecarState:
     )
 
 
-def test_tmux_wake_sends_literal_prompt_then_submits(monkeypatch):
+def test_tmux_wake_sends_literal_prompt_then_submits_with_double_enter(monkeypatch):
     calls = []
 
     class Result:
@@ -36,6 +36,7 @@ def test_tmux_wake_sends_literal_prompt_then_submits(monkeypatch):
     assert mesh._tmux_wake("gpt-lc:0.0") is True
     assert [command for command, _ in calls] == [
         ["tmux", "send-keys", "-t", "gpt-lc:0.0", "-l", "check mesh"],
+        ["tmux", "send-keys", "-t", "gpt-lc:0.0", "Enter"],
         ["tmux", "send-keys", "-t", "gpt-lc:0.0", "Enter"],
     ]
 
