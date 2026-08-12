@@ -157,15 +157,41 @@ def resolve_session_pane(self_name: str) -> Optional[str]:
     try:
         r = subprocess.run(
             [mux, "list-panes", "-t", self_name, "-F",
-             "#{pane_id} #{pane_current_command}"],
+             "#{window_index} #{pane_index} #{pane_current_command}"],
             capture_output=True, timeout=5, text=True,
         )
         if r.returncode != 0:
             return None
         for line in r.stdout.splitlines():
             parts = line.split()
-            if len(parts) >= 2 and parts[1] in ("claude", "node"):
-                return parts[0]
+            if len(parts) >= 3 and parts[2] in ("claude", "node"):
+                # >>> FULLY-QUALIFIED NAME, NOT A PANE-ID. <<< This returned
+                # `#{pane_id}` (%N) until 2026-08-12. On real tmux %N is unique per
+                # SERVER — that is the entire point of id targeting. PSMUX ALLOCATES
+                # IDS PER SESSION, so %1 exists in every session, and `list-panes -a`
+                # reports both co-resident sessions as paneid=%1 winid=@1.
+                #
+                # The list-panes call above is correctly scoped to this cell's own
+                # session. The id it RETURNED was then used UNSCOPED by capture-pane
+                # and send-keys — so on a multi-session psmux box probe_pane could
+                # read ANOTHER CELL'S SCREEN and inject() could deliver a DM INTO
+                # ANOTHER CELL'S PANE. Silently, exit 0.
+                #
+                # AND IT IS NOT DETERMINISTIC BY SORT ORDER — measured: `-t %1`
+                # resolves to whatever the CURRENT ROUTING DEFAULT is, so one target
+                # gives two answers depending on ambient context. An intermittent
+                # cross-cell misdelivery, not a stable one.
+                #
+                # A BARE SESSION NAME WOULD NOT DO: `send-keys -t <session>` lands on
+                # the ACTIVE pane, which on a multi-pane cell can be a SHELL where an
+                # injected "/model ..." RUNS AS A SHELL COMMAND. So the positive
+                # claude/node identification is kept and only the TARGET FORM changes.
+                #
+                # VERIFIED ADVERSARIALLY by gpu-wsl with `psmux display-message -p -t`
+                # (a side-effect-free resolution query): with the routing default
+                # PINNED AT THE NEIGHBOURING SESSION, the fully-qualified form still
+                # resolved to its own session, 4/4. Immune to routing context.
+                return f"{self_name}:{parts[0]}.{parts[1]}"
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return None
     return None
