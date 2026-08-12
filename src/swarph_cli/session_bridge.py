@@ -165,6 +165,24 @@ def resolve_session_pane(self_name: str) -> Optional[str]:
         for line in r.stdout.splitlines():
             parts = line.split()
             if len(parts) >= 3 and parts[2] in ("claude", "node"):
+                # >>> THIS IS A WORKAROUND FOR SOMEONE ELSE'S DEFECT, NOT A REPAIR
+                # OF OUR OWN — psmux/psmux#569. <<< Stated here because the next
+                # reader sees a verbose target construction, assumes it is
+                # over-engineering, and simplifies it back to `parts[0]`. The
+                # upstream fix (ambiguity detection) is not ours and may take a
+                # while; this lands now and is under our control.
+                #
+                # RESOLVE FRESH BEFORE EACH USE — NEVER CACHE THE RETURNED TARGET.
+                # `pane_index` is POSITIONAL (psmux format.rs:1294, fmt_pane_pos +
+                # pane_base_index) with no pane equivalent of renumber-windows, so
+                # killing a pane RESHUFFLES the indices of its siblings. That is the
+                # trade this fix makes and it must not be silent: %N was ambiguous
+                # but STABLE; session:window.pane is unambiguous but POSITIONAL.
+                # Caching it converts a fixed cross-session bug into an intermittent
+                # wrong-pane one. (gpu-wsl; behaviourally UNVERIFIED — the kill-pane
+                # test needs a box with two live cells, and running a destructive
+                # command to prove targeting is unreliable is the wrong order.)
+                #
                 # >>> FULLY-QUALIFIED NAME, NOT A PANE-ID. <<< This returned
                 # `#{pane_id}` (%N) until 2026-08-12. On real tmux %N is unique per
                 # SERVER — that is the entire point of id targeting. PSMUX ALLOCATES
