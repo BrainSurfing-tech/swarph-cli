@@ -263,7 +263,7 @@ def status_protocol_handler(
                 ["xdg-mime", "query", "default", _SCHEME],
                 check=True,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
             )
             current = res.stdout.strip()
             out(f"xdg-mime default for {_SCHEME}: {current or '(none)'}")

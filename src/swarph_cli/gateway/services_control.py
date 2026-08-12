@@ -90,7 +90,7 @@ def _validate(lane: str, action: str) -> None:
 def _unit_active(unit: str) -> bool:
     try:
         return subprocess.run(["systemctl", "is-active", unit], capture_output=True,
-                              text=True, timeout=5).stdout.strip() == "active"
+                              text=True, encoding="utf-8", errors="replace", timeout=5).stdout.strip() == "active"
     except Exception:
         return False
 
@@ -201,7 +201,7 @@ def run_action(lane: str, action: str, model: Optional[str], actor: str = "comma
     # this wrapper. -n = non-interactive (never prompt; fail if a password is needed).
     argv = ["sudo", "-n", FLEETCTL, action, lane]
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        p = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
     except subprocess.TimeoutExpired:
         _audit(actor, lane, action, model, "timeout")
         raise FleetError(500, "fleetctl timed out")
