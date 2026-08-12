@@ -867,8 +867,9 @@ def _tmux_wake(target: str) -> bool:
             stderr=subprocess.PIPE,
             text=True,
         )
-        # In Codex's multiline composer the first Enter creates a line boundary;
-        # a consecutive Enter submits the prompt.
+        # Codex needs a second Enter to submit its multiline composer. In
+        # single-submit composers the first Enter already sends the prompt and
+        # the second reaches an empty composer, where it is a no-op.
         subprocess.run(
             ["tmux", "send-keys", "-t", target, "Enter"],
             check=True,
@@ -878,7 +879,11 @@ def _tmux_wake(target: str) -> bool:
         )
         return True
     except (OSError, subprocess.CalledProcessError) as exc:
-        print(f"[monitor] tmux wake failed: {exc}", file=sys.stderr, flush=True)
+        print(
+            f"[monitor] tmux wake failed; pane may hold an unsubmitted wake: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
         return False
 
 
