@@ -695,12 +695,15 @@ def test_install_service_two_cells_distinct_targets(isolated_state, capsys):
     assert "watchdog --check --cell science-claude" in out_sci
 
 
-def test_install_service_dry_run_default_cell_is_lab(isolated_state, capsys):
-    """Without --cell, the dry-run preview keeps SWARPH_CELL=lab default."""
+def test_install_service_dry_run_default_cell_is_unidentified(isolated_state, capsys):
+    """Without --cell and with no SWARPH_SELF/SWARPH_CELL set, the dry-run preview must
+    NOT silently claim lab-ovh's own name (#402) — it uses the 'unidentified-cell'
+    sentinel instead, same as touch_activity's and --cell's own default."""
     rc = run_watchdog(argv=["--install-service", "--dry-run"])
     assert rc == 0
     captured = capsys.readouterr()
-    assert "SWARPH_CELL=lab" in captured.err
+    assert "SWARPH_CELL=unidentified-cell" in captured.err
+    assert "SWARPH_CELL=lab" not in captured.err
 
 
 @_POSIX_WATCHDOG_SKIP
@@ -1039,6 +1042,46 @@ def test_parser_defaults_process_name_claude_liveness_cmd_none():
     ns = watchdog._build_parser().parse_args(["--check"])
     assert ns.process_name == "claude"
     assert ns.liveness_cmd is None
+
+
+def test_cell_default_prefers_swarph_self_over_swarph_cell(monkeypatch):
+    """#402: --cell's default must agree with hooks.touch_activity's — both prefer
+    $SWARPH_SELF (#360's canonical var) over the older $SWARPH_CELL, or the watchdog
+    and the activity-marker hook resolve two different roles for the same cell."""
+    from swarph_cli.commands import watchdog
+    monkeypatch.setenv("SWARPH_SELF", "workstation-lc")
+    monkeypatch.setenv("SWARPH_CELL", "lab")  # stale/wrong var, must NOT win
+    ns = watchdog._build_parser().parse_args(["--check"])
+    assert ns.cell == "workstation-lc"
+
+
+def test_gateway_default_reads_mesh_gateway_url(monkeypatch):
+    """--gateway's default silently ignored MESH_GATEWAY_URL — every other gateway-reading
+    default in this file (and every other command module) checks the env var first;
+    this one used the bare constant directly. Found 2026-08-12 while auditing every
+    localhost:8788 fallback in swarph-cli after a live gateway rebind broke it."""
+    from swarph_cli.commands import watchdog
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://100.107.222.72:8788")
+    ns = watchdog._build_parser().parse_args(["--check"])
+    assert ns.gateway == "http://100.107.222.72:8788"
+
+
+def test_gateway_default_falls_back_to_localhost_when_unset(monkeypatch):
+    from swarph_cli.commands import watchdog
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    ns = watchdog._build_parser().parse_args(["--check"])
+    assert ns.gateway == watchdog._DEFAULT_GATEWAY_URL
+
+
+def test_cell_default_falls_back_to_sentinel_not_lab(monkeypatch):
+    """#402: with neither identity var set, the default must NOT silently claim
+    lab-ovh's own name — an unresolvable cell must be visibly unidentified."""
+    from swarph_cli.commands import watchdog
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    monkeypatch.delenv("SWARPH_CELL", raising=False)
+    ns = watchdog._build_parser().parse_args(["--check"])
+    assert ns.cell == "unidentified-cell"
+    assert ns.cell != "lab"
 
 
 def test_version_matches_the_packaged_version():

@@ -175,7 +175,8 @@ Recovery escalation (beta #1019 two-stage):
 
 Flags:
   --check              one-shot check (cron-callable; exits with status code)
-  --cell ROLE          cell-yaml role; defaults to current $SWARPH_CELL or 'lab'
+  --cell ROLE          cell-yaml role; defaults to $SWARPH_SELF, then $SWARPH_CELL, then
+                       'unidentified-cell' (never a real peer's name)
   --cursor PATH        cursor JSON path; default $TMPDIR/<role>-cursor.json
                        fallback /tmp/lab-claude-cursor.json
   --threshold SEC      darkness threshold; default 1800 (30 min)
@@ -1841,7 +1842,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="With --install-service: show what would be written without "
              "writing. Useful for review or non-root preview.",
     )
-    p.add_argument("--cell", default=os.environ.get("SWARPH_CELL", "lab"))
+    p.add_argument(
+        "--cell",
+        default=(
+            os.environ.get("SWARPH_SELF")
+            or os.environ.get("SWARPH_CELL")
+            or "unidentified-cell"
+        ),
+    )
     p.add_argument("--cursor", default=None)
     p.add_argument(
         "--activity-marker", default=None,
@@ -1860,7 +1868,10 @@ def _build_parser() -> argparse.ArgumentParser:
              "many seconds (covers mid-long-turn working sessions where "
              "cursor-mtime is stale but session is alive).",
     )
-    p.add_argument("--gateway", default=_DEFAULT_GATEWAY_URL)
+    p.add_argument(
+        "--gateway",
+        default=os.environ.get("MESH_GATEWAY_URL", _DEFAULT_GATEWAY_URL),
+    )
     p.add_argument("--tmux-session", default=None)
     p.add_argument("--peer", default=None)
     p.add_argument(

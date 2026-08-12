@@ -247,13 +247,24 @@ def touch_activity(argv: list[str] | None = None) -> int:
     is worse than no fix (spec §3). cwd is per-cell-reliable even when SWARPH_CELL is
     contaminated on a shared-user box (#20).
 
+    Env fallback prefers ``$SWARPH_SELF`` (#360's canonical identity var) over the older
+    ``$SWARPH_CELL`` — reading only ``SWARPH_CELL`` silently misidentified a cell that had
+    correctly set ``SWARPH_SELF`` (#402). If NEITHER is set and cell.yaml discovery also
+    fails, the fallback is the sentinel ``"unidentified-cell"``, never a real peer's name
+    — defaulting to `"lab"` meant an unresolvable cell's marker silently wrote under
+    lab-ovh's own name instead of announcing that identity couldn't be determined.
+
     BEST-EFFORT: never raises, ALWAYS returns 0 — a liveness hook must not fail a turn.
     """
     try:
         from swarph_cli.cell import discover_cell_in_cwd, load_cell
         from swarph_cli.commands.watchdog import _resolve_activity_marker_path
 
-        role = os.environ.get("SWARPH_CELL", "lab")
+        role = (
+            os.environ.get("SWARPH_SELF")
+            or os.environ.get("SWARPH_CELL")
+            or "unidentified-cell"
+        )
         cell_marker = None
         cell_path = discover_cell_in_cwd()
         if cell_path is not None:
@@ -263,7 +274,7 @@ def touch_activity(argv: list[str] | None = None) -> int:
                     role = cell.role
                 cell_marker = (cell.extra or {}).get("activity_marker_path")
             except Exception:
-                pass  # malformed cell.yaml → fall back to SWARPH_CELL default
+                pass  # malformed cell.yaml → fall back to the env-derived role above
 
         marker = _resolve_activity_marker_path(role, None, cell_marker)
         marker.parent.mkdir(parents=True, exist_ok=True)

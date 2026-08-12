@@ -60,9 +60,35 @@ def test_touch_agrees_with_watchdog_resolver(tmp_path, monkeypatch):
 def test_touch_falls_back_to_swarph_cell_when_no_cell_yaml(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # no cell.yaml
     monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
     monkeypatch.setenv("SWARPH_CELL", "gridiron")
     hooks.touch_activity([])
     assert (tmp_path / "gridiron-claude-active.txt").exists()
+
+
+def test_touch_prefers_swarph_self_over_swarph_cell(tmp_path, monkeypatch):
+    """#402: SWARPH_SELF is the canonical identity var (#360) and must win — reading
+    only SWARPH_CELL silently misidentified a cell that had correctly set SWARPH_SELF."""
+    monkeypatch.chdir(tmp_path)  # no cell.yaml
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv("SWARPH_SELF", "workstation-lc")
+    monkeypatch.setenv("SWARPH_CELL", "lab")  # stale/wrong var, must NOT win
+    hooks.touch_activity([])
+    assert (tmp_path / "workstation-lc-claude-active.txt").exists()
+    assert not (tmp_path / "lab-claude-active.txt").exists()
+
+
+def test_touch_falls_back_to_sentinel_not_lab_when_identity_unresolvable(tmp_path, monkeypatch):
+    """#402: no cell.yaml, no SWARPH_SELF, no SWARPH_CELL must NOT silently write under
+    lab-ovh's own name — that is exactly the defect (a foreign cell's marker landing on
+    lab's identity, making an unidentified cell falsely readable as lab being alive)."""
+    monkeypatch.chdir(tmp_path)  # no cell.yaml
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    monkeypatch.delenv("SWARPH_CELL", raising=False)
+    hooks.touch_activity([])
+    assert not (tmp_path / "lab-claude-active.txt").exists()
+    assert (tmp_path / "unidentified-cell-claude-active.txt").exists()
 
 
 def test_touch_refreshes_mtime_on_existing_marker(tmp_path, monkeypatch):
