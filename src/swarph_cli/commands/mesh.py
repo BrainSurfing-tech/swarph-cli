@@ -434,7 +434,7 @@ def _default_sidecar_state_dir(self_name: str) -> Path:
 
 def _read_cursor(path: Path) -> dict:
     if not path.exists():
-        return {"last_msg_id": 0, "last_wake_at": 0.0}
+        return {"last_msg_id": 0, "last_wake_at": 0.0, "channel_cursors": {}}
     try:
         cursor = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -443,11 +443,12 @@ def _read_cursor(path: Path) -> dict:
             file=sys.stderr,
             flush=True,
         )
-        return {"last_msg_id": 0, "last_wake_at": 0.0}
+        return {"last_msg_id": 0, "last_wake_at": 0.0, "channel_cursors": {}}
     if not isinstance(cursor, dict):
-        return {"last_msg_id": 0, "last_wake_at": 0.0}
+        return {"last_msg_id": 0, "last_wake_at": 0.0, "channel_cursors": {}}
     cursor.setdefault("last_msg_id", 0)
     cursor.setdefault("last_wake_at", 0.0)
+    cursor.setdefault("channel_cursors", {})
     return cursor
 
 
@@ -802,6 +803,9 @@ class MonitorState:
         self.shutdown_requested = False
         self.iterations = 0
         self.dms_seen = 0
+        # #125 option c: channel polling state
+        self.channel_cursors: dict = self.observed.get("channel_cursors", {})
+        self.pending_channel_posts: list = []
 
     def _migrate_pre_122_ledger(self) -> None:
         """Adopt a pre-card-#122 cursor's `pending_wake` as the initial ledger.
@@ -912,6 +916,41 @@ def _select_next_poll_seconds(state: MonitorState) -> int:
     if state.consecutive_empty >= _BACKOFF_EMPTY_THRESHOLD:
         return _BACKOFF_EMPTY_SECONDS
     return state.poll_s
+
+
+def _poll_channel_subscriptions(state: MonitorState) -> None:
+    """#125 option c: discover this peer's channel memberships and poll each
+    for new posts, using the existing member-gated GET /messages?channel=.
+    Additive only -- any failure here must never affect the DM poll above."""
+    # Track existing message IDs to avoid duplicates if this is called multiple times
+    existing_ids = {int(m.get("id", 0)) for m in state.pending_channel_posts}
+
+    url = f"{state.gateway}/channels?{urllib.parse.urlencode({'peer': state.self_name})}"
+    status, body = _http_get_json(url, state.token)
+    if status != 200:
+        return  # fail silent for channels specifically -- DM delivery is the guarantee
+    subscribed = [c["name"] for c in body.get("channels", []) if c.get("is_member")]
+
+    for channel in subscribed:
+        last_id = int(state.channel_cursors.get(channel, 0))
+        params = {"channel": channel, "limit": "50"}
+        curl = f"{state.gateway}/messages?{urllib.parse.urlencode(params)}"
+        cstatus, cbody = _http_get_json(curl, state.token)
+        if cstatus != 200:
+            continue
+        new_posts = [
+            m for m in cbody.get("messages", [])
+            if int(m.get("id", 0)) > last_id and m.get("from_node") != state.self_name
+            and int(m.get("id", 0)) not in existing_ids
+        ]
+        if new_posts:
+            new_posts.sort(key=lambda m: int(m["id"]))
+            state.channel_cursors[channel] = int(new_posts[-1]["id"])
+            state.pending_channel_posts.extend(new_posts)
+            existing_ids.update(int(m.get("id", 0)) for m in new_posts)
+
+    if subscribed:
+        _write_cursor_atomic(state.cursor_path, dict(state.cursor))
 
 
 def _monitor_deliver(state: MonitorState) -> None:
@@ -1043,6 +1082,9 @@ def _monitor_iteration(state: MonitorState) -> None:
     if state.ledgers and not state.ledgers_path.exists():
         _write_ledgers_atomic(state.ledgers_path, state.ledgers)
         state.new_ledgers = set()
+
+    # Poll channel subscriptions (independent of DM delivery, additive only)
+    _poll_channel_subscriptions(state)
 
 
 def _monitor_loop(state: MonitorState) -> int:

@@ -499,6 +499,13 @@ def _print_status(info: dict, pending: int) -> None:
                   "are keyed by the sink STRING, so a renamed target starts "
                   "fresh and replays. This is why the count above may surprise "
                   "you.")
+
+    if info.get("pending_channel_posts"):
+        n = len(info["pending_channel_posts"])
+        channels = sorted({p["channel"] for p in info["pending_channel_posts"]})
+        plural = "s" if n != 1 else ""
+        print(f"  {n} unread channel post{plural} in: {', '.join(channels)}")
+
     if pending:
         print("  read them with: swarph mesh inbox")
 
