@@ -71,6 +71,7 @@ def test_channel_cursor_persists_across_ticks(monkeypatch, tmp_path):
 
 
 def test_status_surfaces_pending_channel_posts(monkeypatch, tmp_path, capsys):
+    """Unit test: _print_status correctly formats pending_channel_posts when provided."""
     info = {
         "self": "lab-ovh",
         "state_dir": str(tmp_path),
@@ -91,3 +92,65 @@ def test_status_surfaces_pending_channel_posts(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "releases" in out
     assert "1" in out
+
+
+def test_status_integration_reads_pending_channel_posts_from_cursor(monkeypatch, tmp_path, capsys):
+    """Integration test: real monitor status pipeline reads and displays pending_channel_posts."""
+    import argparse
+    from swarph_cli.commands import monitor
+
+    # Write cursor file with pending channel posts persisted
+    cursor_file = tmp_path / "cursor.json"
+    cursor_file.write_text(json.dumps({
+        "last_msg_id": 0,
+        "last_wake_at": 0.0,
+        "channel_cursors": {"releases": 501},
+        "pending_channel_posts": [
+            {"id": 501, "channel": "releases", "from_node": "droplet",
+             "content": "v2.0.0 shipped", "kind": "fyi"},
+        ],
+    }))
+
+    # Create pidfile so the monitor appears "running"
+    pidfile = tmp_path / "monitor.pid"
+    pidfile.write_text(json.dumps({
+        "pid": 1234,
+        "self": "lab-ovh",
+        "sinks": ["pull"],
+        "poll_s": 30,
+        "cmdline": "swarph monitor start",
+    }))
+
+    # Mock pidfile_status to return live_ours
+    monkeypatch.setattr(mesh, "pidfile_status",
+                       lambda path: ("live_ours", {"pid": 1234, "sinks": ["pull"]}))
+
+    # Create args for monitor status
+    args = argparse.Namespace(
+        self_name="lab-ovh",
+        state_dir=str(tmp_path),
+        gateway="http://localhost:8788",
+        token_file=None,
+        json=False,
+        brief=False,
+    )
+
+    # Call the real _collect function
+    info = monitor._collect(args)
+
+    # Verify pending_channel_posts are in the info dict
+    assert "pending_channel_posts" in info
+    assert len(info["pending_channel_posts"]) == 1
+    assert info["pending_channel_posts"][0]["channel"] == "releases"
+
+    # Verify the monitor appears to be running
+    assert info["running"] is True
+
+    # Call _print_status with real data from _collect
+    monitor._print_status(info, pending=0)
+    out = capsys.readouterr().out
+
+    # Verify the output includes the channel posts
+    assert "releases" in out
+    assert "1" in out
+    assert "unread channel post" in out

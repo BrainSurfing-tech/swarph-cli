@@ -434,7 +434,7 @@ def _default_sidecar_state_dir(self_name: str) -> Path:
 
 def _read_cursor(path: Path) -> dict:
     if not path.exists():
-        return {"last_msg_id": 0, "last_wake_at": 0.0, "channel_cursors": {}}
+        return {"last_msg_id": 0, "last_wake_at": 0.0, "channel_cursors": {}, "pending_channel_posts": []}
     try:
         cursor = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -443,12 +443,13 @@ def _read_cursor(path: Path) -> dict:
             file=sys.stderr,
             flush=True,
         )
-        return {"last_msg_id": 0, "last_wake_at": 0.0, "channel_cursors": {}}
+        return {"last_msg_id": 0, "last_wake_at": 0.0, "channel_cursors": {}, "pending_channel_posts": []}
     if not isinstance(cursor, dict):
-        return {"last_msg_id": 0, "last_wake_at": 0.0, "channel_cursors": {}}
+        return {"last_msg_id": 0, "last_wake_at": 0.0, "channel_cursors": {}, "pending_channel_posts": []}
     cursor.setdefault("last_msg_id", 0)
     cursor.setdefault("last_wake_at", 0.0)
     cursor.setdefault("channel_cursors", {})
+    cursor.setdefault("pending_channel_posts", [])
     return cursor
 
 
@@ -805,7 +806,7 @@ class MonitorState:
         self.dms_seen = 0
         # #125 option c: channel polling state
         self.channel_cursors: dict = self.observed.get("channel_cursors", {})
-        self.pending_channel_posts: list = []
+        self.pending_channel_posts: list = self.observed.get("pending_channel_posts", [])
 
     def _migrate_pre_122_ledger(self) -> None:
         """Adopt a pre-card-#122 cursor's `pending_wake` as the initial ledger.
@@ -950,6 +951,8 @@ def _poll_channel_subscriptions(state: MonitorState) -> None:
             existing_ids.update(int(m.get("id", 0)) for m in new_posts)
 
     if subscribed:
+        # Persist channel polling state to disk so separate `monitor status` can read it
+        state.cursor["pending_channel_posts"] = state.pending_channel_posts
         _write_cursor_atomic(state.cursor_path, dict(state.cursor))
 
 

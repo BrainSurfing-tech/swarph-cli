@@ -425,6 +425,7 @@ def _collect(args: argparse.Namespace) -> dict:
         # absence that reads as evidence.
         "unread_reportable": bool(rows),
         "sinks": rows,
+        "pending_channel_posts": cursor.get("pending_channel_posts", []),
     }
 
 
