@@ -128,8 +128,13 @@ class PeerSpool:
         self.initialize()
         _validate_job(job)
         path = self.pending / f"{job['job_id']}.json"
-        if path.exists() or (self.running / path.name).exists():
-            raise PeerExecutorError(f"job already exists: {job['job_id']}")
+        for existing_path in (path, self.running / path.name):
+            if existing_path.exists():
+                existing = _read_object(existing_path)
+                _validate_job(existing)
+                if existing == job:
+                    return existing_path
+                raise PeerExecutorError(f"job already exists: {job['job_id']}")
         _write_atomic(path, job)
         return path
 

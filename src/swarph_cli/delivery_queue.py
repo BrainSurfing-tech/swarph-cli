@@ -161,6 +161,9 @@ class DeliveryQueue:
         }:
             raise DeliveryQueueError("only eligible work may be claimed")
         if entry["service_state"] == "claimed":
+            job = entry.get("job")
+            if isinstance(job, dict) and job.get("destination_peer") == destination_peer:
+                return deepcopy(job)
             raise DeliveryQueueError("source DM already has an active service claim")
 
         active = sum(entry.get("service_state") == "claimed" for entry in self._pending)
