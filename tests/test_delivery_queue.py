@@ -3,6 +3,7 @@ import pytest
 from swarph_cli.delivery_queue import DeliveryQueue, DeliveryQueueError, wake_for
 from swarph_cli.peer_executor import PeerSpool
 from swarph_cli.peer_reconciliation import PeerReceiptReconciler
+from swarph_cli.peer_staging import PeerSpoolStager
 
 
 def _dm(i, kind="fyi", thread_id=None):
@@ -67,6 +68,21 @@ def test_unreceipted_job_remains_owed_and_unread(tmp_path):
     assert q.pending()[0]["source_read_state"] == "unread"
     assert q.status(now=q.pending()[0]["queued_at"] + 5)["owed"] == 1
     assert q.accepted_receipts() == []
+
+
+def test_queue_to_spool_staging_is_idempotent_after_restart(tmp_path):
+    queue_path = tmp_path / "queue.json"
+    q = DeliveryQueue(queue_path)
+    q.enqueue(_dm(17, "question"))
+    q.record_eligibility(17, "eligible", "question is assigned to the service")
+    spool = PeerSpool(tmp_path / "spool")
+    first = PeerSpoolStager(q, spool).stage(17, "gpt-lc", max_active=1)
+    second = PeerSpoolStager(DeliveryQueue(queue_path), spool).stage(17, "gpt-lc", max_active=1)
+
+    assert second == first
+    assert (spool.pending / "dm-17.json").exists()
+    assert len(list(spool.pending.glob("*.json"))) == 1
+    assert "content" not in first
 
 
 def test_receipt_must_bind_job_dm_peer_token_digest_and_provenance(tmp_path):

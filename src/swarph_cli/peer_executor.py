@@ -128,27 +128,34 @@ class PeerSpool:
         self.initialize()
         _validate_job(job)
         path = self.pending / f"{job['job_id']}.json"
-        if path.exists() or (self.running / path.name).exists():
-            raise PeerExecutorError(f"job already exists: {job['job_id']}")
-        _write_atomic(path, job)
+        with _exclusive_file_lock(self.locks / f"{job['job_id']}.lock"):
+            for existing_path in (path, self.running / path.name):
+                if existing_path.exists():
+                    existing = _read_object(existing_path)
+                    _validate_job(existing)
+                    if existing == job:
+                        return existing_path
+                    raise PeerExecutorError(f"job already exists: {job['job_id']}")
+            _write_atomic(path, job)
         return path
 
     def claim(self, job_id: str, peer: str) -> dict:
         self.initialize()
         job_id, peer = _canonical_id(job_id, "job_id"), _canonical_id(peer, "peer")
-        pending = self.pending / f"{job_id}.json"
-        job = _read_object(pending)
-        _validate_job(job)
-        if job["destination_peer"] != peer:
-            raise PeerExecutorError("peer cannot claim another peer's job")
-        try:
-            os.replace(pending, self.running / pending.name)
-        except FileNotFoundError as exc:
-            raise PeerExecutorError("job is no longer pending") from exc
-        # The successful rename is the cross-process ownership boundary.  A
-        # process that loses it must not create or advance a claim record.
-        claim = self._new_claim(job_id, peer, token=1)
-        _write_atomic(self.claims / f"{job_id}.json", claim)
+        with _exclusive_file_lock(self.locks / f"{job_id}.lock"):
+            pending = self.pending / f"{job_id}.json"
+            job = _read_object(pending)
+            _validate_job(job)
+            if job["destination_peer"] != peer:
+                raise PeerExecutorError("peer cannot claim another peer's job")
+            try:
+                os.replace(pending, self.running / pending.name)
+            except FileNotFoundError as exc:
+                raise PeerExecutorError("job is no longer pending") from exc
+            # The successful rename is the cross-process ownership boundary. A
+            # process that loses it must not create or advance a claim record.
+            claim = self._new_claim(job_id, peer, token=1)
+            _write_atomic(self.claims / f"{job_id}.json", claim)
         return claim
 
     def reclaim(self, job_id: str, peer: str, *, now: float | None = None) -> dict:
