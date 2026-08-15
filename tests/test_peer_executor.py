@@ -22,6 +22,42 @@ def test_peer_bound_claim_and_receipt(tmp_path):
     assert (tmp_path / "spool" / "receipts" / "job-1.json").exists()
 
 
+def test_enqueue_waits_for_competing_stage_before_claim(tmp_path, monkeypatch):
+    spool = PeerSpool(tmp_path / "spool")
+    job = _job()
+    original_write = peer_executor._write_atomic
+    first_write_started = threading.Event()
+    allow_first_write = threading.Event()
+    second_done = threading.Event()
+    write_count = 0
+
+    def pause_first_pending_write(path, value):
+        nonlocal write_count
+        if path.parent == spool.pending:
+            write_count += 1
+            if write_count == 1:
+                first_write_started.set()
+                assert allow_first_write.wait(timeout=2)
+        original_write(path, value)
+
+    monkeypatch.setattr(peer_executor, "_write_atomic", pause_first_pending_write)
+    first = threading.Thread(target=spool.enqueue, args=(job,))
+    second = threading.Thread(target=lambda: (spool.enqueue(job), second_done.set()))
+    first.start()
+    assert first_write_started.wait(timeout=2)
+    second.start()
+    assert not second_done.wait(timeout=0.1)
+    allow_first_write.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    claim = spool.claim("job-1", "gpt-lc")
+    assert claim["fencing_token"] == 1
+    assert second_done.is_set()
+    assert not (spool.pending / "job-1.json").exists()
+    assert (spool.running / "job-1.json").exists()
+
+
 def test_wrong_peer_and_stale_receipt_are_rejected(tmp_path):
     spool = PeerSpool(tmp_path / "spool")
     spool.enqueue(_job())
