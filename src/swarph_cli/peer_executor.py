@@ -187,26 +187,27 @@ class PeerSpool:
             raise PeerExecutorError("fencing_token must be a positive integer")
         if not isinstance(text, str):
             raise PeerExecutorError("output text must be a string")
-        job = _read_object(self.running / f"{job_id}.json")
-        claim = _read_object(self.claims / f"{job_id}.json")
-        if (job.get("destination_peer"), claim.get("destination_peer"), claim.get("fencing_token")) != (
-            peer,
-            peer,
-            fencing_token,
-        ):
-            raise PeerExecutorError("stale or wrong-peer output")
-        output_path = self._output_path(job_id, fencing_token)
-        if output_path.exists():
-            raise PeerExecutorError("output already exists for this claim")
-        output = {
-            "job_id": job_id,
-            "source_dm_id": job["source_dm_id"],
-            "destination_peer": peer,
-            "fencing_token": fencing_token,
-            "text": text,
-            "output_digest": output_digest(text),
-        }
-        _write_atomic(output_path, output)
+        with _exclusive_file_lock(self.locks / f"{job_id}.lock"):
+            job = _read_object(self.running / f"{job_id}.json")
+            claim = _read_object(self.claims / f"{job_id}.json")
+            if (job.get("destination_peer"), claim.get("destination_peer"), claim.get("fencing_token")) != (
+                peer,
+                peer,
+                fencing_token,
+            ):
+                raise PeerExecutorError("stale or wrong-peer output")
+            output_path = self._output_path(job_id, fencing_token)
+            if output_path.exists():
+                raise PeerExecutorError("output already exists for this claim")
+            output = {
+                "job_id": job_id,
+                "source_dm_id": job["source_dm_id"],
+                "destination_peer": peer,
+                "fencing_token": fencing_token,
+                "text": text,
+                "output_digest": output_digest(text),
+            }
+            _write_atomic(output_path, output)
         return output
 
     def accept_receipt(self, receipt: dict) -> None:

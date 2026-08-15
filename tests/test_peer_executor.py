@@ -94,6 +94,48 @@ def test_reclaim_waits_for_receipt_acceptance(tmp_path, monkeypatch):
     assert spool.receipt_accepted("job-1")
 
 
+def test_reclaim_waits_for_output_persistence(tmp_path, monkeypatch):
+    spool = PeerSpool(tmp_path / "spool")
+    spool.enqueue(_job())
+    claim = spool.claim("job-1", "gpt-lc")
+    original_write = peer_executor._write_atomic
+    output_write_started = threading.Event()
+    allow_output_write = threading.Event()
+    reclaim_done = threading.Event()
+    reclaim_result = []
+
+    def pause_output_write(path, value):
+        if path.parent == spool.outputs:
+            output_write_started.set()
+            assert allow_output_write.wait(timeout=2)
+        original_write(path, value)
+
+    monkeypatch.setattr(peer_executor, "_write_atomic", pause_output_write)
+    output_thread = threading.Thread(
+        target=spool.write_output,
+        args=("job-1", "gpt-lc", claim["fencing_token"], "done"),
+    )
+
+    def reclaim():
+        reclaim_result.append(
+            spool.reclaim("job-1", "gpt-lc", now=claim["lease_expires_at"])
+        )
+        reclaim_done.set()
+
+    output_thread.start()
+    assert output_write_started.wait(timeout=2)
+    reclaim_thread = threading.Thread(target=reclaim)
+    reclaim_thread.start()
+    assert not reclaim_done.wait(timeout=0.1)
+    allow_output_write.set()
+    output_thread.join(timeout=2)
+    reclaim_thread.join(timeout=2)
+
+    assert reclaim_done.is_set()
+    assert reclaim_result[0]["fencing_token"] == claim["fencing_token"] + 1
+    assert (spool.outputs / "job-1.1.json").exists()
+
+
 def test_expired_claim_can_be_reclaimed_with_a_higher_fencing_token(tmp_path):
     spool = PeerSpool(tmp_path / "spool")
     spool.enqueue(_job())
