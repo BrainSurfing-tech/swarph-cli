@@ -240,7 +240,7 @@ def _resolve_cursor_path(
       1. Explicit ``--cursor`` CLI arg (highest)
       2. ``cell.yaml`` extra.cursor_path when --cell present
       3. ``$TMPDIR/<role>-cursor.json``
-      4. ``/tmp/lab-claude-cursor.json`` (legacy lab-orchestrator default)
+      4. ``/tmp/lab-claude-cursor.json`` (legacy lab-orchestrator default, only when role == 'lab')
 
     F4 closes the host-prefix-variant + sibling-instance-variant gap
     class — cell.yaml carries the canonical cursor path per-cell, watchdog
@@ -256,8 +256,12 @@ def _resolve_cursor_path(
     primary = Path(tmpdir) / f"{role}-cursor.json"
     if primary.exists():
         return primary
-    # lab-orchestrator's documented cursor path per session_start_reminder.txt
-    return Path("/tmp/lab-claude-cursor.json")
+    # Only fall back to the legacy lab path when role is actually 'lab';
+    # for any other role, return the computed path so the check fails
+    # loudly instead of aliasing to lab's cursor.
+    if role == "lab":
+        return Path("/tmp/lab-claude-cursor.json")
+    return primary
 
 
 def _resolve_activity_marker_path(
@@ -432,7 +436,8 @@ def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Opti
     caused a real reader to conclude a gateway/token outage makes A1 MORE
     eager, when it makes A1 permanently inert for that cell instead.
     """
-    url = f"{gateway.rstrip('/')}/messages?to_node={peer}&unread_only=true&limit=1"
+    query = urllib.parse.urlencode({"to_node": peer, "unread_only": "true", "limit": 1})
+    url = f"{gateway.rstrip('/')}/messages?{query}"
     req = urllib.request.Request(url)
     if token:
         req.add_header("Authorization", f"Bearer {token}")
@@ -445,7 +450,8 @@ def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Opti
         # "watchdog inert for 12 days, no token in service env" incident —
         # loud here so it cannot silently repeat a third time.
         print(f"swarph watchdog: no MESH_GATEWAY_TOKEN for peer={peer} — "
-              f"unread-count check will 401 and A1 stays inert until one is set",
+              f"unread-count check may 401 if the gateway requires auth; "
+              f"A1 stays inert until one is set",
               file=sys.stderr)
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
