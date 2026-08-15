@@ -251,16 +251,26 @@ class PeerSpool:
 
     def receipt_accepted(self, job_id: str) -> bool:
         """Whether this job has a validated durable receipt, not merely a file."""
-        job_id = _canonical_id(job_id, "job_id")
-        path = self.receipts / f"{job_id}.json"
-        if not path.exists():
-            return False
         try:
-            receipt = _read_object(path)
-            self._validate_accepted_receipt(receipt)
+            return self.accepted_receipt(job_id) is not None
         except PeerExecutorError:
             return False
-        return True
+
+    def accepted_receipt(self, job_id: str) -> dict | None:
+        """Return the current validated receipt, or ``None`` when absent.
+
+        Recovery and receipt persistence share this lock, so a reconciler never
+        obtains a receipt that races with a fencing-token takeover.
+        """
+        self.initialize()
+        job_id = _canonical_id(job_id, "job_id")
+        with _exclusive_file_lock(self.locks / f"{job_id}.lock"):
+            path = self.receipts / f"{job_id}.json"
+            if not path.exists():
+                return None
+            receipt = _read_object(path)
+            self._validate_accepted_receipt(receipt)
+            return receipt
 
     def _validate_accepted_receipt(self, receipt: dict) -> None:
         self.initialize()

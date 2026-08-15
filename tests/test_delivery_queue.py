@@ -1,6 +1,8 @@
 import pytest
 
 from swarph_cli.delivery_queue import DeliveryQueue, DeliveryQueueError, wake_for
+from swarph_cli.peer_executor import PeerSpool
+from swarph_cli.peer_reconciliation import PeerReceiptReconciler
 
 
 def _dm(i, kind="fyi", thread_id=None):
@@ -81,6 +83,53 @@ def test_receipt_must_bind_job_dm_peer_token_digest_and_provenance(tmp_path):
     q.remove_on_receipt(receipt)
     assert q.status()["owed"] == 0
     assert q.accepted_receipts() == [receipt]
+
+
+def test_validated_spool_receipt_reconciles_queue_idempotently(tmp_path):
+    q = DeliveryQueue(tmp_path / "queue.json")
+    q.enqueue(_dm(17, "question"))
+    q.record_eligibility(17, "eligible", "question is assigned to the service")
+    job = q.claim_for_service(17, "gpt-lc", max_active=1)
+    spool = PeerSpool(tmp_path / "spool")
+    spool.enqueue({
+        "schema_version": 1,
+        "job_id": job["job_id"],
+        "source_dm_id": job["source_dm_id"],
+        "destination_peer": job["destination_peer"],
+        "delivery_ref": "queue:17",
+    })
+    claim = spool.claim(job["job_id"], "gpt-lc")
+    output = spool.write_output(job["job_id"], "gpt-lc", claim["fencing_token"], "done")
+    receipt = {
+        "job_id": job["job_id"], "source_dm_id": 17,
+        "destination_peer": "gpt-lc", "fencing_token": claim["fencing_token"],
+        "output_digest": output["output_digest"],
+        "source_ref": {"queue_entry_id": 17, "source_dm_id": 17,
+                       "queue_claim_fence": job["fencing_token"]},
+    }
+    spool.accept_receipt(receipt)
+    reconciler = PeerReceiptReconciler(q, spool)
+
+    assert reconciler.reconcile(job["job_id"]) is True
+    assert q.status()["owed"] == 0
+    assert reconciler.reconcile(job["job_id"]) is False
+
+
+def test_spool_receipt_cannot_reconcile_a_different_queue_claim(tmp_path):
+    q = DeliveryQueue(tmp_path / "queue.json")
+    q.enqueue(_dm(17, "question"))
+    q.record_eligibility(17, "eligible", "question is assigned to the service")
+    job = q.claim_for_service(17, "gpt-lc", max_active=1)
+    receipt = {
+        "job_id": job["job_id"], "source_dm_id": 17,
+        "destination_peer": "gpt-lc", "fencing_token": 1,
+        "output_digest": "a" * 64,
+        "source_ref": {"queue_entry_id": 17, "source_dm_id": 17,
+                       "queue_claim_fence": job["fencing_token"] + 1},
+    }
+    with pytest.raises(DeliveryQueueError, match="active queue claim"):
+        q.reconcile_spool_receipt(receipt)
+    assert q.status()["owed"] == 1
 
 
 def test_cannot_evaluate_and_capacity_refusal_are_loud_and_persisted(tmp_path):
