@@ -1,5 +1,8 @@
+import threading
+
 import pytest
 
+import swarph_cli.peer_executor as peer_executor
 from swarph_cli.peer_executor import PeerExecutorError, PeerService, PeerSpool, output_digest
 
 
@@ -40,6 +43,55 @@ def test_receipt_requires_matching_durable_output(tmp_path):
     spool.write_output("job-1", "gpt-lc", claim["fencing_token"], "different")
     with pytest.raises(PeerExecutorError, match="durable output"):
         spool.accept_receipt(receipt)
+
+
+def test_reclaim_waits_for_receipt_acceptance(tmp_path, monkeypatch):
+    spool = PeerSpool(tmp_path / "spool")
+    spool.enqueue(_job())
+    claim = spool.claim("job-1", "gpt-lc")
+    output = spool.write_output("job-1", "gpt-lc", claim["fencing_token"], "done")
+    receipt = {
+        "job_id": "job-1",
+        "source_dm_id": 17,
+        "destination_peer": "gpt-lc",
+        "fencing_token": claim["fencing_token"],
+        "output_digest": output["output_digest"],
+    }
+    original_write = peer_executor._write_atomic
+    receipt_write_started = threading.Event()
+    allow_receipt_write = threading.Event()
+    reclaim_done = threading.Event()
+    reclaim_error = []
+
+    def pause_receipt_write(path, value):
+        if path.parent == spool.receipts:
+            receipt_write_started.set()
+            assert allow_receipt_write.wait(timeout=2)
+        original_write(path, value)
+
+    monkeypatch.setattr(peer_executor, "_write_atomic", pause_receipt_write)
+    accept_thread = threading.Thread(target=spool.accept_receipt, args=(receipt,))
+
+    def reclaim():
+        try:
+            spool.reclaim("job-1", "gpt-lc", now=claim["lease_expires_at"])
+        except PeerExecutorError as exc:
+            reclaim_error.append(exc)
+        finally:
+            reclaim_done.set()
+
+    accept_thread.start()
+    assert receipt_write_started.wait(timeout=2)
+    reclaim_thread = threading.Thread(target=reclaim)
+    reclaim_thread.start()
+    assert not reclaim_done.wait(timeout=0.1)
+    allow_receipt_write.set()
+    accept_thread.join(timeout=2)
+    reclaim_thread.join(timeout=2)
+
+    assert reclaim_done.is_set()
+    assert reclaim_error and "accepted receipt" in str(reclaim_error[0])
+    assert spool.receipt_accepted("job-1")
 
 
 def test_expired_claim_can_be_reclaimed_with_a_higher_fencing_token(tmp_path):

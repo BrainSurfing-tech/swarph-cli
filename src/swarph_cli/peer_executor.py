@@ -218,34 +218,35 @@ class PeerSpool:
         if not isinstance(receipt.get("source_dm_id"), int) or isinstance(receipt["source_dm_id"], bool):
             raise PeerExecutorError("receipt source_dm_id must be an integer")
         _validate_digest(receipt.get("output_digest"))
-        claim = _read_object(self.claims / f"{receipt['job_id']}.json")
-        job = _read_object(self.running / f"{receipt['job_id']}.json")
-        if (claim["destination_peer"], claim["fencing_token"]) != (
-            receipt["destination_peer"], receipt["fencing_token"]
-        ) or (job.get("destination_peer"), job.get("source_dm_id")) != (
-            receipt["destination_peer"], receipt["source_dm_id"]
-        ):
-            raise PeerExecutorError("stale or wrong-peer receipt")
-        output_path = self._output_path(receipt["job_id"], receipt["fencing_token"])
-        if not output_path.exists():
-            raise PeerExecutorError("durable output is missing")
-        output = _read_object(output_path)
-        if (
-            output.get("source_dm_id"),
-            output.get("destination_peer"),
-            output.get("fencing_token"),
-            output.get("output_digest"),
-        ) != (
-            receipt["source_dm_id"],
-            receipt["destination_peer"],
-            receipt["fencing_token"],
-            receipt["output_digest"],
-        ):
-            raise PeerExecutorError("receipt does not match durable output")
-        path = self.receipts / f"{receipt['job_id']}.json"
-        if path.exists():
-            raise PeerExecutorError("receipt already accepted")
-        _write_atomic(path, receipt)
+        with _exclusive_file_lock(self.locks / f"{receipt['job_id']}.lock"):
+            claim = _read_object(self.claims / f"{receipt['job_id']}.json")
+            job = _read_object(self.running / f"{receipt['job_id']}.json")
+            if (claim["destination_peer"], claim["fencing_token"]) != (
+                receipt["destination_peer"], receipt["fencing_token"]
+            ) or (job.get("destination_peer"), job.get("source_dm_id")) != (
+                receipt["destination_peer"], receipt["source_dm_id"]
+            ):
+                raise PeerExecutorError("stale or wrong-peer receipt")
+            output_path = self._output_path(receipt["job_id"], receipt["fencing_token"])
+            if not output_path.exists():
+                raise PeerExecutorError("durable output is missing")
+            output = _read_object(output_path)
+            if (
+                output.get("source_dm_id"),
+                output.get("destination_peer"),
+                output.get("fencing_token"),
+                output.get("output_digest"),
+            ) != (
+                receipt["source_dm_id"],
+                receipt["destination_peer"],
+                receipt["fencing_token"],
+                receipt["output_digest"],
+            ):
+                raise PeerExecutorError("receipt does not match durable output")
+            path = self.receipts / f"{receipt['job_id']}.json"
+            if path.exists():
+                raise PeerExecutorError("receipt already accepted")
+            _write_atomic(path, receipt)
 
     def receipt_accepted(self, job_id: str) -> bool:
         """Whether this job has a validated durable receipt, not merely a file."""
