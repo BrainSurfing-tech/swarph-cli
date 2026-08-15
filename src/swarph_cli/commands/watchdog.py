@@ -175,7 +175,8 @@ Recovery escalation (beta #1019 two-stage):
 
 Flags:
   --check              one-shot check (cron-callable; exits with status code)
-  --cell ROLE          cell-yaml role; defaults to current $SWARPH_CELL or 'lab'
+  --cell ROLE          cell-yaml role; defaults to $SWARPH_SELF, then $SWARPH_CELL, then
+                       'unidentified-cell' (never a real peer's name)
   --cursor PATH        cursor JSON path; default $TMPDIR/<role>-cursor.json
                        fallback /tmp/lab-claude-cursor.json
   --threshold SEC      darkness threshold; default 1800 (30 min)
@@ -239,7 +240,7 @@ def _resolve_cursor_path(
       1. Explicit ``--cursor`` CLI arg (highest)
       2. ``cell.yaml`` extra.cursor_path when --cell present
       3. ``$TMPDIR/<role>-cursor.json``
-      4. ``/tmp/lab-claude-cursor.json`` (legacy lab-orchestrator default)
+      4. ``/tmp/lab-claude-cursor.json`` (legacy lab-orchestrator default, only when role == 'lab')
 
     F4 closes the host-prefix-variant + sibling-instance-variant gap
     class — cell.yaml carries the canonical cursor path per-cell, watchdog
@@ -255,8 +256,12 @@ def _resolve_cursor_path(
     primary = Path(tmpdir) / f"{role}-cursor.json"
     if primary.exists():
         return primary
-    # lab-orchestrator's documented cursor path per session_start_reminder.txt
-    return Path("/tmp/lab-claude-cursor.json")
+    # Only fall back to the legacy lab path when role is actually 'lab';
+    # for any other role, return the computed path so the check fails
+    # loudly instead of aliasing to lab's cursor.
+    if role == "lab":
+        return Path("/tmp/lab-claude-cursor.json")
+    return primary
 
 
 def _resolve_activity_marker_path(
@@ -418,13 +423,36 @@ def _save_dm_wake_state(path: Path, state: dict) -> None:
 def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Optional[int]:
     """Query gateway for unread DM count addressed to peer.
 
-    Returns int count on success; None on any failure (treat as "don't
-    know — assume unread" so watchdog still tries to wake).
+    Returns int count on success; None on any failure — an unreachable gateway,
+    a missing/rejected token (no Authorization header is sent when token is
+    falsy, so the gateway 401s and that is caught here too), a malformed
+    response.
+
+    THIS DOES NOT MEAN "ASSUME UNREAD." The caller's decision matrix treats
+    None as F2 FAIL-CLOSED: cursor_stale + process_alive + unread=None -> noop,
+    can't verify work, don't poke. A prior version of this docstring claimed
+    the opposite ("assume unread, still tries to wake") and was wrong about
+    the code it was documenting — found 2026-08-12 when the contradiction
+    caused a real reader to conclude a gateway/token outage makes A1 MORE
+    eager, when it makes A1 permanently inert for that cell instead.
     """
-    url = f"{gateway.rstrip('/')}/messages?to_node={peer}&unread_only=true&limit=1"
+    query = urllib.parse.urlencode({"to_node": peer, "unread_only": "true", "limit": 1})
+    url = f"{gateway.rstrip('/')}/messages?{query}"
     req = urllib.request.Request(url)
     if token:
         req.add_header("Authorization", f"Bearer {token}")
+    else:
+        # A missing token and a network outage both surface as None to the
+        # caller (correctly — the decision matrix treats them the same way),
+        # but they are different FACTS an operator would want to know apart.
+        # No token means A1 is permanently inert for this cell until one is
+        # configured, not just this tick. Recurrence of the 2026-05-27
+        # "watchdog inert for 12 days, no token in service env" incident —
+        # loud here so it cannot silently repeat a third time.
+        print(f"swarph watchdog: no MESH_GATEWAY_TOKEN for peer={peer} — "
+              f"unread-count check may 401 if the gateway requires auth; "
+              f"A1 stays inert until one is set",
+              file=sys.stderr)
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -1841,7 +1869,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="With --install-service: show what would be written without "
              "writing. Useful for review or non-root preview.",
     )
-    p.add_argument("--cell", default=os.environ.get("SWARPH_CELL", "lab"))
+    p.add_argument(
+        "--cell",
+        default=(
+            os.environ.get("SWARPH_SELF")
+            or os.environ.get("SWARPH_CELL")
+            or "unidentified-cell"
+        ),
+    )
     p.add_argument("--cursor", default=None)
     p.add_argument(
         "--activity-marker", default=None,
@@ -1860,7 +1895,10 @@ def _build_parser() -> argparse.ArgumentParser:
              "many seconds (covers mid-long-turn working sessions where "
              "cursor-mtime is stale but session is alive).",
     )
-    p.add_argument("--gateway", default=_DEFAULT_GATEWAY_URL)
+    p.add_argument(
+        "--gateway",
+        default=os.environ.get("MESH_GATEWAY_URL", _DEFAULT_GATEWAY_URL),
+    )
     p.add_argument("--tmux-session", default=None)
     p.add_argument("--peer", default=None)
     p.add_argument(
