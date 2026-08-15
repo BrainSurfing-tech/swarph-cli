@@ -18,6 +18,7 @@ def test_peer_bound_claim_and_receipt(tmp_path):
     receipt = {"job_id": "job-1", "source_dm_id": 17, "destination_peer": "gpt-lc", "fencing_token": claim["fencing_token"], "output_digest": output["output_digest"]}
     spool.accept_receipt(receipt)
     assert spool.receipt_accepted("job-1")
+    assert spool.accepted_receipt("job-1") == receipt
     assert (tmp_path / "spool" / "receipts" / "job-1.json").exists()
 
 
