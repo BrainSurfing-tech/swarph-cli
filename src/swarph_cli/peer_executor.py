@@ -5,6 +5,7 @@ the ownership boundary those launchers must satisfy: jobs are addressed to one
 peer, claims carry a monotonic fencing token, and receipts are accepted only
 for the current claim.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -51,7 +52,13 @@ def _canonical_id(value: object, field: str) -> str:
 
 
 def _validate_job(job: dict) -> None:
-    allowed = {"schema_version", "job_id", "source_dm_id", "destination_peer", "delivery_ref"}
+    allowed = {
+        "schema_version",
+        "job_id",
+        "source_dm_id",
+        "destination_peer",
+        "delivery_ref",
+    }
     unknown = set(job) - allowed
     if unknown:
         raise PeerExecutorError(f"job contains undeclared fields: {sorted(unknown)}")
@@ -59,7 +66,9 @@ def _validate_job(job: dict) -> None:
         raise PeerExecutorError("unsupported job schema_version")
     _canonical_id(job.get("job_id"), "job_id")
     _canonical_id(job.get("destination_peer"), "destination_peer")
-    if not isinstance(job.get("source_dm_id"), int) or isinstance(job["source_dm_id"], bool):
+    if not isinstance(job.get("source_dm_id"), int) or isinstance(
+        job["source_dm_id"], bool
+    ):
         raise PeerExecutorError("source_dm_id must be an integer")
     if (
         not isinstance(job.get("delivery_ref"), str)
@@ -79,6 +88,54 @@ def _validate_digest(value: object) -> str:
     except ValueError as exc:
         raise PeerExecutorError("output_digest must be a SHA-256 digest") from exc
     return value
+
+
+def _validate_source_ref(value: object, source_dm_id: int) -> dict:
+    """Validate the immutable queue provenance carried by a service receipt."""
+    required = {"queue_entry_id", "source_dm_id", "queue_claim_fence"}
+    if not isinstance(value, dict) or set(value) != required:
+        raise PeerExecutorError(
+            "source_ref must contain the queue reconciliation contract"
+        )
+    for key in required:
+        if (
+            not isinstance(value[key], int)
+            or isinstance(value[key], bool)
+            or value[key] < 1
+        ):
+            raise PeerExecutorError("source_ref must use positive integer identifiers")
+    if (
+        value["queue_entry_id"] != value["source_dm_id"]
+        or value["source_dm_id"] != source_dm_id
+    ):
+        raise PeerExecutorError("source_ref does not identify the receipt source DM")
+    return dict(value)
+
+
+def _validate_receipt(receipt: object) -> dict:
+    required = {
+        "job_id",
+        "source_dm_id",
+        "destination_peer",
+        "fencing_token",
+        "output_digest",
+        "source_ref",
+    }
+    if not isinstance(receipt, dict) or set(receipt) != required:
+        raise PeerExecutorError(
+            "receipt must contain the complete service receipt contract"
+        )
+    for key in ("job_id", "destination_peer"):
+        _canonical_id(receipt.get(key), key)
+    if not isinstance(receipt["fencing_token"], int) or receipt["fencing_token"] < 1:
+        raise PeerExecutorError("receipt fencing_token must be a positive integer")
+    if not isinstance(receipt["source_dm_id"], int) or isinstance(
+        receipt["source_dm_id"], bool
+    ):
+        raise PeerExecutorError("receipt source_dm_id must be an integer")
+    _validate_digest(receipt["output_digest"])
+    _validate_source_ref(receipt["source_ref"], receipt["source_dm_id"])
+    return receipt
 
 
 @contextmanager
@@ -119,7 +176,14 @@ class PeerSpool:
 
     def initialize(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
-        for directory in (self.pending, self.running, self.claims, self.locks, self.outputs, self.receipts):
+        for directory in (
+            self.pending,
+            self.running,
+            self.claims,
+            self.locks,
+            self.outputs,
+            self.receipts,
+        ):
             directory.mkdir(exist_ok=True)
             if directory.stat().st_dev != self.root.stat().st_dev:
                 raise PeerExecutorError("spool directories must be on one filesystem")
@@ -179,7 +243,9 @@ class PeerSpool:
             _write_atomic(claim_path, claim)
         return claim
 
-    def write_output(self, job_id: str, peer: str, fencing_token: int, text: str) -> dict:
+    def write_output(
+        self, job_id: str, peer: str, fencing_token: int, text: str
+    ) -> dict:
         """Persist the service result before a receipt can acknowledge it."""
         self.initialize()
         job_id, peer = _canonical_id(job_id, "job_id"), _canonical_id(peer, "peer")
@@ -190,7 +256,11 @@ class PeerSpool:
         with _exclusive_file_lock(self.locks / f"{job_id}.lock"):
             job = _read_object(self.running / f"{job_id}.json")
             claim = _read_object(self.claims / f"{job_id}.json")
-            if (job.get("destination_peer"), claim.get("destination_peer"), claim.get("fencing_token")) != (
+            if (
+                job.get("destination_peer"),
+                claim.get("destination_peer"),
+                claim.get("fencing_token"),
+            ) != (
                 peer,
                 peer,
                 fencing_token,
@@ -210,22 +280,100 @@ class PeerSpool:
             _write_atomic(output_path, output)
         return output
 
+    def produce_receipt(
+        self,
+        job_id: str,
+        peer: str,
+        fencing_token: int,
+        text: str,
+        source_ref: dict,
+    ) -> dict:
+        """Persist service output and its queue-bound receipt under one job lock.
+
+        A retry after a crash returns the same receipt only when the text,
+        provenance, peer, and fence all still match the active claim.
+        """
+        self.initialize()
+        job_id, peer = _canonical_id(job_id, "job_id"), _canonical_id(peer, "peer")
+        if not isinstance(fencing_token, int) or fencing_token < 1:
+            raise PeerExecutorError("fencing_token must be a positive integer")
+        if not isinstance(text, str):
+            raise PeerExecutorError("output text must be a string")
+
+        with _exclusive_file_lock(self.locks / f"{job_id}.lock"):
+            job = _read_object(self.running / f"{job_id}.json")
+            claim = _read_object(self.claims / f"{job_id}.json")
+            if (
+                job.get("destination_peer"),
+                claim.get("destination_peer"),
+                claim.get("fencing_token"),
+            ) != (
+                peer,
+                peer,
+                fencing_token,
+            ):
+                raise PeerExecutorError("stale or wrong-peer receipt producer")
+            validated_source_ref = _validate_source_ref(source_ref, job["source_dm_id"])
+            digest = output_digest(text)
+            receipt = {
+                "job_id": job_id,
+                "source_dm_id": job["source_dm_id"],
+                "destination_peer": peer,
+                "fencing_token": fencing_token,
+                "output_digest": digest,
+                "source_ref": validated_source_ref,
+            }
+            receipt_path = self.receipts / f"{job_id}.json"
+            if receipt_path.exists():
+                accepted = _read_object(receipt_path)
+                self._validate_accepted_receipt(accepted)
+                if accepted != receipt:
+                    raise PeerExecutorError(
+                        "existing receipt does not match producer retry"
+                    )
+                return accepted
+
+            output_path = self._output_path(job_id, fencing_token)
+            if output_path.exists():
+                output = _read_object(output_path)
+                if output != {
+                    "job_id": job_id,
+                    "source_dm_id": job["source_dm_id"],
+                    "destination_peer": peer,
+                    "fencing_token": fencing_token,
+                    "text": text,
+                    "output_digest": digest,
+                }:
+                    raise PeerExecutorError(
+                        "existing output does not match receipt producer"
+                    )
+            else:
+                _write_atomic(
+                    output_path,
+                    {
+                        "job_id": job_id,
+                        "source_dm_id": job["source_dm_id"],
+                        "destination_peer": peer,
+                        "fencing_token": fencing_token,
+                        "text": text,
+                        "output_digest": digest,
+                    },
+                )
+            _write_atomic(receipt_path, receipt)
+            return receipt
+
     def accept_receipt(self, receipt: dict) -> None:
         self.initialize()
-        for key in ("job_id", "destination_peer"):
-            _canonical_id(receipt.get(key), key)
-        if not isinstance(receipt.get("fencing_token"), int):
-            raise PeerExecutorError("receipt fencing_token must be an integer")
-        if not isinstance(receipt.get("source_dm_id"), int) or isinstance(receipt["source_dm_id"], bool):
-            raise PeerExecutorError("receipt source_dm_id must be an integer")
-        _validate_digest(receipt.get("output_digest"))
+        _validate_receipt(receipt)
         with _exclusive_file_lock(self.locks / f"{receipt['job_id']}.lock"):
             claim = _read_object(self.claims / f"{receipt['job_id']}.json")
             job = _read_object(self.running / f"{receipt['job_id']}.json")
             if (claim["destination_peer"], claim["fencing_token"]) != (
-                receipt["destination_peer"], receipt["fencing_token"]
+                receipt["destination_peer"],
+                receipt["fencing_token"],
             ) or (job.get("destination_peer"), job.get("source_dm_id")) != (
-                receipt["destination_peer"], receipt["source_dm_id"]
+                receipt["destination_peer"],
+                receipt["source_dm_id"],
             ):
                 raise PeerExecutorError("stale or wrong-peer receipt")
             output_path = self._output_path(receipt["job_id"], receipt["fencing_token"])
@@ -274,11 +422,18 @@ class PeerSpool:
 
     def _validate_accepted_receipt(self, receipt: dict) -> None:
         self.initialize()
+        _validate_receipt(receipt)
         job_id = _canonical_id(receipt.get("job_id"), "job_id")
         running = _read_object(self.running / f"{job_id}.json")
         claim = _read_object(self.claims / f"{job_id}.json")
-        if (receipt.get("destination_peer"), receipt.get("source_dm_id"), receipt.get("fencing_token")) != (
-            running.get("destination_peer"), running.get("source_dm_id"), claim.get("fencing_token")
+        if (
+            receipt.get("destination_peer"),
+            receipt.get("source_dm_id"),
+            receipt.get("fencing_token"),
+        ) != (
+            running.get("destination_peer"),
+            running.get("source_dm_id"),
+            claim.get("fencing_token"),
         ):
             raise PeerExecutorError("receipt no longer matches current claim")
         output_path = self._output_path(job_id, receipt["fencing_token"])
@@ -289,7 +444,9 @@ class PeerSpool:
             raise PeerExecutorError("receipt output digest no longer matches")
 
     @staticmethod
-    def _new_claim(job_id: str, peer: str, *, token: int, now: float | None = None) -> dict:
+    def _new_claim(
+        job_id: str, peer: str, *, token: int, now: float | None = None
+    ) -> dict:
         if token < 1:
             raise PeerExecutorError("fencing_token must be a positive integer")
         claimed_at = time.time() if now is None else now
@@ -329,6 +486,14 @@ class PeerService:
     def accept_receipt(self, receipt: dict) -> None:
         self._authorize()
         self.spool.accept_receipt(receipt)
+
+    def produce_receipt(
+        self, job_id: str, fencing_token: int, text: str, source_ref: dict
+    ) -> dict:
+        self._authorize()
+        return self.spool.produce_receipt(
+            job_id, self.peer, fencing_token, text, source_ref
+        )
 
     def _authorize(self) -> None:
         self.authorizer.require_service(self.peer, self.spool.root)
