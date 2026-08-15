@@ -234,6 +234,66 @@ class DeliveryQueue:
         self._pending.remove(entry)
         self._persist()
 
+    def reconcile_spool_receipt(self, receipt: dict) -> bool:
+        """Acknowledge a validated spool handoff without trusting a bare ID.
+
+        The caller must obtain ``receipt`` through ``PeerSpool.accepted_receipt``.
+        ``source_ref`` binds that durable receipt to this queue claim; removing
+        the queue item is then a retryable acknowledgement of the handoff.
+        """
+        required = {
+            "job_id", "source_dm_id", "destination_peer", "fencing_token",
+            "output_digest", "source_ref",
+        }
+        if not isinstance(receipt, dict) or not required.issubset(receipt):
+            raise DeliveryQueueError("spool receipt lacks the reconciliation contract")
+        source_ref = receipt["source_ref"]
+        if not isinstance(source_ref, dict) or set(source_ref) != {
+            "queue_entry_id", "source_dm_id", "queue_claim_fence",
+        }:
+            raise DeliveryQueueError("spool receipt source_ref is invalid")
+        for key in ("queue_entry_id", "source_dm_id", "queue_claim_fence"):
+            if not isinstance(source_ref[key], int) or isinstance(source_ref[key], bool):
+                raise DeliveryQueueError("spool receipt source_ref must use integer identifiers")
+        if source_ref["queue_entry_id"] != source_ref["source_dm_id"] or (
+            receipt["source_dm_id"] != source_ref["source_dm_id"]
+        ):
+            raise DeliveryQueueError("spool receipt source_ref does not identify its source DM")
+        if not isinstance(receipt["fencing_token"], int) or receipt["fencing_token"] < 1:
+            raise DeliveryQueueError("spool receipt fencing_token must be a positive integer")
+        if not isinstance(receipt["output_digest"], str) or len(receipt["output_digest"]) != 64:
+            raise DeliveryQueueError("spool receipt output_digest must be a SHA-256 digest")
+        try:
+            int(receipt["output_digest"], 16)
+        except ValueError as exc:
+            raise DeliveryQueueError("spool receipt output_digest must be a SHA-256 digest") from exc
+
+        try:
+            entry = self._entry(source_ref["queue_entry_id"])
+        except DeliveryQueueError:
+            if any(
+                accepted.get("source_ref") == source_ref
+                and accepted.get("output_digest") == receipt["output_digest"]
+                for accepted in self._receipts
+            ):
+                return False
+            raise
+        job = entry.get("job")
+        if entry.get("service_state") != "claimed" or not isinstance(job, dict):
+            raise DeliveryQueueError("source DM has no active service claim")
+        if (
+            job.get("job_id"), job.get("source_dm_id"), job.get("destination_peer"),
+            job.get("fencing_token"),
+        ) != (
+            receipt["job_id"], receipt["source_dm_id"], receipt["destination_peer"],
+            source_ref["queue_claim_fence"],
+        ):
+            raise DeliveryQueueError("spool receipt does not match the active queue claim")
+        self._receipts.append(dict(receipt))
+        self._pending.remove(entry)
+        self._persist()
+        return True
+
     def status(self, *, now: float | None = None) -> dict:
         """Return operator-ready owed-work counts and oldest age."""
         observed_at = time.time() if now is None else now
