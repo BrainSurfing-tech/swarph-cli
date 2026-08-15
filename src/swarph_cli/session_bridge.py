@@ -45,7 +45,7 @@ def _capture(pane_id: str) -> Optional[str]:
     try:
         r = subprocess.run(
             [mux, "capture-pane", "-p", "-t", pane_id],
-            capture_output=True, timeout=5, text=True,
+            capture_output=True, timeout=5, text=True, encoding="utf-8", errors="replace",
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return None
@@ -85,7 +85,7 @@ def _send_key(pane_id: str, key: str) -> bool:
     try:
         r = subprocess.run(
             [mux, "send-keys", "-t", pane_id, key],
-            capture_output=True, timeout=5, text=True,
+            capture_output=True, timeout=5, text=True, encoding="utf-8", errors="replace",
         )
         return r.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
@@ -129,13 +129,13 @@ def inject(pane_id: str, text: str) -> bool:
     try:
         r1 = subprocess.run(
             [mux, "send-keys", "-t", pane_id, "-l", body],
-            capture_output=True, timeout=5, text=True,
+            capture_output=True, timeout=5, text=True, encoding="utf-8", errors="replace",
         )
         if r1.returncode != 0:
             return False
         r2 = subprocess.run(
             [mux, "send-keys", "-t", pane_id, "Enter"],
-            capture_output=True, timeout=5, text=True,
+            capture_output=True, timeout=5, text=True, encoding="utf-8", errors="replace",
         )
         return r2.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
@@ -158,7 +158,7 @@ def resolve_session_pane(self_name: str) -> Optional[str]:
         r = subprocess.run(
             [mux, "list-panes", "-t", self_name, "-F",
              "#{window_index} #{pane_index} #{pane_current_command}"],
-            capture_output=True, timeout=5, text=True,
+            capture_output=True, timeout=5, text=True, encoding="utf-8", errors="replace",
         )
         if r.returncode != 0:
             return None

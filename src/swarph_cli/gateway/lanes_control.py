@@ -223,7 +223,7 @@ def _fleet(action: str, unit: str, *, actor: str = "commander", lane: str = "") 
         raise LaneError(503, "fleet control disabled: wrapper integrity check failed")
     try:
         p = subprocess.run(["sudo", "-n", _svc.FLEETCTL, action, unit],
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
     except subprocess.TimeoutExpired:
         _audit(actor, lane, action, unit, "timeout")
         raise LaneError(504, "fleetctl timeout")

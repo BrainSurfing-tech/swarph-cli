@@ -268,7 +268,7 @@ class AppServer:
     def __init__(self, codex: str, cwd: str, timeout: float) -> None:
         self.proc = subprocess.Popen(
             [codex, "app-server", "--stdio"], stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, text=True, encoding="utf-8",
+            stdout=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
         )
         self.child_pid = self.proc.pid
         self.cwd, self.timeout, self.seq = cwd, timeout, 0

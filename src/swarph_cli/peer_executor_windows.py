@@ -29,7 +29,7 @@ def current_windows_sid() -> str:
         ["whoami", "/user", "/fo", "csv", "/nh"],
         check=True,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
     rows = list(csv.reader(io.StringIO(result.stdout)))
     if len(rows) != 1 or len(rows[0]) != 2 or not rows[0][1].startswith("S-"):

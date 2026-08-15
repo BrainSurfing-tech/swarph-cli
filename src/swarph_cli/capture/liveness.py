@@ -30,7 +30,7 @@ def _pane_pids(holder: str) -> List[int]:
     try:
         out = subprocess.run(
             ["tmux", "list-panes", "-t", holder, "-F", "#{pane_pid}"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
     except (OSError, subprocess.SubprocessError):
         return []

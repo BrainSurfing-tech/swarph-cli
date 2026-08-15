@@ -88,7 +88,7 @@ def run_provider(provider: str, prompt: str, timeout: int = _DEFAULT_TIMEOUT,
     home = prepare_isolated_home(provider, root)
     source = os.environ if base_env is None else base_env
     env = build_isolated_env(source, home, provider)
-    proc = subprocess.run(argv, env=env, capture_output=True, text=True,
+    proc = subprocess.run(argv, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
                           timeout=timeout)
     if proc.returncode != 0:
         raise RuntimeError(

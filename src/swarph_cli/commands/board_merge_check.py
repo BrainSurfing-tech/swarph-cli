@@ -249,7 +249,7 @@ def fetch_pr_state(repo: str, number: str) -> dict:
     """
     def gh(*args):
         try:
-            p = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=60)
+            p = subprocess.run(["gh", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
             return p.stdout if p.returncode == 0 else None
         except (OSError, subprocess.SubprocessError):
             return None

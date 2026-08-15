@@ -94,7 +94,7 @@ def _now_ts() -> str:
 
 def _git(repo: Path, *args: str, check: bool = False):
     return subprocess.run(["git", "-C", str(repo), *args],
-                          capture_output=True, text=True, check=check)
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", check=check)
 
 
 def _resolve_dir(arg) -> Path:

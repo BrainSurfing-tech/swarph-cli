@@ -290,7 +290,7 @@ def discover_surfaces() -> list[dict]:
     # "no crontab" branch would tell grok and stay silent for a cell that HAS a
     # crontab and ALSO has a line under another user.
     try:
-        p = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+        p = subprocess.run(["crontab", "-l"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
         surfaces += user_crontab_surfaces(p.returncode, p.stdout, p.stderr)
     except FileNotFoundError:
         # NOT APPLICABLE — a THIRD state, distinct from read and from failed-to-read.
@@ -368,7 +368,7 @@ def _unit_live(unit: str, *, user: bool) -> bool:
     def _q(verb: str) -> str:
         try:
             return subprocess.run(["systemctl", *scope, verb, unit],
-                                  capture_output=True, text=True, timeout=10).stdout.strip()
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10).stdout.strip()
         except (OSError, subprocess.SubprocessError):
             return "unknown"
     return not (_q("is-active") != "active" and _q("is-enabled") in ("disabled", "masked"))

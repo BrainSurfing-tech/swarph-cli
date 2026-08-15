@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.42.9 — 2026-08-12
+
+- **Windows: subprocess output is decoded as UTF-8, not the ANSI code page.** Every `subprocess`
+  call that decodes text now passes `encoding="utf-8", errors="replace"` — 27 sites, no exemptions.
+  `text=True` alone uses `locale.getpreferredencoding(False)`, which is UTF-8 on Linux and **cp1252
+  or cp850 on Windows**, so any non-ASCII byte in a captured pane produced mojibake, and any byte
+  undefined in the code page raised `UnicodeDecodeError`.
+
+  **The failure was invisible by construction.** The exception is raised in `subprocess`'s *reader
+  thread*, so `run()` returns `returncode 0` with `stdout` set to `None`, and the caller dies later
+  on the `None` instead. Nothing ever logged `UnicodeDecodeError` — two separate searches for that
+  string came back empty and were reported as negatives. **The absence of a traceback was the
+  signature, not a refutation.**
+
+  `errors="replace"` is load-bearing rather than merely cautious: bare UTF-8 fixes the mojibake and
+  still raises on invalid bytes, and `capture-pane` reads whatever a TUI painted — including a
+  partial escape sequence at a buffer boundary. `session_bridge` feeds `probe_pane`, so a raise
+  costs the caller its idle/busy/modal verdict *and* its fail-safe. (#226)
+
 ## 0.42.8 — 2026-08-12
 
 - **tmux wakes now submit on Codex.** `_tmux_wake` sends the payload literally (`-l`, since 0.42.7)

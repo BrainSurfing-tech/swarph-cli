@@ -858,14 +858,14 @@ def _tmux_wake(target: str) -> bool:
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         subprocess.run(
             ["tmux", "send-keys", "-t", target, "Enter"],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         # Codex needs a second Enter to submit its multiline composer. In
         # single-submit composers the first Enter already sends the prompt and
@@ -875,7 +875,7 @@ def _tmux_wake(target: str) -> bool:
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         return True
     except (OSError, subprocess.CalledProcessError) as exc:
@@ -897,7 +897,7 @@ def _tmux_notify(target: str, dm_count: int) -> bool:
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         return True
     except (OSError, subprocess.CalledProcessError) as exc:

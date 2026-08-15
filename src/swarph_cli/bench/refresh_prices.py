@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# PORTED-FROM: hedge-fund-mcp:scripts/refresh_llm_prices.py@a7e3f69 (synced 2026-08-11)
+# Machine-checkable provenance, verified IN_SYNC against origin/main by
+# proven.packs.port_link. The prose claim below is correct but unverifiable; this line is
+# the same claim with a ref attached, so when the omega source advances, the port owed
+# becomes a VERDICT instead of a surprise found by diffing two files by hand.
 """Refresh swarph-bench's LLM LIST-price base from the maintained LiteLLM
 repo — LIFTED from the reference lab's already-tested
 ``scripts/refresh_llm_prices.py`` (adapted cache path only).
