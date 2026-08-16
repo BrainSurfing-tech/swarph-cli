@@ -27,6 +27,7 @@ class PeerReplyOutbox:
 
     def __init__(self, root: Path):
         self.root = Path(root)
+        self.pending = self.root / "pending"
 
     def stage(self, spool: PeerSpool, job_id: str) -> dict:
         result = spool.accepted_result(job_id)
@@ -45,7 +46,7 @@ class PeerReplyOutbox:
             "receipt_digest": receipt_digest(receipt),
             "content": output["text"],
         }
-        path = self.root / f"{receipt['job_id']}.json"
+        path = self.pending / f"{receipt['job_id']}.json"
         if path.exists():
             try:
                 existing = json.loads(path.read_text(encoding="utf-8"))

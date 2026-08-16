@@ -89,8 +89,8 @@ def test_stage_refuses_unaccepted_or_legacy_unroutable_results(tmp_path):
 def test_stage_rejects_a_conflicting_preexisting_envelope(tmp_path):
     spool = _completed_spool(tmp_path)
     outbox = PeerReplyOutbox(tmp_path / "outbox")
-    outbox.root.mkdir()
-    (outbox.root / "dm-17.json").write_text('{"forged":true}\n', encoding="utf-8")
+    outbox.pending.mkdir(parents=True)
+    (outbox.pending / "dm-17.json").write_text('{"forged":true}\n', encoding="utf-8")
 
     with pytest.raises(PeerExecutorError, match="conflicts"):
         outbox.stage(spool, "dm-17")
