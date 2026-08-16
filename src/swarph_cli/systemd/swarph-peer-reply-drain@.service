@@ -1,0 +1,10 @@
+[Unit]
+Description=Deliver receipt-gated Swarph peer-service replies (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=75s
+EnvironmentFile=%h/.config/swarph/peer-reply-drain-%i.env
+ExecStart=/usr/local/bin/swarph peer-reply-drain --as %i --spool-dir ${SWARPH_PEER_SPOOL_DIR} --outbox-dir ${SWARPH_PEER_REPLY_OUTBOX_DIR} --gateway ${SWARPH_GATEWAY} --token-file ${SWARPH_TOKEN_FILE}

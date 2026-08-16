@@ -22,6 +22,10 @@ REQUIRED = [
      "deploy/monitor/README.md tells operators to run it"),
     ("systemd/swarph-watchdog.service",
      "`swarph watchdog --install-service` reads it via importlib.resources"),
+    ("systemd/swarph-peer-reply-drain@.service",
+     "peer-service reply delivery must be installed with its bounded supervisor"),
+    ("systemd/swarph-peer-reply-drain@.timer",
+     "peer-service reply delivery must be scheduled after installation"),
 ]
 
 

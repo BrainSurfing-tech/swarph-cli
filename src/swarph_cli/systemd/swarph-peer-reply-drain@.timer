@@ -1,0 +1,12 @@
+[Unit]
+Description=Deliver receipt-gated Swarph peer-service replies (%i)
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=15s
+AccuracySec=2s
+Persistent=true
+Unit=swarph-peer-reply-drain@%i.service
+
+[Install]
+WantedBy=timers.target
