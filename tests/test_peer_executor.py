@@ -7,6 +7,7 @@ from swarph_cli.peer_executor import (
     PeerExecutorError,
     PeerService,
     PeerSpool,
+    envelope_digest,
     output_digest,
 )
 
@@ -32,6 +33,8 @@ def _receipt(claim, digest):
         "destination_peer": "gpt-lc",
         "fencing_token": claim["fencing_token"],
         "output_digest": digest,
+        "payload_digest": output_digest("payload"),
+        "envelope_digest": envelope_digest(_job()),
         "source_ref": _source_ref(),
     }
 
@@ -110,6 +113,19 @@ def test_receipt_requires_matching_durable_output(tmp_path):
         spool.accept_receipt(receipt)
 
 
+def test_receipt_requires_matching_durable_envelope(tmp_path):
+    spool = PeerSpool(tmp_path / "spool")
+    spool.enqueue(_job())
+    claim = spool.claim("job-1", "gpt-lc")
+    output = spool.write_output("job-1", "gpt-lc", claim["fencing_token"], "done")
+
+    with pytest.raises(PeerExecutorError, match="durable envelope"):
+        spool.accept_receipt(
+            _receipt(claim, output["output_digest"])
+            | {"envelope_digest": output_digest("forged envelope")}
+        )
+
+
 def test_receipt_requires_queue_provenance(tmp_path):
     spool = PeerSpool(tmp_path / "spool")
     spool.enqueue(_job())
@@ -133,6 +149,8 @@ def test_reclaim_waits_for_receipt_acceptance(tmp_path, monkeypatch):
         "destination_peer": "gpt-lc",
         "fencing_token": claim["fencing_token"],
         "output_digest": output["output_digest"],
+        "payload_digest": output_digest("payload"),
+        "envelope_digest": envelope_digest(_job()),
         "source_ref": _source_ref(),
     }
     original_write = peer_executor._write_atomic
@@ -282,14 +300,26 @@ def test_peer_service_produces_a_queue_bound_receipt_idempotently(tmp_path):
     source_ref = _source_ref(fence=9)
 
     receipt = service.produce_receipt(
-        "job-1", claim["fencing_token"], "done", source_ref
+        "job-1",
+        claim["fencing_token"],
+        "done",
+        source_ref,
+        output_digest("payload"),
+        envelope_digest(_job()),
     )
 
     assert receipt == _receipt(claim, output_digest("done")) | {
         "source_ref": source_ref
     }
     assert (
-        service.produce_receipt("job-1", claim["fencing_token"], "done", source_ref)
+        service.produce_receipt(
+            "job-1",
+            claim["fencing_token"],
+            "done",
+            source_ref,
+            output_digest("payload"),
+            envelope_digest(_job()),
+        )
         == receipt
     )
     assert spool.accepted_receipt("job-1") == receipt
@@ -308,6 +338,8 @@ def test_receipt_producer_rejects_forged_or_wrong_source_ref(tmp_path):
             claim["fencing_token"],
             "done",
             {"queue_entry_id": 18, "source_dm_id": 18, "queue_claim_fence": 1},
+            output_digest("payload"),
+            envelope_digest(_job()),
         )
     assert not (spool.outputs / "job-1.1.json").exists()
     assert not (spool.receipts / "job-1.json").exists()
@@ -320,7 +352,13 @@ def test_receipt_producer_recovers_after_output_before_receipt(tmp_path):
     output = spool.write_output("job-1", "gpt-lc", claim["fencing_token"], "done")
 
     receipt = spool.produce_receipt(
-        "job-1", "gpt-lc", claim["fencing_token"], "done", _source_ref(fence=4)
+        "job-1",
+        "gpt-lc",
+        claim["fencing_token"],
+        "done",
+        _source_ref(fence=4),
+        output_digest("payload"),
+        envelope_digest(_job()),
     )
 
     assert receipt["output_digest"] == output["output_digest"]

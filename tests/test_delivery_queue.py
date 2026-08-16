@@ -1,7 +1,7 @@
 import pytest
 
 from swarph_cli.delivery_queue import DeliveryQueue, DeliveryQueueError, wake_for
-from swarph_cli.peer_executor import PeerSpool
+from swarph_cli.peer_executor import PeerSpool, envelope_digest, output_digest
 from swarph_cli.peer_reconciliation import PeerReceiptReconciler
 from swarph_cli.peer_staging import PeerSpoolStager
 
@@ -107,21 +107,29 @@ def test_validated_spool_receipt_reconciles_queue_idempotently(tmp_path):
     q.record_eligibility(17, "eligible", "question is assigned to the service")
     job = q.claim_for_service(17, "gpt-lc", max_active=1)
     spool = PeerSpool(tmp_path / "spool")
-    spool.enqueue({
+    envelope = {
         "schema_version": 1,
         "job_id": job["job_id"],
         "source_dm_id": job["source_dm_id"],
         "destination_peer": job["destination_peer"],
         "delivery_ref": "queue:17",
-    })
+    }
+    spool.enqueue(envelope)
     claim = spool.claim(job["job_id"], "gpt-lc")
     output = spool.write_output(job["job_id"], "gpt-lc", claim["fencing_token"], "done")
     receipt = {
-        "job_id": job["job_id"], "source_dm_id": 17,
-        "destination_peer": "gpt-lc", "fencing_token": claim["fencing_token"],
+        "job_id": job["job_id"],
+        "source_dm_id": 17,
+        "destination_peer": "gpt-lc",
+        "fencing_token": claim["fencing_token"],
         "output_digest": output["output_digest"],
-        "source_ref": {"queue_entry_id": 17, "source_dm_id": 17,
-                       "queue_claim_fence": job["fencing_token"]},
+        "payload_digest": output_digest("payload"),
+        "envelope_digest": envelope_digest(envelope),
+        "source_ref": {
+            "queue_entry_id": 17,
+            "source_dm_id": 17,
+            "queue_claim_fence": job["fencing_token"],
+        },
     }
     spool.accept_receipt(receipt)
     reconciler = PeerReceiptReconciler(q, spool)
@@ -137,11 +145,16 @@ def test_spool_receipt_cannot_reconcile_a_different_queue_claim(tmp_path):
     q.record_eligibility(17, "eligible", "question is assigned to the service")
     job = q.claim_for_service(17, "gpt-lc", max_active=1)
     receipt = {
-        "job_id": job["job_id"], "source_dm_id": 17,
-        "destination_peer": "gpt-lc", "fencing_token": 1,
+        "job_id": job["job_id"],
+        "source_dm_id": 17,
+        "destination_peer": "gpt-lc",
+        "fencing_token": 1,
         "output_digest": "a" * 64,
-        "source_ref": {"queue_entry_id": 17, "source_dm_id": 17,
-                       "queue_claim_fence": job["fencing_token"] + 1},
+        "source_ref": {
+            "queue_entry_id": 17,
+            "source_dm_id": 17,
+            "queue_claim_fence": job["fencing_token"] + 1,
+        },
     }
     with pytest.raises(DeliveryQueueError, match="active queue claim"):
         q.reconcile_spool_receipt(receipt)
