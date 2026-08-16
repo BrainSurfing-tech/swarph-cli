@@ -37,8 +37,8 @@ class PeerReplyOutbox:
         source_peer = source_ref.get("source_peer")
         if not isinstance(source_peer, str) or not source_peer:
             raise PeerExecutorError("accepted receipt has no routable source peer")
-        if not output["text"]:
-            raise PeerExecutorError("accepted output is empty and cannot be published")
+        if not isinstance(output["text"], str) or not output["text"].strip():
+            raise PeerExecutorError("accepted output is blank and cannot be published")
         envelope = {
             "schema_version": 1,
             "job_id": receipt["job_id"],

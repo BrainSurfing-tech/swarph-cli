@@ -94,3 +94,20 @@ def test_stage_rejects_a_conflicting_preexisting_envelope(tmp_path):
 
     with pytest.raises(PeerExecutorError, match="conflicts"):
         outbox.stage(spool, "dm-17")
+
+
+def test_stage_refuses_whitespace_only_accepted_output(tmp_path):
+    spool = PeerSpool(tmp_path / "spool")
+    spool.enqueue(_job())
+    service = PeerService(spool, "gpt-lc", _Authorizer())
+    claim = service.claim("dm-17")
+    source_ref = json.loads(_job()["delivery_ref"])
+    from swarph_cli.peer_executor import envelope_digest, output_digest
+
+    service.produce_receipt(
+        "dm-17", claim["fencing_token"], " \t\n", source_ref,
+        output_digest("request body"), envelope_digest(_job()),
+    )
+
+    with pytest.raises(PeerExecutorError, match="blank"):
+        PeerReplyOutbox(tmp_path / "outbox").stage(spool, "dm-17")
