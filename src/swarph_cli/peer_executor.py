@@ -97,6 +97,13 @@ def envelope_digest(job: dict) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def receipt_digest(receipt: dict) -> str:
+    """Return the stable digest of a validated persisted service receipt."""
+    _validate_persisted_receipt(receipt)
+    encoded = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _validate_source_ref(value: object, source_dm_id: int) -> dict:
     """Validate the immutable queue provenance carried by a service receipt."""
     required = {"queue_entry_id", "source_dm_id", "queue_claim_fence"}

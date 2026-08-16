@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from swarph_cli.peer_executor import PeerExecutorError, PeerService, PeerSpool
+from swarph_cli.peer_executor import PeerExecutorError, PeerService, PeerSpool, receipt_digest
 from swarph_cli.peer_reply_outbox import PeerReplyOutbox
 from swarph_cli.peer_service_host import PeerPayload, PeerServiceHost
 
@@ -52,16 +52,15 @@ def _completed_spool(tmp_path):
     return spool
 
 
-def test_stage_derives_reply_target_only_from_accepted_receipt(tmp_path):
+def test_stage_binds_content_to_the_accepted_receipt_without_emitting_a_target(tmp_path):
     spool = _completed_spool(tmp_path)
     outbox = PeerReplyOutbox(tmp_path / "outbox")
 
     envelope = outbox.stage(spool, "dm-17")
 
-    assert envelope["to_node"] == "gpt-ops"
-    assert envelope["kind"] == "answer"
     assert envelope["content"] == "service response"
-    assert envelope["source_ref"]["source_peer"] == "gpt-ops"
+    assert set(envelope) == {"schema_version", "job_id", "receipt_digest", "content"}
+    assert envelope["receipt_digest"] == receipt_digest(spool.accepted_receipt("dm-17"))
     assert outbox.stage(spool, "dm-17") == envelope
 
 

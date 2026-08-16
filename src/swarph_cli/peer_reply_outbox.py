@@ -12,7 +12,7 @@ import os
 import uuid
 from pathlib import Path
 
-from swarph_cli.peer_executor import PeerExecutorError, PeerSpool
+from swarph_cli.peer_executor import PeerExecutorError, PeerSpool, receipt_digest
 
 
 def _write_atomic(path: Path, value: dict) -> None:
@@ -42,13 +42,8 @@ class PeerReplyOutbox:
         envelope = {
             "schema_version": 1,
             "job_id": receipt["job_id"],
-            "source_dm_id": receipt["source_dm_id"],
-            "to_node": source_peer,
-            "kind": "answer",
+            "receipt_digest": receipt_digest(receipt),
             "content": output["text"],
-            "fencing_token": receipt["fencing_token"],
-            "output_digest": receipt["output_digest"],
-            "source_ref": source_ref,
         }
         path = self.root / f"{receipt['job_id']}.json"
         if path.exists():
