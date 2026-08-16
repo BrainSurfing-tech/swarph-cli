@@ -562,6 +562,22 @@ def _init_db() -> None:
             elif "no such table: claude_messages" not in str(e):
                 raise
 
+        # Reply-drainers may retry after a transport success but before their
+        # local evidence write.  Persist the effective sender, caller key, and
+        # immutable intent digest so the gateway is the duplicate-send authority.
+        message_columns = {
+            row["name"] for row in c.execute("PRAGMA table_info(claude_messages)")
+        }
+        if message_columns:
+            for name in (
+                "idempotency_sender",
+                "idempotency_key",
+                "idempotency_digest",
+            ):
+                if name not in message_columns:
+                    log.info("migrating DB: adding claude_messages.%s", name)
+                    c.execute(f"ALTER TABLE claude_messages ADD COLUMN {name} TEXT")
+
         # seat-A B3/B4 migration — additive columns on scheduled_events for
         # EXISTING DBs (same probe+ALTER pattern as session_id / channels above).
         # Fresh installs get both columns from schema.sql's CREATE IF NOT EXISTS.
@@ -2157,6 +2173,7 @@ class MessagePostRequest(BaseModel):
                                    "exclusive with to_node")
     kind: str = Field(..., description="status|question|answer|unblock|fyi")
     content: str = Field(..., min_length=1, max_length=200_000)
+    idempotency_key: Optional[str] = Field(None, min_length=1, max_length=128)
     thread_id: Optional[str] = Field(None, description="UUID; nullable for ad-hoc DMs")
     related_task_id: Optional[int] = None
     # B2: a client MAY send a `mentions` array but the server DISCARDS it and
@@ -2165,6 +2182,40 @@ class MessagePostRequest(BaseModel):
     # rejected, so existing/future clients that send it don't 422.
     mentions: Optional[list] = Field(None, description="IGNORED — server re-derives "
                                      "from content (B2). Accepted for compat.")
+
+
+def _message_post_response(message: sqlite3.Row) -> dict:
+    return {"id": message["id"], "from_node": message["from_node"],
+            "to_node": message["to_node"], "kind": message["kind"],
+            "thread_id": message["thread_id"], "created_at": message["created_at"]}
+
+
+def _idempotency_sender(auth: AuthContext, req: MessagePostRequest) -> str:
+    """Return the narrowest authenticated identity available to this gateway."""
+    return auth.peer or auth.user or auth.owner or req.from_node
+
+
+def _idempotency_digest(req: MessagePostRequest) -> str:
+    """Hash every DM field that affects routing or persisted meaning."""
+    intent = {
+        "from_node": req.from_node,
+        "to_node": req.to_node,
+        "kind": req.kind,
+        "content": req.content,
+        "thread_id": req.thread_id,
+        "related_task_id": req.related_task_id,
+    }
+    encoded = json.dumps(intent, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _find_idempotent_message(
+    connection: sqlite3.Connection, sender: str, key: str
+) -> sqlite3.Row | None:
+    return connection.execute(
+        "SELECT * FROM claude_messages WHERE idempotency_sender=? AND idempotency_key=?",
+        (sender, key),
+    ).fetchone()
 
 
 @app.post("/messages")
@@ -2183,19 +2234,43 @@ async def message_post(req: MessagePostRequest,
     if bool(req.to_node) == bool(req.channel):
         raise HTTPException(400, "exactly one of {to_node, channel} is required")
 
+    if req.idempotency_key is not None and req.channel is not None:
+        raise HTTPException(400, "idempotency_key is supported for DMs only")
+
     if req.channel is not None:
         return _message_post_channel(req, auth)
 
     # ── DM path — BYTE-IDENTICAL to pre-channel behavior ─────────────────────
     now = _utcnow_iso()
+    sender = _idempotency_sender(auth, req)
+    digest = _idempotency_digest(req) if req.idempotency_key is not None else None
     with _conn() as c:
-        cur = c.execute(
-            "INSERT INTO claude_messages (thread_id, from_node, to_node, kind, content, "
-            "related_task_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (req.thread_id, req.from_node, req.to_node, req.kind,
-             req.content, req.related_task_id, now),
-        )
-        msg_id = cur.lastrowid
+        existing = None
+        if req.idempotency_key is not None:
+            existing = _find_idempotent_message(c, sender, req.idempotency_key)
+        if existing is not None:
+            if existing["idempotency_digest"] != digest:
+                raise HTTPException(409, "idempotency_key conflicts with an existing message")
+            return _message_post_response(existing)
+        try:
+            cur = c.execute(
+                "INSERT INTO claude_messages (thread_id, from_node, to_node, kind, content, "
+                "idempotency_sender, idempotency_key, idempotency_digest, related_task_id, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (req.thread_id, req.from_node, req.to_node, req.kind, req.content,
+                 sender if req.idempotency_key is not None else None,
+                 req.idempotency_key, digest, req.related_task_id, now),
+            )
+            msg_id = cur.lastrowid
+        except sqlite3.IntegrityError:
+            if req.idempotency_key is None:
+                raise
+            existing = _find_idempotent_message(c, sender, req.idempotency_key)
+            if existing is None:
+                raise
+            if existing["idempotency_digest"] != digest:
+                raise HTTPException(409, "idempotency_key conflicts with an existing message")
+            return _message_post_response(existing)
         # Bump from_node's last_seen — proves the peer was active enough to
         # write a DM at this timestamp. No-op for unknown peers (the UPDATE
         # filter never matches). Pre-existing field on claude_peers was only

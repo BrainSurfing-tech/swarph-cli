@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS claude_messages (
   to_node TEXT NOT NULL,
   kind TEXT NOT NULL,                    -- 'status' | 'question' | 'answer' | 'unblock' | 'fyi'
   content TEXT NOT NULL,
+  idempotency_sender TEXT,               -- authenticated/effective sender scope
+  idempotency_key TEXT,                  -- optional client request key
+  idempotency_digest TEXT,               -- immutable request-intent digest
   related_task_id INTEGER,               -- FK to claude_tasks (nullable)
   created_at TIMESTAMP NOT NULL,
   read_at TIMESTAMP,
@@ -69,6 +72,9 @@ CREATE TABLE IF NOT EXISTS claude_messages (
 CREATE INDEX IF NOT EXISTS idx_messages_to_unread ON claude_messages(to_node, read_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON claude_messages(thread_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON claude_messages(channel, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_sender_idempotency
+  ON claude_messages(idempotency_sender, idempotency_key)
+  WHERE idempotency_sender IS NOT NULL AND idempotency_key IS NOT NULL;
 
 -- mesh-channels §2 (build step 1) — additive; DMs untouched. Authority columns
 -- (visibility, allow_broadcast) ship here but are ENFORCED in later steps that

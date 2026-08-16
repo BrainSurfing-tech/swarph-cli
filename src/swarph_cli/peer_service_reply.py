@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from swarph_cli.commands.mesh import _post_json
 from swarph_cli.peer_executor import PeerExecutorError, PeerSpool, output_digest
 
 
@@ -28,6 +29,32 @@ class IdempotentReplyTransport(Protocol):
     """Platform transport that must deduplicate equal idempotency keys."""
 
     def send(self, destination: str, content: str, *, idempotency_key: str) -> None: ...
+
+
+class MeshGatewayReplyTransport:
+    """Gateway-backed answer transport with durable server-side deduplication."""
+
+    def __init__(self, gateway: str, token: str, self_name: str):
+        if not gateway or not token or not self_name:
+            raise ValueError("gateway, token, and self_name are required")
+        self.gateway = gateway.rstrip("/")
+        self.token = token
+        self.self_name = self_name
+
+    def send(self, destination: str, content: str, *, idempotency_key: str) -> None:
+        status, _ = _post_json(
+            f"{self.gateway}/messages",
+            {
+                "from_node": self.self_name,
+                "to_node": destination,
+                "kind": "answer",
+                "content": content,
+                "idempotency_key": idempotency_key,
+            },
+            self.token,
+        )
+        if status < 200 or status >= 300:
+            raise PeerReplyError(f"gateway reply delivery failed with status {status}")
 
 
 @dataclass(frozen=True)
