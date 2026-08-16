@@ -5,6 +5,7 @@ import pytest
 from swarph_cli.delivery_queue import DeliveryQueue, DeliveryQueueError, wake_for
 from swarph_cli.peer_executor import (
     PeerExecutorError,
+    PeerService,
     PeerSpool,
     envelope_digest,
     output_digest,
@@ -90,6 +91,40 @@ def test_queue_to_spool_staging_is_idempotent_after_restart(tmp_path):
     assert (spool.pending / "dm-17.json").exists()
     assert len(list(spool.pending.glob("*.json"))) == 1
     assert "content" not in first
+
+
+def test_queue_spool_receipt_reconciles_after_restart(tmp_path):
+    class Authorizer:
+        def require_service(self, peer, spool_root):
+            assert peer == "gpt-lc"
+
+    queue_path = tmp_path / "queue.json"
+    queue = DeliveryQueue(queue_path)
+    queue.enqueue(_dm(17, "question"))
+    queue.record_eligibility(17, "eligible", "service policy permits it")
+    spool = PeerSpool(tmp_path / "spool")
+    envelope = PeerSpoolStager(queue, spool).stage(17, "gpt-lc", max_active=1)
+    source_ref = json.loads(envelope["delivery_ref"])
+    service = PeerService(spool, "gpt-lc", Authorizer())
+    claim = service.claim(envelope["job_id"])
+    receipt = service.produce_receipt(
+        envelope["job_id"], claim["fencing_token"], "done", source_ref,
+        output_digest("m17"), envelope_digest(envelope),
+    )
+
+    # Simulate a crash after the durable receipt but before queue acknowledgement.
+    restarted_queue = DeliveryQueue(queue_path)
+    retry_service = PeerService(spool, "gpt-lc", Authorizer())
+    assert retry_service.produce_receipt(
+        envelope["job_id"], claim["fencing_token"], "done", source_ref,
+        output_digest("m17"), envelope_digest(envelope),
+    ) == receipt
+    assert len(list(spool.outputs.glob("*.json"))) == 1
+    reconciler = PeerReceiptReconciler(restarted_queue, spool)
+    assert reconciler.reconcile(envelope["job_id"]) is True
+    assert restarted_queue.status()["owed"] == 0
+    assert reconciler.reconcile(envelope["job_id"]) is False
+    assert spool.accepted_receipt(envelope["job_id"]) == receipt
 
 
 def test_receipt_must_bind_job_dm_peer_token_digest_and_provenance(tmp_path):
