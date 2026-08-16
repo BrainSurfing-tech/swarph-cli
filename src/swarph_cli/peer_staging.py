@@ -22,6 +22,7 @@ class PeerSpoolStager:
             "queue_entry_id": claim["source_dm_id"],
             "source_dm_id": claim["source_dm_id"],
             "queue_claim_fence": claim["fencing_token"],
+            "source_peer": claim["source_peer"],
         }
         envelope = {
             "schema_version": 1,

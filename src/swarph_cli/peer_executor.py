@@ -100,7 +100,10 @@ def envelope_digest(job: dict) -> str:
 def _validate_source_ref(value: object, source_dm_id: int) -> dict:
     """Validate the immutable queue provenance carried by a service receipt."""
     required = {"queue_entry_id", "source_dm_id", "queue_claim_fence"}
-    if not isinstance(value, dict) or set(value) != required:
+    routed = required | {"source_peer"}
+    if not isinstance(value, dict) or (
+        set(value) != required and set(value) != routed
+    ):
         raise PeerExecutorError(
             "source_ref must contain the queue reconciliation contract"
         )
@@ -116,6 +119,8 @@ def _validate_source_ref(value: object, source_dm_id: int) -> dict:
         or value["source_dm_id"] != source_dm_id
     ):
         raise PeerExecutorError("source_ref does not identify the receipt source DM")
+    if "source_peer" in value:
+        _canonical_id(value["source_peer"], "source_peer")
     return dict(value)
 
 
