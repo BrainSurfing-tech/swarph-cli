@@ -71,6 +71,8 @@ class InboxLogPeerPayloadProvider:
                         raise PeerExecutorError("source DM archive record is invalid")
                     if to_node != self.peer:
                         raise PeerExecutorError("source DM archive record has the wrong recipient")
+                    if request.source_peer is not None and from_node != request.source_peer:
+                        raise PeerExecutorError("source DM archive record has the wrong sender")
                     matches.add((to_node, from_node, content))
         except OSError as exc:
             raise PeerExecutorError("monitor inbox log cannot be read") from exc
@@ -96,4 +98,5 @@ class InboxLogPeerPayloadProvider:
             source_dm_id=request.source_dm_id,
             queue_claim_fence=request.queue_claim_fence,
             text=content,
+            source_peer=request.source_peer,
         )

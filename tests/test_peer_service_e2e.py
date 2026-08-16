@@ -59,6 +59,7 @@ def test_queue_to_host_receipt_reconciles_after_restart_without_spooling_payload
         "queue_entry_id": 17,
         "source_dm_id": 17,
         "queue_claim_fence": 1,
+        "source_peer": "gpt-ops",
     }
     assert "secret request body" not in "\n".join(
         path.read_text(encoding="utf-8") for path in spool_root.rglob("*.json")

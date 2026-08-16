@@ -155,6 +155,9 @@ class DeliveryQueue:
         if not isinstance(destination_peer, str) or not destination_peer:
             raise DeliveryQueueError("destination_peer is required")
         entry = self._entry(dm_id)
+        source_peer = entry.get("from")
+        if not isinstance(source_peer, str) or not source_peer:
+            raise DeliveryQueueError("source DM has no routable sender")
         if entry["eligibility"] != "eligible" or entry["obligation_state"] not in {
             "owed",
             "capacity_refused",
@@ -181,6 +184,7 @@ class DeliveryQueue:
         job = {
             "job_id": f"dm-{entry['id']}",
             "source_dm_id": entry["id"],
+            "source_peer": source_peer,
             "destination_peer": destination_peer,
             "fencing_token": token,
             "reply_provenance": {
@@ -206,7 +210,9 @@ class DeliveryQueue:
             "output_digest",
             "reply_provenance",
         }
-        if not isinstance(receipt, dict) or set(receipt) != required:
+        if not isinstance(receipt, dict) or (
+            set(receipt) != required and set(receipt) != required | {"source_peer"}
+        ):
             raise DeliveryQueueError("receipt must contain the complete receipt contract")
         if not isinstance(receipt["source_dm_id"], int) or isinstance(receipt["source_dm_id"], bool):
             raise DeliveryQueueError("receipt source_dm_id must be an integer")
@@ -251,9 +257,11 @@ class DeliveryQueue:
         if not isinstance(receipt, dict) or not required.issubset(receipt):
             raise DeliveryQueueError("spool receipt lacks the reconciliation contract")
         source_ref = receipt["source_ref"]
-        if not isinstance(source_ref, dict) or set(source_ref) != {
-            "queue_entry_id", "source_dm_id", "queue_claim_fence",
-        }:
+        legacy_ref_fields = {"queue_entry_id", "source_dm_id", "queue_claim_fence"}
+        source_ref_fields = legacy_ref_fields | {"source_peer"}
+        if not isinstance(source_ref, dict) or (
+            set(source_ref) != legacy_ref_fields and set(source_ref) != source_ref_fields
+        ):
             raise DeliveryQueueError("spool receipt source_ref is invalid")
         for key in ("queue_entry_id", "source_dm_id", "queue_claim_fence"):
             if not isinstance(source_ref[key], int) or isinstance(source_ref[key], bool):
@@ -262,6 +270,10 @@ class DeliveryQueue:
             receipt["source_dm_id"] != source_ref["source_dm_id"]
         ):
             raise DeliveryQueueError("spool receipt source_ref does not identify its source DM")
+        if "source_peer" in source_ref and (
+            not isinstance(source_ref["source_peer"], str) or not source_ref["source_peer"]
+        ):
+            raise DeliveryQueueError("spool receipt source_ref has an invalid source peer")
         if not isinstance(receipt["fencing_token"], int) or receipt["fencing_token"] < 1:
             raise DeliveryQueueError("spool receipt fencing_token must be a positive integer")
         if not isinstance(receipt["output_digest"], str) or len(receipt["output_digest"]) != 64:
@@ -292,6 +304,8 @@ class DeliveryQueue:
             source_ref["queue_claim_fence"],
         ):
             raise DeliveryQueueError("spool receipt does not match the active queue claim")
+        if "source_peer" in source_ref and source_ref["source_peer"] != job.get("source_peer"):
+            raise DeliveryQueueError("spool receipt source peer does not match the active queue claim")
         self._receipts.append(dict(receipt))
         self._pending.remove(entry)
         self._persist()

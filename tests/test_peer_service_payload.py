@@ -79,3 +79,19 @@ def test_provider_rejects_wrong_peer_and_oversized_archive(tmp_path):
         InboxLogPeerPayloadProvider(log, "gpt-lc").get_payload(_request(peer="gpt-ops"))
     with pytest.raises(PeerExecutorError, match="read bound"):
         InboxLogPeerPayloadProvider(log, "gpt-lc", max_log_bytes=1).get_payload(_request())
+
+
+def test_provider_binds_new_routed_jobs_to_the_original_sender(tmp_path):
+    log = tmp_path / "inbox.log"
+    _write_log(log, {"id": 17, "to_node": "gpt-lc", "from_node": "other-peer", "content": "body"})
+
+    with pytest.raises(PeerExecutorError, match="wrong sender"):
+        InboxLogPeerPayloadProvider(log, "gpt-lc").get_payload(
+            _request(source_peer="gpt-ops")
+        )
+
+    _write_log(log, {"id": 17, "to_node": "gpt-lc", "from_node": "gpt-ops", "content": "body"})
+    payload = InboxLogPeerPayloadProvider(log, "gpt-lc").get_payload(
+        _request(source_peer="gpt-ops")
+    )
+    assert payload.source_peer == "gpt-ops"

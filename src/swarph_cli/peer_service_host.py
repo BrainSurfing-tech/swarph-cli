@@ -26,6 +26,7 @@ class PeerPayloadRequest:
     source_dm_id: int
     queue_claim_fence: int
     service_fencing_token: int
+    source_peer: str | None = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class PeerPayload:
     source_dm_id: int
     queue_claim_fence: int
     text: str
+    source_peer: str | None = None
 
 
 class PeerPayloadProvider(Protocol):
@@ -85,6 +87,7 @@ class PeerServiceHost:
             source_dm_id=job["source_dm_id"],
             queue_claim_fence=source_ref["queue_claim_fence"],
             service_fencing_token=claim["fencing_token"],
+            source_peer=source_ref.get("source_peer"),
         )
         payload = self.provider.get_payload(request)
         self._validate_payload(payload, request)
@@ -115,6 +118,8 @@ class PeerServiceHost:
             request.queue_claim_fence,
         ):
             raise PeerExecutorError("peer payload does not match the claimed envelope")
+        if request.source_peer is not None and payload.source_peer != request.source_peer:
+            raise PeerExecutorError("peer payload sender does not match the claimed envelope")
         if (
             not isinstance(payload.text, str)
             or len(payload.text) > self.max_payload_chars
