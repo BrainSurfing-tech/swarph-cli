@@ -1,0 +1,8 @@
+# Copy to ~/.config/swarph/peer-reply-drain-<peer>.env and replace every
+# <ABSOLUTE_PATH> placeholder. systemd expands %h/%i in unit directives, NOT
+# inside EnvironmentFile values; leaving specifiers here would pass them to the
+# CLI literally. These directories are service-owned, never monitor state.
+SWARPH_PEER_SPOOL_DIR=<ABSOLUTE_PATH_TO_PEER_SERVICE_SPOOL>
+SWARPH_PEER_REPLY_OUTBOX_DIR=<ABSOLUTE_PATH_TO_PEER_REPLY_OUTBOX>
+SWARPH_GATEWAY=http://lab-ovh:8788
+SWARPH_TOKEN_FILE=<ABSOLUTE_PATH_TO_PEER_TOKEN_FILE>
