@@ -97,6 +97,13 @@ def envelope_digest(job: dict) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def receipt_digest(receipt: dict) -> str:
+    """Return the stable digest of a validated persisted service receipt."""
+    _validate_persisted_receipt(receipt)
+    encoded = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _validate_source_ref(value: object, source_dm_id: int) -> dict:
     """Validate the immutable queue provenance carried by a service receipt."""
     required = {"queue_entry_id", "source_dm_id", "queue_claim_fence"}
@@ -510,6 +517,37 @@ class PeerSpool:
             receipt = _read_object(path)
             self._validate_accepted_receipt(receipt)
             return receipt
+
+    def accepted_result(self, job_id: str) -> dict | None:
+        """Return the receipt and output only after validating both together.
+
+        A reply publisher must not reconstruct this relationship from filenames:
+        doing so would let it publish a stale output after a fencing takeover.
+        """
+        self.initialize()
+        job_id = _canonical_id(job_id, "job_id")
+        with _exclusive_file_lock(self.locks / f"{job_id}.lock"):
+            path = self.receipts / f"{job_id}.json"
+            if not path.exists():
+                return None
+            receipt = _read_object(path)
+            self._validate_accepted_receipt(receipt)
+            output = _read_object(
+                self._output_path(job_id, receipt["fencing_token"])
+            )
+            if (
+                output.get("source_dm_id"),
+                output.get("destination_peer"),
+                output.get("fencing_token"),
+                output.get("output_digest"),
+            ) != (
+                receipt["source_dm_id"],
+                receipt["destination_peer"],
+                receipt["fencing_token"],
+                receipt["output_digest"],
+            ) or not isinstance(output.get("text"), str):
+                raise PeerExecutorError("receipt output is not publishable")
+            return {"receipt": receipt, "output": output}
 
     def _validate_accepted_receipt(self, receipt: dict) -> None:
         self.initialize()
