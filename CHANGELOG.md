@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.43.0 — 2026-08-16
+
+- **Peer-service replies are now fully receipt-gated and supervisor-owned.** A
+  service receives only queue-bound work, binds its answer to an accepted receipt,
+  and writes a deterministic reply envelope. Delivery validates that receipt,
+  routes only to the recorded source peer, and uses a gateway-backed idempotency
+  key so a crash after send cannot create a duplicate DM.
+
+- **`swarph peer-reply-drain` is the bounded delivery action.** It accepts only
+  an explicit spool, reply outbox, peer identity, gateway, and token file; it has
+  no terminal, pane, or model-execution capability. The bundled systemd user
+  template and timer keep its state separate from human monitor state.
+
+- **Recovery coverage now follows the complete crash boundary.** The offline
+  delivery contract test proves a durable receipt survives a restart, receipt
+  retry does not re-emit output, and queue reconciliation acknowledges exactly
+  once.
+
+- **The GitHub PyPI release gate now refuses tags outside `main`.** A matching
+  version alone is insufficient release authority: the tag workflow verifies
+  the tagged commit is reachable from `main` before building or publishing.
+
 ## 0.42.9 — 2026-08-12
 
 - **Windows: subprocess output is decoded as UTF-8, not the ANSI code page.** Every `subprocess`
