@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -95,3 +96,36 @@ def test_provider_binds_new_routed_jobs_to_the_original_sender(tmp_path):
         _request(source_peer="gpt-ops")
     )
     assert payload.source_peer == "gpt-ops"
+
+
+def test_provider_bounds_a_concurrently_growing_archive(tmp_path, monkeypatch):
+    log = tmp_path / "inbox.log"
+    _write_log(log, {"id": 17, "to_node": "gpt-lc", "from_node": "gpt-ops", "content": "body"})
+    original_open = type(log).open
+
+    class _GrowingArchive:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.handle.close()
+
+        def read(self, size):
+            value = self.handle.read(size)
+            fd = os.open(log, os.O_WRONLY | os.O_APPEND)
+            try:
+                os.write(fd, b'{"id":99}\n')
+            finally:
+                os.close(fd)
+            return value
+
+    def growing_open(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        return _GrowingArchive(handle) if path == log and args == ("rb",) else handle
+
+    monkeypatch.setattr(type(log), "open", growing_open)
+    with pytest.raises(PeerExecutorError, match="changed while"):
+        InboxLogPeerPayloadProvider(log, "gpt-lc").get_payload(_request())

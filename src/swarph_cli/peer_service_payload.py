@@ -48,34 +48,49 @@ class InboxLogPeerPayloadProvider:
         if before.st_size > self.max_log_bytes:
             raise PeerExecutorError("monitor inbox log exceeds provider read bound")
 
-        matches: set[tuple[str, str, str]] = set()
         try:
-            with self.inbox_log.open("r", encoding="utf-8") as archive:
-                for raw in archive:
-                    try:
-                        record = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(record, dict) or record.get("id") != request.source_dm_id:
-                        continue
-                    message_id = record.get("id")
-                    to_node = record.get("to_node")
-                    from_node = record.get("from_node")
-                    content = record.get("content")
-                    if (
-                        isinstance(message_id, bool)
-                        or not isinstance(to_node, str)
-                        or not isinstance(from_node, str)
-                        or not isinstance(content, str)
-                    ):
-                        raise PeerExecutorError("source DM archive record is invalid")
-                    if to_node != self.peer:
-                        raise PeerExecutorError("source DM archive record has the wrong recipient")
-                    if request.source_peer is not None and from_node != request.source_peer:
-                        raise PeerExecutorError("source DM archive record has the wrong sender")
-                    matches.add((to_node, from_node, content))
+            # Read at most the pre-validated size plus one byte.  ``inbox.log``
+            # is append-only and may grow while this worker runs; iterating a
+            # live text stream would make max_log_bytes aspirational instead of
+            # an actual resource bound.
+            with self.inbox_log.open("rb") as archive:
+                snapshot = archive.read(before.st_size + 1)
         except OSError as exc:
             raise PeerExecutorError("monitor inbox log cannot be read") from exc
+        if len(snapshot) > before.st_size:
+            raise PeerExecutorError("monitor inbox log changed while resolving payload")
+        try:
+            lines = snapshot.decode("utf-8").splitlines()
+        except UnicodeDecodeError as exc:
+            raise PeerExecutorError("monitor inbox log is not valid UTF-8") from exc
+
+        matches: set[tuple[str, str, str]] = set()
+        try:
+            for raw in lines:
+                try:
+                    record = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict) or record.get("id") != request.source_dm_id:
+                    continue
+                message_id = record.get("id")
+                to_node = record.get("to_node")
+                from_node = record.get("from_node")
+                content = record.get("content")
+                if (
+                    isinstance(message_id, bool)
+                    or not isinstance(to_node, str)
+                    or not isinstance(from_node, str)
+                    or not isinstance(content, str)
+                ):
+                    raise PeerExecutorError("source DM archive record is invalid")
+                if to_node != self.peer:
+                    raise PeerExecutorError("source DM archive record has the wrong recipient")
+                if request.source_peer is not None and from_node != request.source_peer:
+                    raise PeerExecutorError("source DM archive record has the wrong sender")
+                matches.add((to_node, from_node, content))
+        except TypeError as exc:
+            raise PeerExecutorError("monitor inbox log contains an invalid record") from exc
 
         try:
             after = self.inbox_log.stat()
