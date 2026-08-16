@@ -119,17 +119,20 @@ def _validate_source_ref(value: object, source_dm_id: int) -> dict:
     return dict(value)
 
 
-def _validate_receipt(receipt: object) -> dict:
-    required = {
-        "job_id",
-        "source_dm_id",
-        "destination_peer",
-        "fencing_token",
-        "output_digest",
-        "payload_digest",
-        "envelope_digest",
-        "source_ref",
-    }
+_RECEIPT_FIELDS = {
+    "job_id",
+    "source_dm_id",
+    "destination_peer",
+    "fencing_token",
+    "output_digest",
+    "payload_digest",
+    "envelope_digest",
+    "source_ref",
+}
+_LEGACY_RECEIPT_FIELDS = _RECEIPT_FIELDS - {"payload_digest", "envelope_digest"}
+
+
+def _validate_receipt_fields(receipt: object, required: set[str]) -> dict:
     if not isinstance(receipt, dict) or set(receipt) != required:
         raise PeerExecutorError(
             "receipt must contain the complete service receipt contract"
@@ -143,10 +146,30 @@ def _validate_receipt(receipt: object) -> dict:
     ):
         raise PeerExecutorError("receipt source_dm_id must be an integer")
     _validate_digest(receipt["output_digest"])
-    _validate_digest(receipt["payload_digest"])
-    _validate_digest(receipt["envelope_digest"])
     _validate_source_ref(receipt["source_ref"], receipt["source_dm_id"])
     return receipt
+
+
+def _validate_receipt(receipt: object) -> dict:
+    """Validate the current receipt schema required for new completions."""
+    receipt = _validate_receipt_fields(receipt, _RECEIPT_FIELDS)
+    _validate_digest(receipt["payload_digest"])
+    _validate_digest(receipt["envelope_digest"])
+    return receipt
+
+
+def _validate_persisted_receipt(receipt: object) -> bool:
+    """Validate a stored receipt and return whether it uses the legacy schema.
+
+    Six-field receipts were durably accepted before payload and envelope
+    digests existed. They remain read-only completion evidence after upgrade;
+    new receipts must use the current schema.
+    """
+    if isinstance(receipt, dict) and set(receipt) == _LEGACY_RECEIPT_FIELDS:
+        _validate_receipt_fields(receipt, _LEGACY_RECEIPT_FIELDS)
+        return True
+    _validate_receipt(receipt)
+    return False
 
 
 def source_ref_from_delivery_ref(job: dict) -> dict:
@@ -249,6 +272,9 @@ class PeerSpool:
         job_id, peer = _canonical_id(job_id, "job_id"), _canonical_id(peer, "peer")
         with _exclusive_file_lock(self.locks / f"{job_id}.lock"):
             if (self.receipts / f"{job_id}.json").exists():
+                self._validate_accepted_receipt(
+                    _read_object(self.receipts / f"{job_id}.json")
+                )
                 raise PeerExecutorError("job already has an accepted receipt")
             job = _read_object(self.running / f"{job_id}.json")
             _validate_job(job)
@@ -482,7 +508,7 @@ class PeerSpool:
 
     def _validate_accepted_receipt(self, receipt: dict) -> None:
         self.initialize()
-        _validate_receipt(receipt)
+        legacy = _validate_persisted_receipt(receipt)
         job_id = _canonical_id(receipt.get("job_id"), "job_id")
         running = _read_object(self.running / f"{job_id}.json")
         claim = _read_object(self.claims / f"{job_id}.json")
@@ -496,7 +522,7 @@ class PeerSpool:
             claim.get("fencing_token"),
         ):
             raise PeerExecutorError("receipt no longer matches current claim")
-        if receipt.get("envelope_digest") != envelope_digest(running):
+        if not legacy and receipt.get("envelope_digest") != envelope_digest(running):
             raise PeerExecutorError("receipt envelope digest no longer matches")
         output_path = self._output_path(job_id, receipt["fencing_token"])
         if not output_path.exists():
