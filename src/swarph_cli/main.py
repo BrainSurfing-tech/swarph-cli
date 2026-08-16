@@ -95,6 +95,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "memory": "swarph_cli.commands.memory.run_memory",
     "timeline": "swarph_cli.commands.timeline.run_timeline",
     "mesh": "swarph_cli.commands.mesh.run_mesh",
+    "peer-reply-drain": "swarph_cli.commands.peer_reply_drain.run_peer_reply_drain",
     "monitor": "swarph_cli.commands.monitor.run_monitor",
     "board": "swarph_cli.commands.board.run_board",
     "group": "swarph_cli.commands.group.run_group",
