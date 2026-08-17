@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.44.0 — 2026-08-17
+## 0.43.1 — 2026-08-17
 
 - **Cursor is now available as a durable swarph cell provider.** Its local
   state is isolated beneath the cell workspace, resumed only when a prior
