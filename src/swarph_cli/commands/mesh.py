@@ -922,7 +922,33 @@ def _select_next_poll_seconds(state: MonitorState) -> int:
 def _poll_channel_subscriptions(state: MonitorState) -> None:
     """#125 option c: discover this peer's channel memberships and poll each
     for new posts, using the existing member-gated GET /messages?channel=.
-    Additive only -- any failure here must never affect the DM poll above."""
+    Additive only -- any failure here must never affect the DM poll above.
+
+    >>> THAT LAST SENTENCE IS A GUARANTEE, SO IT IS ENFORCED HERE RATHER THAN
+    ASSUMED. <<< The non-200 branches below cover the HTTP failures this code
+    anticipated; they do not cover the ones it did not. A raised exception --
+    a channel record with no "name", a non-numeric message id, a disk error in
+    _write_cursor_atomic, a socket fault inside _http_get_json -- propagates
+    out of the caller's tick, and the caller invokes this on EVERY poll right
+    after _monitor_deliver. So a single persistently-malformed channel record
+    would not merely skip channels once: it would kill DM delivery on every
+    subsequent tick, silently and forever. Channels are a convenience; DM
+    delivery is the product's promise, and the convenience must never be able
+    to take the promise down with it.
+    """
+    try:
+        _poll_channel_subscriptions_inner(state)
+    except Exception as e:  # noqa: BLE001 -- deliberately broad, see docstring
+        # Loud but non-fatal: a swallowed failure that nobody can see is how a
+        # feature ends up "working" for weeks while delivering nothing (#125's
+        # own defect). The DM poll continues; the operator learns.
+        print(f"{state.log_prefix} channel poll failed (DM delivery unaffected): "
+              f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+
+
+def _poll_channel_subscriptions_inner(state: MonitorState) -> None:
+    """The channel poll proper. Never call directly -- go through
+    _poll_channel_subscriptions, which owns the never-break-DMs guarantee."""
     # Track existing message IDs to avoid duplicates if this is called multiple times
     existing_ids = {int(m.get("id", 0)) for m in state.pending_channel_posts}
 
