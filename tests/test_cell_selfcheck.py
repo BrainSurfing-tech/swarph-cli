@@ -432,6 +432,23 @@ def test_legitimately_absent_crontab_is_read_and_still_reported(monkeypatch, tmp
     assert "COVERAGE" in out and "another user" in out
 
 
+def test_verdict_line_states_what_it_is_a_verdict_about(monkeypatch, tmp_path, capsys):
+    """Bare `consistent` was read as 'this cell is correctly configured'.
+
+    drop-on-meta-edge, reviewing PR #243, held that misreading for several
+    seconds after reading the card, the DM, and the diff. The COVERAGE block
+    eventually corrected it; the verdict line itself must carry the property
+    so a reader who stops at the last line is not certified into a lie.
+    """
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("a.service", "ExecStart=x --as lab --state-dir /var/lib/swarph/lab\n"),
+    ], "lab", capsys=capsys)
+    assert rc == 0, out
+    assert "verdict: consistent" in out
+    assert "surfaces agree with each other" in out
+    assert "NOT compared against resolver output" in out
+
+
 def test_coverage_is_printed_even_on_a_clean_run(monkeypatch, tmp_path, capsys):
     """A block that appears only on failure is one nobody reads until too late."""
     _, out = _run(monkeypatch, tmp_path, [_cov("crontab", True, "51 lines")],
@@ -617,3 +634,56 @@ def test_template_unit_does_not_invent_a_cell_named_percent_i(monkeypatch, tmp_p
                             "ExecStart=swarph monitor start --as %i --state-dir <HOME>/state\n"))
     assert not any(r.owner == "%i" for r in rows), f"invented a cell named %i: {rows}"
     assert not any(r.value in ("%i", "<HOME>/state") for r in rows), rows
+
+
+# ── 7. cursor-lin: instance drop-in is where the live ExecStart lives ────────
+# MEASURED 2026-08-17 on cursor-lin (this box). `swarph-monitor@.service` carries
+# `--as %i` (shape 6, skipped as placeholder). The live values
+# (`--as cursor-lin --token-file … --gateway …`) live ONLY in
+# `swarph-monitor@cursor-lin.service.d/override.conf`.
+# The old glob `*swarph*.service` never opened a `.d/` directory, so this cell's
+# own monitor certified `consistent` with ZERO owned flags — the same lie as
+# grok-researcher's clean verdict over an unread crontab.
+
+
+def test_dropin_parent_unit_is_the_instance_not_the_template():
+    assert (
+        sc.dropin_parent_unit("swarph-monitor@cursor-lin.service.d/override.conf")
+        == "swarph-monitor@cursor-lin.service"
+    )
+    assert sc.dropin_parent_unit("swarph-monitor@.service") is None
+    assert sc.dropin_parent_unit("swarph-monitor.service.d/override.conf") == (
+        "swarph-monitor.service"
+    )
+
+
+def test_list_swarph_unit_files_reads_instance_dropins(tmp_path):
+    """A glob that only matches `*.service` is blind to the file systemd actually runs."""
+    (tmp_path / "swarph-monitor@.service").write_text(
+        "ExecStart=swarph monitor start --as %i\n", encoding="utf-8"
+    )
+    drop = tmp_path / "swarph-monitor@cursor-lin.service.d"
+    drop.mkdir()
+    (drop / "override.conf").write_text(
+        "ExecStart=swarph monitor start --as cursor-lin --token-file /t\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "mdmonitor.service").write_text("not ours\n", encoding="utf-8")
+    names = [p.relative_to(tmp_path).as_posix() for p in sc.list_swarph_unit_files(tmp_path)]
+    assert "swarph-monitor@.service" in names
+    assert "swarph-monitor@cursor-lin.service.d/override.conf" in names
+    assert "mdmonitor.service" not in names
+
+
+def test_instance_dropin_text_is_owned_by_the_named_cell():
+    rows = sc.extract(_unit(
+        "swarph-monitor@cursor-lin.service.d/override.conf",
+        "ExecStart=swarph monitor start --as cursor-lin "
+        "--gateway http://100.107.222.72:8788 "
+        "--token-file /home/ubuntu/.config/swarph/cursor-lin.peer_token\n",
+    ))
+    by_key = {r.key: r.value for r in rows}
+    assert by_key["as"] == "cursor-lin"
+    assert by_key["gateway"] == "http://100.107.222.72:8788"
+    assert by_key["token-file"].endswith("cursor-lin.peer_token")
+    assert all(r.owner == "cursor-lin" for r in rows)

@@ -61,6 +61,12 @@ _DM_CURSOR_RE = re.compile(r"cursor\.json$")
 # which a naive owner-parse reports as a cell literally named "%i". Found by running
 # this on lab-ovh, which has a template unit; droplet's five fixtures could not cover
 # it because his box has none. SIXTH SHAPE.
+#
+# SEVENTH SHAPE (cursor-lin, 2026-08-17): an instance drop-in is where the live
+# ExecStart actually lives. `swarph-monitor@.service` is the FILE; the VALUES are
+# in `swarph-monitor@<peer>.service.d/override.conf`. A glob that only matches
+# `*.service` certifies the template (placeholders, skipped) and never opens the
+# drop-in — `consistent` with zero owned flags. Same lie as grok's unread crontab.
 # Matches a placeholder ANYWHERE in the value: `%i`, `<PEER>`, `${HOME}` — and
 # crucially also `<HOME>/state`, a PARTIALLY substituted path. A half-templated
 # value is still unsubstituted template text; treating it as configuration invents
@@ -240,6 +246,33 @@ def system_cron_coverage(live: list, inert: list, unreadable: list, *,
             "detail": detail if (live or inert) else "present but empty"}
 
 
+def dropin_parent_unit(relpath: str) -> Optional[str]:
+    """Instance-or-plain unit name for a drop-in path, or None if this is not one.
+
+    `swarph-monitor@cursor-lin.service.d/override.conf` ->
+    `swarph-monitor@cursor-lin.service`. The parent is what `systemctl is-active`
+    names; the drop-in file itself is not a unit.
+    """
+    posix = relpath.replace("\\", "/")
+    parent = posix.rsplit("/", 1)[0] if "/" in posix else posix
+    if parent.endswith(".service.d"):
+        return parent[: -len(".d")]
+    return None
+
+
+def list_swarph_unit_files(unit_dir: Path) -> list[Path]:
+    """Unit files AND drop-ins. Drop-ins are where instance ExecStart lives.
+
+    MEASURED 2026-08-17 on cursor-lin: the live `--as` / `--token-file` /
+    `--gateway` values exist only in
+    `swarph-monitor@cursor-lin.service.d/override.conf`. `*swarph*.service`
+    never opened that directory.
+    """
+    units = sorted(unit_dir.glob("*swarph*.service"))
+    dropins = sorted(unit_dir.glob("*swarph*.service.d/*.conf"))
+    return units + dropins
+
+
 def discover_surfaces() -> list[dict]:
     """Read this cell's units and crontab. THE ONLY IMPURE FUNCTION HERE.
 
@@ -249,19 +282,33 @@ def discover_surfaces() -> list[dict]:
     """
     surfaces: list[dict] = []
     unit_dirs = [Path("/etc/systemd/system"), Path.home() / ".config/systemd/user"]
+    n_units = 0
+    n_dropins = 0
     for d in unit_dirs:
         if not d.is_dir():
             continue
-        for f in sorted(d.glob("*swarph*.service")):
+        for f in list_swarph_unit_files(d):
             try:
                 text = f.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            surfaces.append({"name": f.name, "kind": "unit", "text": text,
-                             "live": _unit_live(f.name, user=("user" in str(d)))})
+            rel = f.relative_to(d).as_posix()
+            parent = dropin_parent_unit(rel)
+            if parent:
+                n_dropins += 1
+                label = rel
+                live_name = parent
+            else:
+                n_units += 1
+                label = f.name
+                live_name = f.name
+            surfaces.append({"name": label, "kind": "unit", "text": text,
+                             "live": _unit_live(live_name, user=("user" in str(d)))})
+    detail = ", ".join(str(d) for d in unit_dirs if d.is_dir()) or "none present"
+    detail += f"; {n_units} units, {n_dropins} drop-ins"
     surfaces.append({"kind": "coverage", "class": "systemd units",
                      "read": True,
-                     "detail": ", ".join(str(d) for d in unit_dirs if d.is_dir()) or "none present"})
+                     "detail": detail})
 
     # >>> THE CRONTAB PROBE HAD THREE SILENT FAILURE PATHS THAT ALL RENDERED AS
     #     "no crontab surface", AND THE VERDICT PROCEEDED AS IF IT HAD LOOKED. <<<
@@ -512,7 +559,14 @@ def run_selfcheck(*, self_name: str, declaration: Path) -> int:
         print(f"\n  verdict: DID NOT MEASURE (could not read: {names})")
         return 2
 
-    print(f"\n  verdict: {'DRIFT' if drift else 'consistent'}")
+    # Drop-on-meta-edge (PR #243 review): a reviewer who had just read the card
+    # still parsed `verdict: consistent` as "this cell is correctly configured"
+    # for several seconds before COVERAGE corrected it. The property, not the
+    # wording, is the requirement: the verdict must carry what it is ABOUT.
+    # Surfaces agreeing with each other is not a comparison against the shared
+    # resolver (GAP 1, carded, not held).
+    scope = "surfaces agree with each other; NOT compared against resolver output"
+    print(f"\n  verdict: {'DRIFT' if drift else 'consistent'}  ({scope})")
     return 1 if drift else 0
 
 
