@@ -29,10 +29,28 @@ class ContentError(ValueError):
     """A free-text body the CLI refuses to accept."""
 
 
-_SHELL_ACTIVE = (
-    ("`", "a backtick (`)"),
-    ("$(", "a command substitution ($(...))"),
-)
+# >>> NO SHELL-ACTIVE GUARD HERE, AND ITS ABSENCE IS THE DESIGN. <<<
+# A first cut of #458 refused a --content value containing a backtick or $(.
+# drop-on-meta-edge measured it and found the check INVERTED — it fires exactly
+# where quoting WORKED and is silent exactly where quoting FAILED:
+#
+#   single-quoted, CORRECT     'see `foo` here'    -> backticks REACH argv -> REFUSED
+#   double-quoted, CORRUPTED   "see `echo BAD`"    -> substituted, backticks
+#                                                     GONE from argv       -> SILENT
+#
+# Backticks arriving intact is the SIGNATURE OF CORRECT QUOTING: the shell left
+# them literal, so the content is exactly what the author typed and nothing was
+# lost. Backticks arriving ABSENT is the signature of substitution — the actual
+# corruption — and it is undetectable at this layer, because by the time argv
+# exists the evidence has already been consumed by the shell.
+#
+# So every refusal such a guard can issue is a FALSE POSITIVE BY CONSTRUCTION,
+# and the true positive is unreachable. A control that cannot fire on the defect
+# it names, while punishing correct usage, is worse than no control: it trains
+# callers to route around it and it reads as coverage on review.
+#
+# --content-file / --content - are the fix. They remove the shell from the path
+# instead of trying to detect what it already did.
 
 
 def add_content_args(parser, flag: str = "--content", *, required: bool = True) -> None:
@@ -43,8 +61,9 @@ def add_content_args(parser, flag: str = "--content", *, required: bool = True) 
         flag,
         dest=dest,
         default=None,
-        help=f"message body; '-' reads stdin. Refused if it contains shell-active "
-             f"characters — use {flag}-file for those.",
+        help=f"message body; '-' reads stdin. For bodies containing backticks, "
+             f"quotes or $(...), prefer {flag}-file — a shell can alter them "
+             f"before the CLI ever sees them (board #458).",
     )
     group.add_argument(
         f"{flag}-file",
@@ -58,8 +77,10 @@ def add_content_args(parser, flag: str = "--content", *, required: bool = True) 
 def resolve_content(value, file_path, flag: str = "--content"):
     """Return the body from ``FLAG-file``, stdin, or ``FLAG`` — or None if unset.
 
-    File and stdin content is returned exactly as read. Only a ``FLAG`` value is
-    guarded, because only that one came through a shell.
+    Every path returns the body EXACTLY as read — no stripping, no rejection.
+    A ``FLAG`` value has already been through a shell by the time it arrives, so
+    any damage is done and undetectable here (see the note above ``add_content_args``);
+    the file and stdin paths are the ones that never expose it to a shell at all.
     """
     if file_path is not None:
         try:
@@ -70,13 +91,4 @@ def resolve_content(value, file_path, flag: str = "--content"):
         return None
     if value == "-":
         return sys.stdin.read()
-    for token, name in _SHELL_ACTIVE:
-        if token in value:
-            raise ContentError(
-                f"{flag} contains {name}. Your shell evaluates that before the CLI "
-                f"sees it, so part of this body may already have been EXECUTED or "
-                f"replaced by an empty string — silently, with the send still "
-                f"reporting success (board #458). Refusing to send. Use "
-                f"{flag}-file <path>, or {flag} - to read the body from stdin."
-            )
     return value

@@ -69,19 +69,30 @@ def test_missing_content_file_is_a_refusal_not_a_traceback(tmp_path, sent):
     assert not sent, "nothing may be sent when the body could not be read"
 
 
-# ── the guard: --content refuses shell-active characters, by name ─────────────
+# ── NO GUARD: shell-active characters in --content are DELIVERED, not refused ──
+#
+# A first cut of #458 refused --content values containing a backtick or $(.
+# drop-on-meta-edge measured the check and found it INVERTED — it fires exactly
+# where quoting WORKED and is silent exactly where quoting FAILED:
+#
+#   single-quoted, CORRECT     'see `foo` here'  -> backticks REACH argv -> refused
+#   double-quoted, CORRUPTED   "see `echo BAD`"  -> substituted, GONE    -> silent
+#
+# Backticks arriving intact is the SIGNATURE OF CORRECT QUOTING. So the guard's
+# every refusal was a false positive by construction, and its true positive was
+# unreachable — by the time argv exists, the shell has already consumed the
+# evidence. These tests now assert the OPPOSITE of what they used to.
 
-@pytest.mark.parametrize("bad,name", [
-    ("a `backtick` body", "backtick"),
-    ("a $(whoami) body", "command substitution"),
+@pytest.mark.parametrize("body", [
+    "a `backtick` body",
+    "a $(whoami) body",
 ])
-def test_content_with_shell_active_chars_is_refused(bad, name, sent, capsys):
-    rc = mesh.run_mesh(["send", "c2", "--kind", "fyi", "--content", bad])
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert name in err
-    assert "--content-file" in err
-    assert not sent, "a refused body must never reach the gateway"
+def test_shell_active_content_is_DELIVERED_byte_identical(body, sent):
+    """>>> THE INVERSION. <<< A backtick that reached argv means the shell left it
+    literal — the author typed exactly this. Refusing it would discard a correct,
+    intact body, and markdown-quoted terms are ordinary in agent-composed DMs."""
+    assert mesh.run_mesh(["send", "c2", "--kind", "fyi", "--content", body]) == 0
+    assert sent["body"]["content"] == body, "delivered content must be byte-identical"
 
 
 def test_plain_content_still_sends(sent):
@@ -97,10 +108,12 @@ def test_content_and_content_file_are_mutually_exclusive(tmp_path):
 
 # ── the same treatment on the sibling verbs ───────────────────────────────────
 
-def test_channel_post_refuses_backticks(monkeypatch, capsys):
-    monkeypatch.setattr(ch, "post_json", lambda *a, **k: pytest.fail("must not post"))
-    assert ch.run_channel(["post", "ann", "--content", "a `backtick`"]) == 1
-    assert "backtick" in capsys.readouterr().err
+def test_channel_post_delivers_backticks(monkeypatch):
+    cap = {}
+    monkeypatch.setattr(ch, "post_json",
+                        lambda url, body, token, **k: (cap.update(body=body), (200, {"id": 9}))[1])
+    assert ch.run_channel(["post", "ann", "--content", "a `backtick`"]) == 0
+    assert cap["body"]["content"] == "a `backtick`"
 
 
 def test_channel_post_content_file(tmp_path, monkeypatch):
@@ -113,17 +126,21 @@ def test_channel_post_content_file(tmp_path, monkeypatch):
     assert cap["body"]["content"] == HOSTILE
 
 
-def test_board_cards_add_body_refuses_backticks(monkeypatch, capsys):
-    monkeypatch.setattr(board, "_post_json", lambda *a, **k: pytest.fail("must not post"))
-    assert board.run_board(["cards", "add", "--project", "p", "--title", "t",
-                            "--body", "a `backtick`"]) == 1
-    assert "backtick" in capsys.readouterr().err
+def test_board_cards_add_delivers_backticks(monkeypatch):
+    cap = {}
+    monkeypatch.setattr(board, "_post_json",
+                        lambda url, body, *a, **k: (cap.update(body=body), (200, {"id": 1}))[1])
+    # numeric project id: skips the list-projects resolution round-trip, which is
+    # not what this test is about.
+    assert board.run_board(["cards", "add", "--project", "1", "--title", "t",
+                            "--body", "a `backtick`"]) == 0
+    assert cap["body"]["body"] == "a `backtick`"
 
 
-def test_board_cards_say_refuses_backticks(monkeypatch, capsys):
-    monkeypatch.setattr(board, "_http_get_json", lambda *a, **k: pytest.fail("must not read"))
-    assert board.run_board(["cards", "say", "1", "--content", "a `backtick`"]) == 1
-    assert "backtick" in capsys.readouterr().err
+def test_resolve_content_never_rejects_a_shell_active_value():
+    """Unit-level statement of the same rule: resolve_content has no reject path
+    for --content. Anything the shell handed us is delivered as received."""
+    assert resolve_content("a `tick` and $(sub)", None, "--content") == "a `tick` and $(sub)"
 
 
 def test_board_cards_add_without_body_still_works():
@@ -131,7 +148,10 @@ def test_board_cards_add_without_body_still_works():
     assert resolve_content(None, None, "--body") is None
 
 
-def test_content_error_names_the_flag_it_came_from():
+def test_content_error_names_the_flag_it_came_from(tmp_path):
+    """ContentError survives for the case that IS detectable: an unreadable file.
+    That failure is real, local, and knowable — unlike shell corruption, which is
+    already finished by the time this process starts."""
     with pytest.raises(ContentError) as exc:
-        resolve_content("a `tick`", None, "--body")
+        resolve_content(None, str(tmp_path / "nope.txt"), "--body")
     assert "--body-file" in str(exc.value)
