@@ -919,6 +919,37 @@ def _select_next_poll_seconds(state: MonitorState) -> int:
     return state.poll_s
 
 
+def _wake_policy_admits(policy, msg: dict, self_name: str) -> bool:
+    """#194 — does THIS cell's own wake_policy admit this channel post?
+
+    `muted` is handled by the caller (it skips the fetch entirely). Here:
+      · mentions_only -> only posts that name this cell
+      · all / anything else / None -> admit
+
+    >>> FAIL OPEN, DELIBERATELY. <<< An unknown policy value, or a gateway that
+    does not send one at all, admits the post. Failing CLOSED would drop channel
+    posts silently — which is card #125's ORIGINAL DEFECT, not a safe default:
+    seventeen cells set a policy, nothing honoured it, and nobody could tell
+    because the absence looked exactly like "no posts". A filter that errs toward
+    delivering is recoverable by the reader; one that errs toward silence is not.
+    The inert case is announced by the caller so it cannot pass for enforcement.
+    """
+    if policy != "mentions_only":
+        return True
+    raw = msg.get("mentions")
+    # The gateway stores mentions as a JSON STRING ('[]'), not a list. Parse
+    # defensively: a malformed value must not decide "not mentioned" and swallow
+    # the post — on any doubt, admit it and let the reader judge.
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return True
+    if not isinstance(raw, (list, tuple)):
+        return True
+    return self_name in raw
+
+
 def _poll_channel_subscriptions(state: MonitorState) -> None:
     """#125 option c: discover this peer's channel memberships and poll each
     for new posts, using the existing member-gated GET /messages?channel=.
@@ -956,9 +987,25 @@ def _poll_channel_subscriptions_inner(state: MonitorState) -> None:
     status, body = _http_get_json(url, state.token)
     if status != 200:
         return  # fail silent for channels specifically -- DM delivery is the guarantee
-    subscribed = [c["name"] for c in body.get("channels", []) if c.get("is_member")]
+    members = [c for c in body.get("channels", []) if c.get("is_member")]
+    subscribed = [c["name"] for c in members]
+    # #194: the caller's OWN wake_policy per channel. C1 added this to
+    # GET /channels?peer=; a gateway that predates it omits the key entirely.
+    policies = {c["name"]: c.get("wake_policy") for c in members}
+    if subscribed and all(policies[n] is None for n in subscribed):
+        # >>> AN UNENFORCEABLE POLICY MUST NOT LOOK ENFORCED (#184c). <<< If the
+        # gateway never sends wake_policy, this filter is INERT — every post
+        # surfaces regardless of what the cell asked for. That is precisely the
+        # shape that convinced 17 cells they had subscribed to something, so it
+        # is stated out loud rather than left to look like filtering.
+        print(f"{state.log_prefix} wake_policy absent from GET /channels — "
+              f"channel filtering INERT, surfacing all posts (gateway predates #125 C1)",
+              file=sys.stderr, flush=True)
 
     for channel in subscribed:
+        policy = policies.get(channel)
+        if policy == "muted":
+            continue  # asked for silence; honour it before spending a fetch
         last_id = int(state.channel_cursors.get(channel, 0))
         params = {"channel": channel, "limit": "50"}
         curl = f"{state.gateway}/messages?{urllib.parse.urlencode(params)}"
@@ -969,6 +1016,7 @@ def _poll_channel_subscriptions_inner(state: MonitorState) -> None:
             m for m in cbody.get("messages", [])
             if int(m.get("id", 0)) > last_id and m.get("from_node") != state.self_name
             and int(m.get("id", 0)) not in existing_ids
+            and _wake_policy_admits(policy, m, state.self_name)
         ]
         if new_posts:
             new_posts.sort(key=lambda m: int(m["id"]))
