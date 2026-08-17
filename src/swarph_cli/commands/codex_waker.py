@@ -212,12 +212,18 @@ def _drain_outbox_locked(
             _quarantine_outbox_entry(outbox, path, str(exc))
             continue
         try:
+            # The body is RELAYED peer-authored text: it routinely carries
+            # backticks (markdown) and must never be an argv value (#458). Pipe
+            # it on stdin so it crosses verbatim and nothing can interpret it.
             subprocess.run(
                 [
                     swarph_bin, "mesh", "send", message["to_node"], "--kind", message["kind"],
-                    "--content", message["content"], "--as", self_name, "--gateway", gateway,
+                    "--content", "-", "--as", self_name, "--gateway", gateway,
                     "--token-file", token_file,
                 ],
+                input=message["content"],
+                encoding="utf-8",
+                errors="replace",
                 check=True,
                 timeout=_OUTBOX_SEND_TIMEOUT_S,
             )

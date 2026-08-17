@@ -426,12 +426,14 @@ def test_outbox_deletes_only_after_mesh_send_succeeds(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(
         "swarph_cli.commands.codex_waker.subprocess.run",
-        lambda args, check, timeout: calls.append((args, timeout)),
+        lambda args, check, timeout, input, **kw: calls.append((args, timeout, input)),
     )
     _drain_outbox(outbox, state_dir, "self", "http://gateway", "/token", "swarph")
     assert calls and not (outbox / "21.json").exists()
     assert not (state_dir / "outbox-authorizations" / "21.json").exists()
-    assert calls[0][0][calls[0][0].index("--content") + 1] == "Synthetic reply"
+    # #458: a RELAYED body never travels as an argv value — it goes on stdin.
+    assert calls[0][0][calls[0][0].index("--content") + 1] == "-"
+    assert calls[0][2] == "Synthetic reply"
     assert calls[0][1] == waker._OUTBOX_SEND_TIMEOUT_S
 
 
@@ -460,7 +462,7 @@ def test_timed_out_send_retains_its_entry_and_continues_to_later_reply(tmp_path,
     _authorize_outbox_reply(state_dir, {"id": 24, "from_node": "peer"})
     calls = []
 
-    def send(args, check, timeout):
+    def send(args, check, timeout, **kw):
         calls.append(args)
         if len(calls) == 1:
             raise subprocess.TimeoutExpired(args, timeout)
@@ -482,7 +484,7 @@ def test_overlapping_drainers_do_not_double_send(tmp_path, monkeypatch):
     release = threading.Event()
     calls = []
 
-    def send(args, check, timeout):
+    def send(args, check, timeout, **kw):
         calls.append(args)
         started.set()
         assert release.wait(5)
@@ -520,7 +522,7 @@ def test_outbox_rejects_agent_asserted_destination(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(
         "swarph_cli.commands.codex_waker.subprocess.run",
-        lambda args, check, timeout: calls.append(args),
+        lambda args, check, timeout, **kw: calls.append(args),
     )
     _drain_outbox(outbox, state_dir, "self", "http://gateway", "/token", "swarph")
     assert calls == []
@@ -538,7 +540,7 @@ def test_invalid_outbox_entry_does_not_block_later_authorized_reply(tmp_path, mo
     calls = []
     monkeypatch.setattr(
         "swarph_cli.commands.codex_waker.subprocess.run",
-        lambda args, check, timeout: calls.append(args),
+        lambda args, check, timeout, **kw: calls.append(args),
     )
     _drain_outbox(outbox, state_dir, "self", "http://gateway", "/token", "swarph")
     assert (outbox / "invalid" / "001.json").exists()
