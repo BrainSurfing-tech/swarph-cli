@@ -16,18 +16,20 @@ BIN = "/usr/bin/claude"
 ARGV = ["claude", "--name", "lab"]
 
 
-def _cell():
+def _cell(cwd=None):
     # #360: pre_launch now hands the membrane's SCRUBBED+STAMPED env to the
     # Windows-Terminal relaunch, so the cell must carry its identity.
-    return types.SimpleNamespace(name="cell-under-test", cwd=Path("/home/ubuntu/lab"))
+    return types.SimpleNamespace(
+        name="cell-under-test", cwd=cwd if cwd is not None else Path("/home/ubuntu/lab")
+    )
 
 
-def _call(membrane, monkeypatch, *, session_name, tmux_ok=True, wt_ok=False):
+def _call(membrane, monkeypatch, *, session_name, tmux_ok=True, wt_ok=False, cwd=None):
     launch = MagicMock(return_value=tmux_ok)
     wt = MagicMock(return_value=wt_ok)
     monkeypatch.setattr(spawn, "_launch_via_tmux", launch)
     monkeypatch.setattr(spawn, "_relaunch_in_windows_terminal", wt)
-    rc = membrane.pre_launch(_cell(), BIN, ARGV, no_banner=True, session_name=session_name)
+    rc = membrane.pre_launch(_cell(cwd), BIN, ARGV, no_banner=True, session_name=session_name)
     return rc, launch, wt
 
 
@@ -86,28 +88,36 @@ def test_codex_and_antigravity_inherit_base_tmux(monkeypatch):
 # its body was claude-specific — only the call site was — so codex and antigravity
 # (the two cells the commander launched by hand for months) never got the rescue.
 
-def test_every_membrane_reaches_wt_when_base_tmux_declines(monkeypatch):
+def test_every_membrane_reaches_wt_when_base_tmux_declines(monkeypatch, tmp_path):
     """THE PAYLOAD OF THE HOIST. Every provider, not just claude.
 
     Written as a loop over MEMBRANES rather than a list of named cases on purpose:
     a provider added later is covered the day it is registered. A per-provider test
     would have passed for years while codex sat uncovered — which is exactly what
     happened.
+
+    The env factory is invoked INSIDE the loop, not after it. After this PR
+    registered CursorMembrane last, the old "assert once on call_args" only
+    exercised cursor's builder — and that builder mkdirs ``<cwd>/.cursor-cell``,
+    which exploded on the hoist fixture's fictional ``/home/ubuntu/lab`` (CI
+    PermissionError on ``/home/ubuntu``). A writable cwd + a per-membrane
+    factory call is the property: every membrane's env, not whichever one
+    happened to be registered last.
     """
-    assert set(spawn.MEMBRANES) >= {"claude", "codex", "antigravity", "grok", "vibe"}
+    assert set(spawn.MEMBRANES) >= {"claude", "codex", "antigravity", "grok", "vibe", "cursor"}
     for key, m in spawn.MEMBRANES.items():
         rc, _launch, wt = _call(
-            m, monkeypatch, session_name="lab", tmux_ok=False, wt_ok=True
+            m, monkeypatch, session_name="lab", tmux_ok=False, wt_ok=True, cwd=tmp_path
         )
         assert rc == 0, f"{key}: WT rescue did not take over"
         # #360: a 4th argument now carries the membrane's env AS A FACTORY (lazy,
-    # because grok/vibe builders create directories). Assert the first three
-    # positionally AND that the factory yields an env stamped with THIS cell —
-    # checking only arity would pass a factory returning an unstamped env.
-    args, _kw = wt.call_args
-    assert args[:3] == (BIN, ARGV, Path("/home/ubuntu/lab"))
-    assert callable(args[3]), "the env must arrive as a lazy factory"
-    assert args[3]()["SWARPH_SELF"] == "cell-under-test"
+        # because grok/vibe/cursor builders create directories). Assert the first
+        # three positionally AND that the factory yields an env stamped with THIS
+        # cell — checking only arity would pass a factory returning an unstamped env.
+        args, _kw = wt.call_args
+        assert args[:3] == (BIN, ARGV, tmp_path), key
+        assert callable(args[3]), f"{key}: the env must arrive as a lazy factory"
+        assert args[3]()["SWARPH_SELF"] == "cell-under-test", key
 
 
 def test_every_membrane_declines_when_neither_tmux_nor_wt(monkeypatch):
