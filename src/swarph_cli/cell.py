@@ -62,7 +62,11 @@ _VALID_PROVIDERS_V0_6 = VALID_PROVIDERS  # historical name for the v0.6 frozense
 _validate_uuid = validate_uuid_str  # historical helper name
 
 # Providers enabled by this CLI runtime beyond swarph-shared's legacy policy.
-CLI_ENABLED_PROVIDERS = VALID_PROVIDERS | {"muse"}
+# `cursor` rides the muse ordering deliberately: a membrane + this enablement in
+# ONE swarph-cli release, and entry into swarph_shared.VALID_PROVIDERS only in a
+# later one. spawn.py's guard is `VALID_PROVIDERS ⊆ MEMBRANES`, so this direction
+# is inert while the reverse raises at import for every fresh install (#247).
+CLI_ENABLED_PROVIDERS = VALID_PROVIDERS | {"muse", "cursor"}
 
 
 def _config_root() -> Path:

@@ -86,14 +86,14 @@ def test_it_overrides_the_CLI_methods_while_keeping_claude_plumbing():
 
 def test_a_workspace_with_NO_prior_session_starts_fresh(tmp_path, monkeypatch):
     monkeypatch.setattr(spawn, "_MUSE_SESSION_INDEX", str(_index(tmp_path, None)))
-    assert _argv(_cell(tmp_path)) == ["muse"]
+    assert _argv(_cell(tmp_path)) == ["muse", "--disable-sandbox"]
 
 
 def test_a_workspace_WITH_a_prior_session_resumes_it(tmp_path, monkeypatch):
     """`--last`, never bare `resume` — bare opens the picker."""
     monkeypatch.setattr(spawn, "_MUSE_SESSION_INDEX", str(_index(tmp_path, str(tmp_path))))
     argv = _argv(_cell(tmp_path))
-    assert argv == ["muse", "resume", "--last"]
+    assert argv == ["muse", "--disable-sandbox", "resume", "--last"]
 
 
 def test_ANOTHER_workspaces_session_does_not_trigger_resume(tmp_path, monkeypatch):
@@ -106,7 +106,7 @@ def test_ANOTHER_workspaces_session_does_not_trigger_resume(tmp_path, monkeypatc
     """
     monkeypatch.setattr(spawn, "_MUSE_SESSION_INDEX",
                         str(_index(tmp_path, "/some/other/workspace")))
-    assert _argv(_cell(tmp_path)) == ["muse"]
+    assert _argv(_cell(tmp_path)) == ["muse", "--disable-sandbox"]
 
 
 def test_an_UNREADABLE_index_starts_fresh_rather_than_risking_the_picker(tmp_path, monkeypatch):
@@ -120,10 +120,10 @@ def test_an_UNREADABLE_index_starts_fresh_rather_than_risking_the_picker(tmp_pat
     broken = tmp_path / "not-a-database.db"
     broken.write_text("this is not sqlite", encoding="utf-8")
     monkeypatch.setattr(spawn, "_MUSE_SESSION_INDEX", str(broken))
-    assert _argv(_cell(tmp_path)) == ["muse"]
+    assert _argv(_cell(tmp_path)) == ["muse", "--disable-sandbox"]
 
     monkeypatch.setattr(spawn, "_MUSE_SESSION_INDEX", str(tmp_path / "absent.db"))
-    assert _argv(_cell(tmp_path)) == ["muse"]
+    assert _argv(_cell(tmp_path)) == ["muse", "--disable-sandbox"]
 
 
 def test_bare_resume_is_NEVER_emitted(tmp_path, monkeypatch):
@@ -140,19 +140,42 @@ def test_bare_resume_is_NEVER_emitted(tmp_path, monkeypatch):
 
 def test_passthrough_is_appended(tmp_path, monkeypatch):
     monkeypatch.setattr(spawn, "_MUSE_SESSION_INDEX", str(_index(tmp_path, None)))
-    assert _argv(_cell(tmp_path), ["--model", "x"]) == ["muse", "--model", "x"]
+    assert _argv(_cell(tmp_path), ["--model", "x"]) == [
+        "muse", "--disable-sandbox", "--model", "x",
+    ]
+
+
+def test_disable_sandbox_is_ALWAYS_passed_because_the_sandbox_is_broken(
+    tmp_path, monkeypatch,
+):
+    """>>> NOT A POSTURE CHOICE. <<< muse's OS sandbox is broken; a cell
+    launched with it enabled does not become a working cell. The flag is
+    therefore unconditional on BOTH paths — a resume-only or fresh-only
+    injection would leave the other path still dead.
+
+    When the sandbox works, delete this test and the flag together. Do not
+    "complete the pattern" by adding `--yolo` / `--disable-approval` to match.
+    """
+    monkeypatch.setattr(spawn, "_MUSE_SESSION_INDEX", str(_index(tmp_path, None)))
+    assert _argv(_cell(tmp_path))[1] == "--disable-sandbox"
+    monkeypatch.setattr(
+        spawn, "_MUSE_SESSION_INDEX", str(_index(tmp_path, str(tmp_path)))
+    )
+    argv = _argv(_cell(tmp_path))
+    assert argv[:3] == ["muse", "--disable-sandbox", "resume"]
 
 
 def test_safety_defaults_are_NOT_weakened(tmp_path, monkeypatch):
-    """muse ships approval and sandboxing ON; `--yolo` disables both.
+    """Approval stays ON. `--yolo` disables approval AND sandbox together;
+    `--disable-approval` / `--trust-workspace` are the other two widenings.
 
-    A membrane is the wrong place to silently weaken a provider's safety
-    posture. An operator who wants it passes it through, where it is visible in
-    the spawn command rather than buried in a library default.
+    `--disable-sandbox` is the known-broken exception (see the test above) and
+    is deliberately NOT in this list. The property here is: we did not use the
+    sandbox workaround as cover to relax the rest.
     """
     monkeypatch.setattr(spawn, "_MUSE_SESSION_INDEX", str(_index(tmp_path, None)))
     argv = _argv(_cell(tmp_path))
-    for unsafe in ("--yolo", "--disable-approval", "--disable-sandbox", "--trust-workspace"):
+    for unsafe in ("--yolo", "--disable-approval", "--trust-workspace"):
         assert unsafe not in argv, f"the membrane injected {unsafe}"
 
 
