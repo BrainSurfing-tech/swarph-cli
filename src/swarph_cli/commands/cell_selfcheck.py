@@ -559,7 +559,14 @@ def run_selfcheck(*, self_name: str, declaration: Path) -> int:
         print(f"\n  verdict: DID NOT MEASURE (could not read: {names})")
         return 2
 
-    print(f"\n  verdict: {'DRIFT' if drift else 'consistent'}")
+    # Drop-on-meta-edge (PR #243 review): a reviewer who had just read the card
+    # still parsed `verdict: consistent` as "this cell is correctly configured"
+    # for several seconds before COVERAGE corrected it. The property, not the
+    # wording, is the requirement: the verdict must carry what it is ABOUT.
+    # Surfaces agreeing with each other is not a comparison against the shared
+    # resolver (GAP 1, carded, not held).
+    scope = "surfaces agree with each other; NOT compared against resolver output"
+    print(f"\n  verdict: {'DRIFT' if drift else 'consistent'}  ({scope})")
     return 1 if drift else 0
 
 

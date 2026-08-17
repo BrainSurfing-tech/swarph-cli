@@ -432,6 +432,23 @@ def test_legitimately_absent_crontab_is_read_and_still_reported(monkeypatch, tmp
     assert "COVERAGE" in out and "another user" in out
 
 
+def test_verdict_line_states_what_it_is_a_verdict_about(monkeypatch, tmp_path, capsys):
+    """Bare `consistent` was read as 'this cell is correctly configured'.
+
+    drop-on-meta-edge, reviewing PR #243, held that misreading for several
+    seconds after reading the card, the DM, and the diff. The COVERAGE block
+    eventually corrected it; the verdict line itself must carry the property
+    so a reader who stops at the last line is not certified into a lie.
+    """
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("a.service", "ExecStart=x --as lab --state-dir /var/lib/swarph/lab\n"),
+    ], "lab", capsys=capsys)
+    assert rc == 0, out
+    assert "verdict: consistent" in out
+    assert "surfaces agree with each other" in out
+    assert "NOT compared against resolver output" in out
+
+
 def test_coverage_is_printed_even_on_a_clean_run(monkeypatch, tmp_path, capsys):
     """A block that appears only on failure is one nobody reads until too late."""
     _, out = _run(monkeypatch, tmp_path, [_cov("crontab", True, "51 lines")],
