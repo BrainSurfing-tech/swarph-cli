@@ -24,6 +24,7 @@ for users (alpha #891 D2).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -242,6 +243,7 @@ def _validate_routing(cell: Cell) -> None:
         "muse": "anthropic",
         "codex": "codex",
         "antigravity": "antigravity",
+        "cursor": "cursor",
     }.get(cell.provider)
     if provider_native is None:
         raise CellError(
@@ -606,11 +608,17 @@ def _build_muse_argv(cell: Cell, no_starter: bool, passthrough: list[str]) -> li
         muse belongs on codex's resume-by-discovery pattern, not claude's.
       * ``resume`` is a SUBCOMMAND, not a flag, and must precede its options.
 
-    SAFETY DEFAULTS ARE LEFT ALONE. muse ships approval and sandboxing ON
-    (``--approval-mode on-request``, sandbox enabled); ``--yolo`` would disable
-    both. A membrane is the wrong place to weaken a provider's safety posture
-    silently — an operator who wants it can pass it through explicitly, where it
-    is visible in the spawn command rather than buried in a library default.
+    APPROVAL STAYS ON. ``--yolo`` / ``--disable-approval`` are still the
+    operator's to pass through, never a library default.
+
+    THE SANDBOX IS THE EXCEPTION, AND IT IS NOT A POSTURE CHOICE. muse's OS
+    sandbox is broken: a cell launched with it enabled does not become a
+    working cell. ``--disable-sandbox`` is therefore unconditional on both the
+    fresh and resume paths (it is a root option and may sit on either side of
+    ``resume`` — pinned immediately after ``muse`` so the two paths cannot
+    drift). This is a known-broken-default workaround, not a silent
+    ``--yolo``. When the sandbox works, delete the flag and the test that
+    pins it; do not "complete the pattern" by weakening approval to match.
     """
     if _muse_has_session_for(cell.cwd):
         # >>> RESUME HAS NO PROMPT SLOT, AND THAT IS A REAL LIMITATION, NOT AN
@@ -621,9 +629,9 @@ def _build_muse_argv(cell: Cell, no_starter: bool, passthrough: list[str]) -> li
         # a resumed muse cell keeps its own continuity but does NOT receive the
         # restored-task text. `muse session-message` may be the eventual answer;
         # it is a separate integration, not a silent workaround.
-        return ["muse", "resume", "--last", *passthrough]
+        return ["muse", "--disable-sandbox", "resume", "--last", *passthrough]
 
-    argv = ["muse"]
+    argv = ["muse", "--disable-sandbox"]
     if not no_starter:
         starter = read_starter_prompt(cell)
         if starter:
@@ -2039,6 +2047,218 @@ def _build_vibe_argv(
     return argv
 
 
+#: Cursor cell data dir, created INSIDE the cell cwd. GROUNDED against
+#: cursor-agent 2026.08.11 by execution on 2026-08-17, and the grounding is what
+#: picks ``CURSOR_DATA_DIR`` over the isolated-$HOME shape grok/vibe use:
+#:   * ``CURSOR_DATA_DIR=<tmp> agent status`` -> "✓ Logged in", and <tmp> receives
+#:     the ``projects/`` state. The data dir isolates cell state and leaves auth
+#:     ALONE.
+#:   * ``HOME=<tmp> agent status`` -> "Not logged in". A relocated HOME BREAKS
+#:     auth, because ``auth.json`` resolves off the CONFIG dir, not the data dir
+#:     (vendor ``getAuthFilePath``: win32 ``%APPDATA%/Cursor``, darwin
+#:     ``~/.cursor``, else ``$XDG_CONFIG_HOME``|``~/.config`` + ``/cursor``).
+#: So the cell relocates ONLY the data dir. It keeps the operator's subscription
+#: auth (the $0 path, WITHOUT a credential symlink — nothing to link, because the
+#: dir holding it is deliberately not moved), and it keeps ``Path.home()`` intact
+#: so ``~/.config/swarph/<self>.peer_token``, ``~/.swarph/secrets.toml`` and the
+#: codegraph hook still resolve. That is VibeMembrane's lesson — a fake $HOME
+#: costs the cell its own mesh identity — paid here at zero cost.
+#: >>> AND ``$XDG_CONFIG_HOME`` MUST NOT BE RELOCATED EITHER, for BOTH reasons at
+#: once: it is where cursor reads auth.json AND where swarph reads its own cells
+#: dir + peer token. It looks like the tidier isolation knob and it is the one
+#: that breaks both sides. <<<
+_CURSOR_CELL_DATA_SUBDIR = ".cursor-cell"
+
+#: Cursor cell env: DENY-BY-DEFAULT over the cursor namespace. Allowlist only a
+#: var the cell genuinely needs to RECEIVE from the parent — none today.
+_CURSOR_ENV_ALLOWLIST: frozenset = frozenset()
+
+#: Valid ``sandbox:`` values for a cursor cell — cursor's own vocabulary
+#: (``--sandbox <enabled|disabled>``), NOT codex's workspace-write/read-only.
+_CURSOR_SANDBOX_VALUES = frozenset({"enabled", "disabled"})
+
+
+def _scrub_cursor_namespace(env: dict[str, str]) -> None:
+    """DENY-BY-DEFAULT scrub of the ``CURSOR_*`` / ``__CURSOR*`` namespace.
+
+    ``CURSOR_API_KEY`` and ``CURSOR_AUTH_TOKEN`` already fall to the shared
+    suffix sweep. ``CURSOR_API_ENDPOINT`` does NOT — it is neither ``*_API_KEY``
+    nor ``*_BASE_URL`` — and it IS the redirect: vendor source defaults the
+    endpoint to ``process.env.CURSOR_API_ENDPOINT``, so an inherited one moves
+    the cell off the subscription endpoint with nothing about the session looking
+    different. ``CURSOR_DATA_DIR`` is the other half: inherited, it points the
+    cell back at the operator's ``~/.cursor`` and silently undoes the isolation
+    this membrane exists to create. Enumerating those two re-opens on the next
+    release (the same whack-a-mole the grok scrub refuses), so deny the namespace
+    and let cursor fall back to its built-in defaults plus the operator auth file.
+
+    ``__CURSOR*`` is included because ``__CURSOR_SANDBOX_ENV_RESTORE`` is a
+    RESTORE HOOK, not a value: the cursor sandbox shell wrapper evals it, so
+    whatever a parent put there can outlive a scrub of the variables themselves.
+    (Measured payload on this box is only ``CURSOR_CONVERSATION_ID`` — the
+    objection is the mechanism, not today's contents.) It appears only when a
+    cell is spawned FROM a cursor session, where none of it means anything to the
+    cell.
+    """
+    for key in [
+        k for k in env
+        if k.startswith(("CURSOR_", "__CURSOR"))
+        and k not in _CURSOR_ENV_ALLOWLIST
+    ]:
+        env.pop(key, None)
+
+
+def _cursor_data_dir(cell: Cell) -> Path:
+    """The cell's private cursor state root (``<cwd>/.cursor-cell``)."""
+    return cell.cwd / _CURSOR_CELL_DATA_SUBDIR
+
+
+def _cursor_env(cell: Cell) -> dict[str, str]:
+    """Subscription env for a local ``cursor-agent`` CELL ($0 Cursor plan).
+
+    On top of the canonical billing scrub: the namespace deny (see
+    ``_scrub_cursor_namespace``) and a cell-private ``CURSOR_DATA_DIR`` so the
+    cell's chats / projects / cli-config never mix with the operator's
+    ``~/.cursor``. HOME and ``XDG_CONFIG_HOME`` are deliberately untouched — see
+    ``_CURSOR_CELL_DATA_SUBDIR`` for the probes that decided that.
+
+    MESH_GATEWAY_TOKEN is deliberately NOT popped — same as every other
+    membrane, the cell inherits the gateway token so its mesh DMs work out of
+    the box.
+    """
+    env = _spawn_env_base(cell)
+    # ORDER IS LOAD-BEARING: the scrub removes an inherited CURSOR_DATA_DIR and
+    # this sets the cell's own AFTER, so the membrane's value is authoritative.
+    # Inverted, an operator's shell CURSOR_DATA_DIR silently wins and the cell
+    # writes into the operator's state — isolation that reads as working.
+    _scrub_cursor_namespace(env)
+    data_dir = _cursor_data_dir(cell)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    env["CURSOR_DATA_DIR"] = str(data_dir)
+    return env
+
+
+def _cursor_sandbox(cell: Cell) -> Optional[str]:
+    """The cell's declared ``--sandbox`` value, or None to leave it to cursor.
+
+    >>> DELIBERATELY NOT DEFAULTED, AND THAT IS THE OPPOSITE OF WHAT agy DOES. <<<
+    agy defaults its sandbox ON because firejail's availability is knowable from
+    this box. Cursor's sandbox is a kernel/OS-level facility whose behavior on
+    the SECOND validated environment — Windows/psmux — cannot be probed from
+    here, and ``--sandbox`` OVERRIDES cursor's own config. Forcing a value is
+    therefore the one choice that can make a cell fail to start on the platform
+    we cannot test, and it buys nothing cursor's own default does not already
+    give. So: silent unless cell.yaml declares it, and loud when it declares
+    nonsense (a codex-shaped ``workspace-write`` raises here rather than being
+    forwarded to a CLI that would reject it after the pane is already up).
+    """
+    sandbox = getattr(cell, "sandbox", None)
+    if sandbox is None:
+        return None
+    if sandbox not in _CURSOR_SANDBOX_VALUES:
+        raise CellError(
+            f"cell.yaml: sandbox {sandbox!r} is not valid for provider "
+            f"'cursor'. Valid values: {sorted(_CURSOR_SANDBOX_VALUES)}."
+        )
+    return sandbox
+
+
+def _cursor_has_prior_chat(cell: Cell) -> bool:
+    """True if this cell has a cursor chat for ``--continue`` to land on.
+
+    >>> THE GUARD THAT KEEPS EVERY GENESIS SPAWN ALIVE. <<< ``--continue`` is not
+    a graceful-fresh-start flag here: cursor rewrites it to ``--resume "-1"``,
+    resolves it via ``getLatestChatId()``, and on an empty store calls
+    ``exit(1, "No previous chats found.")``. MEASURED — exit code 1 on a virgin
+    data dir, vendor source read afterwards to confirm the mechanism. An
+    UNCONDITIONAL ``--continue`` (which is exactly what the agy membrane does,
+    because agy DOES start fresh gracefully) would make the FIRST spawn of every
+    cursor cell die instantly inside a multiplexer pane that then collapses:
+    "tmux session created, no agent" — the same shape as the v0.12.0 Windows
+    breakage, arriving through argv instead of exec semantics.
+    ONE PROVIDER'S GRACEFUL FLAG IS ANOTHER'S IMMEDIATE EXIT. The analogy was the
+    trap; the probe was two commands.
+
+    Evidence is read from the cell's OWN data dir, and the isolation is what
+    makes "has a prior chat" a local question at all:
+      * ``<data>/chats/<md5(abs cwd)>/`` — the interactive store. md5-of-
+        resolved-path is vendor-side, not invented here (verified: md5 of
+        ``/home/ubuntu`` equals the live chats subdir name).
+      * ``<data>/projects/*/agent-transcripts/*/`` — print-mode runs leave
+        transcripts and no ``chats/`` dir at all, so the primary probe alone
+        answers "no" for a cell whose only history came through ``-p``.
+
+    FAILS TOWARD FRESH, DELIBERATELY. If cursor moves its layout both probes go
+    False, ``--continue`` is omitted, and the cell starts a NEW chat — it loses
+    continuity, which is recoverable and visible. The other direction emits
+    ``--continue`` into a store that cannot satisfy it and the cell does not
+    start at all. Never raises, for the same reason.
+    """
+    data_dir = _cursor_data_dir(cell)
+    try:
+        digest = hashlib.md5(
+            str(Path(cell.cwd).resolve()).encode("utf-8")
+        ).hexdigest()
+        chat_dir = data_dir / "chats" / digest
+        if chat_dir.is_dir() and any(chat_dir.iterdir()):
+            return True
+        projects = data_dir / "projects"
+        if projects.is_dir():
+            for project in projects.iterdir():
+                transcripts = project / "agent-transcripts"
+                if transcripts.is_dir() and any(transcripts.iterdir()):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _build_cursor_argv(
+    cell: Cell, no_starter: bool, passthrough: list[str]
+) -> list[str]:
+    """The interactive ``cursor-agent`` TUI as a durable swarph cell.
+
+    ``--trust`` is REQUIRED, not a convenience. A detached cell in a workspace
+    the cell's own (fresh, isolated) data dir has never trusted stops with "To
+    proceed, you can either: run 'agent' interactively to decide / pass --trust,
+    --yolo, or -f if you trust this directory" — measured, non-interactively.
+    So withholding the NARROW flag leaves only the WIDE ones on the table, the
+    same inversion VibeMembrane's ``--trust`` documents. Cursor does persist the
+    answer, but to ``<CURSOR_DATA_DIR>/projects/<slug>/.workspace-trusted``,
+    which for a cell IS cell-private state — the write never reaches the
+    operator's ``~/.cursor``. (That containment is a PROPERTY OF THE ISOLATED
+    DATA DIR, not of the flag: without the isolation this would be the
+    persistent-write posture vibe's flag was chosen to avoid.)
+
+    NO ``-p``/``--print``: that is send-one-prompt-and-exit, and a cell that
+    exits after one turn is not a cell. NO ``--force`` / ``--yolo`` /
+    ``--auto-review``: widening tool approval is cell.yaml's to do explicitly,
+    never the membrane's default.
+
+    NO ``--workspace`` / ``--add-dir``: ``launch`` chdirs to ``cell.cwd`` and
+    cursor defaults its workspace to the cwd, so no path-shaped string crosses
+    the exec boundary (#314 — an absolute Windows path containing spaces
+    re-splits there).
+
+    The starter is POSITIONAL because cursor's surface has no system-prompt
+    sibling (no ``--append-system-prompt`` / ``--system-prompt-override``); the
+    positional prompt is the only identity channel, as with vibe. Verified
+    compatible with ``--continue`` in the same argv.
+    """
+    argv = ["cursor-agent", "--trust"]
+    if _cursor_has_prior_chat(cell):
+        argv.append("--continue")
+    sandbox = _cursor_sandbox(cell)
+    if sandbox is not None:
+        argv.extend(["--sandbox", sandbox])
+    if not no_starter and cell.starter_prompt_path:
+        starter = read_starter_prompt(cell)
+        if starter:  # skip an empty starter file (matches claude/grok membranes)
+            argv.append(starter)
+    argv.extend(passthrough)
+    return argv
+
+
 class GrokMembrane(ProviderMembrane):
     """Local ``grok`` CLI as a durable swarph CELL ($0 OIDC / subscription).
 
@@ -2256,6 +2476,133 @@ class VibeMembrane(ProviderMembrane):
         return None
 
 
+class CursorMembrane(ProviderMembrane):
+    """Local ``cursor-agent`` CLI as a durable swarph CELL (Cursor plan).
+
+    Same shape as GrokMembrane/VibeMembrane — exec the local agent TUI in a named
+    multiplexer session via the BASE ``pre_launch`` (no override: that hoist is
+    what card #2 fixed, and Linux tmux / Windows psmux parity is exactly what the
+    base buys) — with ONE deliberate divergence: the cell's isolation is
+    ``CURSOR_DATA_DIR``, NOT a fake ``$HOME``. See
+    ``_CURSOR_CELL_DATA_SUBDIR`` for the two probes that settled that, and
+    ``_cursor_has_prior_chat`` for the genesis trap in ``--continue``.
+
+    Session model (``uses_pinned_session`` False): cursor mints and OWNS its own
+    chat ids under ``<data>/chats/<md5(cwd)>/``, so the cell carries no
+    swarph-pinned UUID and relies on cursor's own ``--continue`` for continuity.
+    A pinned lane IS reachable — ``--new-session-id <uuid4>`` exists — but it is
+    a HIDDEN flag AND it is mutually exclusive with ``--continue``/``--resume``
+    (vendor source: "Error: --new-session-id cannot be combined with --resume or
+    --continue"), so adopting it would trade a stable documented surface for an
+    unstable one AND rebuild the resume logic. Deferred on purpose, not missed.
+    """
+
+    name = "cursor"
+
+    env_builder = staticmethod(_cursor_env)
+
+    def uses_pinned_session(self) -> bool:
+        return False
+
+    def build_argv(
+        self,
+        cell: Cell,
+        *,
+        session_id: Optional[str],
+        no_starter: bool,
+        passthrough: list[str],
+        effective_role: Optional[str],
+    ) -> list[str]:
+        return _build_cursor_argv(cell, no_starter, passthrough)
+
+    def resolve_binary(self) -> Optional[str]:
+        # ``cursor-agent`` FIRST, and the order is not cosmetic: the installer
+        # also drops a bare ``agent`` symlink, which is a name any number of
+        # unrelated tools can occupy on a shared PATH. Prefer the unambiguous
+        # one, accept the short one, then the install location the operator's
+        # PATH may not carry (same fallback grok/vibe/agy take).
+        for name in ("cursor-agent", "agent"):
+            found = shutil.which(name)
+            if found:
+                return found
+        for name in ("cursor-agent", "agent"):
+            home_local = Path.home() / ".local" / "bin" / name
+            if home_local.exists():
+                return str(home_local)
+        return None
+
+    def binary_not_found_message(self) -> str:
+        return (
+            "swarph spawn: neither 'cursor-agent' nor 'agent' found on PATH. "
+            "Install the Cursor Agent CLI (curl https://cursor.com/install -fsS "
+            "| bash) or set PATH explicitly."
+        )
+
+    def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
+        try:
+            os.chdir(cell.cwd)
+        except OSError as exc:
+            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
+            return 1
+        env = _cursor_env(cell)
+        env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
+        # Per-OS split, identical to claude/grok/vibe: Windows os.exec* is
+        # emulated as spawn-and-exit, which collapses the psmux pane whose root
+        # command it was; a BLOCKING subprocess.run keeps THIS process as the
+        # pane root. POSIX execve does a true in-place replace.
+        if sys.platform == "win32":
+            try:
+                return subprocess.run([binary, *argv[1:]], env=env).returncode
+            except OSError as exc:
+                print(f"swarph spawn: launch failed: {exc}", file=sys.stderr)
+                return 1
+        try:
+            os.execve(binary, argv, env)
+        except OSError as exc:
+            print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
+            return 1
+        return 0  # unreachable on POSIX (execve replaces); keeps type checker happy
+
+    def memory_sync_files(self, cell) -> list:
+        """WORKSPACE instruction files only — the two cursor actually reads from
+        the cwd (``AGENTS.md``; ``.cursor/rules/**/*.mdc``, both confirmed in the
+        2026.08.11 bundle's rule loader).
+
+        TWO THINGS ARE EXCLUDED BY CONSTRUCTION, AND BOTH WOULD BE WRONG TO ADD:
+          * ``<data>/cli-config.json`` — it carries ``approvalMode`` and
+            ``permissions``. The memory repo is keyed by cell.ROLE, so a config
+            captured from one cell restores into EVERY same-role cell through a
+            git remote: one operator relaxing approval once would propagate it to
+            the fleet, with the argv posture test still passing. Vibe's
+            config.toml, same vector, different file. CONFIG IS POLICY, NOT MEMORY.
+          * ``~/.cursor/rules`` (USER-scope rules) — those are the OPERATOR's and
+            are shared with the cell already, since HOME is not relocated.
+            Capturing them would push operator-global rules into a per-role repo
+            and back out into every cell of that role.
+        The chat store (``chats/**/store.db`` + its WAL) is also absent: a live
+        sqlite database copied mid-write is a torn artifact, and continuity here
+        is cursor's own job via ``--continue``.
+        """
+        files = []
+        if (cell.cwd / "AGENTS.md").exists():
+            files.append(("AGENTS.md", cell.cwd / "AGENTS.md"))
+        rules_dir = cell.cwd / ".cursor" / "rules"
+        if rules_dir.is_dir():
+            for p in sorted(rules_dir.rglob("*")):
+                if p.is_file() and p.suffix in (".mdc", ".md"):
+                    rel = p.relative_to(rules_dir).as_posix()
+                    files.append((f"cursor-rules/{rel}", p))
+        return files
+
+    def memory_restore_dest(self, rel_parts, cell):
+        if rel_parts and rel_parts[0] == "cursor-rules":
+            return (cell.cwd / ".cursor" / "rules").joinpath(*rel_parts[1:])
+        return None
+
+    def memory_guard_file(self, cell):
+        return cell.cwd / "AGENTS.md"
+
+
 class MuseMembrane(ClaudeMembrane):
     """Muse (Meta) lane — ITS OWN CLI, on Claude's plumbing.
 
@@ -2328,6 +2675,13 @@ MEMBRANES: dict[str, ProviderMembrane] = {
     # and kills `swarph spawn` for every fresh install (2026-08-05, ~5h).
     "vibe": VibeMembrane(),
     "muse": MuseMembrane(),
+    # The cursor lane. Registered here AND enabled via cell.CLI_ENABLED_PROVIDERS
+    # in the same release; `cursor` enters swarph_shared.VALID_PROVIDERS only in a
+    # LATER one. That is the muse ordering, and it is the safe direction the #247
+    # outage established: this guard is a SUBSET check, so a membrane ahead of the
+    # shared whitelist is inert, while a whitelist ahead of the membrane raises AT
+    # IMPORT and kills `swarph spawn` for every fresh install.
+    "cursor": CursorMembrane(),
 }
 
 # Defensive coupling: every shared-whitelisted provider MUST have a membrane,
@@ -2451,7 +2805,7 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
             )
 
-    elif cell.provider in ("antigravity", "grok"):
+    elif cell.provider in ("antigravity", "grok", "cursor"):
         # Fresh-session providers (no swarph-pinned UUID): grok mints + owns its
         # own session ids (continuity via --continue + grok memory). Still want
         # the operator-typed slot-role as effective_role for the named tmux

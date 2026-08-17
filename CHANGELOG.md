@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.43.1 — 2026-08-17
+
+- **Cursor is now available as a durable swarph cell provider.** Its local
+  state is isolated beneath the cell workspace, resumed only when a prior
+  Cursor chat exists, and launched with workspace trust so supervised cells do
+  not stall on an interactive trust prompt.
+
+- **Muse launches with its sandbox disabled.** This is a temporary workaround
+  for the broken Muse OS sandbox; approval remains enabled and no broad
+  auto-approval flags are injected.
+
 ## 0.43.0 — 2026-08-16
 
 - **Peer-service replies are now fully receipt-gated and supervisor-owned.** A
