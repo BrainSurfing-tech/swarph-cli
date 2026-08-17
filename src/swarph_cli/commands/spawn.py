@@ -2259,6 +2259,80 @@ def _build_cursor_argv(
     return argv
 
 
+def _build_cursor_print_argv(cell: Cell, prompt: str) -> list[str]:
+    """Headless one-shot for DM delivery (#454). Not a cell.
+
+    ``--print`` is send-one-prompt-and-exit. Interactive spawn MUST NOT use it
+    (a cell that exits after one turn is not a cell). Delivery MUST: this is
+    how a cursor cell receives a DM without send-keys into a TUI.
+
+    ``--continue`` (not bare ``--resume``) when a prior chat exists: ``--resume``
+    without a chat id can select a session, which is a TTY prompt. ``--continue``
+    is the same continuity the interactive membrane already measured.
+
+    NO ``--force`` / ``--yolo`` / ``--auto-review``: headless must not quietly
+    become unapproved-execution. Same posture as the TUI argv.
+    """
+    if not str(prompt).strip():
+        raise ValueError("cursor --print delivery needs a non-empty prompt")
+    argv = ["cursor-agent", "--trust", "--print", "--output-format", "text"]
+    if _cursor_has_prior_chat(cell):
+        argv.append("--continue")
+    sandbox = _cursor_sandbox(cell)
+    if sandbox is not None:
+        argv.extend(["--sandbox", sandbox])
+    argv.append(prompt)
+    return argv
+
+
+def run_cursor_print(cell: Cell, prompt: str, *, timeout: Optional[float] = None) -> int:
+    """Block until ``cursor-agent --print`` exits. Returncode is the transport.
+
+    Launching is not success (#184). Non-zero means TRANSPORT-INCOMPLETE.
+    This is Cursor-specific on purpose — see #454: a shared ProviderMembrane
+    headless seam with Codex would be a false abstraction across two session
+    models.
+    """
+    argv = _build_cursor_print_argv(cell, prompt)
+    # Resolve here, not via CursorMembrane(), because this helper sits above
+    # the class in the file. Same search order as CursorMembrane.resolve_binary.
+    binary = None
+    for name in ("cursor-agent", "agent"):
+        found = shutil.which(name)
+        if found:
+            binary = found
+            break
+    if binary is None:
+        for name in ("cursor-agent", "agent"):
+            home_local = Path.home() / ".local" / "bin" / name
+            if home_local.exists():
+                binary = str(home_local)
+                break
+    if not binary:
+        print(
+            "swarph spawn: neither 'cursor-agent' nor 'agent' found on PATH. "
+            "Install the Cursor Agent CLI (curl https://cursor.com/install -fsS "
+            "| bash) or set PATH explicitly.",
+            file=sys.stderr,
+        )
+        return 127
+    env = _cursor_env(cell)
+    env.update(_git_identity_env(cell))
+    try:
+        completed = subprocess.run(
+            [binary, *argv[1:]],
+            cwd=str(cell.cwd),
+            env=env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return 124
+    except OSError as exc:
+        print(f"swarph: cursor --print launch failed: {exc}", file=sys.stderr)
+        return 1
+    return int(completed.returncode)
+
+
 class GrokMembrane(ProviderMembrane):
     """Local ``grok`` CLI as a durable swarph CELL ($0 OIDC / subscription).
 
@@ -2514,6 +2588,10 @@ class CursorMembrane(ProviderMembrane):
         effective_role: Optional[str],
     ) -> list[str]:
         return _build_cursor_argv(cell, no_starter, passthrough)
+
+    def deliver_print(self, cell: Cell, prompt: str, *, timeout: Optional[float] = None) -> int:
+        """#454 delivery path. Blocks. Returncode is transport-complete."""
+        return run_cursor_print(cell, prompt, timeout=timeout)
 
     def resolve_binary(self) -> Optional[str]:
         # ``cursor-agent`` FIRST, and the order is not cosmetic: the installer
