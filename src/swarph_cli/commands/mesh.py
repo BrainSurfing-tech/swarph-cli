@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from .. import tokens
+from ._content import ContentError, add_content_args, resolve_content
 from ._display import sanitize_terminal
 
 
@@ -66,7 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
     send = sub.add_parser("send", help="send a mesh DM")
     send.add_argument("to", help="recipient peer name")
     send.add_argument("--kind", required=True, help="message kind")
-    send.add_argument("--content", required=True, help="message body")
+    add_content_args(send)
     _add_common(send)
 
     inbox = sub.add_parser("inbox", help="read this peer's mesh inbox")
@@ -293,13 +294,18 @@ def _write_secret_file_mode_600(path: Path, value: str) -> None:
 
 
 def _run_send(args: argparse.Namespace) -> int:
+    try:
+        content = resolve_content(args.content, getattr(args, "content_file", None))
+    except ContentError as exc:
+        print(f"swarph mesh send: {exc}", file=sys.stderr)
+        return 1
     self_name = _resolve_self_name(args.self_name)
     token = _resolve_token(self_name, args.token_file)
     body = {
         "from_node": self_name,
         "to_node": args.to,
         "kind": args.kind,
-        "content": args.content,
+        "content": content,
     }
     status, payload = _post_json(
         f"{args.gateway.rstrip('/')}/messages",
