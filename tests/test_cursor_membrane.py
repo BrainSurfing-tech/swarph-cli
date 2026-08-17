@@ -26,6 +26,7 @@ every fresh install. <<<
 from __future__ import annotations
 
 import hashlib
+import subprocess
 import types
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -37,12 +38,14 @@ from swarph_cli.commands.spawn import (
     MEMBRANES,
     CursorMembrane,
     _build_cursor_argv,
+    _build_cursor_print_argv,
     _cursor_data_dir,
     _cursor_env,
     _cursor_has_prior_chat,
     _cursor_sandbox,
     _scrub_cursor_namespace,
     _validate_routing,
+    run_cursor_print,
     _CURSOR_CELL_DATA_SUBDIR,
 )
 
@@ -530,3 +533,64 @@ def test_memory_restore_dest_returns_None_for_a_foreign_prefix(tmp_path):
 
 def test_guard_file_is_AGENTS_md_the_file_an_empty_restore_would_CLOBBER(tmp_path):
     assert MEMBRANES["cursor"].memory_guard_file(_cell(tmp_path)) == tmp_path / "AGENTS.md"
+
+
+# ── #454 headless --print delivery (not a cell; the TUI argv stays TUI) ─────
+
+def test_print_argv_is_print_mode_and_the_tui_argv_is_not(tmp_path):
+    tui = _build_cursor_argv(_cell(tmp_path), no_starter=True, passthrough=[])
+    prn = _build_cursor_print_argv(_cell(tmp_path), "check mesh")
+    assert "--print" not in tui and "-p" not in tui
+    assert "--print" in prn
+    assert "--output-format" in prn and "text" in prn
+    assert prn[-1] == "check mesh"
+
+
+def test_print_argv_never_carries_approval_bypass(tmp_path):
+    argv = _build_cursor_print_argv(_cell(tmp_path), "check mesh")
+    for flag in ("--force", "-f", "--yolo", "--auto-review", "--approve-mcps"):
+        assert flag not in argv, f"{flag} on the headless path is unapproved-execution"
+
+
+def test_print_argv_continues_only_when_a_prior_chat_exists(tmp_path):
+    fresh = _build_cursor_print_argv(_cell(tmp_path), "check mesh")
+    assert "--continue" not in fresh
+    cell = _cell(tmp_path)
+    _seed_chat(cell)
+    resumed = _build_cursor_print_argv(cell, "check mesh")
+    assert "--continue" in resumed
+    assert "--resume" not in resumed
+
+
+def test_print_argv_rejects_an_empty_prompt(tmp_path):
+    with pytest.raises(ValueError):
+        _build_cursor_print_argv(_cell(tmp_path), "   ")
+
+
+def test_run_cursor_print_returns_the_process_exit_code_not_launch_success(tmp_path, monkeypatch):
+    """#184: transport-complete is the wait, not the spawn."""
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        seen["cwd"] = kw.get("cwd")
+        seen["timeout"] = kw.get("timeout")
+        return types.SimpleNamespace(returncode=3)
+
+    monkeypatch.setattr("swarph_cli.commands.spawn.subprocess.run", fake_run)
+    monkeypatch.setattr("swarph_cli.commands.spawn.shutil.which", lambda n: "/bin/cursor-agent")
+    rc = run_cursor_print(_cell(tmp_path), "check mesh", timeout=12)
+    assert rc == 3
+    assert seen["cmd"][0] == "/bin/cursor-agent"
+    assert "--print" in seen["cmd"]
+    assert seen["cwd"] == str(tmp_path)
+    assert seen["timeout"] == 12
+
+
+def test_run_cursor_print_timeout_is_124_not_zero(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="cursor-agent", timeout=1)
+
+    monkeypatch.setattr("swarph_cli.commands.spawn.subprocess.run", boom)
+    monkeypatch.setattr("swarph_cli.commands.spawn.shutil.which", lambda n: "/bin/cursor-agent")
+    assert run_cursor_print(_cell(tmp_path), "check mesh") == 124
