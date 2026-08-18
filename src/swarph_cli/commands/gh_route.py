@@ -25,6 +25,7 @@ import sys
 from typing import Optional
 
 from swarph_cli import gh_identity as ghid
+from swarph_cli.cell import cells_dir
 from swarph_cli.console_safe import print_safe
 
 
@@ -103,6 +104,76 @@ def run_show() -> int:
     return 0
 
 
+def _cells_on_this_box() -> list:
+    """Every cell config on this box — NOT just the caller.
+
+    >>> THE HOOK IS INSTALLED PER-BOX AND FIRES FOR EVERY CELL SHARING IT. <<< A
+    preflight that inspects only the caller reports GREEN on a box where five other
+    cells are one install away from a total `gh` refusal. lab-ovh runs eleven cells
+    on one uid; a caller-scoped check there measures the wrong population, which is
+    the defect this whole card family keeps finding.
+    """
+    try:
+        return sorted(p.stem for p in cells_dir().glob("*.yaml"))
+    except Exception:
+        return []
+
+
+def run_doctor() -> int:
+    """Would installing the router REFUSE anyone on this box? Answer BEFORE installing.
+
+    >>> THE ORDERING IS THE HAZARD, NOT THE REFUSAL. <<< Rule 1 is CORRECT to refuse an
+    unmapped cell — falling back to the ambient account is how a cell ran five days as
+    another cell (#360). But `~/.config/swarph/gh-identities.json` does not exist on
+    lab-ovh, so installing the hook first makes the router refuse EVERY `gh` call on
+    the box, discovered one broken command at a time.
+
+    drop-on-meta-edge measured that the blast radius is WIDER THAN `gh`: the invocation
+    regex has 4 known false positives, all quoting, so
+    `git commit -m "fix; gh routing was wrong"` matches, resolves to an unmapped cell,
+    and the COMMIT is refused. An unmapped box does not merely lose `gh` — it loses
+    every command that mentions one inside a string.
+
+    Exit 0 only when every cell on this box resolves. Non-zero is "do not install yet".
+    """
+    try:
+        table = ghid.load_mapping()
+    except ghid.RouterRefusal as exc:
+        print_safe(
+            f"swarph gh-route doctor: REFUSED\n  {exc}\n"
+            f"  >>> DO NOT INSTALL THE HOOK UNTIL THIS EXISTS. <<< The router correctly\n"
+            f"  refuses every `gh` call without it — and, per the invocation regex's\n"
+            f"  known false positives, every command that merely QUOTES one.",
+            file=sys.stderr)
+        return 1
+
+    cells = _cells_on_this_box()
+    if not cells:
+        # >>> AN EMPTY CELL LIST IS NOT A CLEAN BOX. <<< It is a box whose config
+        # directory is missing or unreadable, and "0 of 0 refused, all good" would be
+        # a green derived from having looked nowhere.
+        print_safe(
+            f"swarph gh-route doctor: CANNOT EVALUATE — no cell configs found under\n"
+            f"  {cells_dir()}. This is not a clean box, it is an unread one. The hook\n"
+            f"  fires for every cell here and this check cannot see any of them.",
+            file=sys.stderr)
+        return 1
+
+    unmapped = [c for c in cells if not isinstance(table.get(c), str) or not table.get(c)]
+    for c in cells:
+        login = table.get(c)
+        ok = isinstance(login, str) and login
+        print(f"  {'ok     ' if ok else 'REFUSED'}  {c} -> {login if ok else '(unmapped)'}")
+    print(f"\nmapping: {ghid.mapping_path()}")
+    if unmapped:
+        print(f">>> {len(unmapped)} of {len(cells)} cells on this box would be REFUSED: "
+              f"{', '.join(unmapped)}")
+        print("    Add them to the mapping before installing the hook.")
+        return 1
+    print(f"all {len(cells)} cells on this box resolve — safe to install")
+    return 0
+
+
 def run_gh_route(argv: list[str]) -> int:
     p = argparse.ArgumentParser(
         prog="swarph gh-route",
@@ -111,5 +182,10 @@ def run_gh_route(argv: list[str]) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("hook", help="PreToolUse hook body (reads the payload on stdin)")
     sub.add_parser("show", help="print what THIS cell resolves to; non-zero on refusal")
+    sub.add_parser("doctor", help="would installing the hook refuse anyone ON THIS BOX?")
     args = p.parse_args(argv)
-    return run_hook() if args.cmd == "hook" else run_show()
+    if args.cmd == "hook":
+        return run_hook()
+    if args.cmd == "doctor":
+        return run_doctor()
+    return run_show()
