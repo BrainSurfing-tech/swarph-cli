@@ -148,7 +148,8 @@ exit 0
 # follow-up if droplet's validation finds the per-call cost too high (spec §4).
 _GH_IDENTITY_ROUTER_SH = r"""#!/bin/sh
 # gh-identity-router.sh — swarph bundled Claude Code hook (#397).
-# Rewrites `gh ...` into `GH_TOKEN=$(gh auth token --user <login>) gh ...`, with the
+# Rewrites `gh ...` into `export GH_TOKEN=$(gh auth token --user <login>); gh ...`,
+# with the
 # login resolved from THIS cell's SWARPH_SELF. Denies loudly when the cell is unmapped.
 #
 # A THIN WRAPPER on purpose: the resolver must REFUSE rather than fall back, and a
