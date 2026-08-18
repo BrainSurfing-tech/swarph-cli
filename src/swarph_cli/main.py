@@ -87,6 +87,8 @@ _VERB_HANDLERS: dict[str, str] = {
     "install-codex-hooks": "swarph_cli.commands.install_codex_hooks.run_install_codex_hooks",
     "hook-output": "swarph_cli.commands.hook_output.run_hook_output",
     "codex-hook-output": "swarph_cli.commands.codex_hook_output.run_codex_hook_output",
+    "install-wake-hook": "swarph_cli.commands.install_wake_hook.run_install_wake_hook",
+    "wake-hook-output": "swarph_cli.commands.wake_hook_output.run_wake_hook_output",
     "codegraph-hook": "swarph_cli.commands.codegraph_hook.run_codegraph_hook",
     "watchdog": "swarph_cli.commands.watchdog.run_watchdog",
     "hooks": "swarph_cli.commands.hooks.run_hooks",
