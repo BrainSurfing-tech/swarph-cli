@@ -47,17 +47,32 @@ def test_builtin_hook_installs(tmp_path):
     # char). `Path.as_posix()` is pathlib's OWN normalisation, used here as an
     # INDEPENDENT ORACLE — asserting against `hooks._hook_command_path` would
     # compare the implementation with itself and pass however wrong it was.
-    expected_command = script.resolve().as_posix()
+    # win32 now wraps that path in an EXPLICIT INTERPRETER (cursor-win, 2026-08-18:
+    # a bare .sh path hit the file association and launched the IDE on every tool
+    # call). The oracle stays INDEPENDENT by asserting the STRUCTURE rather than
+    # re-deriving which bash — a quoted interpreter ending in bash.exe, never the
+    # System32 WSL launcher, then pathlib's own as_posix() script path.
+    _script_posix = script.resolve().as_posix()
+
+    def _assert_command(cmd):
+        if sys.platform != "win32":
+            assert cmd == _script_posix
+            return
+        interp, sep, tail = cmd.partition('" "')
+        assert sep, f"win32 command must name an interpreter: {cmd!r}"
+        assert interp.startswith('"') and interp.lower().endswith("bash.exe"), interp
+        assert "system32" not in interp.lower(), "must never be the WSL launcher"
+        assert tail == _script_posix + '"', tail
     settings = _load_settings(settings_path)
     hooks = settings["hooks"]
 
     sf = hooks["StopFailure"]
     assert sf[0]["matcher"] == "rate_limit"
-    assert sf[0]["hooks"][0]["command"] == expected_command
+    _assert_command(sf[0]["hooks"][0]["command"])
 
     st = hooks["Stop"]
     assert st[0]["matcher"] == ""
-    assert st[0]["hooks"][0]["command"] == expected_command
+    _assert_command(st[0]["hooks"][0]["command"])
 
 
 # --------------------------------------------------------------------------- #

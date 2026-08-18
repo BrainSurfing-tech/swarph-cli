@@ -724,10 +724,20 @@ def _hook_script_path(path) -> str:
 #: Git-for-Windows bash, in preference order. NOT System32\bash.exe (WSL: different
 #: filesystem, the script is not there) and NOT git-bash.exe (spawns a mintty window
 #: instead of running inline). cursor-win measured both failure modes on metal.
+#: Git for Windows ships TWO bashes and BOTH run a script correctly:
+#:   Git/bin/bash.exe      — the launcher cursor-win measured on the reference laptop
+#:   Git/usr/bin/bash.exe  — the MSYS2 bash the GitHub Windows runner resolves to
+#: >>> THE FIRST VERSION LISTED ONLY bin/ AND CI FOUND usr/bin/bash.EXE, so the
+#: resolver fell through to shutil.which. Hardcoding ONE box's layout is the same
+#: error as reasoning about a platform you do not have. <<< Preference order is
+#: cursor-win's measurement first, then the runner's.
 _WIN_BASH_CANDIDATES = (
     r"C:/Program Files/Git/bin/bash.exe",
+    r"C:/Program Files/Git/usr/bin/bash.exe",
     r"C:/Program Files (x86)/Git/bin/bash.exe",
+    r"C:/Program Files (x86)/Git/usr/bin/bash.exe",
     r"C:/Git/bin/bash.exe",
+    r"C:/Git/usr/bin/bash.exe",
 )
 
 

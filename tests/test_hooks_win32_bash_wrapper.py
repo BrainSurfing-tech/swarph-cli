@@ -30,6 +30,7 @@ dead binding nobody can remove, while uninstall reports success.
 from __future__ import annotations
 
 import pathlib
+import sys
 from pathlib import Path
 from unittest import mock
 
@@ -41,9 +42,15 @@ from swarph_cli.commands import hooks
 @pytest.fixture
 def win32():
     """Pretend to be win32 with Git-for-Windows installed."""
+    # >>> THE PREDICATE MUST TOLERATE BACKSLASHES. <<< On a real Windows runner
+    # str(Path("C:/Program Files/Git/bin/bash.exe")) yields BACKSLASHES, so a
+    # forward-slash-only match silently failed there and the resolver fell through
+    # to shutil.which — which is how CI ended up on usr/bin/bash.EXE while this
+    # fixture believed it had pinned bin/bash.exe.
+    def _is_git_bash(self):
+        return "program files/git" in str(self).replace("\\", "/").lower()
     with mock.patch.object(hooks.sys, "platform", "win32"), \
-         mock.patch.object(hooks.Path, "exists",
-                           lambda self: "Program Files/Git" in str(self)):
+         mock.patch.object(hooks.Path, "exists", _is_git_bash):
         yield
 
 
@@ -52,8 +59,13 @@ def test_win32_command_names_an_interpreter(win32):
     the .sh file association — on the reference box, the IDE, once per tool call."""
     cmd = hooks._hook_command_path(
         pathlib.PureWindowsPath(r"C:\Users\p\.swarph\hooks\activity-marker.sh"))
-    assert cmd == ('"C:/Program Files/Git/bin/bash.exe" '
-                   '"C:/Users/p/.swarph/hooks/activity-marker.sh"')
+    # Asserts the SHAPE, not one box's Git layout — the first version hardcoded
+    # bin/bash.exe and CI has usr/bin/bash.EXE.
+    assert cmd.startswith('"'), cmd
+    interpreter, script = cmd.split('" "', 1)
+    assert interpreter.strip('"').lower().endswith("bash.exe")
+    assert "system32" not in interpreter.lower(), "must never be the WSL launcher"
+    assert script == 'C:/Users/p/.swarph/hooks/activity-marker.sh"' 
 
 
 def test_win32_never_selects_the_WSL_launcher():
@@ -76,6 +88,8 @@ def test_win32_accepts_a_NON_system32_bash_from_PATH():
         assert hooks._windows_hook_bash() == "C:/msys64/usr/bin/bash.exe"
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="asserts POSIX command construction; on win32 the command is deliberately wrapped and there are 3 variants")
 def test_POSIX_is_completely_unchanged():
     """>>> THE BLAST-RADIUS GUARD. <<< Every cell in this mesh except one is POSIX.
     A win32 fix that alters the Linux command string would rewrite settings.json on
@@ -101,6 +115,8 @@ def test_uninstall_matches_ALL_THREE_generations(win32):
     assert any("\\" in v for v in bare), "gen 1: a form still carrying backslashes"
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="asserts POSIX command construction; on win32 the command is deliberately wrapped and there are 3 variants")
 def test_POSIX_still_gets_exactly_one_variant():
     """The dedup must collapse identical forms, or POSIX uninstall would scan three
     copies of one string and any future 'did it match more than once' logic would
@@ -109,14 +125,9 @@ def test_POSIX_still_gets_exactly_one_variant():
     assert len(hooks._installed_command_variants(bundle, "/home/ubuntu/.swarph/hooks")) == 1
 
 
-def test_the_NEW_gh_router_bundle_inherits_the_fix(win32):
-    """>>> COMPOSITION, AND THE REASON THIS TEST EXISTS. <<< The #397 router bundle
-    was added HOURS BEFORE this bug was reported, and it binds PreToolUse/Bash — so
-    on Windows it would have launched the IDE on every Bash call, exactly like
-    activity-marker. It inherits the fix only because it goes through the shared
-    helper. If someone later hand-rolls a command string for a new bundle, this
-    fails."""
-    bundle = hooks.resolve_builtin("gh-identity-router")
-    cmd = hooks._installed_command(bundle, r"C:\Users\p\.swarph\hooks")
-    assert cmd.startswith('"C:/Program Files/Git/bin/bash.exe" "')
-    assert cmd.endswith('gh-identity-router.sh"')
+# >>> THE COMPOSITION TEST FOR THE #397 ROUTER BUNDLE LIVES ON THAT PR, NOT HERE. <<<
+# It asserts that gh-identity-router — which binds PreToolUse/Bash and would have
+# launched the IDE on every Bash call too — inherits this fix via the shared helper.
+# That composition only becomes TRUE when both changes are present, so asserting it
+# here (where the bundle does not exist) would test nothing. It is carried on the
+# feat/397 branch, which rebases onto this one.
