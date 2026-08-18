@@ -251,6 +251,13 @@ def test_a_MISSING_message_refusal_names_the_SEARCH_BOUND(monkeypatch, capsys):
     # sentence this whole file exists to distrust.
     assert calls and "limit=37" in calls[0], \
         f"--search-limit must reach the gateway query, got {calls}"
+    # grok, optional on the second review: the URL was checked for the BOUND and not
+    # for the SCOPE. A reply that searched the wrong peer's inbox would satisfy every
+    # other assertion here — including the refusal, which would then be TRUE and
+    # MISLEADING. Pinned rather than deferred: "next time we touch this file" is the
+    # decay this whole card exists to kill.
+    assert "to_node=lab-ovh" in calls[0], \
+        f"the scan must be scoped to THIS peer's inbox, got {calls[0]}"
     assert "37" in err, f"the refusal must name the bound it searched: {err}"
     assert "older than that window" in err
 
