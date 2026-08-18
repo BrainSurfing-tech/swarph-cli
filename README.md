@@ -70,6 +70,8 @@ swarph board <sub>       mesh board — projects/cards kanban (list/show/add/mov
 swarph lane <sub>        $0-lane orchestration — list/create/scale/delete/enqueue
 swarph bench <sub>       deterministic LLM benchmark-pack runner — run/validate/add/prices
 swarph highlight "<x>"   log a highlight to the shared git-backed swarph timeline
+swarph mesh reply <id>   reply to a DM IN ITS OWN THREAD — closes a #307 obligation; the
+                         verb is universal across kinds and never claims a closure it cannot see
 swarph spawn <role>      launch a long-lived agent session as a named mesh cell
 swarph daemon            foreground inbox-drain loop (the mesh doorbell)
 swarph watchdog          detect + recover stranded agent sessions (cron- or systemd-driven)
