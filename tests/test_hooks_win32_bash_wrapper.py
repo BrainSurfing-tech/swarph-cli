@@ -131,3 +131,40 @@ def test_POSIX_still_gets_exactly_one_variant():
 # That composition only becomes TRUE when both changes are present, so asserting it
 # here (where the bundle does not exist) would test nothing. It is carried on the
 # feat/397 branch, which rebases onto this one.
+
+
+def _exists_in(present):
+    """`str(WindowsPath)` yields BACKSLASHES, so comparing it against the
+    forward-slash candidate strings never matches ON WINDOWS.
+
+    >>> THE FIRST DRAFT DID EXACTLY THAT AND WINDOWS CI CAUGHT IT. <<< Both tests
+    fell through to shutil.which and got the runner's real `bash.EXE` — a
+    platform-naive comparison inside a test written to check Windows path layouts,
+    authored on Linux where it could not fail. Normalize before comparing.
+    """
+    return lambda self: str(self).replace("\\", "/") in present
+
+
+def test_BOTH_git_bash_layouts_present_prefers_bin(monkeypatch):
+    """A box can carry BOTH Git bash layouts at once — not either/or.
+
+    workstation-lc measured exactly that (2026-08-18): `Git/bin/bash.exe` (47KB, the
+    launcher) AND `Git/usr/bin/bash.exe` (2.4MB, the real binary bin forwards to) both
+    present, and asked whether the resolver handles it rather than treating the two as
+    mutually exclusive signals. It does — first-exists over an ORDERED tuple — but that
+    was a property of the code nobody had asserted, so the honest answer needed a test
+    and not a reading. Preference is cursor-win's measured layout first.
+    """
+    both = {hooks._WIN_BASH_CANDIDATES[0], hooks._WIN_BASH_CANDIDATES[1]}
+    monkeypatch.setattr(hooks.Path, "exists", _exists_in(both))
+    assert hooks._windows_hook_bash() == hooks._WIN_BASH_CANDIDATES[0]
+
+
+def test_only_the_CI_layout_present_still_resolves(monkeypatch):
+    """The failure that actually happened: the first version listed only `bin/` and the
+    GitHub Windows runner has `usr/bin/bash.EXE`, so the resolver fell through to
+    shutil.which. Absence of the preferred layout must select the next real one, not
+    give up — otherwise the fix works only on the box it was written on."""
+    only_ci = {hooks._WIN_BASH_CANDIDATES[1]}
+    monkeypatch.setattr(hooks.Path, "exists", _exists_in(only_ci))
+    assert hooks._windows_hook_bash() == hooks._WIN_BASH_CANDIDATES[1]
