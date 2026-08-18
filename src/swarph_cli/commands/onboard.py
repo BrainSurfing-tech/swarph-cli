@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pathlib
 import sys
 import tempfile
 import urllib.error
@@ -102,6 +103,12 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Phase 5.5 mechanics-phase peer onboarding per PLAN.md §15.4.",
     )
     p.add_argument("peer", help="canonical peer name (e.g. razorpeter)")
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="PROBE ONLY. Print where this peer actually stands on the onboarding "
+             "ladder and what the next action is for each gap. Changes nothing.",
+    )
     p.add_argument(
         "--gateway",
         default=os.environ.get("MESH_GATEWAY_URL", "http://localhost:8788"),
@@ -379,12 +386,149 @@ def _parse_capability(spec: str) -> tuple[str, object]:
         return k.strip(), v
 
 
+_UNKNOWN = "?"
+
+
+def _probe_onboarding(peer: str, gateway: str) -> list:
+    """Non-mutating probe of the onboarding ladder. Returns [(mark, label, detail)].
+
+    >>> WRITTEN BECAUSE THE LADDER HAD NO STATUS SURFACE, ONLY A FORWARD RUN. <<<
+    The 2026-08-18 fresh-eyes audit (board #464) found onboarding is a CLOSED LOOP
+    WITH NO ENTRANCE: ratification needs a handshake DM, sending needs your own
+    peer token, and the only pointer to getting one is a file that is not shipped.
+    A fresh cell therefore hit `403 caller-binding`, exit 1, with no way to see
+    which rung it was on or who could unblock it.
+
+    Every rung reports one of: ok / MISSING / '?'. >>> '?' IS A FIRST-CLASS RESULT
+    AND MUST NEVER BE RENDERED AS ok. <<< A probe that cannot see a rung says so;
+    the whole failure family this session catalogued (#458, #459, #463) is a check
+    reporting silence as success.
+    """
+    import urllib.error
+    import urllib.request
+
+    rows = []
+    base = gateway.rstrip("/")
+
+    # 1. gateway reachable at all — everything below is meaningless otherwise
+    try:
+        urllib.request.urlopen(base + "/peers", timeout=8)
+        reachable = True
+        rows.append(("ok", "gateway reachable", base))
+    except urllib.error.HTTPError:
+        reachable = True   # answered, just refused us — that IS reachable
+        rows.append(("ok", "gateway reachable", base + " (auth required)"))
+    except Exception as exc:
+        reachable = False
+        rows.append(("MISSING", "gateway reachable",
+                     f"{base} -> {type(exc).__name__}. Fix this first; every rung "
+                     f"below is unknowable until it answers."))
+
+    # 2. own peer token on disk
+    tok_path = pathlib.Path.home() / ".config" / "swarph" / f"{peer}.peer_token"
+    token = None
+    if tok_path.exists():
+        token = tok_path.read_text(encoding="utf-8").strip()
+        mode = oct(tok_path.stat().st_mode & 0o777)
+        rows.append(("ok" if mode == "0o600" else "MISSING",
+                     "peer token on disk",
+                     f"{tok_path} (mode {mode}" + ("" if mode == "0o600" else "; expected 0600") + ")"))
+    else:
+        rows.append(("MISSING", "peer token on disk",
+                     f"{tok_path} absent. THIS IS THE RUNG THAT CANNOT BE SELF-SERVED: "
+                     f"a token is minted by POST /peers/register and returned ONCE. Ask "
+                     f"the operator to mint one and deliver it OUT OF BAND -- never over "
+                     f"the mesh, where message content is retained."))
+
+    # 3. does that token actually authenticate as this peer?
+    if token and reachable:
+        req = urllib.request.Request(
+            f"{base}/messages?to_node={peer}&limit=1",
+            headers={"Authorization": f"Bearer {token}"})
+        try:
+            urllib.request.urlopen(req, timeout=8)
+            rows.append(("ok", "token authenticates", f"reads its own inbox as {peer}"))
+        except urllib.error.HTTPError as e:
+            rows.append(("MISSING", "token authenticates",
+                         f"HTTP {e.code}. A token that exists but is refused is DEAD, not "
+                         f"missing -- mint-once means re-registering returns 200 with a "
+                         f"null token and changes nothing. Recovery needs a deregister "
+                         f"first, which is an operator action."))
+        except Exception as e:
+            rows.append((_UNKNOWN, "token authenticates", f"could not determine: {type(e).__name__}"))
+    else:
+        rows.append((_UNKNOWN, "token authenticates",
+                     "not attempted (no token on disk)" if not token else "not attempted (gateway down)"))
+
+    # 4/5/6. registry facts, if we can read the registry at all
+    peer_row = None
+    if reachable and token:
+        req = urllib.request.Request(base + "/peers", headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = json.loads(r.read().decode())
+            allp = data if isinstance(data, list) else data.get("peers", [])
+            peer_row = next((x for x in allp if x.get("name") == peer), None)
+        except Exception:
+            peer_row = None
+
+    if peer_row is None:
+        detail = "could not read the registry" if token else "not attempted"
+        rows.append((_UNKNOWN, "registered", detail))
+        rows.append((_UNKNOWN, "ratified", detail))
+        rows.append((_UNKNOWN, "capabilities declared", detail))
+    else:
+        rows.append(("ok", "registered", f"registered_at {str(peer_row.get('registered_at'))[:19]}"))
+        rows.append(("ok" if peer_row.get("ratified") else "MISSING", "ratified",
+                     f"by {peer_row.get('ratified_by')}" if peer_row.get("ratified")
+                     else "a witness must run `swarph ratify <peer>`. Unratified cells "
+                          "still operate -- this gates trust, not function."))
+        caps = peer_row.get("capabilities") or {}
+        extra = {k: v for k, v in caps.items() if k != "can_claim_tasks"}
+        rows.append(("ok" if extra else "MISSING", "capabilities declared",
+                     f"{sorted(caps)}" if extra else
+                     "only can_claim_tasks. NOTHING CAN BE ROUTED TO YOU BY MODEL OR "
+                     "PROVIDER until you re-register with a real roster -- an "
+                     "undeclared capability is invisible capacity."))
+
+    # 7. health — the field that separates 'up' from 'reachable'
+    if peer_row is not None:
+        rows.append(("ok" if peer_row.get("last_health") else "MISSING", "health check has succeeded",
+                     str(peer_row.get("last_health"))[:19] if peer_row.get("last_health")
+                     else "last_health is null -- no health check has EVER succeeded. "
+                          "last_seen is not a substitute: it stays fresh while a cell is deaf."))
+    return rows
+
+
+def _print_checklist(peer: str, gateway: str) -> int:
+    rows = _probe_onboarding(peer, gateway)
+    print_safe(f"onboarding checklist for {peer} @ {gateway}\n")
+    width = max(len(lbl) for _, lbl, _ in rows)
+    for mark, label, detail in rows:
+        sym = {"ok": "[x]", "MISSING": "[ ]"}.get(mark, "[?]")
+        print_safe(f"  {sym} {label.ljust(width)}  {detail}")
+    gaps = [l for m, l, _ in rows if m == "MISSING"]
+    unknown = [l for m, l, _ in rows if m == _UNKNOWN]
+    print_safe("")
+    if gaps:
+        print_safe(f"  {len(gaps)} gap(s): {', '.join(gaps)}")
+    if unknown:
+        print_safe(f"  {len(unknown)} UNDETERMINED: {', '.join(unknown)} "
+                   f"-- undetermined is NOT ok; it means the probe could not see.")
+    if not gaps and not unknown:
+        print_safe("  fully onboarded.")
+    return 0
+
+
 def run_onboard(argv: list[str]) -> int:
     """Entry point invoked by ``swarph_cli.main`` verb dispatch.
 
     Returns process exit code: 0 on success, 1 on validation fail,
     2 on gateway error."""
     args = _build_parser().parse_args(argv)
+
+    if getattr(args, "check", False):
+        return _print_checklist(args.peer, args.gateway)
 
     # ── Step 1: validate_node_name ───────────────────────────────────
     print_safe(f"[1/6] validate_node_name({args.peer!r})")

@@ -76,7 +76,8 @@ def _build_parser() -> argparse.ArgumentParser:
     inbox.add_argument(
         "--peek",
         action="store_true",
-        help="show the inbox WITHOUT marking anything read (default: reading consumes)",
+        help="show the inbox WITHOUT marking anything read (default: reading CONSUMES -- "
+             "it marks every DM shown as read for the resolved identity)",
     )
     _add_common(inbox)
 
@@ -116,7 +117,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--as", dest="self_name", default=None, help="sender/self peer")
+    p.add_argument(
+        "--as", dest="self_name", default=None,
+        help="sender/self peer. IF OMITTED THIS FALLS BACK TO $SWARPH_SELF -- it does "
+             "not fail. On a box where several cells share one environment that is "
+             "the box owner's identity, so pass --as explicitly when you are not it.",
+    )
     p.add_argument(
         "--gateway",
         default=os.environ.get("MESH_GATEWAY_URL", _DEFAULT_GATEWAY),
@@ -178,6 +184,26 @@ def _resolve_self_name(
         return env
     if state_dir is not None:
         return state_dir.name
+    raise RuntimeError("cannot resolve self identity; pass --as or set SWARPH_SELF")
+
+
+def _resolve_self_with_source(arg: Optional[str]) -> tuple:
+    """(name, source) — WHERE the identity came from, not just what it is.
+
+    >>> A COMMAND THAT ACTS AS SOMEBODY MUST SAY WHO. <<< $SWARPH_SELF is set
+    machine-wide on a co-resident box, so a cell that forgets --as silently
+    inherits the box owner's identity. It is not an authz hole -- the token really
+    is that peer's -- which is precisely why nothing alerts. The 2026-08-18
+    fresh-eyes onboarding audit hit this on its FIRST command: a brand-new cell ran
+    `swarph mesh inbox` and was shown 20 unread DMs belonging to four other peers.
+    Reading consumes, so an unlucky first command marks another peer's queue read,
+    silently, exit 0. Same family as board #360 (identity fails TOWARD lab-ovh).
+    """
+    if arg:
+        return arg, "--as"
+    env = os.environ.get("SWARPH_SELF")
+    if env:
+        return env, "$SWARPH_SELF"
     raise RuntimeError("cannot resolve self identity; pass --as or set SWARPH_SELF")
 
 
@@ -352,7 +378,7 @@ def _mark_read(gateway: str, token: str, messages: list) -> None:
 
 
 def _run_inbox(args: argparse.Namespace) -> int:
-    self_name = _resolve_self_name(args.self_name)
+    self_name, id_source = _resolve_self_with_source(args.self_name)
     token = _resolve_token(self_name, args.token_file)
     params = {"to": self_name, "limit": str(args.limit)}
     if args.unread:
@@ -369,13 +395,23 @@ def _run_inbox(args: argparse.Namespace) -> int:
         if not getattr(args, "peek", False):
             _mark_read(args.gateway, token, messages)
         return 0
+    # The identity is printed BEFORE the mail, on every path including empty --
+    # an inbox you cannot attribute is worse than no inbox, and the empty case is
+    # exactly where a wrong identity looks like good news.
+    print(f"inbox {self_name} (identity from {id_source})")
     if not messages:
-        print(f"inbox {self_name}: empty")
+        print("  empty")
         return 0
     for dm in messages:
         print(_format_inbox_line(dm))
     if not getattr(args, "peek", False):
         _mark_read(args.gateway, token, messages)
+        # >>> CONSUMPTION ANNOUNCES ITSELF. <<< Marking read is destructive and was
+        # previously silent, so consuming the WRONG peer's queue produced no signal
+        # at all. Not inverted to peek-by-default: PullSink -- the default monitor
+        # sink -- advances its ledger on exactly this ACK, so a peek default would
+        # leave `monitor status` reporting DMs pending forever.
+        print(f"  marked {len(messages)} read as {self_name}")
     return 0
 
 
