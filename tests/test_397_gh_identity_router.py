@@ -242,3 +242,32 @@ def test_hook_does_not_double_inject(mapping, monkeypatch):
     rc, out = _hook({"tool_name": "Bash", "tool_input": {
         "command": "GH_TOKEN=$(gh auth token --user lab-ovh) gh pr view 1"}}, monkeypatch)
     assert rc == 0 and out is None
+
+
+# ── drop-on-meta-edge, reviewing #249 against his OWN failing corpus ──────────
+
+@pytest.mark.parametrize("cmd", [
+    "if gh pr view 249; then echo yes; fi",
+    "while gh pr checks 1; do sleep 1; done",
+    "until gh api rate_limit; do sleep 5; done",
+    "if true; then :; elif gh pr list; then :; fi",
+])
+def test_gh_in_a_CONDITION_is_still_a_gh_call(cmd):
+    """>>> THE 1 OF 11 FALSE NEGATIVES THAT SURVIVED. <<< `_START` listed then/do/else
+    — the words that FOLLOW a condition — and not if/while/until/elif, the words that
+    OPEN one. A `gh` call in the condition of an `if` is exactly as much a `gh` call
+    as one in its body, and it is a shape people write constantly.
+
+    drop measured it by re-running HIS corpus, not the PR's seven cases: "0/7 false
+    positives is measured against your seven cases, not mine, and the claim as
+    written is wider than its evidence." So was the token list."""
+    assert ghid.targets_gh(cmd), f"missed a gh call in a condition: {cmd!r}"
+
+
+def test_the_condition_keywords_do_not_match_a_BARE_WORD_ending_in_them():
+    """NON-VACUITY: \\b-anchored, so `notif gh` or a path like /usr/if/gh must not be
+    matched by the new tokens for the wrong reason. Adding four keywords to a regex
+    is exactly where an over-broad match sneaks in — and an over-broad match here
+    REFUSES an unrelated command, which is worse than missing one."""
+    assert not ghid.targets_gh("echo notifgh")
+    assert not ghid.targets_gh("echo whilegh")

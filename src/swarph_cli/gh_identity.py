@@ -53,7 +53,18 @@ _WRAPPERS = (
 #: `cd /tmp\ngh pr list` missed entirely — and multi-line Bash is the DOMINANT shape
 #: in this harness. drop-on-meta-edge measured 11 false negatives in 16 realistic
 #: shapes against the first version; that was the biggest single class.
-_START = r"(?:^|[;&|]|\$\(|`|\(|\{|\bthen\b|\bdo\b|\belse\b|&&|\|\|)"
+# >>> `\bif\b` AND FRIENDS WERE MISSING, AND drop MEASURED THE COST: 1 OF 11 FALSE
+# NEGATIVES SURVIVED THE FIX, AND IT WAS `if gh pr view 249; then`. <<< The list had
+# then/do/else — the words that FOLLOW a condition — and not the words that OPEN one.
+# A command in the CONDITION of an if/while/until is exactly as much a `gh` call as
+# one in its body, and it is a shape people write constantly.
+#
+# Found by re-running drop's own failing corpus rather than the PR's seven cases:
+# "0/7 false positives is measured against your seven cases, not mine, and the claim
+# as written is wider than its evidence." The token list was, too.
+_START = (r"(?:^|[;&|]|\$\(|`|\(|\{"
+          r"|\bthen\b|\bdo\b|\belse\b|\bif\b|\bwhile\b|\buntil\b|\belif\b"
+          r"|&&|\|\|)")
 _LEAD = r"[ \t]*"                       # leading whitespace/tab — also missed before
 _ENVPFX = r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+)*"
 _WRAPPFX = rf"(?:(?:{_WRAPPERS})[ \t]+)*"
