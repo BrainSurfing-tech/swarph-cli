@@ -146,6 +146,24 @@ exit 0
 # 2026-07-13). Correct baseline; a shell fast-path throttle (skip the spawn when the
 # marker is already fresh, fall through to the correct resolve otherwise) is a clean
 # follow-up if droplet's validation finds the per-call cost too high (spec §4).
+_GH_IDENTITY_ROUTER_SH = r"""#!/bin/sh
+# gh-identity-router.sh — swarph bundled Claude Code hook (#397).
+# Rewrites `gh ...` into `GH_TOKEN=$(gh auth token --user <login>) gh ...`, with the
+# login resolved from THIS cell's SWARPH_SELF. Denies loudly when the cell is unmapped.
+#
+# A THIN WRAPPER on purpose: the resolver must REFUSE rather than fall back, and a
+# refusal path written in inline shell is the one nobody tests. The Python side has
+# the tests; this file must stay boring enough to read in one glance.
+#
+# >>> NOTE THE ABSENCE OF `|| true`. <<< Every other bundled hook ends with one
+# because a telemetry hook must never block work. This one is a CREDENTIAL CONTROL:
+# if it cannot run, the correct outcome is that the `gh` call does not silently
+# proceed under the ambient account. Swallowing its failure would reinstate exactly
+# the fallback the card forbids.
+exec swarph gh-route hook
+"""
+
+
 _ACTIVITY_MARKER_SH = r"""#!/bin/sh
 # activity-marker.sh — swarph bundled Claude Code hook (#2).
 # Touches THIS cell's watchdog liveness marker so a long autonomous turn (many tool
@@ -207,6 +225,22 @@ BUILTIN_HOOKS: dict = {
         bindings=(
             HookBinding("StopFailure", "rate_limit"),
             HookBinding("Stop", ""),
+        ),
+    ),
+    "gh-identity-router": HookBundle(
+        name="gh-identity-router",
+        description=(
+            "Injects GH_TOKEN per `gh` invocation, resolved from THIS cell's mesh "
+            "identity (SWARPH_SELF) via ~/.config/swarph/gh-identities.json. NEVER "
+            "runs `gh auth switch` (global to the box) and NEVER falls back to the "
+            "active account — an unmapped cell is DENIED, loudly (#397)."
+        ),
+        publisher="swarph-builtin",
+        trust="builtin",
+        script_name="gh-identity-router.sh",
+        script_body=_GH_IDENTITY_ROUTER_SH,
+        bindings=(
+            HookBinding("PreToolUse", "Bash"),
         ),
     ),
     "activity-marker": HookBundle(
