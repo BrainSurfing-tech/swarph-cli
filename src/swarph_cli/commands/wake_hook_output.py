@@ -56,40 +56,63 @@ def _drain_stdin() -> None:
 
 
 def _emit(payload: dict[str, Any], *, harness: str) -> int:
-    """Emit context in the shape the calling harness expects."""
+    """Emit context in the shape the calling harness expects.
+
+    The unknown-harness refusal emits BOTH known envelope shapes in one
+    JSON object — a harness reads the key it knows and ignores the other.
+    This is still a guess: a harness with a third shape renders nothing,
+    and the refusal is silent there. That limit is not testable from here
+    (PR #254 review, finding 1), so it is stated rather than asserted away.
+    """
+    context = payload.get("context", "")
     if harness in _VERIFY_HARNESSES:
         # Cursor sessionStart: {"env": {...}, "additional_context": "..."}
-        print(json.dumps({"additional_context": payload.get("context", "")}))
-    else:
+        print(json.dumps({"additional_context": context}))
+    elif harness in _ARM_HARNESSES:
         # Claude Code / Codex SessionStart shape.
         print(
             json.dumps(
                 {
                     "hookSpecificOutput": {
                         "hookEventName": "SessionStart",
-                        "additionalContext": payload.get("context", ""),
+                        "additionalContext": context,
                     }
+                }
+            )
+        )
+    else:
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": context,
+                    },
+                    "additional_context": context,
                 }
             )
         )
     return 0
 
 
-def _discover_cell_name(explicit: Optional[str] = None) -> Optional[str]:
-    """Cell-name resolution, most-explicit first.
+def _resolve_cell(explicit: Optional[str] = None) -> tuple[Optional[str], str]:
+    """Cell-name resolution, most-explicit first. Returns (name, source).
 
     1. ``--cell`` baked into the installed hook command
     2. ``$SWARPH_SELF`` — the mesh's existing self-name convention
-       (``swarph monitor --as`` honors it too)
+       (``swarph monitor --as`` honors it too). On a shared box this is
+       THE BOX OWNER'S identity (mesh's own --as help says so), so the
+       source is reported alongside the name: a verified verdict about
+       the wrong cell is worse than no verdict.
     3. cwd discovery: ./cell.yaml, then cells_dir/<basename(cwd)>.yaml —
        weakest, since harness sessions do not necessarily start in a
        cell-named directory
     """
     if explicit:
-        return explicit
+        return explicit, "install-time --cell"
     env_self = os.environ.get("SWARPH_SELF", "").strip()
     if env_self:
-        return env_self
+        return env_self, "$SWARPH_SELF"
     cwd_local = discover_cell_in_cwd()
     candidates = [cwd_local] if cwd_local is not None else []
     cwd_basename = Path.cwd().name
@@ -104,8 +127,8 @@ def _discover_cell_name(explicit: Optional[str] = None) -> Optional[str]:
             continue
         name = getattr(cell, "name", None) or getattr(cell, "role", None)
         if name:
-            return str(name)
-    return None
+            return str(name), f"cwd discovery ({path})"
+    return None, "unresolved"
 
 
 def _sidecar_dir(cell_name: str) -> Path:
@@ -148,7 +171,7 @@ def _arm_instruction(cell_name: Optional[str]) -> str:
     )
 
 
-def _verify_report(cell_name: Optional[str]) -> str:
+def _verify_report(cell_name: Optional[str], source: str = "unresolved") -> str:
     if not cell_name:
         return (
             "[swarph silent-wake] CANNOT VERIFY the DM wake: no cell.yaml "
@@ -156,6 +179,17 @@ def _verify_report(cell_name: Optional[str]) -> str:
             "session is. If this session is a mesh cell, DMs may arrive "
             "unnoticed. Run `swarph monitor status --as <cell>` yourself."
         )
+    # Finding 3 (PR #254 review): a name resolved from the ambient
+    # environment can be the BOX OWNER'S identity on a shared box. Name
+    # the source in the verdict so a wrong-cell verification is visible
+    # in the message rather than hidden behind a confident ARMED.
+    provenance = (
+        f" (identity from {source} — on a shared box that is the box "
+        "owner's cell; if this session is not that cell, this verdict "
+        "is about the wrong wake)"
+        if source == "$SWARPH_SELF"
+        else f" (identity from {source})"
+    )
     try:
         proc = subprocess.run(
             [
@@ -192,34 +226,64 @@ def _verify_report(cell_name: Optional[str]) -> str:
             f"{cell_name}: `swarph monitor status` failed ({detail}). "
             "Treat the wake as UNARMED until proven otherwise."
         )
-    if proc.returncode == 2 or not status.get("running"):
+    # Finding 2 (PR #254 review): an absent field is schema drift, not a
+    # negative — route it to CANNOT VERIFY rather than reporting a
+    # specific wrong diagnosis with a specific wrong remedy.
+    if proc.returncode == 2:
         return (
             f"[swarph silent-wake] WAKE NOT ARMED for {cell_name}: the "
             "swarph monitor is not running. Start it (`swarph monitor "
             f"start --as {cell_name} --sink tmux:{cell_name}`) or DMs "
-            "arrive unnoticed."
+            "arrive unnoticed." + provenance
         )
+    if "running" not in status:
+        return (
+            f"[swarph silent-wake] CANNOT VERIFY the DM wake for "
+            f"{cell_name}: `monitor status` output has no 'running' field "
+            "(schema drift?). Treat the wake as UNARMED until proven "
+            "otherwise." + provenance
+        )
+    if not status["running"]:
+        return (
+            f"[swarph silent-wake] WAKE NOT ARMED for {cell_name}: the "
+            "swarph monitor is not running. Start it (`swarph monitor "
+            f"start --as {cell_name} --sink tmux:{cell_name}`) or DMs "
+            "arrive unnoticed." + provenance
+        )
+    if "sinks" not in status:
+        return (
+            f"[swarph silent-wake] CANNOT VERIFY the DM wake for "
+            f"{cell_name}: `monitor status` output has no 'sinks' field "
+            "(schema drift?). Treat the wake as UNARMED until proven "
+            "otherwise." + provenance
+        )
+    sinks = [s for s in status["sinks"] if isinstance(s, dict)]
     push_sinks = [
-        s.get("name")
-        for s in status.get("sinks", [])
-        if isinstance(s, dict) and s.get("is_push")
+        s["name"] for s in sinks if s.get("is_push") is True and s.get("name")
     ]
-    push_sinks = [n for n in push_sinks if n]
     if push_sinks:
         return (
             f"[swarph silent-wake] DM wake ARMED for {cell_name}: swarph "
             f"monitor push sink(s) {', '.join(push_sinks)} deliver DMs into "
             "this session. Mid-session silence detection is the monitor's "
             "job (card #487), not this hook's — this verification covers "
-            "session start only."
+            "session start only." + provenance
+        )
+    if any("is_push" not in s for s in sinks):
+        return (
+            f"[swarph silent-wake] CANNOT VERIFY the DM wake for "
+            f"{cell_name}: sink entries lack the 'is_push' field (schema "
+            "drift?), so push coverage cannot be determined. Treat the "
+            "wake as UNARMED until proven otherwise." + provenance
         )
     configured = status.get("configured_sinks") or []
     return (
         f"[swarph silent-wake] WAKE NOT ARMED for {cell_name}: the monitor "
         "is running but has NO push sink "
-        f"(configured: {', '.join(configured) or 'none'}). DMs will land in "
-        "the inbox with nothing to wake this session. Add one, e.g. "
-        f"`swarph monitor start --as {cell_name} --sink tmux:{cell_name}`."
+        f"(configured: {', '.join(str(c) for c in configured) or 'none'}). "
+        "DMs will land in the inbox with nothing to wake this session. "
+        f"Add one, e.g. `swarph monitor start --as {cell_name} --sink "
+        f"tmux:{cell_name}`." + provenance
     )
 
 
@@ -252,11 +316,13 @@ def run_wake_hook_output(argv: Optional[list[str]] = None) -> int:
                     + ", ".join(_KNOWN_HARNESSES)
                 )
             },
-            harness="claude",  # loudest portable shape for an unknown caller
+            harness="unknown",  # dual-envelope refusal; see _emit
         )
 
-    cell_name = _discover_cell_name(args.cell)
+    cell_name, cell_source = _resolve_cell(args.cell)
 
     if harness in _ARM_HARNESSES:
         return _emit({"context": _arm_instruction(cell_name)}, harness=harness)
-    return _emit({"context": _verify_report(cell_name)}, harness=harness)
+    return _emit(
+        {"context": _verify_report(cell_name, cell_source)}, harness=harness
+    )

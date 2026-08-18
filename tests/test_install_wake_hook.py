@@ -135,9 +135,11 @@ def test_detection_prefers_cursor_env(isolated_home, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _run_output(argv, monkeypatch, cell_name=None, monitor_json=None, monitor_rc=0):
+def _run_output(argv, monkeypatch, cell_name=None, monitor_json=None,
+                monitor_rc=0, cell_source="install-time --cell"):
     monkeypatch.setattr(
-        who, "_discover_cell_name", lambda explicit=None: cell_name
+        who, "_resolve_cell",
+        lambda explicit=None: (cell_name, cell_source if cell_name else "unresolved"),
     )
     if monitor_json is not None or monitor_rc != 0:
 
@@ -184,10 +186,11 @@ def test_arm_rendering_without_cell_still_instructs(monkeypatch, capsys):
 
 def test_verify_rendering_armed_when_push_sink(monkeypatch, capsys):
     status = {
+        "running": True,
         "sinks": [
             {"name": "tmux:cursor-lin", "is_push": True},
             {"name": "pull", "is_push": False},
-        ]
+        ],
     }
     rc = _run_output(
         ["--harness", "cursor"], monkeypatch,
@@ -265,9 +268,55 @@ def test_verify_rendering_is_not_vacuous(monkeypatch, capsys):
 def test_unknown_harness_output_is_loud_refusal(monkeypatch, capsys):
     rc = _run_output(["--harness", "ed"], monkeypatch)
     assert rc == 0  # never block session start, even while refusing
-    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    out = json.loads(capsys.readouterr().out)
+    # Finding 1 (PR #254 review): the refusal goes out in BOTH known
+    # envelope shapes — an unknown harness reads the key it knows.
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert out["additional_context"] == ctx
     assert "UNSUPPORTED HARNESS" in ctx
     assert "ed" in ctx
+
+
+def test_verify_missing_running_field_is_cannot_verify(monkeypatch, capsys):
+    """Finding 2: schema drift must not report a specific wrong diagnosis."""
+    rc = _run_output(
+        ["--harness", "cursor"], monkeypatch,
+        cell_name="cursor-lin", monitor_json={"sinks": []},
+    )
+    assert rc == 0
+    ctx = json.loads(capsys.readouterr().out)["additional_context"]
+    assert "CANNOT VERIFY" in ctx
+    assert "running" in ctx
+    assert "WAKE NOT ARMED" not in ctx
+
+
+def test_verify_missing_is_push_field_is_cannot_verify(monkeypatch, capsys):
+    status = {"running": True, "sinks": [{"name": "tmux:cursor-lin"}]}
+    rc = _run_output(
+        ["--harness", "cursor"], monkeypatch,
+        cell_name="cursor-lin", monitor_json=status,
+    )
+    assert rc == 0
+    ctx = json.loads(capsys.readouterr().out)["additional_context"]
+    assert "CANNOT VERIFY" in ctx
+    assert "is_push" in ctx
+
+
+def test_verify_env_fallback_names_shared_box_risk(monkeypatch, capsys):
+    """Finding 3: a $SWARPH_SELF-resolved identity must carry its
+    provenance — on a shared box that name is the box owner's cell."""
+    status = {"running": True,
+              "sinks": [{"name": "tmux:lab-ovh", "is_push": True}]}
+    rc = _run_output(
+        ["--harness", "cursor"], monkeypatch,
+        cell_name="lab-ovh", cell_source="$SWARPH_SELF",
+        monitor_json=status,
+    )
+    assert rc == 0
+    ctx = json.loads(capsys.readouterr().out)["additional_context"]
+    assert "ARMED" in ctx
+    assert "$SWARPH_SELF" in ctx
+    assert "box owner" in ctx
 
 
 # ---------------------------------------------------------------------------
