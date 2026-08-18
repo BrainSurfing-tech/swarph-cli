@@ -112,7 +112,9 @@ def test_mesh_inbox_uses_to_query_and_unread(monkeypatch, capsys):
         }
 
     monkeypatch.setattr(mesh, "_http_get_json", fake_get)
-    rc = mesh.run_mesh(["inbox", "--unread", "--limit", "5"])
+    # --as named: a destructive read under an AMBIENT identity is refused (#464/#247),
+    # and this test is about the query shape, not about the refusal.
+    rc = mesh.run_mesh(["inbox", "--as", "gpt-ops", "--unread", "--limit", "5"])
     assert rc == 0
     assert "to=gpt-ops" in captured["url"]
     assert "to_node=" not in captured["url"]
@@ -130,7 +132,7 @@ def test_mesh_inbox_json_output(monkeypatch, capsys):
         "_http_get_json",
         lambda url, token, *, timeout=10.0: (200, {"messages": [], "n": 0}),
     )
-    rc = mesh.run_mesh(["inbox", "--json"])
+    rc = mesh.run_mesh(["inbox", "--as", "gpt-ops", "--json"])
     assert rc == 0
     assert json.loads(capsys.readouterr().out) == {"messages": [], "n": 0}
 

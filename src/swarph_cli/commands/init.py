@@ -27,12 +27,39 @@ _DEFAULT_GATEWAY = os.environ.get("MESH_GATEWAY_URL", "http://lab-ovh:8788")
 _CODEX_SANDBOX_DEFAULT = "workspace-write"
 _CODEX_SANDBOX_VALUES = ("workspace-write", "read-only")
 
-# LLM type → (provider, blurb). The menu the wizard shows.
-_LLM_CHOICES = [
-    ("claude", "Anthropic Claude — claude membrane"),
-    ("codex", "OpenAI / GPT — codex membrane (AGENTS.md)"),
-    ("antigravity", "Google Gemini — agy membrane (firejail)"),
-]
+# provider → blurb. DESCRIPTIONS ONLY — this is NOT the menu, and must never
+# again decide which providers are offerable.
+_LLM_BLURBS = {
+    "claude": "Anthropic Claude — claude membrane",
+    "codex": "OpenAI / GPT — codex membrane (AGENTS.md)",
+    "antigravity": "Google Gemini — agy membrane (firejail)",
+    "cursor": "Cursor — cursor-agent membrane (isolated CURSOR_DATA_DIR)",
+    "grok": "xAI Grok — grok membrane",
+    "muse": "Muse — muse membrane",
+    "vibe": "Vibe — vibe membrane",
+}
+
+
+def _llm_choices() -> list:
+    """The menu, DERIVED from CLI_ENABLED_PROVIDERS rather than hardcoded.
+
+    >>> THIS LIST WAS A HARDCODED THREE WHILE SEVEN PROVIDERS WERE ENABLED. <<<
+    The wizard offered claude / codex / antigravity and prompted "[1-3]", so a
+    grok, cursor, muse or vibe cell could not complete `swarph init` interactively
+    at all — it had to already know to pass --provider, which the wizard never
+    mentioned. An escape hatch existed (typing the provider name fell through to
+    the CLI_ENABLED_PROVIDERS check) and NOTHING DISCLOSED IT.
+
+    Found by the 2026-08-18 fresh-eyes onboarding audit (board #464). The proof
+    that a hand-maintained mirror drifts: `cursor` was added to
+    CLI_ENABLED_PROVIDERS the same day the Cursor membrane shipped, and this menu
+    never learned. Deriving it means the next provider appears by construction.
+
+    Unknown providers still list, with a generated blurb — an enabled provider the
+    user cannot see is the bug; a provider without prose is a cosmetic gap.
+    """
+    return [(p, _LLM_BLURBS.get(p, f"{p} membrane"))
+            for p in sorted(CLI_ENABLED_PROVIDERS)]
 
 
 # ---------------------------------------------------------------------------
@@ -60,19 +87,22 @@ def _ask_yn(prompt: str, default: bool = False) -> bool:
 
 
 def _ask_llm() -> str:
+    choices = _llm_choices()
+    hi = len(choices)
     print("\nSelect LLM type:")
-    for i, (prov, blurb) in enumerate(_LLM_CHOICES, 1):
+    for i, (prov, blurb) in enumerate(choices, 1):
         print(f"  {i}) {prov:12} {blurb}")
     while True:
         try:
-            ans = input("Choice [1-3]: ").strip()
+            ans = input(f"Choice [1-{hi}] (or type the provider name): ").strip()
         except EOFError:
             ans = "1"
-        if ans.isdigit() and 1 <= int(ans) <= len(_LLM_CHOICES):
-            return _LLM_CHOICES[int(ans) - 1][0]
+        if ans.isdigit() and 1 <= int(ans) <= hi:
+            return choices[int(ans) - 1][0]
         if ans in CLI_ENABLED_PROVIDERS:
             return ans
-        print("  (enter 1, 2, or 3)")
+        # Name the actual options rather than a range that hid four of them.
+        print(f"  (enter 1-{hi}, or one of: {', '.join(p for p, _ in choices)})")
 
 
 def _https_normalize(repo: str) -> tuple[str, bool]:
