@@ -132,7 +132,13 @@ def _arm_instruction(cell_name: Optional[str]) -> str:
         "Run it unbuffered (-u is in the command) — a buffered watch is "
         "silent while looking armed, which is the failure this exists to "
         "prevent. Verify the swarph monitor is running with "
-        "`swarph monitor status`."
+        "`swarph monitor status`.\n"
+        "ARM EXACTLY ONE WAKE SOURCE: if a swarph monitor push sink "
+        "(tmux:<cell>) or another watch already wakes this cell, do NOT "
+        "arm a second one. Overlapping wakes can abort an in-flight turn "
+        "(grok-researcher transcript probe, 2026-08-18: 13 historical "
+        "mid_turn_aborts from watchdog+tmux wake overlap), and the abort "
+        "is invisible in every success counter."
         + (
             ""
             if cell_name

@@ -162,6 +162,9 @@ def test_arm_rendering_claude_shape_and_content(monkeypatch, capsys):
     assert "dm_notify_filter" in ctx
     assert "cursor-lin" in ctx
     assert "-u" in ctx  # unbuffered is load-bearing; keep it visible
+    # grok probe (2026-08-18): overlapping wake sources abort in-flight
+    # turns. The instruction must tell the agent to arm exactly one.
+    assert "EXACTLY ONE WAKE SOURCE" in ctx
 
 
 def test_arm_rendering_codex_uses_same_shape(monkeypatch, capsys):
