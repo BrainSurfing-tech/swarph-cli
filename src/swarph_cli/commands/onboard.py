@@ -436,9 +436,13 @@ def _probe_onboarding(peer: str, gateway: str) -> list:
     else:
         rows.append(("MISSING", "peer token on disk",
                      f"{tok_path} absent. THIS IS THE RUNG THAT CANNOT BE SELF-SERVED: "
-                     f"a token is minted by POST /peers/register and returned ONCE. Ask "
-                     f"the operator to mint one and deliver it OUT OF BAND -- never over "
-                     f"the mesh, where message content is retained."))
+                     f"a token is minted by POST /peers/register and returned ONCE. "
+                     f"RECOVERY, if the peer is already registered: re-registering returns "
+                     f"HTTP 200 with token_status=existing and NO token -- it looks like "
+                     f"success and changes nothing. An operator must DELETE /peers/{peer} "
+                     f"first, which purges the old token and writes a revocation row; the "
+                     f"next register then mints a fresh generation. Deliver it OUT OF BAND "
+                     f"-- never over the mesh, where message content is retained."))
 
     # 3. does that token actually authenticate as this peer?
     if token and reachable:
@@ -493,10 +497,27 @@ def _probe_onboarding(peer: str, gateway: str) -> list:
 
     # 7. health — the field that separates 'up' from 'reachable'
     if peer_row is not None:
-        rows.append(("ok" if peer_row.get("last_health") else "MISSING", "health check has succeeded",
-                     str(peer_row.get("last_health"))[:19] if peer_row.get("last_health")
-                     else "last_health is null -- no health check has EVER succeeded. "
-                          "last_seen is not a substitute: it stays fresh while a cell is deaf."))
+        url = str(peer_row.get("url") or "")
+        if peer_row.get("last_health"):
+            rows.append(("ok", "health check has succeeded", str(peer_row.get("last_health"))[:19]))
+        elif url.startswith("outbound-only://"):
+            # >>> N/A IS NOT A GAP, AND THE DISTINCTION IS THE POINT. <<< A cell with
+            # no inbound listener can NEVER close this rung. Marking it MISSING mints a
+            # permanent red mark, and a checklist that everyone permanently fails is one
+            # nobody reads -- openwolf's 2.0.3 lesson (false-positive warnings train
+            # users to ignore the system) applied to us before we ship it. Raised by
+            # cursor-lin, which is outbound-only and would have carried this forever.
+            rows.append(("ok", "health check has succeeded",
+                         "N/A -- url is outbound-only://, so this cell has no inbound "
+                         "endpoint to health-check. Not a gap; liveness for this cell is "
+                         "its own polling, not an inbound probe."))
+        else:
+            rows.append(("MISSING", "health check has succeeded",
+                         "last_health is null -- no health check has EVER succeeded. "
+                         "last_seen is not a substitute: it stays fresh while a cell is "
+                         "deaf. If this cell has no inbound listener, register it with "
+                         "url=outbound-only://<name> so this rung reads N/A rather than "
+                         "failing forever."))
     return rows
 
 

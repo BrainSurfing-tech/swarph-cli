@@ -59,3 +59,81 @@ def test_menu_is_derived_not_a_second_copy():
     CONSTRUCTION — same length, same members, sorted."""
     offered = [p for p, _ in _llm_choices()]
     assert offered == sorted(CLI_ENABLED_PROVIDERS)
+
+
+# ── #464 refinements from cursor-lin's LIVED onboarding audit ────────────────
+
+def _probe_with_peer_row(monkeypatch, peer_row):
+    """Drive the REAL _probe_onboarding with a fabricated registry row.
+
+    Stubs the two network reads and the token file so the classifier under test is
+    the only live logic. Written this way after a first attempt reimplemented the
+    branch inside the test and asserted on its own copy — a test that passes with
+    the fix reverted, which is precisely the defect this PR exists to remove.
+    """
+    import io, json as _json
+    from swarph_cli.commands import onboard
+
+    class _Resp:
+        def __init__(self, payload): self._p = _json.dumps(payload).encode()
+        def read(self): return self._p
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _urlopen(req, timeout=8):
+        url = req if isinstance(req, str) else req.full_url
+        if url.endswith("/peers"):
+            return _Resp({"peers": [peer_row]})
+        return _Resp({"messages": []})
+
+    monkeypatch.setattr(onboard.urllib.request, "urlopen", _urlopen)
+    monkeypatch.setattr(onboard.pathlib.Path, "exists", lambda self: True)
+    monkeypatch.setattr(onboard.pathlib.Path, "read_text", lambda self, **k: "tok")
+    monkeypatch.setattr(onboard.pathlib.Path, "stat",
+                        lambda self: type("S", (), {"st_mode": 0o600})())
+    return {label: (mark, detail)
+            for mark, label, detail in onboard._probe_onboarding(peer_row["name"], "http://gw:8788")}
+
+
+def test_outbound_only_cell_does_not_carry_a_permanent_health_gap(monkeypatch):
+    """>>> N/A IS NOT A GAP. <<< A cell registered outbound-only:// has no inbound
+    endpoint, so `last_health` can NEVER become non-null. Marking it MISSING mints a
+    red mark no action can close — and a checklist everyone permanently fails is one
+    nobody reads. openwolf's 2.0.3 lesson (false-positive warnings train users to
+    ignore the system), caught by cursor-lin, which is outbound-only and would have
+    carried this forever.
+    """
+    rows = _probe_with_peer_row(monkeypatch, {
+        "name": "cellA", "url": "outbound-only://cellA", "last_health": None,
+        "ratified": True, "capabilities": {"can_claim_tasks": True, "provider": "x"},
+        "registered_at": "2026-08-18T00:00:00"})
+    mark, detail = rows["health check has succeeded"]
+    assert mark == "ok", "outbound-only must not read as a gap"
+    assert "N/A" in detail
+
+
+def test_a_LISTENING_cell_with_no_health_STILL_reports_a_gap(monkeypatch):
+    """NON-VACUITY for the test above: the N/A branch must be reachable ONLY via the
+    outbound-only sentinel. If it swallowed every null last_health, it would hide the
+    real defect — a cell that should be answering health checks and is not."""
+    rows = _probe_with_peer_row(monkeypatch, {
+        "name": "cellB", "url": "http://cellB:8787", "last_health": None,
+        "ratified": True, "capabilities": {"can_claim_tasks": True, "provider": "x"},
+        "registered_at": "2026-08-18T00:00:00"})
+    mark, detail = rows["health check has succeeded"]
+    assert mark == "MISSING"
+    assert "last_seen is not a substitute" in detail
+
+
+def test_token_rung_names_the_recovery_not_just_the_gap():
+    """The rung that cannot be self-served must say what unblocks it. Tonight the
+    recovery (DELETE then re-register mints a new generation) existed only in a
+    human's head, and the CLI's own error surface said 'existing'."""
+    import inspect
+    from swarph_cli.commands import onboard
+    src = inspect.getsource(onboard._probe_onboarding)
+    assert "RECOVERY" in src
+    assert "DELETE /peers/" in src
+    assert "token_status=existing" in src, (
+        "must warn that re-registering returns a success-shaped 200 with no token"
+    )
