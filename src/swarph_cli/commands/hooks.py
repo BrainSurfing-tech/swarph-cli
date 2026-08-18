@@ -553,6 +553,22 @@ def install_hook(
     """
     hooks_home_p = Path(hooks_home).expanduser()
     script_dst = (hooks_home_p / bundle.script_name).resolve()
+
+    # >>> REFUSE BEFORE WRITING A BINDING THAT CANNOT FIRE. <<< On win32 with no
+    # Git-for-Windows bash, the only thing left on PATH is System32\bash.exe — the WSL
+    # launcher, a different filesystem where this script does not exist. Installing
+    # anyway produces a hook that fires on every matching tool call and fails from
+    # inside a filesystem the operator is not thinking about. A refusal naming the
+    # remedy is the more useful output, and it is the branch real Windows boxes without
+    # Git actually take. (drop, reviewing #250.)
+    if sys.platform == "win32" and _find_windows_bash() is None:
+        out(f"cannot install {bundle.name}: no Git-for-Windows bash found.")
+        out("  Looked for: " + ", ".join(_WIN_BASH_CANDIDATES))
+        out("  A hook installed now would run under System32\\bash.exe (WSL), a")
+        out("  different filesystem where the hook script does not exist.")
+        out("  Install Git for Windows, then re-run — nothing was written.")
+        return 1
+
     command = _hook_command_path(script_dst)
 
     # ---- show-before-write preview ----
@@ -741,14 +757,26 @@ _WIN_BASH_CANDIDATES = (
 )
 
 
-def _windows_hook_bash() -> str:
-    """Absolute path to a bash that can actually run a hook script on win32.
+def _find_windows_bash():
+    """A bash that can actually run a hook script on win32, or ``None``.
 
-    Falls back to ``shutil.which("bash")`` ONLY when it is not the System32 WSL
-    launcher — a fallback that silently selects WSL would move the failure from
-    "wrong program" to "right program, wrong filesystem", which is harder to
-    diagnose, not easier. Last resort is the bare name, which at least fails
-    LOUDLY at fire time rather than launching an IDE.
+    >>> THE PREVIOUS VERSION'S LAST RESORT WAS THE BUG IT WAS GUARDING AGAINST. <<<
+    It refused ``shutil.which("bash")`` when that resolved into System32 — correctly,
+    since System32\\bash.exe is the WSL launcher and lives on a different filesystem
+    where the hook script does not exist — and then fell through to ``return "bash"``,
+    which Windows resolves to EXACTLY THAT LAUNCHER. The guard rejected a path and the
+    fallback re-selected it by name.
+
+    The docstring claimed the bare name "fails LOUDLY at fire time rather than
+    launching an IDE". Found false by drop reviewing #250: it does not fail loudly, it
+    silently starts WSL and reports a missing file from inside a filesystem the
+    operator was never thinking about. I had reasoned about the branch I wrote and
+    stated a conclusion about the branch I did not — the prediction is deleted rather
+    than re-argued.
+
+    Returning ``None`` makes "there is no usable bash here" a REPRESENTABLE ANSWER
+    instead of a wrong one. What each caller does with it differs, and that difference
+    is the whole point — see ``_windows_hook_bash`` and ``install_hook``.
     """
     for cand in _WIN_BASH_CANDIDATES:
         if Path(cand).exists():
@@ -762,7 +790,22 @@ def _windows_hook_bash() -> str:
         found = None
     if found and "system32" not in found.replace("\\", "/").lower():
         return found.replace("\\", "/")
-    return "bash"
+    return None
+
+
+def _windows_hook_bash() -> str:
+    """The interpreter used to BUILD A COMMAND STRING — never a claim that it works.
+
+    >>> UNRESOLVABLE STILL YIELDS A STRING HERE, AND THAT IS DELIBERATE. <<< This
+    function feeds ``_hook_command_path``, which feeds ``_installed_command_variants``,
+    which is how uninstall and list FIND EXISTING ENTRIES. Raising or refusing here
+    would mean a box whose Git install was removed after installing hooks could no
+    longer REMOVE them — the fix would strand the operator harder than the bug.
+
+    So the refusal belongs at the verb that CREATES a broken binding (install), not at
+    the ones that clean it up. Fail closed on the write, fail open on the read.
+    """
+    return _find_windows_bash() or "bash"
 
 
 def _installed_command_variants(bundle: HookBundle, hooks_home) -> tuple:
