@@ -31,7 +31,7 @@ WINDOWS_STYLE = r"C:\Users\pierr\.swarph\hooks\cell-resilience.sh"
 
 def test_backslashes_become_forward_slashes_on_win32(monkeypatch):
     monkeypatch.setattr(hooks.sys, "platform", "win32")
-    out = hooks._hook_command_path(WINDOWS_STYLE)
+    out = hooks._hook_script_path(WINDOWS_STYLE)
     assert out == "C:/Users/pierr/.swarph/hooks/cell-resilience.sh"
 
 
@@ -43,7 +43,7 @@ def test_no_backslash_survives_on_win32(monkeypatch):
     and not others would pass a laxer equality check.
     """
     monkeypatch.setattr(hooks.sys, "platform", "win32")
-    assert "\\" not in hooks._hook_command_path(WINDOWS_STYLE)
+    assert "\\" not in hooks._hook_script_path(WINDOWS_STYLE)
 
 
 def test_drive_letter_is_preserved(monkeypatch):
@@ -54,7 +54,7 @@ def test_drive_letter_is_preserved(monkeypatch):
     would trade a loud failure for a wrong one.
     """
     monkeypatch.setattr(hooks.sys, "platform", "win32")
-    assert hooks._hook_command_path(WINDOWS_STYLE).startswith("C:/")
+    assert hooks._hook_script_path(WINDOWS_STYLE).startswith("C:/")
 
 
 def test_posix_paths_are_untouched(monkeypatch):

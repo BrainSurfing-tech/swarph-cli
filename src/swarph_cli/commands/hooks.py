@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -680,8 +681,88 @@ def _hook_command_path(path) -> str:
     uninstall stops finding what install wrote and silently removes nothing —
     so the fix cannot be applied at one site only. The invariant is asserted in
     tests, not just stated here.
+
+    >>> AND A FORWARD-SLASH PATH ALONE IS STILL NOT A COMMAND ON WINDOWS. <<<
+    REPORTED AND MEASURED ON METAL by cursor-win (2026-08-18): Claude Code does
+    not always exec a hook command through bash there. A PATH-ONLY command goes to
+    Windows ShellExecute, which resolves the ``.sh`` FILE ASSOCIATION — on that box
+    the IDE. Measured:
+
+        Antigravity.exe "C:\\Users\\...\\.swarph\\hooks\\activity-marker.sh"
+
+    activity-marker binds ``PreToolUse`` with matcher ``""``, so it fires on EVERY
+    TOOL CALL — and every tool call launched the IDE. The file association was the
+    symptom; the installer writing a bare path is the defect. Official Claude
+    plugins already write ``bash "…/hook.sh"``.
+
+    So win32 now emits an explicit interpreter: ``"<bash>" "<forward/slash/path>"``.
+
+    >>> WHICH bash MATTERS, AND THE OBVIOUS ONE IS WRONG. <<< ``bash`` on PATH is
+    ``C:\\WINDOWS\\system32\\bash.exe`` — the WSL launcher, a different filesystem
+    where the script does not exist. And ``git-bash.exe`` spawns a mintty WINDOW
+    rather than running inline. Git's ``bin/bash.exe`` is the one that behaves.
+    """
+    script = _hook_script_path(path)
+    if sys.platform != "win32":
+        return script
+    return f'"{_windows_hook_bash()}" "{script}"'
+
+
+def _hook_script_path(path) -> str:
+    """Just the SCRIPT path, bash-safe — no interpreter, no quoting.
+
+    Split out from _hook_command_path when the win32 command grew an explicit
+    interpreter (cursor-win, 2026-08-18). The forward-slash property is still a
+    real invariant and still worth asserting on its own — bash consumes
+    backslashes, so a Windows path must be converted no matter what precedes it
+    — but it is now a property of one COMPONENT rather than of the whole string.
+    Keeping both lets the #216 tests keep testing what they were written to test.
     """
     return str(path).replace("\\", "/") if sys.platform == "win32" else str(path)
+
+
+#: Git-for-Windows bash, in preference order. NOT System32\bash.exe (WSL: different
+#: filesystem, the script is not there) and NOT git-bash.exe (spawns a mintty window
+#: instead of running inline). cursor-win measured both failure modes on metal.
+#: Git for Windows ships TWO bashes and BOTH run a script correctly:
+#:   Git/bin/bash.exe      — the launcher cursor-win measured on the reference laptop
+#:   Git/usr/bin/bash.exe  — the MSYS2 bash the GitHub Windows runner resolves to
+#: >>> THE FIRST VERSION LISTED ONLY bin/ AND CI FOUND usr/bin/bash.EXE, so the
+#: resolver fell through to shutil.which. Hardcoding ONE box's layout is the same
+#: error as reasoning about a platform you do not have. <<< Preference order is
+#: cursor-win's measurement first, then the runner's.
+_WIN_BASH_CANDIDATES = (
+    r"C:/Program Files/Git/bin/bash.exe",
+    r"C:/Program Files/Git/usr/bin/bash.exe",
+    r"C:/Program Files (x86)/Git/bin/bash.exe",
+    r"C:/Program Files (x86)/Git/usr/bin/bash.exe",
+    r"C:/Git/bin/bash.exe",
+    r"C:/Git/usr/bin/bash.exe",
+)
+
+
+def _windows_hook_bash() -> str:
+    """Absolute path to a bash that can actually run a hook script on win32.
+
+    Falls back to ``shutil.which("bash")`` ONLY when it is not the System32 WSL
+    launcher — a fallback that silently selects WSL would move the failure from
+    "wrong program" to "right program, wrong filesystem", which is harder to
+    diagnose, not easier. Last resort is the bare name, which at least fails
+    LOUDLY at fire time rather than launching an IDE.
+    """
+    for cand in _WIN_BASH_CANDIDATES:
+        if Path(cand).exists():
+            return cand
+    try:
+        found = shutil.which("bash")
+    except Exception:
+        # shutil.which consults os.environ["PATHEXT"]/NeedCurrentDirectoryForExePath
+        # on win32; under a patched sys.platform (tests) that machinery is absent.
+        # A lookup failure must never take down hook installation.
+        found = None
+    if found and "system32" not in found.replace("\\", "/").lower():
+        return found.replace("\\", "/")
+    return "bash"
 
 
 def _installed_command_variants(bundle: HookBundle, hooks_home) -> tuple:
@@ -697,14 +778,35 @@ def _installed_command_variants(bundle: HookBundle, hooks_home) -> tuple:
     at hook-fire time. Found in review by Copilot on PR #216; I had made install
     and uninstall agree GOING FORWARD and never asked what was already on disk.
 
-    Canonical form FIRST (it is what install now writes); the legacy form is
-    appended only when it actually differs, so POSIX — where the two are
-    identical — gets exactly one candidate and no behaviour change at all.
+    Canonical form FIRST (it is what install now writes); older forms are appended
+    only when they actually differ, so POSIX — where they are identical — gets
+    exactly one candidate and no behaviour change at all.
+
+    >>> AND NOW THERE ARE THREE GENERATIONS, NOT TWO. <<< cursor-win's bash-wrapper
+    fix (2026-08-18) creates the SAME hole a second time: every Windows cell that
+    installed between the forward-slash fix and the wrapper fix has a BARE
+    FORWARD-SLASH command on disk. Matching only the newest form orphans those
+    exactly as matching only forward-slash would have orphaned the backslash ones.
+
+    The lesson from #216 is written in this function's own existence, so the fix is
+    to EXTEND the ladder rather than replace its top rung:
+
+        gen 3  "<bash.exe>" "C:/Users/.../hook.sh"    <- current canonical
+        gen 2  C:/Users/.../hook.sh                   <- forward-slash, bare
+        gen 1  C:\\Users\\...\\hook.sh                  <- backslash, original
+
+    POSIX collapses all three to one string, so it gets a single candidate and no
+    behaviour change — the same property the two-generation version had.
     """
     resolved = (Path(hooks_home).expanduser() / bundle.script_name).resolve()
     canonical = _hook_command_path(resolved)
-    legacy = str(resolved)
-    return (canonical,) if canonical == legacy else (canonical, legacy)
+    forward_bare = str(resolved).replace("\\", "/")
+    backslash = str(resolved)
+    out = []
+    for cand in (canonical, forward_bare, backslash):
+        if cand not in out:
+            out.append(cand)
+    return tuple(out)
 
 
 def _installed_command(bundle: HookBundle, hooks_home) -> str:
