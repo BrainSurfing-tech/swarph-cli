@@ -21,6 +21,22 @@ entry, the operator reinstalls, install MERGES the canonical binding ALONGSIDE t
 surviving legacy one, and the hook FIRES TWICE. Every Windows cell that installed before
 2026-08-18 is in that state.
 
+>>> WIN32-ON-LINUX IS THE STRICTER ORACLE HERE, NOT THE WEAKER ONE. <<< The next
+reader will see a simulated platform and downgrade it in their head. Do not: when
+#251 and #252 composed into a break, the REAL Windows runner stayed green throughout
+and only this simulation caught it. The reason generalizes —
+
+    WHEN A GUARD FIRES ON A MISSING RESOURCE, THE ENVIRONMENT THAT HAS THE RESOURCE
+    CANNOT TEST IT.
+
+#252's guard exists to handle the ABSENCE of a Git bash. A real Windows runner
+SUPPLIES a Git bash, so it can never exercise the guard's live branch. The
+"realistic" environment is the weaker oracle and the simulation is the stricter one,
+which inverts the usual instinct. (drop-on-meta-edge, reviewing #255, tagged [ASIDE].)
+
+Same family as the rest of this file: an instrument that cannot produce the negative
+case cannot certify the negative case.
+
 The docstring on `_installed_command_variants` says "ONE HELPER, TWO CALLERS" and names
 install + list. Uninstall was the third, missed a third time — which is what says the
 ladder must be reached through one path rather than remembered at each site.
@@ -62,6 +78,17 @@ def win32(monkeypatch):
     canonical form independent of whatever bash the host happens to have."""
     monkeypatch.setattr(hooks.sys, "platform", "win32")
     monkeypatch.setattr(hooks, "_windows_hook_bash", lambda: _BASH)
+    # >>> #251 AND #252 WERE EACH GREEN ALONE AND RED TOGETHER. <<< #252 (drop's #201
+    # finding) made install REFUSE on win32 when no Git bash can be resolved. This
+    # suite simulates win32 ON LINUX, where no Git path exists, so install_hook began
+    # refusing and `test_reinstall_after_remove_leaves_exactly_ONE_binding` got zero
+    # bindings instead of one. Patching the COMMAND BUILDER was no longer enough once
+    # a second function started asking the same question for a different purpose.
+    #
+    # It passed on the WINDOWS runner throughout, because a real Git bash exists
+    # there — so the composition failure was visible only on the platform the feature
+    # is not for. Neither PR's own CI could see it: the break needs both merged.
+    monkeypatch.setattr(hooks, "_find_windows_bash", lambda: _BASH)
 
 
 def _settings_with(path: Path, bundle, command: str) -> None:

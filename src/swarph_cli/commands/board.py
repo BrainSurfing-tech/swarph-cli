@@ -207,6 +207,23 @@ def _card_say_payload(from_node: str, to_node: str, kind: str, content: str,
     }
 
 
+def _format_ask(d) -> str:
+    """One line naming the obligation, its holder, and when it goes red.
+
+    >>> NAMING THE DEADLINE OR ITS ABSENCE IS THE POINT, NOT DECORATION. <<< #145's
+    lesson, one layer over: "0 overdue" must not be able to mean "nobody set dates".
+    An obligation with no timeout never goes red on its own, and the operator has to
+    be told that AT THE MOMENT THEY CREATE IT — afterwards it looks identical to one
+    that simply is not late yet.
+    """
+    when = d.get("timeout_at")
+    deadline = f"overdue after {when}" if when else (
+        "NO TIMEOUT — this never goes red on its own; pass --timeout-hours if it should")
+    return (f"obligation #{d.get('id')} on card #{d.get('card_id')}: "
+            f"{d.get('holder')} owes it, status={d.get('status')}, {deadline}\n"
+            f"  thread {d.get('thread_uuid')} — the holder's reply in this thread closes it")
+
+
 def _format_thread(data) -> str:
     msgs = data.get("messages", []) if isinstance(data, dict) else (data or [])
     card_id = data.get("card_id") if isinstance(data, dict) else None
@@ -275,6 +292,17 @@ def _build_parser() -> argparse.ArgumentParser:
     cy.add_argument("--to", dest="to_node", default=None,
                     help="recipient peer (default: the card's assignee)")
     _add_common(cy)
+
+    ck = cards.add_parser(
+        "ask", help="MINT an obligation on this card: name who owes what, as a ROW")
+    ck.add_argument("id", type=int)
+    ck.add_argument("holder", help="the peer who OWES the delivery")
+    ck.add_argument("what", help="what is owed, in one line")
+    ck.add_argument("--timeout-hours", type=int, default=None,
+                    help="hours until this obligation reads OVERDUE (default: none, "
+                         "which means it never goes red on its own)")
+    ck.add_argument("--kind", default="action", help="obligation kind (default: action)")
+    ck.add_argument("--json", action="store_true"); _add_common(ck)
 
     cr = cards.add_parser("ready", help="flag a card ready-to-advance (move_ready) for the orchestrator")
     cr.add_argument("id", type=int); cr.add_argument("--clear", action="store_true", help="unset move_ready")
@@ -388,6 +416,18 @@ def run_board(argv: list[str]) -> int:
             # it PASSED ALL 15 TESTS — the definition of a code path doing nothing.
             # Reading it would not have found that; mutating it did. <<<
             return _out(st, d, _format_thread, aj)
+        if args.command == "ask":
+            # >>> THE ASK IS THE MINT. <<< #307 requirement (2): the expectation must
+            # be created BY THE ACT of asking, or it is one more thing to remember and
+            # decays exactly like the prose it replaces. So there is no separate
+            # "record an obligation" verb, deliberately — this posts the request AND
+            # the row in one gateway call, or neither.
+            body = {"holder": args.holder, "what": args.what, "created_by": self_name,
+                    "kind": args.kind}
+            if args.timeout_hours is not None:
+                body["timeout_hours"] = args.timeout_hours
+            st, d = _post_json(f"{gw}/board/cards/{args.id}/ask", body, token)
+            return _out(st, d, _format_ask, args.json)
         if args.command == "say":
             try:
                 content = resolve_content(args.content, getattr(args, "content_file", None))

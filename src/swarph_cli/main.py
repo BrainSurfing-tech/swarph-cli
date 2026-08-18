@@ -92,6 +92,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "codegraph-hook": "swarph_cli.commands.codegraph_hook.run_codegraph_hook",
     "watchdog": "swarph_cli.commands.watchdog.run_watchdog",
     "hooks": "swarph_cli.commands.hooks.run_hooks",
+    "gh-route": "swarph_cli.commands.gh_route.run_gh_route",
     "protocol-handler": "swarph_cli.commands.protocol_handler.run_protocol_handler",
     "memory-sync": "swarph_cli.commands.memory_sync.run_memory_sync",
     "memory": "swarph_cli.commands.memory.run_memory",
