@@ -140,17 +140,23 @@ def test_reinstall_after_remove_leaves_exactly_ONE_binding(home, win32):
 def test_list_reports_a_LEGACY_install_as_INSTALLED(home, win32):
     """Read side of the same ladder. Reporting a legacy install as 'available' invites
     the reinstall that creates the duplicate — so the gap on the read side is what makes
-    the gap on the write side dangerous."""
+    the gap on the write side dangerous.
+    >>> AND THE FIRST VERSION OF THIS TEST CALLED `_is_installed` AND
+    `_installed_command_variants` DIRECTLY. <<< It passed with the list-side fix
+    REVERTED — it re-implemented the read path instead of driving it, so it graded my
+    own inline expression rather than the shipped verb. That is the same defect as the
+    bug: a helper verified through its own front door. It drives `list_hooks` now.
+    """
     bundle = hooks.resolve_builtin("cell-resilience")
-    b0 = bundle.bindings[0]
     sp = home / "settings.json"
     _settings_with(sp, bundle, _legacy_command(bundle, home / "hooks"))
 
-    settings = hooks._load_settings(sp)
-    installed = any(
-        hooks._is_installed(settings, c, bundle)
-        for c in hooks._installed_command_variants(bundle, home / "hooks"))
-    assert installed, "a legacy-generation install must still read as INSTALLED"
+    lines = []
+    hooks.list_hooks(settings_path=sp, hooks_home=home / "hooks", out=lines.append)
+
+    row = next(l for l in lines if "cell-resilience" in l)
+    assert "installed" in row and "available" not in row, (
+        f"a legacy-generation install must read as INSTALLED, got: {row!r}")
 
 
 def test_removing_a_NOT_INSTALLED_hook_is_still_a_no_op(home, win32):
