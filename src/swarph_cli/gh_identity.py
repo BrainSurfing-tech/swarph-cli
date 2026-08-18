@@ -38,13 +38,41 @@ from typing import Optional
 MAPPING_ENV = "SWARPH_GH_IDENTITY_MAP"
 DEFAULT_MAPPING_PATH = Path.home() / ".config" / "swarph" / "gh-identities.json"
 
-#: `gh` at the head of the command, or after leading env assignments / sudo -E etc.
-#: Deliberately anchored: a bare `gh` word anywhere (e.g. `grep gh file`) must NOT
-#: match, or the router would rewrite unrelated commands.
-_GH_INVOCATION = re.compile(r"(?:^|[;&|]\s*|\$\(\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*gh(?=\s|$)")
+#: Wrappers that take a command as their argument, so `gh` is argv[1+] rather than
+#: argv[0]. grok-researcher enumerated these against the first version, which
+#: matched none of them: `timeout 40 gh pr view 249` is the one it had itself run
+#: twice while reviewing these PRs, which is as real-world as a corpus gets.
+_WRAPPERS = (
+    r"env(?:\s+-\w+)*|sudo(?:\s+-\w+(?:\s+\S+)?)*|command(?:\s+-\w+)*|exec|nohup"
+    r"|time|nice(?:\s+-n\s*-?\d+)?|timeout\s+\S+|stdbuf(?:\s+-\S+)*|rlwrap|xargs(?:\s+-\S+(?:\s+\S+)?)*"
+)
+
+#: Positions from which a command can start: string start, after a separator, inside
+#: a substitution, after a block/subshell opener, or after then/do/else.
+#: >>> MULTILINE IS LOAD-BEARING. <<< Without it `^` is string-start only, so
+#: `cd /tmp\ngh pr list` missed entirely — and multi-line Bash is the DOMINANT shape
+#: in this harness. drop-on-meta-edge measured 11 false negatives in 16 realistic
+#: shapes against the first version; that was the biggest single class.
+_START = r"(?:^|[;&|]|\$\(|`|\(|\{|\bthen\b|\bdo\b|\belse\b|&&|\|\|)"
+_LEAD = r"[ \t]*"                       # leading whitespace/tab — also missed before
+_ENVPFX = r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+)*"
+_WRAPPFX = rf"(?:(?:{_WRAPPERS})[ \t]+)*"
+#: `gh`, `./gh`, or any absolute path ending in /gh.
+_GH_WORD = r"(?:\.{0,2}/|(?:/[\w.-]+)*/)?gh"
+
+_GH_INVOCATION = re.compile(
+    rf"{_START}{_LEAD}{_ENVPFX}{_WRAPPFX}{_GH_WORD}(?=[ \t]|$)", re.MULTILINE)
 
 #: Already carries an explicit GH_TOKEN — an operator decision; do not double-inject.
-_HAS_GH_TOKEN = re.compile(r"(?:^|[;&|]\s*|\$\(\s*)(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*GH_TOKEN=")
+#: >>> `export GH_TOKEN=...` MUST COUNT. <<< The first version matched only the
+#: `VAR=x cmd` prefix form, so `export GH_TOKEN=abc; gh pr view` had its gh half
+#: detected and its token half missed — and the router stacked its own credential in
+#: front of the one the operator deliberately chose (#332: an explicit argument is a
+#: decision, not a hint). grok-researcher named this as the live stacking case.
+_HAS_GH_TOKEN = re.compile(
+    rf"{_START}{_LEAD}(?:(?:export|declare|local|typeset|readonly)[ \t]+)?"
+    rf"{_WRAPPFX}(?:[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+)*GH_TOKEN[ \t]*=",
+    re.MULTILINE)
 
 
 class RouterRefusal(Exception):
@@ -126,9 +154,34 @@ def already_explicit(command: str) -> bool:
 
 
 def inject(command: str, login: str) -> str:
-    """Prefix the per-invocation credential. Leaves global `gh` state untouched.
+    """Export the credential for this invocation. Leaves global `gh` state untouched.
 
     `gh auth token --user <login>` reads the stored OAuth token for that account
     WITHOUT switching the active one — the property the whole card rests on.
+
+    >>> `export VAR=x; cmd`, NOT `VAR=x cmd`. THE FIRST VERSION USED THE PREFIX FORM
+    AND WAS INERT FOR EVERY COMPOSED COMMAND. <<< In bash a `VAR=x cmd` prefix scopes
+    VAR to `cmd` ALONE, so the token landed on `cd`, on `echo`, on whatever came
+    first — never on `gh`. Found by drop-on-meta-edge, verified here:
+
+        bash -c 'GH_TOKEN=FAKE cd /tmp && echo "[${GH_TOKEN}]"'   ->  []
+        bash -c 'export GH_TOKEN=OK; cd /tmp && echo "[${GH_TOKEN}]"'  ->  [OK]
+
+    `cd /tmp && gh pr list` was a DOCUMENTED SUPPORTED EXAMPLE and it did nothing.
+
+    >>> AND IT WAS THE WORST AVAILABLE FAILURE MODE, because it REPORTED SUCCESS:
+    rc=0 plus a systemMessage naming the resolved identity, while the gh process ran
+    under the ambient account. The router's own output became the evidence that it
+    had worked. <<<
+
+    The suite could not see it: the test asserted the STRING SHAPE (startswith /
+    endswith) and nothing executed. That is the proxy detector pointed at our own
+    tests — same class as a 409 handler that is confident, well-tested, and about
+    the wrong thing. test_the_injected_token_REACHES_a_composed_command now runs a
+    real shell.
+
+    The export is scoped to this Bash tool call's own shell, which is exactly the
+    per-invocation property wanted — it is not `gh auth switch`, and it touches no
+    global state and no other session.
     """
-    return f'GH_TOKEN=$(gh auth token --user {login}) {command}'
+    return f'export GH_TOKEN=$(gh auth token --user {login}); {command}'

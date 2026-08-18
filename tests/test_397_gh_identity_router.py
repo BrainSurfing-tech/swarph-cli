@@ -121,14 +121,49 @@ def test_lab_cannot_resolve_to_the_REVIEWER_identity(mapping):
 
 # ── injection: per-call, never global ─────────────────────────────────────────
 
-def test_injection_is_PER_CALL_and_never_switches_the_box():
+def test_injection_never_switches_the_box():
     """`gh auth switch` is GLOBAL. Measured 2026-08-11: it would have attributed a
-    later MERGE from another session to the reviewer. If this assertion ever fails,
-    the router has become the bug it was built to prevent."""
+    later MERGE from another session to the reviewer."""
     out = ghid.inject("gh pr review 12 --approve", "reviewers-pixel")
-    assert out.startswith("GH_TOKEN=$(gh auth token --user reviewers-pixel) ")
     assert "auth switch" not in out
-    assert out.endswith("gh pr review 12 --approve")
+    assert "reviewers-pixel" in out
+
+
+@pytest.mark.parametrize("shape", [
+    "gh pr review 12",                       # simple
+    "cd /tmp && gh pr list",                 # >>> THE ONE THAT WAS INERT <<<
+    "echo 249 | xargs -I{} gh pr view {}",   # pipeline + xargs
+    "timeout 40 gh pr view 249",             # wrapper
+    "( gh pr list )",                        # subshell
+    "bash -c 'gh pr merge 3'",               # nested shell
+])
+def test_the_injected_token_REACHES_a_composed_command(shape):
+    """>>> THE TEST THAT WOULD HAVE CAUGHT IT, AND THE ONE THE FIRST DRAFT LACKED. <<<
+
+    The first version asserted the STRING SHAPE — startswith/endswith on the rewritten
+    command — and NOTHING EXECUTED. It stayed green while the feature was 100% inert
+    for every composed command, because `VAR=x cmd` scopes VAR to `cmd` alone: the
+    token landed on `cd`, on `echo`, on whatever ran first. Never on `gh`.
+
+    drop-on-meta-edge found it and named why it was the worst available failure mode:
+    the hook returned rc=0 AND a systemMessage naming the resolved identity, while the
+    gh process ran under the ambient account. The router's own output was the evidence
+    that it had worked.
+
+    So this test asserts the PROPERTY — a real subprocess, further down a real
+    composed command, actually sees GH_TOKEN in its environment — instead of asserting
+    that the string looks right. `gh` is replaced by a probe so the assertion is about
+    the ENVIRONMENT and needs no credential, no network and no GitHub account.
+    """
+    import subprocess
+    probe = shape.replace("gh ", 'printenv GH_TOKEN >/dev/null && echo REACHED; : ', 1)
+    cmd = ghid.inject(probe, "reviewers-pixel").replace(
+        "$(gh auth token --user reviewers-pixel)", "SENTINEL", 1)
+    r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=15)
+    assert "REACHED" in r.stdout, (
+        f"the token did NOT reach the gh position in: {shape!r}\n"
+        f"  rewritten: {cmd}\n  stdout={r.stdout!r} stderr={r.stderr!r}"
+    )
 
 
 # ── the hook envelope ─────────────────────────────────────────────────────────
@@ -148,7 +183,10 @@ def test_hook_rewrites_the_command_and_STATES_the_identity(mapping, monkeypatch)
                      "tool_input": {"command": "gh pr review 5 --approve"}}, monkeypatch)
     assert rc == 0
     cmd = out["hookSpecificOutput"]["updatedInput"]["command"]
-    assert cmd.startswith("GH_TOKEN=$(gh auth token --user reviewers-pixel) ")
+    # EXPORT form, not the `VAR=x cmd` prefix — the prefix scopes to the first
+    # command only and was inert for everything composed (see the parametrised
+    # execution test above, which is the one that actually proves it).
+    assert cmd.startswith("export GH_TOKEN=$(gh auth token --user reviewers-pixel); ")
     # A wrong mapping must be DIAGNOSABLE rather than silently wrong.
     assert "drop-on-meta-edge -> reviewers-pixel" in out["systemMessage"]
 
