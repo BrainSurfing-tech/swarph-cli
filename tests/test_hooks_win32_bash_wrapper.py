@@ -133,6 +133,18 @@ def test_POSIX_still_gets_exactly_one_variant():
 # feat/397 branch, which rebases onto this one.
 
 
+def _exists_in(present):
+    """`str(WindowsPath)` yields BACKSLASHES, so comparing it against the
+    forward-slash candidate strings never matches ON WINDOWS.
+
+    >>> THE FIRST DRAFT DID EXACTLY THAT AND WINDOWS CI CAUGHT IT. <<< Both tests
+    fell through to shutil.which and got the runner's real `bash.EXE` — a
+    platform-naive comparison inside a test written to check Windows path layouts,
+    authored on Linux where it could not fail. Normalize before comparing.
+    """
+    return lambda self: str(self).replace("\\", "/") in present
+
+
 def test_BOTH_git_bash_layouts_present_prefers_bin(monkeypatch):
     """A box can carry BOTH Git bash layouts at once — not either/or.
 
@@ -144,7 +156,7 @@ def test_BOTH_git_bash_layouts_present_prefers_bin(monkeypatch):
     and not a reading. Preference is cursor-win's measured layout first.
     """
     both = {hooks._WIN_BASH_CANDIDATES[0], hooks._WIN_BASH_CANDIDATES[1]}
-    monkeypatch.setattr(hooks.Path, "exists", lambda self: str(self) in both)
+    monkeypatch.setattr(hooks.Path, "exists", _exists_in(both))
     assert hooks._windows_hook_bash() == hooks._WIN_BASH_CANDIDATES[0]
 
 
@@ -154,5 +166,5 @@ def test_only_the_CI_layout_present_still_resolves(monkeypatch):
     shutil.which. Absence of the preferred layout must select the next real one, not
     give up — otherwise the fix works only on the box it was written on."""
     only_ci = {hooks._WIN_BASH_CANDIDATES[1]}
-    monkeypatch.setattr(hooks.Path, "exists", lambda self: str(self) in only_ci)
+    monkeypatch.setattr(hooks.Path, "exists", _exists_in(only_ci))
     assert hooks._windows_hook_bash() == hooks._WIN_BASH_CANDIDATES[1]
