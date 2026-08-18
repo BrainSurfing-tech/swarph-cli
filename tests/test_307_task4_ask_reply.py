@@ -148,7 +148,18 @@ def test_the_two_reply_outcomes_do_not_print_the_same_line(monkeypatch, capsys):
     mesh.run_mesh(["reply", "2", "--content", "x", "--gateway", "http://gw"])
     threadless = capsys.readouterr().out
 
-    assert threaded != threadless
+    # >>> COMPARING THE RAW STRINGS IS VACUOUS AND A MUTATION PROVED IT. <<< The two
+    # lines carry different message ids (10 vs 11), so they differ ALWAYS — including
+    # when the threadless branch was mutated to print the threaded text verbatim,
+    # which is exactly the collapse this test claims to catch. It passed. Strip the
+    # digits and the confound goes with them, leaving only the WORDING to compare.
+    import re
+    norm = lambda t: re.sub(r"\d+", "N", t)
+    assert norm(threaded) != norm(threadless), (
+        "the two outcomes must be distinguishable by their WORDING, not merely by the "
+        "ids that happen to differ in every pair of sends"
+    )
+    assert "NOT IN A THREAD" in threadless and "NOT IN A THREAD" not in threaded
 
 
 @pytest.mark.parametrize("kind", ["answer", "fyi", "status", "question", "unblock"])
