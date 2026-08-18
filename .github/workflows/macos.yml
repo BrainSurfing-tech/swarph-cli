@@ -30,6 +30,18 @@
 # 2026-08-18. A floor gets added the day the first darwin-only path does, and not
 # before.
 #
+# >>> AND THE RE-ENTRY CONDITION IS WRITTEN HERE, NOW, BECAUSE A DELIBERATE ABSENCE
+# WITH NO TRIGGER SILENTLY BECOMES PERMANENT. <<< (drop-on-meta-edge, reviewing #259.)
+#
+#     ADD A DARWIN NODE-ID FLOOR THE DAY THE FIRST `sys.platform == "darwin"` BRANCH
+#     OR DARWIN-ONLY TEST LANDS IN THIS PACKAGE.
+#
+# Without that sentence the gap reopens the moment someone writes that branch, and BY
+# CONSTRUCTION NOBODY IS LOOKING — the floor's absence is invisible precisely because
+# it was justified once. Same defect as a ledger entry carrying a removal condition
+# and no start date (#115): correct when written, unfalsifiable about when it stopped
+# being correct.
+#
 # FIRST-RUN EXPECTATION, stated up front so a red is not a surprise and not a
 # scandal: nobody knows what breaks. The first run is DISCOVERY. If it is red, the
 # outcome is either a fix or a DECLARED exemption carrying a start date and the
