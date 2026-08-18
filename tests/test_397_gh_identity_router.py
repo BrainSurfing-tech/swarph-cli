@@ -155,11 +155,28 @@ def test_the_injected_token_REACHES_a_composed_command(shape):
     that the string looks right. `gh` is replaced by a probe so the assertion is about
     the ENVIRONMENT and needs no credential, no network and no GitHub account.
     """
-    import subprocess
+    import subprocess, sys as _sys
+    # >>> THE TEST WALKED INTO THE HAZARD THE PRODUCT CODE REJECTS BY NAME. <<<
+    # `["bash", "-c", ...]` on the Windows runner resolves to C:\WINDOWS\system32\
+    # bash.exe — the WSL launcher — which answered "Windows Subsystem for Linux has
+    # no installed distributions" in UTF-16. That is cursor-win's reported bug,
+    # committed in a test three files from the fix for it. Being right about a hazard
+    # in one file does not stop you walking into it in another.
+    #
+    # So resolve the shell the same way the PRODUCT does, via the helper that exists
+    # for this. On POSIX it is plain "bash"; on win32 it is Git's bash, never System32.
+    if _sys.platform == "win32":
+        from swarph_cli.commands.hooks import _windows_hook_bash
+        shell = _windows_hook_bash()
+        if shell == "bash":
+            pytest.skip("no non-WSL bash on this runner; the property is POSIX shell "
+                        "semantics and a WSL launcher cannot answer it")
+    else:
+        shell = "bash"
     probe = shape.replace("gh ", 'printenv GH_TOKEN >/dev/null && echo REACHED; : ', 1)
     cmd = ghid.inject(probe, "reviewers-pixel").replace(
         "$(gh auth token --user reviewers-pixel)", "SENTINEL", 1)
-    r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=15)
+    r = subprocess.run([shell, "-c", cmd], capture_output=True, text=True, timeout=15)
     assert "REACHED" in r.stdout, (
         f"the token did NOT reach the gh position in: {shape!r}\n"
         f"  rewritten: {cmd}\n  stdout={r.stdout!r} stderr={r.stderr!r}"
