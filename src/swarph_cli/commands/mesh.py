@@ -434,7 +434,7 @@ def _default_sidecar_state_dir(self_name: str) -> Path:
 
 def _read_cursor(path: Path) -> dict:
     if not path.exists():
-        return {"last_msg_id": 0, "last_wake_at": 0.0}
+        return {"last_msg_id": 0, "last_wake_at": 0.0, "channel_cursors": {}, "pending_channel_posts": []}
     try:
         cursor = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -443,11 +443,13 @@ def _read_cursor(path: Path) -> dict:
             file=sys.stderr,
             flush=True,
         )
-        return {"last_msg_id": 0, "last_wake_at": 0.0}
+        return {"last_msg_id": 0, "last_wake_at": 0.0, "channel_cursors": {}, "pending_channel_posts": []}
     if not isinstance(cursor, dict):
-        return {"last_msg_id": 0, "last_wake_at": 0.0}
+        return {"last_msg_id": 0, "last_wake_at": 0.0, "channel_cursors": {}, "pending_channel_posts": []}
     cursor.setdefault("last_msg_id", 0)
     cursor.setdefault("last_wake_at", 0.0)
+    cursor.setdefault("channel_cursors", {})
+    cursor.setdefault("pending_channel_posts", [])
     return cursor
 
 
@@ -802,6 +804,9 @@ class MonitorState:
         self.shutdown_requested = False
         self.iterations = 0
         self.dms_seen = 0
+        # #125 option c: channel polling state
+        self.channel_cursors: dict = self.observed.get("channel_cursors", {})
+        self.pending_channel_posts: list = self.observed.get("pending_channel_posts", [])
 
     def _migrate_pre_122_ledger(self) -> None:
         """Adopt a pre-card-#122 cursor's `pending_wake` as the initial ledger.
@@ -914,6 +919,117 @@ def _select_next_poll_seconds(state: MonitorState) -> int:
     return state.poll_s
 
 
+def _wake_policy_admits(policy, msg: dict, self_name: str) -> bool:
+    """#194 — does THIS cell's own wake_policy admit this channel post?
+
+    `muted` is handled by the caller (it skips the fetch entirely). Here:
+      · mentions_only -> only posts that name this cell
+      · all / anything else / None -> admit
+
+    >>> FAIL OPEN, DELIBERATELY. <<< An unknown policy value, or a gateway that
+    does not send one at all, admits the post. Failing CLOSED would drop channel
+    posts silently — which is card #125's ORIGINAL DEFECT, not a safe default:
+    seventeen cells set a policy, nothing honoured it, and nobody could tell
+    because the absence looked exactly like "no posts". A filter that errs toward
+    delivering is recoverable by the reader; one that errs toward silence is not.
+    The inert case is announced by the caller so it cannot pass for enforcement.
+    """
+    if policy != "mentions_only":
+        return True
+    raw = msg.get("mentions")
+    # The gateway stores mentions as a JSON STRING ('[]'), not a list. Parse
+    # defensively: a malformed value must not decide "not mentioned" and swallow
+    # the post — on any doubt, admit it and let the reader judge.
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return True
+    if not isinstance(raw, (list, tuple)):
+        return True
+    return self_name in raw
+
+
+def _poll_channel_subscriptions(state: MonitorState) -> None:
+    """#125 option c: discover this peer's channel memberships and poll each
+    for new posts, using the existing member-gated GET /messages?channel=.
+    Additive only -- any failure here must never affect the DM poll above.
+
+    >>> THAT LAST SENTENCE IS A GUARANTEE, SO IT IS ENFORCED HERE RATHER THAN
+    ASSUMED. <<< The non-200 branches below cover the HTTP failures this code
+    anticipated; they do not cover the ones it did not. A raised exception --
+    a channel record with no "name", a non-numeric message id, a disk error in
+    _write_cursor_atomic, a socket fault inside _http_get_json -- propagates
+    out of the caller's tick, and the caller invokes this on EVERY poll right
+    after _monitor_deliver. So a single persistently-malformed channel record
+    would not merely skip channels once: it would kill DM delivery on every
+    subsequent tick, silently and forever. Channels are a convenience; DM
+    delivery is the product's promise, and the convenience must never be able
+    to take the promise down with it.
+    """
+    try:
+        _poll_channel_subscriptions_inner(state)
+    except Exception as e:  # noqa: BLE001 -- deliberately broad, see docstring
+        # Loud but non-fatal: a swallowed failure that nobody can see is how a
+        # feature ends up "working" for weeks while delivering nothing (#125's
+        # own defect). The DM poll continues; the operator learns.
+        print(f"{state.log_prefix} channel poll failed (DM delivery unaffected): "
+              f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+
+
+def _poll_channel_subscriptions_inner(state: MonitorState) -> None:
+    """The channel poll proper. Never call directly -- go through
+    _poll_channel_subscriptions, which owns the never-break-DMs guarantee."""
+    # Track existing message IDs to avoid duplicates if this is called multiple times
+    existing_ids = {int(m.get("id", 0)) for m in state.pending_channel_posts}
+
+    url = f"{state.gateway}/channels?{urllib.parse.urlencode({'peer': state.self_name})}"
+    status, body = _http_get_json(url, state.token)
+    if status != 200:
+        return  # fail silent for channels specifically -- DM delivery is the guarantee
+    members = [c for c in body.get("channels", []) if c.get("is_member")]
+    subscribed = [c["name"] for c in members]
+    # #194: the caller's OWN wake_policy per channel. C1 added this to
+    # GET /channels?peer=; a gateway that predates it omits the key entirely.
+    policies = {c["name"]: c.get("wake_policy") for c in members}
+    if subscribed and all(policies[n] is None for n in subscribed):
+        # >>> AN UNENFORCEABLE POLICY MUST NOT LOOK ENFORCED (#184c). <<< If the
+        # gateway never sends wake_policy, this filter is INERT — every post
+        # surfaces regardless of what the cell asked for. That is precisely the
+        # shape that convinced 17 cells they had subscribed to something, so it
+        # is stated out loud rather than left to look like filtering.
+        print(f"{state.log_prefix} wake_policy absent from GET /channels — "
+              f"channel filtering INERT, surfacing all posts (gateway predates #125 C1)",
+              file=sys.stderr, flush=True)
+
+    for channel in subscribed:
+        policy = policies.get(channel)
+        if policy == "muted":
+            continue  # asked for silence; honour it before spending a fetch
+        last_id = int(state.channel_cursors.get(channel, 0))
+        params = {"channel": channel, "limit": "50"}
+        curl = f"{state.gateway}/messages?{urllib.parse.urlencode(params)}"
+        cstatus, cbody = _http_get_json(curl, state.token)
+        if cstatus != 200:
+            continue
+        new_posts = [
+            m for m in cbody.get("messages", [])
+            if int(m.get("id", 0)) > last_id and m.get("from_node") != state.self_name
+            and int(m.get("id", 0)) not in existing_ids
+            and _wake_policy_admits(policy, m, state.self_name)
+        ]
+        if new_posts:
+            new_posts.sort(key=lambda m: int(m["id"]))
+            state.channel_cursors[channel] = int(new_posts[-1]["id"])
+            state.pending_channel_posts.extend(new_posts)
+            existing_ids.update(int(m.get("id", 0)) for m in new_posts)
+
+    if subscribed:
+        # Persist channel polling state to disk so separate `monitor status` can read it
+        state.cursor["pending_channel_posts"] = state.pending_channel_posts
+        _write_cursor_atomic(state.cursor_path, dict(state.cursor))
+
+
 def _monitor_deliver(state: MonitorState) -> None:
     """Best-effort delivery to every PUSH sink whose ledger lags the cursor.
 
@@ -970,7 +1086,7 @@ def _monitor_deliver(state: MonitorState) -> None:
         _write_ledgers_atomic(state.ledgers_path, state.ledgers)
 
 
-def _monitor_iteration(state: MonitorState) -> None:
+def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> None:
     state.iterations += 1
     last_id = int(state.observed.get("last_msg_id", 0))
     # NO unread_only: novelty is the `id > last_msg_id` cursor below, not the read
@@ -1043,6 +1159,19 @@ def _monitor_iteration(state: MonitorState) -> None:
     if state.ledgers and not state.ledgers_path.exists():
         _write_ledgers_atomic(state.ledgers_path, state.ledgers)
         state.new_ledgers = set()
+
+    # Poll channel subscriptions (independent of DM delivery, additive only).
+    # >>> NOT ON THE SIDECAR PATH. <<< _sidecar_iteration aliases this function, so
+    # without the flag every sidecar tick would also fetch /channels and each
+    # subscribed channel's messages. That is redundant AND costly there: since C1
+    # fans a channel post out as a real claude_messages row addressed to each
+    # member, the sidecar already sees channel traffic through its own DM poll. The
+    # only thing this poll adds is `pending_channel_posts`, which exists for
+    # `monitor status` — a surface the sidecar does not serve. So the sidecar would
+    # pay extra latency and an extra HTTP call per tick, on the wake path, to
+    # collect data nothing in it reads.
+    if poll_channels:
+        _poll_channel_subscriptions(state)
 
 
 def _monitor_loop(state: MonitorState) -> int:
@@ -1334,7 +1463,15 @@ class MeshSidecarState(MonitorState):
 
 
 # Legacy aliases. One engine underneath, so the deprecated verb cannot drift.
-_sidecar_iteration = _monitor_iteration
+# >>> THE SIDECAR IS NOT A BARE ALIAS ANY MORE, AND THE DIFFERENCE IS DELIBERATE. <<<
+# It was `_sidecar_iteration = _monitor_iteration`, which meant a change aimed at the
+# monitor landed on the wake path invisibly — #125's channel poll did exactly that and
+# broke test_sidecar_wakes_on_new_mail_and_advances_cursor. Sharing the engine is still
+# right (the verbs must not drift); what the alias hid was that they have DIFFERENT JOBS.
+# The sidecar wakes a cell on mail; the monitor also maintains status state.
+def _sidecar_iteration(state: MonitorState) -> None:
+    """The wake path: same engine, no channel polling. See _monitor_iteration."""
+    _monitor_iteration(state, poll_channels=False)
 _sidecar_deliver_wake = _monitor_deliver
 
 
