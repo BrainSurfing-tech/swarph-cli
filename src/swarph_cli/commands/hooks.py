@@ -797,6 +797,13 @@ def _installed_command_variants(bundle: HookBundle, hooks_home) -> tuple:
 
     POSIX collapses all three to one string, so it gets a single candidate and no
     behaviour change — the same property the two-generation version had.
+
+    >>> HAND-ROLLED WORKAROUNDS ARE NOT A GENERATION. <<< workstation-lc asked
+    (2026-08-18) whether its own ``.cmd`` shim should become a fourth rung. It should
+    not: this ladder tracks what the INSTALLER wrote, and a matcher for a string no
+    installer ever emitted is a stub that passes every test and matches nothing on the
+    one box it exists for. If a workaround ever spreads, the fix is the EXACT command
+    string from a real settings.json, not a guess at its shape.
     """
     resolved = (Path(hooks_home).expanduser() / bundle.script_name).resolve()
     canonical = _hook_command_path(resolved)
