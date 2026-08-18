@@ -70,12 +70,17 @@ swarph board <sub>       mesh board — projects/cards kanban (list/show/add/mov
 swarph lane <sub>        $0-lane orchestration — list/create/scale/delete/enqueue
 swarph bench <sub>       deterministic LLM benchmark-pack runner — run/validate/add/prices
 swarph highlight "<x>"   log a highlight to the shared git-backed swarph timeline
+swarph mesh reply <id>   reply to a DM IN ITS OWN THREAD — closes a #307 obligation; the
+                         verb is universal across kinds and never claims a closure it cannot see
 swarph spawn <role>      launch a long-lived agent session as a named mesh cell
 swarph daemon            foreground inbox-drain loop (the mesh doorbell)
 swarph watchdog          detect + recover stranded agent sessions (cron- or systemd-driven)
 swarph install-multiplexer   fetch the Windows tmux multiplexer (psmux) — pinned + checksum-verified
 swarph add <uri>         install a hook / MCP server / skill by content-addressed URI
 swarph hooks             install Claude Code hooks as reusable artifacts
+swarph gh-route <sub>    GitHub identity router — resolve THIS cell's gh login from its
+                         mesh identity and inject GH_TOKEN per call, or REFUSE (hook/show/doctor)
+swarph install-wake-hook install the silent DM-wake SessionStart hook for this cell
 swarph onboard / ratify  bring a new peer into the mesh (mechanics + witness ratification)
 swarph import <path>     port a session from another CLI into swarph-native format
 ```
@@ -97,6 +102,8 @@ swarph board cards link <id> <key> <value>    # add/update a link (merges — ne
 swarph board cards assign <id> <who>
 swarph board cards thread <id> [--limit N]     # the card's conversation (a card IS a thread)
 swarph board cards say <id> --content "…" [--to <peer>] [--kind fyi|question|answer|status|unblock]
+swarph board cards ask <id> <holder> "<what>" [--timeout-hours N]   # MINT an obligation:
+                                              # name who owes what as a ROW, not a sentence (#307)
 ```
 
 `--project` accepts a numeric id **or** a slug (resolved via `projects list`). Note: card creation always starts at `proposed` (the gateway has no stage-on-create) — use `cards move` to advance.

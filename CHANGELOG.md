@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.44.0 — 2026-08-18
+
+- **`swarph gh-route` — a cell's GitHub actions are attributable by construction.**
+  A `PreToolUse` hook resolves the calling cell's GitHub identity from its mesh
+  identity and injects `GH_TOKEN` **per invocation**. It never runs `gh auth switch`
+  (global to the box, so one switch re-attributes every later call from every cell),
+  and an unmapped cell is a **loud refusal** rather than a silent fall-back to
+  whichever account happens to be active. `gh-route doctor` answers "would installing
+  this refuse anyone **on this box**?" before you install it — reporting on every cell
+  sharing the machine, not just the caller.
+
+- **`swarph install-wake-hook` — the silent DM wake, as a bundle.**
+  A SessionStart hook that either **arms** a watch (harnesses that own their wake) or
+  **verifies** the swarph-side wake is armed (harnesses that do not), and **refuses
+  loudly** where neither is possible — because a wake that silently fails to arm reads
+  as armed on every dashboard while the cell goes deaf. Ships the unbuffered DM filter:
+  a buffered stage is silent while looking armed.
+
+- **`swarph board cards ask` + `swarph mesh reply` — an expected delivery is a ROW.**
+  `ask` mints an obligation naming who owes what; the holder's reply in that thread
+  closes it. `reply` is universal across every DM kind and reports what the send
+  actually returned — it does **not** claim a closure it cannot see.
+
+- **`swarph monitor` polls subscribed channels**, honouring the caller's wake policy.
+
+- Fixes: win32 hook commands name an interpreter instead of a bare `.sh` path (which
+  Windows resolved via file association); `hooks remove`/`list` reach the migration
+  ladder so legacy bindings can actually be removed; win32 install **refuses** when no
+  Git bash resolves rather than silently selecting the WSL launcher; `mesh send`
+  gains `--content-file`/stdin and refuses shell-active `--content`; three onboarding
+  footguns closed (#464); `onboard` no longer presents this cell's token to register
+  another peer (#467b).
+
 ## 0.43.1 — 2026-08-17
 
 - **Cursor is now available as a durable swarph cell provider.** Its local
