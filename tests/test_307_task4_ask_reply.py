@@ -116,8 +116,23 @@ def test_ask_with_a_timeout_names_the_deadline_instead(monkeypatch, capsys):
 # ── reply ───────────────────────────────────────────────────────────────────
 
 def _inbox(monkeypatch, messages):
-    monkeypatch.setattr(mesh, "_http_get_json",
-                        lambda url, token: (200, {"messages": messages}))
+    """Canned inbox that also RECORDS THE URL IT WAS ASKED FOR.
+
+    >>> THE FIRST VERSION DISCARDED THE URL, SO NO TEST COULD SEE WHAT THE CODE
+    ACTUALLY REQUESTED. <<< grok, non-blocking on #253: asserting "37" appears in the
+    refusal proves only that the CLI arg was interpolated into a MESSAGE — the code
+    could ignore the bound entirely and still print a confident sentence about it.
+    Third instance of the same proxy-vs-thing collapse in one session. Return the
+    calls so the test can assert on the REQUEST, not on prose about the request.
+    """
+    calls = []
+
+    def fake(url, token):
+        calls.append(url)
+        return 200, {"messages": messages}
+
+    monkeypatch.setattr(mesh, "_http_get_json", fake)
+    return calls
 
 
 def test_reply_posts_IN_THE_ORIGINAL_THREAD(monkeypatch, capsys):
@@ -136,18 +151,19 @@ def test_reply_posts_IN_THE_ORIGINAL_THREAD(monkeypatch, capsys):
     assert body["kind"] == "answer"
 
 
-def test_the_threaded_line_does_NOT_ASSERT_that_an_obligation_CLOSED():
+def test_threaded_reply_reports_only_what_the_send_returned(monkeypatch, capsys):
     """>>> grok's BLOCKING REVIEW ON PR #253, AND HE WAS RIGHT. <<< POST /messages
     returns id/from/to/kind/thread_id/created_at — NO CLOSE FACT. Closing is Task 2's
     side effect and it fails OPEN for a ghost holder, a non-holder, or no row at all.
-    The first version printed "an open obligation ... is now closed" on exit 0.
+    The first version printed "an open obligation ... is now closed" on exit 0: prose
+    asserted as fact on a successful exit, THE EXACT SHAPE OF "#91 is waiting on a
+    seat", inside the tool built to kill it.
 
-    That is prose asserted as fact on a successful exit — THE EXACT SHAPE OF "#91 is
-    waiting on a seat", written inside the tool built to kill it. This test exists so
-    the claim cannot come back."""
-
-
-def test_threaded_reply_reports_only_what_the_send_returned(monkeypatch, capsys):
+    >>> AND MY FIRST FIX SHIPPED A NAMESAKE TEST WITH A DOCSTRING AND NO ASSERTS. <<<
+    grok caught it: pytest collects it and it passes forever, so the pin was a NAME.
+    A test that cannot fail is worse than no test — it occupies the slot where the
+    real one would have gone and reports green from it. Merged into this one, which
+    actually asserts."""
     _inbox(monkeypatch, [{"id": 99, "from_node": "droplet", "thread_id": "t-abc"}])
     _posts(monkeypatch, mesh, payload={"id": 100})
 
@@ -222,7 +238,7 @@ def test_a_MISSING_message_refusal_names_the_SEARCH_BOUND(monkeypatch, capsys):
     older than the window is indistinguishable from one that never existed unless the
     refusal says what was searched — otherwise the operator hunts a delivery bug that
     is really a paging window."""
-    _inbox(monkeypatch, [{"id": 1, "from_node": "d", "thread_id": "t"}])
+    calls = _inbox(monkeypatch, [{"id": 1, "from_node": "d", "thread_id": "t"}])
     _posts(monkeypatch, mesh)
 
     rc = mesh.run_mesh(["reply", "404", "--content", "x", "--gateway", "http://gw",
@@ -230,11 +246,12 @@ def test_a_MISSING_message_refusal_names_the_SEARCH_BOUND(monkeypatch, capsys):
 
     err = capsys.readouterr().err
     assert rc == 1
-    # grok, non-blocking: the first version asserted the literal string "search-limit"
-    # — which is the FLAG NAME, present in the message whatever the code did with it.
-    # Assert the VALUE actually reached the refusal, so a bound that is ignored cannot
-    # still produce a confident-looking message about it.
-    assert "37" in err, f"the refusal must name the bound it ACTUALLY searched: {err}"
+    # >>> ASSERT ON THE REQUEST, NOT ON PROSE ABOUT THE REQUEST. <<< The bound must
+    # reach the GET; a message naming a limit the code never applied is the confident
+    # sentence this whole file exists to distrust.
+    assert calls and "limit=37" in calls[0], \
+        f"--search-limit must reach the gateway query, got {calls}"
+    assert "37" in err, f"the refusal must name the bound it searched: {err}"
     assert "older than that window" in err
 
 
