@@ -757,6 +757,44 @@ def run_onboard(argv: list[str]) -> int:
         token,
     )
     if status != 200:
+        # >>> #467b RUNG 3 — RE-RENDER THE BINDING 403 AT THE CALL SITE. <<<
+        # The resolver's refusal (above) catches the common shape, but it CANNOT
+        # catch every one: a raw token string does not self-identify as per-peer,
+        # so when $MESH_GATEWAY_TOKEN holds a PER-PEER value — cards #332/#333's
+        # exact misconfiguration, described sixty lines above the resolver — the
+        # target check has nothing to test and the caller sails past it.
+        #
+        # drop-on-meta-edge's point (#24311): a target check cannot fix that, but
+        # catching the 403 HERE covers every bypass path at once (--token-file,
+        # env, secrets.toml), needs no knowledge of the token's regime, and makes
+        # the friendly message UNCONDITIONAL rather than resolver-path-dependent.
+        #
+        # The bare gateway text names a binding rule and nothing else — not the
+        # verb, not which credential to use, not that the CLIENT is what needs
+        # changing. #468's house rule, applied client-side: a refusal must carry
+        # its escape.
+        if status == 403 and "caller-binding" in str(body):
+            print_safe(
+                f"swarph onboard: the gateway refused this credential for "
+                f"{canonical!r}.\n\n"
+                f"  {body}\n\n"
+                f"  The gateway binds POST /peers/register's `name` to the "
+                f"AUTHENTICATED caller,\n"
+                f"  so the token presented can register only the peer it "
+                f"authenticates as.\n"
+                f"  Onboarding another cell is an OPERATOR action.\n\n"
+                f"  Use an operator credential:\n"
+                f"      swarph onboard {canonical} --token-file <operator-token>\n\n"
+                f"  If $MESH_GATEWAY_TOKEN is set, CHECK ITS VALUE — a per-peer "
+                f"token stored\n"
+                f"  under that name authenticates as ONE cell and is the usual "
+                f"cause here\n"
+                f"  (cards #332/#333). To see which peer a token actually is:\n"
+                f"      curl -sH \"Authorization: Bearer <token>\" "
+                f"{args.gateway}/whoami\n",
+                file=sys.stderr,
+            )
+            return 2
         print_safe(
             f"swarph onboard: gateway register failed: {status} {body}",
             file=sys.stderr,

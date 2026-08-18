@@ -132,3 +132,75 @@ def test_the_refusal_does_not_fire_when_there_is_no_per_peer_token(monkeypatch, 
     msg = str(e.value)
     assert "no gateway credential found" in msg
     assert "refusing to onboard" not in msg
+
+
+# ── rung 3: re-render the gateway's binding 403 at the CALL SITE ──────────────
+#
+# drop-on-meta-edge (#24311) walked every return in the resolver and confirmed the
+# withhold leaks nothing — but found two paths that skip the target check because
+# they never see a peer name to compare: --token-file (deliberate, #332) and
+# $MESH_GATEWAY_TOKEN. The second matters: when that env var holds a PER-PEER value
+# — cards #332/#333's exact misconfiguration — the resolver has nothing to test,
+# because A RAW TOKEN STRING DOES NOT SELF-IDENTIFY AS PER-PEER.
+#
+# So the resolver check cannot be made complete. Catching the 403 at the register
+# call site covers every bypass path at once, needs no knowledge of the token's
+# regime, and makes the friendly message UNCONDITIONAL instead of dependent on
+# which rung happened to answer.
+
+def _drive_register_403(monkeypatch, tmp_path, capsys, body, peer="razorpeter"):
+    """Drive the REAL run_onboard far enough to hit the register response handler,
+    stubbing only the network. run_onboard takes ARGV and parses it itself, so the
+    real parser runs too — written this way after an earlier test in this repo
+    reimplemented a classifier inside the test and asserted on its own copy."""
+    from swarph_cli.commands import onboard as ob
+    from swarph_shared import peer_registry
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok-operator")
+    monkeypatch.setattr(ob, "_post_json", lambda url, payload, token: (403, body))
+    # validate_node_name is imported INSIDE run_onboard from swarph_shared, so the
+    # patch target is the source module, not the command module.
+    monkeypatch.setattr(peer_registry, "validate_node_name", lambda *a, **k: True)
+    rc = ob.run_onboard([peer, "--gateway", "http://gw.invalid:8788"])
+    return rc, capsys.readouterr().err
+
+
+def test_the_binding_403_is_RE_RENDERED_with_the_verb_and_the_remedy(
+        monkeypatch, tmp_path, capsys):
+    """>>> THE BYPASS PATH THE RESOLVER CANNOT SEE. <<< $MESH_GATEWAY_TOKEN holding
+    a per-peer value reaches the gateway and gets a 403 naming a binding rule and
+    nothing else. Unhandled, that is the confusion this whole change exists to
+    prevent, surviving on the path most likely to be misconfigured."""
+    body = ("caller-binding: authenticated peer 'lab-ovh' may not act as "
+            "register_mint_target='razorpeter'")
+    rc, err = _drive_register_403(monkeypatch, tmp_path, capsys, body)
+    assert rc == 2
+    assert "razorpeter" in err
+    assert "OPERATOR action" in err
+    assert "--token-file" in err, "must name the escape"
+    assert "MESH_GATEWAY_TOKEN" in err, "must name the LIKELY CAUSE, not just the fix"
+    assert body in err, "the gateway's own text must survive, not be swallowed"
+
+
+def test_the_advertised_diagnostic_names_a_route_that_EXISTS(
+        monkeypatch, tmp_path, capsys):
+    """>>> A REFUSAL THAT NAMES A NON-EXISTENT REMEDY IS WORSE THAN SILENCE. <<<
+    The first draft of this message advertised `swarph mesh whoami`. THERE IS NO
+    SUCH VERB — only the gateway route GET /whoami. Caught before shipping, and
+    pinned here because the same class of error (advertising a remedy that does not
+    function) already occurred once tonight in this same file's resolver."""
+    rc, err = _drive_register_403(
+        monkeypatch, tmp_path, capsys,
+        "caller-binding: authenticated peer 'x' may not act as y")
+    assert "/whoami" in err
+    assert "swarph mesh whoami" not in err, "that verb does not exist"
+
+
+def test_a_NON_binding_failure_is_not_dressed_up_as_a_credential_problem(
+        monkeypatch, tmp_path, capsys):
+    """SCOPING / NON-VACUITY: a 500, or a 403 for some other reason, must NOT get
+    the credential lecture — misdiagnosing an unrelated failure as a credential
+    problem is the same defect pointed the other way."""
+    rc, err = _drive_register_403(monkeypatch, tmp_path, capsys, "database is locked")
+    assert rc == 2
+    assert "OPERATOR action" not in err
+    assert "gateway register failed" in err
