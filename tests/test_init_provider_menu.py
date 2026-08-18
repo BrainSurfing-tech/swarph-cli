@@ -137,3 +137,51 @@ def test_token_rung_names_the_recovery_not_just_the_gap():
     assert "token_status=existing" in src, (
         "must warn that re-registering returns a success-shaped 200 with no token"
     )
+
+
+def test_identity_rung_uses_a_DISCRIMINATING_route_not_a_readable_one(monkeypatch):
+    """>>> THE RUNG THAT COST A FALSE RATIFICATION. <<<
+
+    It used to assert `GET /messages?to_node=<peer>` returned 200. Peers may read ALL
+    mesh DMs (commander ruling 2026-08-05), so ANY valid token returns 200 there — the
+    check could not fail for the reason it appeared to pass. lab ratified meta-muse on
+    exactly that evidence and retracted 40 minutes later: the file named
+    meta-muse.peer_token authenticates as meta-muse-2.
+
+    /whoami is discriminating: it ANSWERS DIFFERENTLY FOR A DIFFERENT PRINCIPAL. This
+    test is the operational form of that — same call, two bindings, answer must move.
+    """
+    import json as _json
+    from swarph_cli.commands import onboard
+
+    class _Resp:
+        def __init__(s, p): s._p = _json.dumps(p).encode()
+        def read(s): return s._p
+        def __enter__(s): return s
+        def __exit__(s, *a): return False
+
+    def _run(bound_to):
+        def _urlopen(req, timeout=8):
+            url = req if isinstance(req, str) else req.full_url
+            if url.endswith("/whoami"):
+                return _Resp({"peer": bound_to, "regime": "per_peer_token",
+                              "key_generation": 1})
+            if url.endswith("/peers"):
+                return _Resp({"peers": []})
+            return _Resp({})
+        monkeypatch.setattr(onboard.urllib.request, "urlopen", _urlopen)
+        monkeypatch.setattr(onboard.pathlib.Path, "exists", lambda self: True)
+        monkeypatch.setattr(onboard.pathlib.Path, "read_text", lambda self, **k: "tok")
+        monkeypatch.setattr(onboard.pathlib.Path, "stat",
+                            lambda self: type("S", (), {"st_mode": 0o600})())
+        return {lbl: (mk, dt) for mk, lbl, dt in
+                onboard._probe_onboarding("cellA", "http://gw:8788")}
+
+    match = _run("cellA")["token identifies as this peer"]
+    assert match[0] == "ok"
+
+    mismatch = _run("cellB")["token identifies as this peer"]
+    assert mismatch[0] == "MISSING", (
+        "a token bound to a DIFFERENT peer must not pass an identity rung"
+    )
+    assert "MISMATCH" in mismatch[1] and "cellB" in mismatch[1]

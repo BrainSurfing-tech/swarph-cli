@@ -456,24 +456,48 @@ def _probe_onboarding(peer: str, gateway: str) -> list:
                      f"next register then mints a fresh generation. Deliver it OUT OF BAND "
                      f"-- never over the mesh, where message content is retained."))
 
-    # 3. does that token actually authenticate as this peer?
+    # 3. does that token actually IDENTIFY as this peer?
+    #
+    # >>> WAS: "reads its own inbox -> 200". THAT WAS A PROXY AND IT COST A FALSE
+    # RATIFICATION. <<< Peers may read ALL mesh DMs (commander ruling 2026-08-05), so
+    # ANY valid token returns 200 on /messages?to_node=<anyone>. The check could not
+    # fail for the reason it appeared to pass. lab ratified meta-muse on exactly that
+    # evidence at 04:32 and retracted it 40 minutes later: the file named
+    # meta-muse.peer_token authenticates as META-MUSE-2.
+    #
+    # GET /whoami is the discriminating route, found by drop-on-meta-edge: it returns
+    # the bound peer name, so it ANSWERS DIFFERENTLY FOR A DIFFERENT PRINCIPAL. The
+    # operational test drop sharpened out of this: run the same call with a second
+    # token and see whether the answer moves; if it does not move, it was never about
+    # identity. Read-only, zero blast radius -- lab had previously reached for DELETE
+    # to learn this, which the harness classifier correctly blocked.
     if token and reachable:
-        req = urllib.request.Request(
-            f"{base}/messages?to_node={peer}&limit=1",
-            headers={"Authorization": f"Bearer {token}"})
+        req = urllib.request.Request(f"{base}/whoami",
+                                     headers={"Authorization": f"Bearer {token}"})
         try:
-            urllib.request.urlopen(req, timeout=8)
-            rows.append(("ok", "token authenticates", f"reads its own inbox as {peer}"))
+            with urllib.request.urlopen(req, timeout=8) as _r:
+                who = json.loads(_r.read().decode())
+            bound = who.get("peer")
+            if bound == peer:
+                rows.append(("ok", "token identifies as this peer",
+                             f"/whoami -> peer={bound!r} regime={who.get('regime')} "
+                             f"gen={who.get('key_generation')}"))
+            else:
+                rows.append(("MISSING", "token identifies as this peer",
+                             f"FILENAME/BINDING MISMATCH: this file authenticates as "
+                             f"{bound!r}, NOT {peer!r}. Every by-name lookup in the tree "
+                             f"resolves the wrong credential. Do not ratify on this."))
         except urllib.error.HTTPError as e:
-            rows.append(("MISSING", "token authenticates",
+            rows.append(("MISSING", "token identifies as this peer",
                          f"HTTP {e.code}. A token that exists but is refused is DEAD, not "
                          f"missing -- mint-once means re-registering returns 200 with a "
                          f"null token and changes nothing. Recovery needs a deregister "
                          f"first, which is an operator action."))
         except Exception as e:
-            rows.append((_UNKNOWN, "token authenticates", f"could not determine: {type(e).__name__}"))
+            rows.append((_UNKNOWN, "token identifies as this peer",
+                         f"could not determine: {type(e).__name__}"))
     else:
-        rows.append((_UNKNOWN, "token authenticates",
+        rows.append((_UNKNOWN, "token identifies as this peer",
                      "not attempted (no token on disk)" if not token else "not attempted (gateway down)"))
 
     # 4/5/6. registry facts, if we can read the registry at all
