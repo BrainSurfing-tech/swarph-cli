@@ -32,10 +32,27 @@ from swarph_cli.commands import board, mesh
 
 @pytest.fixture(autouse=True)
 def _identity(monkeypatch):
-    monkeypatch.setattr(mesh, "_resolve_self_name", lambda a: a or "lab-ovh")
-    monkeypatch.setattr(mesh, "_resolve_token", lambda n, f: "tok")
-    monkeypatch.setattr(board, "_resolve_self_name", lambda a: a or "lab-ovh",
-                        raising=False)
+    """Identity and credentials passed IN, never read off the host.
+
+    >>> THE FIRST DRAFT PASSED LOCALLY AND FAILED IN CI, FOR THE REASON I HAD FILED A
+    CARD ABOUT THREE HOURS EARLIER. <<< It patched `mesh._resolve_token` but not
+    `board._resolve_token`, so the board path ran the REAL resolver and read
+    ~/.config/swarph/lab-ovh.peer_token — which exists on this box and on no runner.
+    Board #479 is exactly this: tests that read host env/config pass where there is
+    nothing to test and fail where the product runs. I wrote a fresh instance of it
+    while the card was open.
+
+    >>> AND `raising=False` IS WHAT LET IT HIDE. <<< It was on the board patch, so if
+    the attribute had been absent the patch would have silently done nothing and the
+    test would still have passed on ambient state. Every patch here is strict now: a
+    rename must break the fixture LOUDLY rather than quietly return it to reading the
+    host.
+    """
+    for mod in (mesh, board):
+        monkeypatch.setattr(mod, "_resolve_self_name", lambda a: a or "lab-ovh")
+        monkeypatch.setattr(mod, "_resolve_token", lambda n, f: "tok")
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
 
 
 def _posts(monkeypatch, mod, status=200, payload=None):
