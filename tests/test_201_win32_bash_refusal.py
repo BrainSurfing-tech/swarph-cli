@@ -35,8 +35,23 @@ def home(tmp_path):
 
 
 @pytest.fixture
+def no_git_bash(monkeypatch):
+    """Windows with no usable bash — stated at the RESOLVER, not by blanking the disk.
+
+    >>> THE FIRST DRAFT PATCHED `Path.exists` TO RETURN FALSE FOR EVERYTHING. <<< That
+    is global, so it also answered this suite's own `assert not settings.exists()` —
+    the refusal tests would have passed against code that wrote the file. A fixture
+    that satisfies the assertion it is supposed to challenge is the vacuous-green
+    pattern twice in one morning.
+    """
+    monkeypatch.setattr(hooks.sys, "platform", "win32")
+    monkeypatch.setattr(hooks, "_find_windows_bash", lambda: None)
+
+
+@pytest.fixture
 def win32_without_bash(monkeypatch):
-    """Windows, and nothing usable to run a script with — the box drop described."""
+    """The RESOLVER's own view: nothing on disk, and PATH offering only the WSL
+    launcher. Narrow on purpose — only the resolver test uses it."""
     monkeypatch.setattr(hooks.sys, "platform", "win32")
     monkeypatch.setattr(hooks.Path, "exists", lambda self: False)
     monkeypatch.setattr(hooks.shutil, "which",
@@ -50,7 +65,7 @@ def test_the_System32_launcher_is_never_selected(win32_without_bash):
     assert hooks._find_windows_bash() is None
 
 
-def test_install_REFUSES_and_writes_nothing(home, win32_without_bash):
+def test_install_REFUSES_and_writes_nothing(home, no_git_bash):
     """A binding written here fires on every matching tool call and fails from inside
     WSL. Refusing is the more useful output — and it must be a real abort, not a
     warning followed by the write."""
@@ -66,7 +81,7 @@ def test_install_REFUSES_and_writes_nothing(home, win32_without_bash):
     assert not (home / "hooks" / bundle.script_name).exists(), "script was written"
 
 
-def test_the_refusal_names_the_remedy(home, win32_without_bash):
+def test_the_refusal_names_the_remedy(home, no_git_bash):
     """A refusal that does not say what to do is a dead end wearing a safety check.
     It must name the missing thing, not merely decline."""
     bundle = hooks.resolve_builtin("cell-resilience")
