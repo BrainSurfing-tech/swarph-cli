@@ -430,9 +430,21 @@ def _probe_onboarding(peer: str, gateway: str) -> list:
     if tok_path.exists():
         token = tok_path.read_text(encoding="utf-8").strip()
         mode = oct(tok_path.stat().st_mode & 0o777)
-        rows.append(("ok" if mode == "0o600" else "MISSING",
-                     "peer token on disk",
-                     f"{tok_path} (mode {mode}" + ("" if mode == "0o600" else "; expected 0600") + ")"))
+        if not token:
+            # >>> F1 (drop, PR #247 review). EXISTENCE IS NOT CONTENT. <<< This rung
+            # tested exists() and the mode and never that the file HELD a credential,
+            # so a 0-byte 0600 file read as a clean [x] -- and then rung 3 printed
+            # "not attempted (no token on disk)" one line below it. The same checklist
+            # asserted the token was present AND absent. A fresh cell, the entire
+            # audience for this verb, reads ok and looks elsewhere.
+            token = None
+            rows.append(("MISSING", "peer token on disk",
+                         f"{tok_path} present but EMPTY -- a mint that was never written, "
+                         f"or a truncated copy. Treat as no token."))
+        else:
+            rows.append(("ok" if mode == "0o600" else "MISSING",
+                         "peer token on disk",
+                         f"{tok_path} (mode {mode}" + ("" if mode == "0o600" else "; expected 0600") + ")"))
     else:
         rows.append(("MISSING", "peer token on disk",
                      f"{tok_path} absent. THIS IS THE RUNG THAT CANNOT BE SELF-SERVED: "
@@ -466,21 +478,41 @@ def _probe_onboarding(peer: str, gateway: str) -> list:
 
     # 4/5/6. registry facts, if we can read the registry at all
     peer_row = None
+    registry_read = False          # F3: did the READ succeed, regardless of the result?
     if reachable and token:
         req = urllib.request.Request(base + "/peers", headers={"Authorization": f"Bearer {token}"})
         try:
             with urllib.request.urlopen(req, timeout=8) as r:
                 data = json.loads(r.read().decode())
             allp = data if isinstance(data, list) else data.get("peers", [])
+            registry_read = True
             peer_row = next((x for x in allp if x.get("name") == peer), None)
         except Exception:
             peer_row = None
 
     if peer_row is None:
-        detail = "could not read the registry" if token else "not attempted"
-        rows.append((_UNKNOWN, "registered", detail))
+        if registry_read:
+            # >>> F3 (drop). peer_row=None HAD TWO CAUSES AND ONE MESSAGE. <<< The read
+            # SUCCEEDING and the peer being absent is the single most likely fresh-cell
+            # state, and reporting it as "could not read the registry" points at
+            # gateway/permissions when the truth is "you are not registered yet" -- the
+            # exact rung this whole ladder exists to surface.
+            rows.append(("MISSING", "registered",
+                         f"gateway answered and {peer} is NOT in the registry. Run "
+                         f"`swarph mesh register --as {peer}` (or have an operator do it)."))
+            detail = "not attempted (peer is not registered)"
+        else:
+            rows.append((_UNKNOWN, "registered",
+                         "could not read the registry" if token else "not attempted"))
+            detail = "could not read the registry" if token else "not attempted"
         rows.append((_UNKNOWN, "ratified", detail))
         rows.append((_UNKNOWN, "capabilities declared", detail))
+        # >>> F2 (drop). THIS RUNG USED TO VANISH. <<< It was appended only when
+        # peer_row was truthy, so an unreadable registry silently produced a SIX-row
+        # checklist. An absent row is worse than a '?': a '?' cannot be missed, but the
+        # reader cannot count what was never printed, and a fresh cell never learns the
+        # rung exists. Every rung must appear in every branch.
+        rows.append((_UNKNOWN, "health check has succeeded", detail))
     else:
         rows.append(("ok", "registered", f"registered_at {str(peer_row.get('registered_at'))[:19]}"))
         rows.append(("ok" if peer_row.get("ratified") else "MISSING", "ratified",

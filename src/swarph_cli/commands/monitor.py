@@ -461,7 +461,7 @@ def _print_brief(info: dict, pending: int) -> None:
     parts = [f"{r['label']} ({', '.join(r['pending_from'])})" if r["pending_from"]
              else r["label"]
              for r in info["sinks"] if r["pending"]]
-    print("; ".join(parts) + " — swarph mesh inbox")
+    print("; ".join(parts) + f" — swarph mesh inbox --as {info['self']}")
 
 
 def _print_status(info: dict, pending: int) -> None:
@@ -500,7 +500,7 @@ def _print_status(info: dict, pending: int) -> None:
                   "fresh and replays. This is why the count above may surprise "
                   "you.")
     if pending:
-        print("  read them with: swarph mesh inbox")
+        print(f"  read them with: swarph mesh inbox --as {info['self']}")
 
 
 # ── stop ─────────────────────────────────────────────────────────────────────

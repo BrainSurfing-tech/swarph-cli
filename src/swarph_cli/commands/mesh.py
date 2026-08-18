@@ -74,6 +74,13 @@ def _build_parser() -> argparse.ArgumentParser:
     inbox.add_argument("--limit", type=int, default=20, help="max messages")
     inbox.add_argument("--json", action="store_true", help="print raw JSON")
     inbox.add_argument(
+        "--consume",
+        action="store_true",
+        help="allow the destructive read when the identity was NOT named with --as. "
+             "Without it, an ambiently-resolved identity is refused rather than "
+             "silently consuming somebody else's unread state.",
+    )
+    inbox.add_argument(
         "--peek",
         action="store_true",
         help="show the inbox WITHOUT marking anything read (default: reading CONSUMES -- "
@@ -379,6 +386,34 @@ def _mark_read(gateway: str, token: str, messages: list) -> None:
 
 def _run_inbox(args: argparse.Namespace) -> int:
     self_name, id_source = _resolve_self_with_source(args.self_name)
+
+    # >>> A DESTRUCTIVE READ UNDER AN UNNAMED IDENTITY IS REFUSED, NOT WARNED. <<<
+    # Printing the identity was the first fix and it is not sufficient, for two
+    # reasons drop established in review of PR #247:
+    #   1. THE USERS ARE AGENTS. A line of output is not a control for a caller that
+    #      pipes to head/tail -- demonstrated first-party the same night, when lab
+    #      piped `swarph ratify` to tail, saw steps 3-4 of 6, and misread a SUCCESS
+    #      as a failure. A warning nobody reads is not a warning.
+    #   2. THE HARM IS ASYMMETRIC AND UNOBSERVABLE BY THE VICTIM. Reading consumes,
+    #      the loss is irreversible, and the peers whose unread state is destroyed
+    #      cannot see it happen. A warning informs the one actor who is NOT harmed.
+    # So: refuse only where BOTH conditions hold -- the identity was inferred rather
+    # than named, AND the operation is destructive. Naming --as, or opting in with
+    # --consume, proceeds exactly as before. Every internal caller already passes
+    # --as, so this refuses nothing the mesh does to itself.
+    destructive = not getattr(args, "peek", False)
+    if destructive and id_source != "--as" and not getattr(args, "consume", False):
+        print(
+            f"swarph mesh inbox: REFUSING a destructive read as {self_name!r}, an "
+            f"identity taken from {id_source} rather than named with --as.\n"
+            f"  Reading marks every DM shown as READ, and that is not reversible.\n"
+            f"  If you meant {self_name}: swarph mesh inbox --as {self_name}\n"
+            f"  To look without consuming:  swarph mesh inbox --peek\n"
+            f"  To proceed anyway:          swarph mesh inbox --consume",
+            file=sys.stderr,
+        )
+        return 1
+
     token = _resolve_token(self_name, args.token_file)
     params = {"to": self_name, "limit": str(args.limit)}
     if args.unread:
