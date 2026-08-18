@@ -143,9 +143,37 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _resolve_token(token_file_arg: Optional[str]) -> str:
+def _resolve_token(token_file_arg: Optional[str], *,
+                   target_peer: Optional[str] = None) -> str:
     """Step 3 — token resolution per §15.4. Read-only on the secrets file
-    (does not auto-create per drop DM #726 #3 — privilege boundary)."""
+    (does not auto-create per drop DM #726 #3 — privilege boundary).
+
+    `target_peer` — the peer name this credential will be used to REGISTER, when
+    that is known. Only rung 4 (the cell's own per-peer token) cares: a per-peer
+    token may register ITSELF and nothing else. Default None means "not a
+    registration", which is why `ratify` and `daemon` — which import this
+    function and never call POST /peers/register — are unaffected.
+
+    >>> WHY THIS PARAMETER EXISTS (#467b, found by drop-on-meta-edge). <<< The
+    gateway now binds POST /peers/register's `name` to the authenticated caller.
+    `swarph onboard <peer>` takes the peer name as a POSITIONAL ARGUMENT — the
+    help text's own example is a different box — and rung 4 hands it THIS cell's
+    credential, so `swarph onboard razorpeter` on lab-ovh presents lab-ovh's
+    token to register razorpeter. That is a cell credential performing an
+    OPERATOR action, and it worked only because the server never asked.
+
+    Contrast `swarph mesh register`, which passes allow_peer_token=False and
+    registers only itself: two verbs, one endpoint, opposite credential policies,
+    and only one was written with this question in mind.
+
+    Refusing HERE rather than letting the gateway 403 is the point. The server's
+    message names a binding rule ("peer 'lab-ovh' may not act as
+    register_mint_target='razorpeter'"); it cannot name the verb, the credential
+    to use instead, or the fact that the CLIENT is what needs changing. This rung
+    has already caused that exact confusion once — see the REFUSE-DO-NOT-PROMPT
+    note below, where a missing credential was reported as a broken verb. A
+    server-side 403 on the onboarding path would reproduce it through a new door.
+    """
     # ── #332: AN EXPLICIT ARGUMENT IS A DECISION, NOT A HINT ────────────────
     # >>> THIS BLOCK USED TO SIT BELOW THE $MESH_GATEWAY_TOKEN LOOKUP, so a
     # stale value in the environment silently overrode the credential the
@@ -234,6 +262,11 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
     # unaffected and #243's additivity guarantee survives for that population.
     env_tok = os.environ.get("MESH_GATEWAY_TOKEN")
     self_name = os.environ.get("SWARPH_SELF", "").strip()
+    # Set when a per-peer credential was found but is not usable for THIS target
+    # (#467b). Distinguishes "you have the WRONG credential" from "you have NO
+    # credential" at the refusal below — two different operator problems, and
+    # conflating them is what made a missing credential read as a broken verb.
+    peer_token_withheld = False
     if self_name:
         res = tokens.resolve_token(
             self_name,
@@ -243,7 +276,17 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
             warn=lambda m: print_safe(f"swarph onboard: {m}", file=sys.stderr),
         )
         if res is not None and res.source in ("peer-token", "legacy-peer-token"):
-            return res.token
+            # >>> #467b: A PER-PEER CREDENTIAL MAY REGISTER ITSELF AND NOTHING ELSE.
+            # <<< WITHHOLD IT AND FALL THROUGH rather than returning or refusing
+            # here. Falling through is the load-bearing choice: an operator token in
+            # $MESH_GATEWAY_TOKEN (or secrets.toml) is BELOW this branch, so
+            # refusing at this point would reject a caller who HAS the right
+            # credential — and the refusal text advertises exactly that remedy.
+            # A refusal naming a remedy it then blocks is worse than no refusal.
+            if target_peer is not None and target_peer != self_name:
+                peer_token_withheld = True
+            else:
+                return res.token
 
     if env_tok:
         return env_tok
@@ -290,6 +333,17 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
     # mints. So this was never a permissions problem — only a lookup that never
     # learned.
     #
+    # >>> THAT MEASUREMENT WAS CORRECT WHEN TAKEN AND IS NOW FALSE FOR THE CASE
+    # THIS VERB ACTUALLY EXERCISES (#467b, 2026-08-18). <<< mesh-gateway e4a1f6a
+    # binds POST /peers/register's `name` to the authenticated caller, so a
+    # per-peer token still returns 200 — but ONLY when registering ITSELF. The
+    # 2026-08-03 measurement happened to register the running cell's own name, so
+    # it could not distinguish "the gateway accepts a per-peer token" from "the
+    # gateway accepts a per-peer token FOR ITS OWN NAME". One measurement, two
+    # questions, and the conclusion was written at the wider scope — the same
+    # shape as the sentence corrected directly below. The cross-name case is now
+    # refused CLIENT-side at rung 4; see _resolve_token's docstring.
+    #
     # >>> THAT SENTENCE USED TO READ "THE GATEWAY NEVER REQUIRED THE SHARED
     # TOKEN", FULL STOP — AND IT IS A DIFFERENT CLAIM. The measurement answered
     # "what may a CLIENT present?"; the sentence generalised it to "what does
@@ -304,6 +358,14 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
     if self_name:
         peer_tok = Path.home() / ".config" / "swarph" / f"{self_name}.peer_token"
         if peer_tok.exists():
+            # #467b, same rule as the branch above: withhold for a cross-name
+            # target, do not return and do not raise. This rung sits BELOW the env
+            # and secrets lookups, so reaching it already means no operator
+            # credential was found — the specific refusal is raised at the bottom.
+            if target_peer is not None and target_peer != self_name:
+                peer_token_withheld = True
+                peer_tok = None
+        if peer_tok is not None and peer_tok.exists():
             try:
                 val = peer_tok.read_text(encoding="utf-8").strip()
                 if val:
@@ -320,6 +382,28 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
     # NOTE the deliberate absence of a default for SWARPH_SELF: guessing a name
     # makes a cell hunt ANOTHER CELL'S token, find nothing, and blame the
     # credential — measured on 6 of 6 cells 2026-07-29. Unset is named as unset.
+    # >>> #467b: TWO DIFFERENT OPERATOR PROBLEMS, TWO DIFFERENT MESSAGES. <<< "You
+    # hold the wrong credential for this target" and "you hold no credential" have
+    # different remedies, and this verb has already cost the mesh a day by making
+    # one look like the other (see REFUSE-DO-NOT-PROMPT above: a missing credential
+    # was reported as a broken verb). Answering both with the generic list would
+    # tell an operator holding a perfectly good per-peer token that nothing was
+    # found — which is false, and points them at the wrong fix.
+    if peer_token_withheld:
+        raise RuntimeError(
+            f"refusing to onboard {target_peer!r} with {self_name}'s own per-peer "
+            f"token.\n\n"
+            f"  found:  ~/.config/swarph/{self_name}.peer_token\n"
+            f"  That credential authenticates as {self_name!r}, and the gateway binds\n"
+            f"  POST /peers/register's `name` to the authenticated caller — so it can\n"
+            f"  register {self_name!r} and no other peer. Presenting it would 403.\n\n"
+            f"  ONBOARDING ANOTHER CELL IS AN OPERATOR ACTION. Use an operator "
+            f"credential:\n"
+            f"      swarph onboard {target_peer} --token-file <operator-token>\n"
+            f"      MESH_GATEWAY_TOKEN=<operator-token> swarph onboard {target_peer}\n\n"
+            f"  To onboard THIS cell, the per-peer token IS the right credential:\n"
+            f"      swarph onboard {self_name}"
+        )
     raise RuntimeError(
         "no gateway credential found. Tried, in order:\n"
         f"  1. --token-file            {'(not given)' if not token_file_arg else token_file_arg}\n"
@@ -328,7 +412,9 @@ def _resolve_token(token_file_arg: Optional[str]) -> str:
         f"  4. ~/.config/swarph/<self>.peer_token  "
         + (f"(SWARPH_SELF={self_name!r} -> not found)" if self_name
            else "(SWARPH_SELF IS UNSET — set it; this verb will not guess a peer name)")
-        + "\n  The per-peer token is sufficient: POST /peers/register accepts it."
+        + "\n  The per-peer token is sufficient TO ONBOARD THAT SAME CELL — the"
+          "\n  gateway binds register's name to the caller, so it cannot onboard"
+          "\n  another peer. For that, use an operator credential (1 or 2)."
         # >>> NAME THE ALTERNATIVE. `onboard` JOINS AN EXISTING MESH, so it needs
         # that mesh's URL and a token ITS operators issue — an outsider cannot
         # complete it, ever, without them. The command a newcomer actually wants
@@ -654,7 +740,9 @@ def run_onboard(argv: list[str]) -> int:
 
     # ── Step 3: resolve MESH_GATEWAY_TOKEN ───────────────────────────
     print_safe("[3/6] resolve MESH_GATEWAY_TOKEN")
-    token = _resolve_token(args.token_file)
+    # target_peer=canonical: rung 4 must know WHICH peer is being registered, so a
+    # cell's own per-peer token is refused for onboarding anyone but itself (#467b).
+    token = _resolve_token(args.token_file, target_peer=canonical)
     if not token:
         print_safe("swarph onboard: empty token", file=sys.stderr)
         return 1
@@ -669,6 +757,44 @@ def run_onboard(argv: list[str]) -> int:
         token,
     )
     if status != 200:
+        # >>> #467b RUNG 3 — RE-RENDER THE BINDING 403 AT THE CALL SITE. <<<
+        # The resolver's refusal (above) catches the common shape, but it CANNOT
+        # catch every one: a raw token string does not self-identify as per-peer,
+        # so when $MESH_GATEWAY_TOKEN holds a PER-PEER value — cards #332/#333's
+        # exact misconfiguration, described sixty lines above the resolver — the
+        # target check has nothing to test and the caller sails past it.
+        #
+        # drop-on-meta-edge's point (#24311): a target check cannot fix that, but
+        # catching the 403 HERE covers every bypass path at once (--token-file,
+        # env, secrets.toml), needs no knowledge of the token's regime, and makes
+        # the friendly message UNCONDITIONAL rather than resolver-path-dependent.
+        #
+        # The bare gateway text names a binding rule and nothing else — not the
+        # verb, not which credential to use, not that the CLIENT is what needs
+        # changing. #468's house rule, applied client-side: a refusal must carry
+        # its escape.
+        if status == 403 and "caller-binding" in str(body):
+            print_safe(
+                f"swarph onboard: the gateway refused this credential for "
+                f"{canonical!r}.\n\n"
+                f"  {body}\n\n"
+                f"  The gateway binds POST /peers/register's `name` to the "
+                f"AUTHENTICATED caller,\n"
+                f"  so the token presented can register only the peer it "
+                f"authenticates as.\n"
+                f"  Onboarding another cell is an OPERATOR action.\n\n"
+                f"  Use an operator credential:\n"
+                f"      swarph onboard {canonical} --token-file <operator-token>\n\n"
+                f"  If $MESH_GATEWAY_TOKEN is set, CHECK ITS VALUE — a per-peer "
+                f"token stored\n"
+                f"  under that name authenticates as ONE cell and is the usual "
+                f"cause here\n"
+                f"  (cards #332/#333). To see which peer a token actually is:\n"
+                f"      curl -sH \"Authorization: Bearer <token>\" "
+                f"{args.gateway}/whoami\n",
+                file=sys.stderr,
+            )
+            return 2
         print_safe(
             f"swarph onboard: gateway register failed: {status} {body}",
             file=sys.stderr,
