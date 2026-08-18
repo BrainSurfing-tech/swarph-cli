@@ -834,11 +834,19 @@ def uninstall_hook(
     (best-effort; errors swallowed). Idempotent: removing a not-installed hook
     is a no-op — never raises, returns 0.
     """
-    command = _installed_command(bundle, hooks_home)
+    # >>> THE LADDER IS REACHED HERE, NOT MERELY DEFINED. <<< _installed_command
+    # returns the CURRENT canonical string only, so a cell that installed under an
+    # older generation kept its binding while this reported success. Reproduced on
+    # metal by workstation-lc, 2026-08-18; _installed_command_variants had existed
+    # for exactly this and had ZERO production callers. `_command_variants_for`
+    # inside _unmerge_hook only varies SLASH DIRECTION — it cannot cross the
+    # interpreter-prefix boundary, so it does not cover this on its own.
+    commands = _installed_command_variants(bundle, hooks_home)
 
     settings = _load_settings(settings_path)
     for b in bundle.bindings:
-        settings = _unmerge_hook(settings, b.event, b.matcher, command)
+        for command in commands:
+            settings = _unmerge_hook(settings, b.event, b.matcher, command)
     _save_settings(settings_path, settings)
 
     if remove_script:
@@ -899,7 +907,12 @@ def list_hooks(
     for name in sorted(BUILTIN_HOOKS):
         bundle = BUILTIN_HOOKS[name]
         command = _installed_command(bundle, hooks_home)
-        status = "installed" if _is_installed(settings, command, bundle) else "available"
+        # Read side of the same ladder: a legacy install reported as "available"
+        # invites the reinstall that produces a DUPLICATE binding.
+        status = ("installed"
+                  if any(_is_installed(settings, c, bundle)
+                         for c in _installed_command_variants(bundle, hooks_home))
+                  else "available")
         out(f"{name}  [{status}]  trust=builtin  — {bundle.description}")
     return 0
 
