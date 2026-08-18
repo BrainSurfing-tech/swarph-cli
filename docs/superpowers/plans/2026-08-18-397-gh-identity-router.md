@@ -19,6 +19,16 @@ Copied verbatim from the card and from this session's measurements. Every task's
 - **A missing mapping file ≠ an empty mapping.** "Nobody is mapped yet" and "this peer specifically is not" must not collapse into one behaviour. (Already implemented in `load_mapping`; do not regress it.)
 - **The injected identity is stated in the refusal/audit line**, so a wrong mapping is diagnosable rather than silently wrong.
 - **The commander's CORPORATE identity is never used.** A third credential belonging to his employer is authenticated on this box (named on card #397, deliberately not repeated here — this file is public). Using it to manufacture review independence would put an employer's identity on approvals the commander never gave, on a repo that employer does not own. Refused explicitly, not left as an unexamined option.
+- **The mapping is `(peer, ROLE) -> login`, NOT `peer -> login`.** The card's original
+  shape cannot hold: commander, 2026-08-18, *"Orchestrator-hue is for orchestrator
+  creating PR requests for card in their projects"* — so one cell needs different
+  logins for different verbs (`lab-ovh` + authoring-a-project-PR -> `orchestrators-hue`;
+  `lab-ovh` + reviewing -> `lab-ovh`). Cheap, because the router already parses the
+  command for rule 2 and that same parse yields the role.
+- **Role credentials give FUNCTIONAL attribution, not PARTY attribution.** "An
+  orchestrator opened this" is visible; *which* orchestrator is not. The two-party gate
+  needs party, so roles and identity answer different questions and the design needs
+  both. Collapsing them is how `reviewers-pixel` became four cells.
 - **`$SWARPH_SELF` is the input this depends on** (#360 stamps it at spawn). On a shared box it is the box owner's identity if unstamped — which is why an unset value is a refusal and not a guess.
 - **Interim discipline, already in force:** lab does not review its own PRs under a second credential, with or without this build.
 
