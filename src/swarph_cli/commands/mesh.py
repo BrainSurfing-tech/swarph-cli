@@ -70,6 +70,17 @@ def _build_parser() -> argparse.ArgumentParser:
     add_content_args(send)
     _add_common(send)
 
+    reply = sub.add_parser(
+        "reply", help="reply to a DM IN ITS OWN THREAD (closes a #307 obligation)")
+    reply.add_argument("message_id", type=int, help="the DM being replied to")
+    reply.add_argument("--kind", default="answer",
+                       help="message kind (default: answer). NOT gated — a reply is "
+                            "universal across every DM kind.")
+    reply.add_argument("--search-limit", type=int, default=200,
+                       help="how far back in this inbox to look for the message")
+    add_content_args(reply)
+    _add_common(reply)
+
     inbox = sub.add_parser("inbox", help="read this peer's mesh inbox")
     inbox.add_argument("--unread", action="store_true", help="only unread DMs")
     inbox.add_argument("--limit", type=int, default=20, help="max messages")
@@ -353,6 +364,91 @@ def _run_send(args: argparse.Namespace) -> int:
         f"sent id={payload.get('id')} from={payload.get('from_node')} "
         f"to={payload.get('to_node')} kind={payload.get('kind')}"
     )
+    return 0
+
+
+def _find_inbox_message(gateway: str, token: str, self_name: str,
+                        message_id: int, limit: int):
+    """The DM being replied to, or (None, reason). Never raises, never guesses.
+
+    >>> THERE IS NO GET /messages/{id}. <<< The gateway exposes a filtered LIST and a
+    per-message read-receipt, so a reply has to find its target by scanning this
+    peer's own inbox. That is a BOUNDED search, and the bound is the interesting
+    part: a message older than `limit` is INDISTINGUISHABLE from one that never
+    existed unless the refusal says which was searched. "not found" alone would send
+    the operator hunting for a delivery bug that is really a paging window.
+    """
+    st, d = _http_get_json(
+        f"{gateway.rstrip('/')}/messages?to_node={self_name}&limit={int(limit)}", token)
+    if not (st and 200 <= st < 300):
+        return None, f"gateway {st or 'unreachable'}: {d.get('detail', d) if isinstance(d, dict) else d}"
+    msgs = d if isinstance(d, list) else d.get("messages", [])
+    for m in msgs:
+        if int(m.get("id", -1)) == int(message_id):
+            return m, None
+    return None, (
+        f"message {message_id} is not in {self_name}'s inbox "
+        f"(searched the most recent {len(msgs)} of --search-limit {limit}). "
+        f"It may be older than that window, or addressed to a different peer — "
+        f"those are different problems and this cannot tell them apart."
+    )
+
+
+def _run_reply(args: argparse.Namespace) -> int:
+    """Reply to a DM IN ITS THREAD, which is what lets #307 close an obligation.
+
+    >>> A REPLY IS UNIVERSAL ACROSS KINDS, DELIBERATELY. <<< The spec's constraint:
+    not gated by kind. Gating would mean a peer could owe you an answer on a DM whose
+    kind nobody thought to allow, and the obligation would be unclosable through the
+    product — the exact "waiting on a seat" shape #307 exists to kill.
+
+    >>> AND A THREADLESS REPLY MUST NOT REPORT THE SAME LINE AS A THREADED ONE. <<<
+    Most DMs carry no thread. Refusing them would make this verb useless for the
+    common case; sending them silently would let an operator believe they had closed
+    an obligation when nothing could have closed. So both are SENT and the two
+    outcomes PRINT DIFFERENTLY. One message for two causes hides which one happened.
+    """
+    try:
+        content = resolve_content(args.content, getattr(args, "content_file", None))
+    except ContentError as exc:
+        print(f"swarph mesh reply: {exc}", file=sys.stderr)
+        return 1
+    self_name = _resolve_self_name(args.self_name)
+    token = _resolve_token(self_name, args.token_file)
+    gw = args.gateway.rstrip("/")
+
+    original, why = _find_inbox_message(gw, token, self_name,
+                                        args.message_id, args.search_limit)
+    if original is None:
+        print(f"swarph mesh reply: {why}", file=sys.stderr)
+        return 1
+
+    to_node = original.get("from_node")
+    if not to_node:
+        print(f"swarph mesh reply: message {args.message_id} has no sender recorded, "
+              f"so there is nobody to reply TO.", file=sys.stderr)
+        return 1
+
+    body = {"from_node": self_name, "to_node": to_node,
+            "kind": args.kind, "content": content}
+    thread_id = original.get("thread_id")
+    if thread_id:
+        body["thread_id"] = thread_id
+
+    status, payload = _post_json(f"{gw}/messages", body, token)
+    if status < 200 or status >= 300:
+        print(f"swarph mesh reply: gateway {status}: "
+              f"{payload.get('detail', '<gateway error>')}", file=sys.stderr)
+        return 1
+
+    if thread_id:
+        print(f"replied id={payload.get('id')} to={to_node} kind={args.kind} "
+              f"in thread {thread_id} (an open obligation held by {self_name} on this "
+              f"thread is now closed)")
+    else:
+        print(f"replied id={payload.get('id')} to={to_node} kind={args.kind} "
+              f"— NOT IN A THREAD: message {args.message_id} carries no thread_id, so "
+              f"this closes no obligation. It was sent as an ordinary DM.")
     return 0
 
 
@@ -1604,6 +1700,8 @@ def run_mesh(argv: list[str]) -> int:
         args = parser.parse_args(argv)
         if args.command == "send":
             return _run_send(args)
+        if args.command == "reply":
+            return _run_reply(args)
         if args.command == "inbox":
             return _run_inbox(args)
         if args.command == "register":
