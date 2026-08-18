@@ -8,6 +8,7 @@ import json
 import sys
 import urllib.parse
 
+from ._content import ContentError, add_content_args, resolve_content
 from ._display import sanitize_terminal
 from ._gateway_client import (
     add_common_args,
@@ -57,7 +58,7 @@ def _build_parser() -> argparse.ArgumentParser:
     post = sub.add_parser("post", help="post a message to a channel")
     post.add_argument("name", help="channel name")
     post.add_argument("--kind", default="fyi", help="message kind (default fyi)")
-    post.add_argument("--content", required=True, help="message body")
+    add_content_args(post)
     add_common_args(post)
 
     read = sub.add_parser("read", help="read recent messages in a channel")
@@ -170,9 +171,14 @@ def _run_members(args: argparse.Namespace) -> int:
 
 
 def _run_post(args: argparse.Namespace) -> int:
+    try:
+        content = resolve_content(args.content, getattr(args, "content_file", None))
+    except ContentError as exc:
+        print(f"swarph channel post: {exc}", file=sys.stderr)
+        return 1
     self_name, token, base = _ctx(args)
     status, payload = post_json(
-        f"{base}/messages", _post_payload(self_name, args.name, args.kind, args.content), token
+        f"{base}/messages", _post_payload(self_name, args.name, args.kind, content), token
     )
     if not _ok(status):
         return _fail("post", status, payload)

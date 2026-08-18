@@ -18,6 +18,7 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 
+from swarph_cli.commands._content import ContentError, add_content_args, resolve_content
 from swarph_cli.commands._display import sanitize_terminal as _s
 from swarph_cli.commands.mesh import (
     _add_common,
@@ -247,7 +248,7 @@ def _build_parser() -> argparse.ArgumentParser:
     cs.add_argument("--json", action="store_true"); _add_common(cs)
     ca = cards.add_parser("add", help="create a card")
     ca.add_argument("--project", required=True, help="project id or slug"); ca.add_argument("--title", required=True)
-    ca.add_argument("--body"); ca.add_argument("--ai2", action="store_true")
+    add_content_args(ca, "--body", required=False); ca.add_argument("--ai2", action="store_true")
     ca.add_argument("--priority", type=int, default=0)
     ca.add_argument("--label", action="append", dest="labels", metavar="LABEL",
                     help="attach a label (repeatable)")
@@ -269,7 +270,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_common(ct)
     cy = cards.add_parser("say", help="post a message onto the card's thread")
     cy.add_argument("id", type=int)
-    cy.add_argument("--content", required=True)
+    add_content_args(cy)
     cy.add_argument("--kind", default="fyi", help="status|question|answer|unblock|fyi")
     cy.add_argument("--to", dest="to_node", default=None,
                     help="recipient peer (default: the card's assignee)")
@@ -340,12 +341,17 @@ def run_board(argv: list[str]) -> int:
             st, d = _http_get_json(f"{gw}/board/cards/{args.id}", token)
             return _out(st, d, _format_card, aj)
         if args.command == "add":
+            try:
+                body = resolve_content(args.body, getattr(args, "body_file", None), "--body")
+            except ContentError as exc:
+                print(f"swarph board cards add: {exc}", file=sys.stderr)
+                return 1
             pid, err = _resolve_project(gw, token, args.project)
             if err or pid is None:
                 print(f"swarph board: {err or 'project required'}", file=sys.stderr)
                 return 1
             st, d = _post_json(f"{gw}/board/cards", _card_add_payload(
-                self_name, pid, args.title, body=args.body, ai2=args.ai2,
+                self_name, pid, args.title, body=body, ai2=args.ai2,
                 priority=args.priority, labels=getattr(args, "labels", None)), token)
             return _out(st, d, lambda x: f"created card #{x.get('id')} [{x.get('stage')}] (stage defaults to proposed — use `cards move` to advance)", aj)
         if args.command == "label":
@@ -383,6 +389,11 @@ def run_board(argv: list[str]) -> int:
             # Reading it would not have found that; mutating it did. <<<
             return _out(st, d, _format_thread, aj)
         if args.command == "say":
+            try:
+                content = resolve_content(args.content, getattr(args, "content_file", None))
+            except ContentError as exc:
+                print(f"swarph board cards say: {exc}", file=sys.stderr)
+                return 1
             st, card = _http_get_json(f"{gw}/board/cards/{args.id}", token)
             if st != 200:
                 print(f"swarph board cards say: cannot read card #{args.id}: "
@@ -402,7 +413,7 @@ def run_board(argv: list[str]) -> int:
                 return 1
             st, d = _post_json(
                 f"{gw}/messages",
-                _card_say_payload(self_name, to_node, args.kind, args.content, thread_uuid),
+                _card_say_payload(self_name, to_node, args.kind, content, thread_uuid),
                 token,
             )
             # A 403 here carries the gateway's explanation that attaching PUBLISHES

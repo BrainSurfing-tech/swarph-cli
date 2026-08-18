@@ -49,7 +49,7 @@ Usage:
   swarph onboard <peer-name> [--gateway URL]
   swarph ratify <peer-name> [--reason "<text>"] [--witness-name <self>]
   swarph daemon [--state-dir DIR] [--self NAME] [--poll-seconds N]
-  swarph mesh send <peer> --kind question --content "..."
+  swarph mesh send <peer> --kind question (--content "..." | --content-file PATH | --content -)
 
 Examples:
   swarph "explain Hawkes process briefly"
