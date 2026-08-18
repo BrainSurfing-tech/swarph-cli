@@ -1086,7 +1086,7 @@ def _monitor_deliver(state: MonitorState) -> None:
         _write_ledgers_atomic(state.ledgers_path, state.ledgers)
 
 
-def _monitor_iteration(state: MonitorState) -> None:
+def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> None:
     state.iterations += 1
     last_id = int(state.observed.get("last_msg_id", 0))
     # NO unread_only: novelty is the `id > last_msg_id` cursor below, not the read
@@ -1160,8 +1160,18 @@ def _monitor_iteration(state: MonitorState) -> None:
         _write_ledgers_atomic(state.ledgers_path, state.ledgers)
         state.new_ledgers = set()
 
-    # Poll channel subscriptions (independent of DM delivery, additive only)
-    _poll_channel_subscriptions(state)
+    # Poll channel subscriptions (independent of DM delivery, additive only).
+    # >>> NOT ON THE SIDECAR PATH. <<< _sidecar_iteration aliases this function, so
+    # without the flag every sidecar tick would also fetch /channels and each
+    # subscribed channel's messages. That is redundant AND costly there: since C1
+    # fans a channel post out as a real claude_messages row addressed to each
+    # member, the sidecar already sees channel traffic through its own DM poll. The
+    # only thing this poll adds is `pending_channel_posts`, which exists for
+    # `monitor status` — a surface the sidecar does not serve. So the sidecar would
+    # pay extra latency and an extra HTTP call per tick, on the wake path, to
+    # collect data nothing in it reads.
+    if poll_channels:
+        _poll_channel_subscriptions(state)
 
 
 def _monitor_loop(state: MonitorState) -> int:
@@ -1453,7 +1463,15 @@ class MeshSidecarState(MonitorState):
 
 
 # Legacy aliases. One engine underneath, so the deprecated verb cannot drift.
-_sidecar_iteration = _monitor_iteration
+# >>> THE SIDECAR IS NOT A BARE ALIAS ANY MORE, AND THE DIFFERENCE IS DELIBERATE. <<<
+# It was `_sidecar_iteration = _monitor_iteration`, which meant a change aimed at the
+# monitor landed on the wake path invisibly — #125's channel poll did exactly that and
+# broke test_sidecar_wakes_on_new_mail_and_advances_cursor. Sharing the engine is still
+# right (the verbs must not drift); what the alias hid was that they have DIFFERENT JOBS.
+# The sidecar wakes a cell on mail; the monitor also maintains status state.
+def _sidecar_iteration(state: MonitorState) -> None:
+    """The wake path: same engine, no channel polling. See _monitor_iteration."""
+    _monitor_iteration(state, poll_channels=False)
 _sidecar_deliver_wake = _monitor_deliver
 
 
