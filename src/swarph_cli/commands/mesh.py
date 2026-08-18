@@ -78,6 +78,9 @@ def _build_parser() -> argparse.ArgumentParser:
                             "universal across every DM kind.")
     reply.add_argument("--search-limit", type=int, default=200,
                        help="how far back in this inbox to look for the message")
+    reply.add_argument("--json", action="store_true",
+                       help="machine-readable result. Most callers here are automated "
+                            "and both outcomes exit 0, so stdout prose is not a signal.")
     add_content_args(reply)
     _add_common(reply)
 
@@ -441,10 +444,31 @@ def _run_reply(args: argparse.Namespace) -> int:
               f"{payload.get('detail', '<gateway error>')}", file=sys.stderr)
         return 1
 
+    # >>> THIS COMMAND CANNOT KNOW WHETHER AN OBLIGATION CLOSED, AND THE FIRST VERSION
+    # SAID IT DID. <<< POST /messages returns id/from/to/kind/thread_id/created_at —
+    # no close fact. Closing is #307 Task 2's SIDE EFFECT and it fails OPEN for a
+    # ghost holder, a non-holder, or no row at all. So "an open obligation is now
+    # closed" was prose asserted on exit 0 — THE EXACT SHAPE OF "#91 is waiting on a
+    # seat", written inside the tool built to kill it. (grok-researcher, blocking
+    # review on PR #253.) The threadless branch was already honest; this one now
+    # matches it. Report the fact that was returned; name the thing that was not.
+    if args.json:
+        print(json.dumps({
+            "id": payload.get("id"), "to_node": to_node, "kind": args.kind,
+            "thread_id": thread_id,
+            # attached_to_thread is what this command KNOWS. Deliberately not named
+            # closed_obligation: an automated caller must not read a delivery fact as
+            # a closure fact. (gpu-wsl: both outcomes return 0 and most callers here
+            # are automated, so stdout prose is not a signal.)
+            "attached_to_thread": bool(thread_id),
+            "closed_obligation": None,
+        }, indent=2))
+        return 0
     if thread_id:
         print(f"replied id={payload.get('id')} to={to_node} kind={args.kind} "
-              f"in thread {thread_id} (an open obligation held by {self_name} on this "
-              f"thread is now closed)")
+              f"in thread {thread_id} — if {self_name} holds an open obligation on "
+              f"this thread the gateway closes it, and THIS COMMAND CANNOT CONFIRM "
+              f"THAT: the send returns no close fact. Check the card.")
     else:
         print(f"replied id={payload.get('id')} to={to_node} kind={args.kind} "
               f"— NOT IN A THREAD: message {args.message_id} carries no thread_id, so "

@@ -136,6 +136,30 @@ def test_reply_posts_IN_THE_ORIGINAL_THREAD(monkeypatch, capsys):
     assert body["kind"] == "answer"
 
 
+def test_the_threaded_line_does_NOT_ASSERT_that_an_obligation_CLOSED():
+    """>>> grok's BLOCKING REVIEW ON PR #253, AND HE WAS RIGHT. <<< POST /messages
+    returns id/from/to/kind/thread_id/created_at — NO CLOSE FACT. Closing is Task 2's
+    side effect and it fails OPEN for a ghost holder, a non-holder, or no row at all.
+    The first version printed "an open obligation ... is now closed" on exit 0.
+
+    That is prose asserted as fact on a successful exit — THE EXACT SHAPE OF "#91 is
+    waiting on a seat", written inside the tool built to kill it. This test exists so
+    the claim cannot come back."""
+
+
+def test_threaded_reply_reports_only_what_the_send_returned(monkeypatch, capsys):
+    _inbox(monkeypatch, [{"id": 99, "from_node": "droplet", "thread_id": "t-abc"}])
+    _posts(monkeypatch, mesh, payload={"id": 100})
+
+    mesh.run_mesh(["reply", "99", "--content", "done", "--gateway", "http://gw"])
+
+    out = capsys.readouterr().out
+    assert "is now closed" not in out, (
+        "the send returns no close fact — asserting one is the card's own defect"
+    )
+    assert "CANNOT CONFIRM" in out
+
+
 def test_a_THREADLESS_reply_is_SENT_but_says_it_closes_nothing(monkeypatch, capsys):
     """>>> THE PROPERTY THAT MATTERS MOST HERE. <<< Sending silently would let an
     operator believe an obligation closed when nothing could have. Refusing would
@@ -201,11 +225,17 @@ def test_a_MISSING_message_refusal_names_the_SEARCH_BOUND(monkeypatch, capsys):
     _inbox(monkeypatch, [{"id": 1, "from_node": "d", "thread_id": "t"}])
     _posts(monkeypatch, mesh)
 
-    rc = mesh.run_mesh(["reply", "404", "--content", "x", "--gateway", "http://gw"])
+    rc = mesh.run_mesh(["reply", "404", "--content", "x", "--gateway", "http://gw",
+                        "--search-limit", "37"])
 
     err = capsys.readouterr().err
     assert rc == 1
-    assert "search-limit" in err and "older than that window" in err
+    # grok, non-blocking: the first version asserted the literal string "search-limit"
+    # — which is the FLAG NAME, present in the message whatever the code did with it.
+    # Assert the VALUE actually reached the refusal, so a bound that is ignored cannot
+    # still produce a confident-looking message about it.
+    assert "37" in err, f"the refusal must name the bound it ACTUALLY searched: {err}"
+    assert "older than that window" in err
 
 
 def test_a_reply_is_NOT_sent_when_the_original_cannot_be_found(monkeypatch):
@@ -214,6 +244,38 @@ def test_a_reply_is_NOT_sent_when_the_original_cannot_be_found(monkeypatch):
     _inbox(monkeypatch, [])
     seen = _posts(monkeypatch, mesh)
 
-    mesh.run_mesh(["reply", "404", "--content", "x", "--gateway", "http://gw"])
+    rc = mesh.run_mesh(["reply", "404", "--content", "x", "--gateway", "http://gw"])
 
+    assert rc == 1, "a refusal must be a real abort, not a warning that returns 0"
     assert seen == [], "nothing may be posted when the target is unknown"
+
+
+def test_JSON_output_never_claims_a_closure_it_cannot_see(monkeypatch, capsys):
+    """>>> gpu-wsl's FINDING: BOTH OUTCOMES EXIT 0 AND MOST CALLERS HERE ARE
+    AUTOMATED. <<< Without a machine-readable result the only signal is stdout prose,
+    which no script reads. --json exposes what this command KNOWS —
+    attached_to_thread — and reports closed_obligation as null RATHER THAN OMITTING
+    IT. Omission would let a caller's `.get("closed_obligation", False)` read a
+    missing key as a confident False; an explicit null is unignorable."""
+    import json as _json
+    _inbox(monkeypatch, [{"id": 99, "from_node": "droplet", "thread_id": "t-abc"}])
+    _posts(monkeypatch, mesh, payload={"id": 100})
+
+    mesh.run_mesh(["reply", "99", "--content", "x", "--gateway", "http://gw", "--json"])
+
+    d = _json.loads(capsys.readouterr().out)
+    assert d["attached_to_thread"] is True
+    assert d["closed_obligation"] is None, "this command cannot see a closure"
+    assert d["thread_id"] == "t-abc"
+
+
+def test_JSON_marks_a_threadless_reply_as_unattached(monkeypatch, capsys):
+    import json as _json
+    _inbox(monkeypatch, [{"id": 99, "from_node": "droplet", "thread_id": None}])
+    _posts(monkeypatch, mesh, payload={"id": 100})
+
+    mesh.run_mesh(["reply", "99", "--content", "x", "--gateway", "http://gw", "--json"])
+
+    d = _json.loads(capsys.readouterr().out)
+    assert d["attached_to_thread"] is False
+    assert d["closed_obligation"] is None
