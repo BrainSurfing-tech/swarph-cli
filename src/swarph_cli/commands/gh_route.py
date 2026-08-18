@@ -112,9 +112,41 @@ def _cells_on_this_box() -> list:
     cells are one install away from a total `gh` refusal. lab-ovh runs eleven cells
     on one uid; a caller-scoped check there measures the wrong population, which is
     the defect this whole card family keeps finding.
+
+    >>> IT MUST RETURN THE MESH NAME, NOT THE FILENAME. <<< The router resolves
+    `SWARPH_SELF` (run_show, and the hook path) and looks THAT up in the mapping. A
+    preflight keyed on `p.stem` is asking a different question than the thing it
+    certifies, and the two only agree when the filename happens to equal the mesh name.
+
+    Found on lab-ovh 2026-08-18: `lab.yaml` carries `name: lab-ovh` with `role: lab` —
+    a deliberate split (commander, 2026-05-28: "I want lab to be lab"; the mesh name is
+    lab-ovh, the display role is lab). Doctor reported `lab -> (unmapped)` while
+    SWARPH_SELF=lab-ovh WAS mapped and would have worked.
+
+    Both directions are wrong, and the second is the dangerous one:
+      FALSE POSITIVE  doctor cries refusal for a cell that resolves fine
+      FALSE NEGATIVE  "fix" it by adding the FILENAME key and doctor goes GREEN while
+                      the router still looks up the mesh name — a preflight certifying
+                      an install that refuses every gh call. A green that means nothing
+                      is worse than a red that means nothing.
     """
     try:
-        return sorted(p.stem for p in cells_dir().glob("*.yaml"))
+        out = []
+        for f in sorted(cells_dir().glob("*.yaml")):
+            name = None
+            try:
+                for line in f.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("name:"):
+                        # strip an inline `# comment` — these configs carry them
+                        name = line.split(":", 1)[1].split("#", 1)[0].strip().strip("'\"")
+                        break
+            except OSError:
+                name = None
+            # Fall back to the stem ONLY when the file declares no name. Do not fall
+            # back on a READ ERROR silently — an unreadable config is unknown coverage,
+            # and reporting its filename as a mesh name invents a fact.
+            out.append(name or f.stem)
+        return sorted(out)
     except Exception:
         return []
 
