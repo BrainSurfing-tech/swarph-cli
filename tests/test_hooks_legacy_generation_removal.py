@@ -62,6 +62,17 @@ def win32(monkeypatch):
     canonical form independent of whatever bash the host happens to have."""
     monkeypatch.setattr(hooks.sys, "platform", "win32")
     monkeypatch.setattr(hooks, "_windows_hook_bash", lambda: _BASH)
+    # >>> #251 AND #252 WERE EACH GREEN ALONE AND RED TOGETHER. <<< #252 (drop's #201
+    # finding) made install REFUSE on win32 when no Git bash can be resolved. This
+    # suite simulates win32 ON LINUX, where no Git path exists, so install_hook began
+    # refusing and `test_reinstall_after_remove_leaves_exactly_ONE_binding` got zero
+    # bindings instead of one. Patching the COMMAND BUILDER was no longer enough once
+    # a second function started asking the same question for a different purpose.
+    #
+    # It passed on the WINDOWS runner throughout, because a real Git bash exists
+    # there — so the composition failure was visible only on the platform the feature
+    # is not for. Neither PR's own CI could see it: the break needs both merged.
+    monkeypatch.setattr(hooks, "_find_windows_bash", lambda: _BASH)
 
 
 def _settings_with(path: Path, bundle, command: str) -> None:
