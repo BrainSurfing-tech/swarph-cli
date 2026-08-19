@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from swarph_cli.commands.guide import _load_guide, _split_topics, run_guide
+from swarph_cli.commands.guide import _load_guide, _search, _split_topics, run_guide
 
 
 def test_the_guide_loads_as_a_packaged_resource():
@@ -271,3 +271,70 @@ def test_every_path_survives_a_cp1252_console(argv):
     )
     assert "UnicodeEncodeError" not in r.stderr, r.stderr
     assert r.returncode in (0, 2), f"rc={r.returncode}\n{r.stderr}"
+
+
+# ── Windows-seat review of 0.45.0: gpu-wsl + cursor-win, independently ──────
+
+def test_the_guide_gives_a_WINDOWS_supervision_answer():
+    """>>> FOUND BY TWO CELLS INDEPENDENTLY (gpu-wsl and cursor-win), which is what
+    made it undeniable. <<<
+
+    start-here step 1 explicitly acknowledges Windows ("you also need a multiplexer:
+    psmux"). Step 4 then handed every reader `sudo systemctl enable --now` with no
+    alternative, and check-your-own-setup repeated the systemd-only check.
+
+    cursor-win's phrasing is the reason this is a bug and not an omission: the silence
+    reads as "they forgot me" PRECISELY BECAUSE step 1 acknowledged them. A guide that
+    never mentioned Windows would be merely incomplete; one that mentions it and then
+    stops is a route that dead-ends. That is the #520 defect -- naming a destination
+    without a route -- inside the fix for #520."""
+    text = _load_guide()
+    topics = _split_topics(text)
+    assert "schtasks" in topics["start-here"], "no Windows supervision instruction"
+    assert "psmux" in topics["start-here"]
+    assert "schtasks" in topics["check-your-own-setup"], (
+        "the liveness table must be answerable on Windows too -- step 4 sends them here")
+
+
+def test_the_guide_routes_to_the_wake_hook():
+    """cursor-win: his commander typed `swarph guide wake` within an hour of the
+    upgrade, because the waker is a verb now and that is the word he knows. The guide
+    had ZERO mentions of it -- 'wake' appeared only as channel wake_policy.
+
+    'How do I get woken' is among the likeliest intents on a fresh install, and the
+    guide's own framing is that a cell arrives with an intent rather than a topic
+    name."""
+    text = _load_guide()
+    topics = _split_topics(text)
+    assert "swarph install-wake-hook" in topics["how-to"]
+    assert "**wake hook**" in topics["glossary"]
+    # and it must be reachable by the words a caller would actually use
+    for term in ("woken", "wake hook"):
+        assert _search(topics, term), f"{term!r} finds nothing"
+
+
+@pytest.mark.parametrize("argv,expect_rc", [
+    (["--search", "wake"], 0),      # the flag spelling
+    (["search", "wake"], 0),        # >>> the spelling an LLM types FIRST <<<
+    (["find", "wake"], 0),
+    (["apropos", "wake"], 0),
+    (["wake"], 2),                  # a bare intent word: must NAME the alternative
+])
+def test_every_dialect_of_the_intent_word(argv, expect_rc, capsys):
+    """cursor-win measured all three on a live box and only ONE reached the careful
+    error:
+
+        guide --search wake    ok
+        guide wake             "no topic 'wake'"   <- names alternatives
+        guide search wake      argparse: unrecognized arguments  <- a USAGE DUMP that
+                                                                    never mentions --search
+
+    argparse rejected the third before run_guide was entered, so the branch built for
+    exactly this failure could not fire. His conclusion is the fix: an LLM cell types
+    `guide search wake` long before it types `--search`, so the natural spelling must
+    BE the correct spelling."""
+    assert run_guide(argv) == expect_rc
+    cap = capsys.readouterr()
+    if expect_rc == 2:
+        assert "--search wake" in cap.err, (
+            "an unknown topic must route the caller INTO --search, not list nouns at them")

@@ -131,6 +131,21 @@ def run_guide(argv: "list[str]") -> int:
     p.add_argument("--search", metavar="TERM",
                    help="find topics by INTENT rather than by name (FreeDOS `apropos`). "
                         "Searches the commands and the prose.")
+    # >>> AN LLM CELL TYPES `guide search wake` LONG BEFORE IT TYPES `--search`. <<<
+    # cursor-win measured all three dialects on a live box, and only one of them reached
+    # the careful error:
+    #
+    #     guide --search wake    ok
+    #     guide wake             "no topic 'wake'"      <- names alternatives
+    #     guide search wake      argparse: unrecognized arguments  <- a USAGE DUMP that
+    #                                                                 does not mention
+    #                                                                 --search at all
+    #
+    # argparse rejects the third before run_guide is ever entered, so the "name the
+    # alternatives" branch cannot fire. The natural spelling must BE the correct spelling:
+    # a two-token rewrite, before parsing.
+    if len(argv) >= 2 and argv[0] in ("search", "find", "apropos"):
+        argv = ["--search", *argv[1:]]
     args = p.parse_args(argv)
 
     text = _load_guide()
@@ -177,9 +192,13 @@ def run_guide(argv: "list[str]") -> int:
     # >>> NAME THE ALTERNATIVES. <<< "unknown topic" tells the caller it was wrong and
     # not what to do instead, which is the same defect as an onboarding page that names a
     # destination without a route.
+    # Point at --search, not only at the topic list. The caller arrived with an INTENT
+    # word that is not a topic name -- which is the exact failure --search was built for,
+    # so the error should route them into it rather than list nouns at them. (cursor-win.)
     print_safe(f"swarph guide: no topic {args.topic!r}."
                + (f" Did you mean: {', '.join(hits)}?" if hits else ""),
                stream=sys.stderr)
+    print_safe(f"  try:  swarph guide --search {args.topic}", stream=sys.stderr)
     print_safe(f"Topics: {', '.join(topics)}", stream=sys.stderr)
     return 2
 
