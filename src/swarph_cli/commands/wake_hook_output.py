@@ -152,7 +152,14 @@ def _resolve_cell(explicit: Optional[str] = None) -> tuple[Optional[str], str]:
     """
     tmux = _tmux_session_cell()
     if tmux is not None:
-        return tmux
+        name, source = tmux
+        # An overridden --cell must be NAMED, never silently ignored
+        # (lab-ovh on #527: same defect shape as an ignored filter
+        # returning an unfiltered superset that looks filtered). The
+        # precedence stands — the override is reported, not swallowed.
+        if explicit and explicit != name:
+            source = f"{source} (overrode install-time --cell '{explicit}')"
+        return name, source
     if explicit:
         return explicit, "install-time --cell"
     env_self = os.environ.get("SWARPH_SELF", "").strip()

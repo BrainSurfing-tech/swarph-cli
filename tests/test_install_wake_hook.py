@@ -25,6 +25,10 @@ def isolated_home(tmp_path, monkeypatch) -> Iterator[Path]:
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("HOMEDRIVE", tmp_path.drive)
     monkeypatch.setenv("HOMEPATH", str(tmp_path)[len(tmp_path.drive):])
+    # The installer's --cell/session disagreement warning probes the tmux
+    # session — strip the ambient one so tests are hermetic on a box where
+    # pytest itself runs inside tmux.
+    monkeypatch.delenv("TMUX", raising=False)
     yield tmp_path
 
 
@@ -431,6 +435,40 @@ def test_nothing_resolves_is_unresolved(resolution_env):
     assert who._resolve_cell() == (None, "unresolved")
 
 
+def test_tmux_overriding_a_baked_cell_is_named_not_swallowed(resolution_env):
+    """lab-ovh on #527: when tmux and --cell disagree, resolving to tmux
+    must REPORT the override — an ignored --cell is the same defect shape
+    as an ignored filter returning an unfiltered superset that looks
+    filtered."""
+    cells, in_tmux = resolution_env
+    (cells / "cursor-lin.yaml").write_text("", encoding="utf-8")
+    in_tmux("cursor-lin")
+    name, source = who._resolve_cell(explicit="gpt-ops")
+    assert name == "cursor-lin"
+    assert "overrode install-time --cell 'gpt-ops'" in source
+
+
+def test_tmux_agreeing_with_baked_cell_reports_no_override(resolution_env):
+    """Non-vacuity partner: agreement must NOT manufacture an override
+    note."""
+    cells, in_tmux = resolution_env
+    (cells / "cursor-lin.yaml").write_text("", encoding="utf-8")
+    in_tmux("cursor-lin")
+    name, source = who._resolve_cell(explicit="cursor-lin")
+    assert name == "cursor-lin"
+    assert "overrode" not in source
+
+
+def test_override_note_reaches_the_arm_envelope(monkeypatch, capsys):
+    rc = _run_output(
+        ["--harness", "claude"], monkeypatch, cell_name="cursor-lin",
+        cell_source="tmux session 'cursor-lin' (overrode install-time --cell 'gpt-ops')",
+    )
+    assert rc == 0
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "overrode install-time --cell 'gpt-ops'" in ctx
+
+
 def test_arm_instruction_names_tmux_provenance(monkeypatch, capsys):
     rc = _run_output(["--harness", "claude"], monkeypatch,
                      cell_name="cursor-lin",
@@ -512,6 +550,58 @@ def test_uninstall_is_exempt_from_the_pair_guard(isolated_home, capsys):
         (isolated_home / ".claude" / "settings.json").read_text(encoding="utf-8")
     )
     assert settings["hooks"]["SessionStart"] == []
+
+
+# ---------------------------------------------------------------------------
+# Card #527 review: install-time warning when the installer's own session
+# disagrees with the baked --cell
+# ---------------------------------------------------------------------------
+
+
+def test_baked_cell_disagreeing_with_own_session_warns(
+    isolated_home, monkeypatch, capsys
+):
+    monkeypatch.chdir(isolated_home)
+    monkeypatch.setattr(
+        iwh, "_tmux_session_cell",
+        lambda: ("cursor-lin", "tmux session 'cursor-lin'"),
+    )
+    rc = iwh.run_install_wake_hook(
+        ["--harness", "claude", "--cell", "gpt-ops", "--scope", "project"]
+    )
+    assert rc == 0  # warning, not refusal — the install proceeds
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "cursor-lin" in err and "gpt-ops" in err
+    assert "outranks the baked name" in err
+
+
+def test_baked_cell_agreeing_with_own_session_is_quiet(
+    isolated_home, monkeypatch, capsys
+):
+    """Non-vacuity partner: agreement must not warn."""
+    monkeypatch.chdir(isolated_home)
+    monkeypatch.setattr(
+        iwh, "_tmux_session_cell",
+        lambda: ("gpt-ops", "tmux session 'gpt-ops'"),
+    )
+    rc = iwh.run_install_wake_hook(
+        ["--harness", "claude", "--cell", "gpt-ops", "--scope", "project"]
+    )
+    assert rc == 0
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_unresolvable_own_session_is_quiet(isolated_home, monkeypatch, capsys):
+    """Non-vacuity partner: an installer outside tmux (or in an unknown
+    session) has no disagreement to report."""
+    monkeypatch.chdir(isolated_home)
+    monkeypatch.setattr(iwh, "_tmux_session_cell", lambda: None)
+    rc = iwh.run_install_wake_hook(
+        ["--harness", "claude", "--cell", "gpt-ops", "--scope", "project"]
+    )
+    assert rc == 0
+    assert "WARNING" not in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

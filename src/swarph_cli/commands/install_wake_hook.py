@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from swarph_cli.cell import _atomic_write_text
+from swarph_cli.commands.wake_hook_output import _tmux_session_cell
 
 
 _VERB = "wake-hook-output"
@@ -274,6 +275,28 @@ def run_install_wake_hook(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # Card #527 review (lab-ovh): a baked --cell that disagrees with the
+    # installer's own resolving tmux session is very likely a
+    # self-misconfiguration — at runtime a resolving session OUTRANKS the
+    # baked name, so the request can never take effect for those sessions.
+    # WARNING, not refusal: an orchestrator installing another cell's
+    # project hook from its own session is legitimate (readers in the
+    # target cell's tmux resolve themselves and agree), so refusing here
+    # would block a valid use.
+    if args.cell and not args.uninstall:
+        tmux = _tmux_session_cell()
+        if tmux is not None and tmux[0] != args.cell:
+            print(
+                f"swarph install-wake-hook: WARNING — you are installing "
+                f"--cell {args.cell} from a session that resolves to "
+                f"{tmux[0]} ({tmux[1]}). At runtime a resolving tmux "
+                "session outranks the baked name (card #527): sessions "
+                "whose tmux name is a known cell will run as THEMSELVES, "
+                f"not as {args.cell}. If you are installing your own hook, "
+                "the name you baked is not yours.",
+                file=sys.stderr,
+            )
 
     target.parent.mkdir(parents=True, exist_ok=True)
     before = _read_config(target)
