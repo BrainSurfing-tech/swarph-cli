@@ -200,6 +200,10 @@ Installs the silent-wake session-start hook (board card #482). The product
 depends on where the wake lives: claude/codex get an arm-instruction (the
 tail -F inbox.log | dm_notify_filter watch), cursor gets verify-and-report
 of the swarph monitor's push sink. Unknown harnesses are refused loudly.
+--cell is refused with --scope user (card #527): a baked cell name in a
+box-global file arms one cell's wake for every session on the box and
+silently evicts the last installed cell's. Omit --cell and the hook
+resolves the cell at runtime from the tmux session name.
 """
 
 
@@ -213,7 +217,9 @@ def run_install_wake_hook(argv: Optional[list[str]] = None) -> int:
         "--cell",
         default=None,
         help="cell name to bake into the hook command (default: the hook "
-        "resolves $SWARPH_SELF, then cwd discovery, at fire time)",
+        "resolves the tmux session name, then $SWARPH_SELF, then cwd "
+        "discovery, at fire time). Valid only with --scope project — "
+        "a baked name in a box-global file is refused (card #527)",
     )
     p.add_argument("--scope", choices=("user", "project"), default="user")
     p.add_argument("--uninstall", action="store_true")
@@ -247,6 +253,28 @@ def run_install_wake_hook(argv: Optional[list[str]] = None) -> int:
         return 2
 
     target = _config_path(harness, args.scope)
+
+    # Card #527 task 2: the verb has BOTH facts at install time and must
+    # check the pair. A per-cell name baked into a BOX-GLOBAL file is a
+    # fleet-wide misconfiguration with a single-cell author: every session
+    # on the box is told to tail one arbitrary cell's inbox, and the next
+    # cell's install silently evicts the last (measured live: gpt-ops
+    # 14:03, cursor-lin 14:48, nothing told gpt-ops). Runtime resolution
+    # (task 1) makes user-scope installs correct WITHOUT a baked name.
+    if args.cell and args.scope == "user" and not args.uninstall:
+        print(
+            "swarph install-wake-hook: LOUD REFUSAL — --cell with a "
+            f"box-global target ({target}) arms ONE cell's wake in a file "
+            "EVERY session on the box reads, and silently evicts the "
+            "previously installed cell's (card #527). The two valid "
+            "combinations: --scope user WITHOUT --cell (the hook resolves "
+            "the cell at runtime from the tmux session name), or --scope "
+            "project WITH --cell (a per-project file only that project's "
+            "sessions read). Nothing was written.",
+            file=sys.stderr,
+        )
+        return 2
+
     target.parent.mkdir(parents=True, exist_ok=True)
     before = _read_config(target)
 
@@ -275,7 +303,34 @@ def run_install_wake_hook(argv: Optional[list[str]] = None) -> int:
         )
         return 0
 
-    _atomic_write_text(target, json.dumps(after, indent=2, sort_keys=True) + "\n")
+    payload = json.dumps(after, indent=2, sort_keys=True) + "\n"
+    _atomic_write_text(target, payload)
+    # ASSERT THE ARTIFACT CHANGED AT THE STEP THAT CHANGES IT (card #527
+    # task 3): "installed" is a claim about the filesystem and must be
+    # checked against it. Three specimens of report-success-change-nothing
+    # shipped before this assert existed, and cursor-lin's ran in the
+    # RELEASED 0.44.0 wheel — version skew cannot explain it. A slow
+    # external revert can still escape a check taken this close to the
+    # write; what this catches is the write that never landed at all.
+    try:
+        landed = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"swarph install-wake-hook: WRITE DID NOT LAND — cannot re-read "
+            f"{target} after writing ({exc}). The {action} is NOT in effect. "
+            "Investigate what owns that file before retrying.",
+            file=sys.stderr,
+        )
+        return 2
+    if landed != payload:
+        print(
+            f"swarph install-wake-hook: WRITE DID NOT LAND — {target} "
+            "re-reads as different content than was written. Something on "
+            f"this box reverted or swallowed the {action}; it is NOT in "
+            "effect. Investigate what owns that file before retrying.",
+            file=sys.stderr,
+        )
+        return 2
     print(f"swarph install-wake-hook: {action}ed at {target}.", file=sys.stderr)
     if action == "install":
         product = (

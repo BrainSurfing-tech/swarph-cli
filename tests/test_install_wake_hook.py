@@ -176,12 +176,18 @@ def test_arm_rendering_codex_uses_same_shape(monkeypatch, capsys):
     assert "hookSpecificOutput" in out
 
 
-def test_arm_rendering_without_cell_still_instructs(monkeypatch, capsys):
+def test_arm_rendering_without_cell_refuses_loudly(monkeypatch, capsys):
+    """Card #527 task 1: CANNOT-RESOLVE is a loud refusal, never a
+    placeholder. The old rendering said "substitute <cell> yourself" —
+    on a shared box the session's guess is the box-wide $SWARPH_SELF,
+    i.e. the box owner, i.e. the wrong-cell hazard armed by the
+    session's own hand."""
     rc = _run_output(["--harness", "claude"], monkeypatch, cell_name=None)
     assert rc == 0
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "tail -n 0 -F" in ctx
-    assert "<cell>" in ctx
+    assert "CANNOT RESOLVE" in ctx
+    assert "DO NOT arm a DM watch for a guessed cell" in ctx
+    assert "substitute" not in ctx
 
 
 def test_verify_rendering_armed_when_push_sink(monkeypatch, capsys):
@@ -317,6 +323,236 @@ def test_verify_env_fallback_names_shared_box_risk(monkeypatch, capsys):
     assert "ARMED" in ctx
     assert "$SWARPH_SELF" in ctx
     assert "box owner" in ctx
+
+
+# ---------------------------------------------------------------------------
+# Card #527 task 1: runtime cell resolution (most-local first)
+# ---------------------------------------------------------------------------
+
+
+class _TmuxProc:
+    def __init__(self, session: str, rc: int = 0):
+        self.returncode = rc
+        self.stdout = (session + "\n") if session else ""
+        self.stderr = ""
+
+
+@pytest.fixture
+def resolution_env(tmp_path, monkeypatch):
+    """Isolate the REAL _resolve_cell from the ambient box: no TMUX, no
+    SWARPH_SELF, no cwd discovery, cells_dir redirected to tmp, cwd in a
+    directory whose basename matches no cell."""
+    from types import SimpleNamespace
+
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    monkeypatch.setattr(who, "discover_cell_in_cwd", lambda: None)
+    cells = tmp_path / "cells"
+    cells.mkdir()
+    monkeypatch.setattr(who, "cells_dir", lambda: cells)
+    work = tmp_path / "not-a-cell"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    monkeypatch.setattr(
+        who, "load_cell",
+        lambda path: SimpleNamespace(name=path.stem, role=None),
+    )
+
+    def in_tmux(session: str, rc: int = 0):
+        monkeypatch.setenv("TMUX", f"/tmp/tmux-fake/default,1,0")
+        monkeypatch.setattr(
+            who.subprocess, "run",
+            lambda *a, **k: _TmuxProc(session, rc),
+        )
+
+    return cells, in_tmux
+
+
+def test_tmux_session_resolves_to_cell(resolution_env):
+    cells, in_tmux = resolution_env
+    (cells / "cursor-lin.yaml").write_text("", encoding="utf-8")
+    in_tmux("cursor-lin")
+    name, source = who._resolve_cell()
+    assert name == "cursor-lin"
+    assert source == "tmux session 'cursor-lin'"
+
+
+def test_tmux_outranks_a_baked_cell(resolution_env):
+    """THE defect repair: a box-global baked --cell must not lie to a
+    session whose tmux name says it is a different cell."""
+    cells, in_tmux = resolution_env
+    (cells / "drop-on-meta-edge.yaml").write_text("", encoding="utf-8")
+    in_tmux("drop-on-meta-edge")
+    name, source = who._resolve_cell(explicit="gpt-ops")
+    assert name == "drop-on-meta-edge"
+    assert "tmux" in source
+
+
+def test_unknown_tmux_session_falls_through_never_invents(resolution_env):
+    """A tmux session named 'scratch' must not invent a cell named
+    'scratch' — fall through to the next source."""
+    cells, in_tmux = resolution_env
+    in_tmux("scratch")
+    name, source = who._resolve_cell(explicit="gpt-ops")
+    assert (name, source) == ("gpt-ops", "install-time --cell")
+
+
+def test_no_tmux_env_falls_through(resolution_env):
+    name, source = who._resolve_cell(explicit="gpt-ops")
+    assert (name, source) == ("gpt-ops", "install-time --cell")
+
+
+def test_tmux_command_failure_falls_through(resolution_env):
+    cells, in_tmux = resolution_env
+    (cells / "cursor-lin.yaml").write_text("", encoding="utf-8")
+    in_tmux("cursor-lin", rc=1)
+    name, source = who._resolve_cell(explicit="gpt-ops")
+    assert (name, source) == ("gpt-ops", "install-time --cell")
+
+
+def test_tmux_exception_falls_through(resolution_env, monkeypatch):
+    monkeypatch.setenv("TMUX", "/tmp/tmux-fake/default,1,0")
+
+    def boom(*a, **k):
+        raise FileNotFoundError("tmux not installed")
+
+    monkeypatch.setattr(who.subprocess, "run", boom)
+    name, source = who._resolve_cell(explicit="gpt-ops")
+    assert (name, source) == ("gpt-ops", "install-time --cell")
+
+
+def test_env_self_still_resolves_with_provenance(resolution_env, monkeypatch):
+    monkeypatch.setenv("SWARPH_SELF", "lab-ovh")
+    name, source = who._resolve_cell()
+    assert (name, source) == ("lab-ovh", "$SWARPH_SELF")
+
+
+def test_nothing_resolves_is_unresolved(resolution_env):
+    assert who._resolve_cell() == (None, "unresolved")
+
+
+def test_arm_instruction_names_tmux_provenance(monkeypatch, capsys):
+    rc = _run_output(["--harness", "claude"], monkeypatch,
+                     cell_name="cursor-lin",
+                     cell_source="tmux session 'cursor-lin'")
+    assert rc == 0
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "identity from tmux session 'cursor-lin'" in ctx
+
+
+def test_arm_instruction_names_env_provenance_as_shared_box_risk(monkeypatch, capsys):
+    """The arm path gets the same F3 warning the verify path has: an ARM
+    instruction for the wrong cell is as hazardous as a wrong verdict."""
+    rc = _run_output(["--harness", "claude"], monkeypatch,
+                     cell_name="lab-ovh", cell_source="$SWARPH_SELF")
+    assert rc == 0
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "$SWARPH_SELF" in ctx
+    assert "box owner" in ctx
+
+
+def test_verify_refusal_names_every_failed_source(monkeypatch, capsys):
+    rc = _run_output(["--harness", "cursor"], monkeypatch, cell_name=None)
+    assert rc == 0
+    ctx = json.loads(capsys.readouterr().out)["additional_context"]
+    assert "CANNOT VERIFY" in ctx
+    for source in ("tmux", "--cell", "$SWARPH_SELF", "cwd"):
+        assert source in ctx
+
+
+# ---------------------------------------------------------------------------
+# Card #527 task 2: refuse --cell + a box-global target
+# ---------------------------------------------------------------------------
+
+
+def test_cell_with_user_scope_refuses_and_writes_nothing(isolated_home, capsys):
+    rc = iwh.run_install_wake_hook(["--harness", "claude", "--cell", "gpt-ops"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "LOUD REFUSAL" in err
+    assert "--scope project" in err
+    assert "gpt-ops" not in err.split("LOUD REFUSAL")[0]  # refusal, not install
+    assert not (isolated_home / ".claude" / "settings.json").exists()
+
+
+def test_cell_with_project_scope_installs(isolated_home, monkeypatch, capsys):
+    """Non-vacuity partner: the refusal must not swallow the VALID
+    per-cell combination."""
+    monkeypatch.chdir(isolated_home)
+    rc = iwh.run_install_wake_hook(
+        ["--harness", "claude", "--cell", "gpt-ops", "--scope", "project"]
+    )
+    assert rc == 0
+    settings = json.loads(
+        (isolated_home / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert "--cell gpt-ops" in cmd
+
+
+def test_user_scope_without_cell_installs(isolated_home, capsys):
+    """Non-vacuity partner: the combination runtime resolution makes
+    correct — box-global file, no baked name."""
+    rc = iwh.run_install_wake_hook(["--harness", "claude"])
+    assert rc == 0
+    settings = json.loads(
+        (isolated_home / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert "--cell" not in cmd
+
+
+def test_uninstall_is_exempt_from_the_pair_guard(isolated_home, capsys):
+    iwh.run_install_wake_hook(["--harness", "claude"])
+    rc = iwh.run_install_wake_hook(
+        ["--harness", "claude", "--cell", "gpt-ops", "--uninstall"]
+    )
+    assert rc == 0
+    settings = json.loads(
+        (isolated_home / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert settings["hooks"]["SessionStart"] == []
+
+
+# ---------------------------------------------------------------------------
+# Card #527 task 3: the installer asserts it wrote
+# ---------------------------------------------------------------------------
+
+
+def test_install_re_reads_what_it_wrote(isolated_home, capsys):
+    rc = iwh.run_install_wake_hook(["--harness", "claude"])
+    assert rc == 0
+    assert "installed at" in capsys.readouterr().err
+    landed = (isolated_home / ".claude" / "settings.json").read_text(
+        encoding="utf-8"
+    )
+    assert "wake-hook-output" in landed
+
+
+def test_swallowed_write_is_a_loud_failure(isolated_home, monkeypatch, capsys):
+    """A write that lands but re-reads as different content (an external
+    reconciler reverting between write and check) must NOT print a
+    success claim."""
+    def revert(target, payload):
+        target.write_text('{"hooks": {"SessionStart": []}}\n', encoding="utf-8")
+
+    monkeypatch.setattr(iwh, "_atomic_write_text", revert)
+    rc = iwh.run_install_wake_hook(["--harness", "claude"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "WRITE DID NOT LAND" in err
+    assert "installed at" not in err
+
+
+def test_write_that_never_landed_is_a_loud_failure(isolated_home, monkeypatch, capsys):
+    """The 14:47 specimen's shape: the write step ran, the success line
+    would have printed, and the file on disk never changed."""
+    monkeypatch.setattr(iwh, "_atomic_write_text", lambda target, payload: None)
+    rc = iwh.run_install_wake_hook(["--harness", "claude"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "WRITE DID NOT LAND" in err
+    assert "installed at" not in err
 
 
 # ---------------------------------------------------------------------------
