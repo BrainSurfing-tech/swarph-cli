@@ -106,15 +106,41 @@ def _search(topics: "dict[str, str]", term: str) -> "list[tuple[str, str]]":
     ('subscribe', 'who owes me') and the word they know may appear only in a sentence.
     One line per topic keeps the answer readable; the topic name is the actionable part.
     """
+    # >>> THE FIRST MATCHING LINE IS OFTEN THE WORST ONE. <<< Searching "channel"
+    # returned `## Channels` (the heading -- tautological), a wrapped mid-sentence
+    # fragment from start-here, and -- the actively misleading one -- the TAIL OF THE
+    # MONITOR DEFINITION from the glossary, because it mentions "channels" and sorts
+    # earlier in the file than the channel definition itself.
+    #
+    # So rank rather than take-the-first. A result that answers is worth more than a
+    # result that merely contains the word. (Commander, running it, 2026-08-19.)
     needle = term.strip().lower()
     hits: list[tuple[str, str]] = []
     for name, body in topics.items():
+        best = None
         for line in body.splitlines():
-            if needle in line.lower():
-                clean = line.strip().lstrip("#").strip().lstrip("> ").strip()
-                if clean:
-                    hits.append((name, clean[:96]))
+            low = line.lower()
+            if needle not in low:
+                continue
+            clean = line.strip().lstrip("#").strip().lstrip("> ").strip()
+            if not clean:
+                continue
+            # the section heading restates the topic name and answers nothing
+            if line.startswith("## "):
+                continue
+            score = 0
+            if clean.lower().startswith(f"**{needle}**"):
+                score = 3          # a glossary DEFINITION of the searched word
+            elif clean.startswith("|"):
+                score = 2          # a how-to row: a task plus its command
+            elif clean.startswith(("`", "swarph ", "**")):
+                score = 1          # a command or a bolded lead-in
+            if best is None or score > best[0]:
+                best = (score, clean[:96])
+                if score == 3:
                     break
+        if best is not None:
+            hits.append((name, best[1]))
     return hits
 
 

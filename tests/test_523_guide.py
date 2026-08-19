@@ -338,3 +338,46 @@ def test_every_dialect_of_the_intent_word(argv, expect_rc, capsys):
     if expect_rc == 2:
         assert "--search wake" in cap.err, (
             "an unknown topic must route the caller INTO --search, not list nouns at them")
+
+
+def test_search_returns_the_line_that_ANSWERS_not_the_first_line_that_matches():
+    """>>> THE FIRST MATCHING LINE IS OFTEN THE WORST ONE. <<< Found by the commander
+    simply running `swarph guide --search channel` on his box:
+
+        channels    Channels                                    <- the heading. tautological.
+        glossary    predecessor and polls no channels at all.   <- THE MONITOR DEFINITION
+
+    The glossary hit is the one that matters: searching 'channel' returned the tail of
+    the **monitor** entry, because it happens to mention channels and sorts earlier in
+    the file than the channel definition itself. A result that merely CONTAINS the word
+    outranked the one that DEFINES it -- so the search was answering 'where does this
+    string appear' while the caller asked 'what is this'.
+
+    Ranked now: a `**term**` definition beats a how-to row beats a command beats prose,
+    and the section heading is skipped because it restates the topic name."""
+    topics = _split_topics(_load_guide())
+    hits = dict(_search(topics, "channel"))
+
+    assert hits["glossary"].startswith("**channel**"), (
+        f"glossary must return the channel DEFINITION, got: {hits['glossary']!r}")
+    assert hits["channels"] != "Channels", "a section heading answers nothing"
+    assert "swarph channel" in hits["channels"]
+
+
+def test_a_definition_outranks_a_mention_in_the_same_section():
+    """NON-VACUITY for the ranking: the glossary contains BOTH a line mentioning the
+    word and a line defining it, and the definition must win regardless of file order."""
+    topics = _split_topics(_load_guide())
+    for term in ("channel", "obligation", "wake hook", "fan-out"):
+        hit = dict(_search(topics, term)).get("glossary")
+        assert hit and hit.lower().startswith(f"**{term}**"), (
+            f"searching {term!r} should surface its glossary definition, got {hit!r}")
+
+
+def test_search_never_returns_an_empty_or_heading_only_line():
+    """A result the caller cannot act on is worse than one fewer result."""
+    topics = _split_topics(_load_guide())
+    for term in ("channel", "monitor", "wake", "board", "brain", "guide"):
+        for name, line in _search(topics, term):
+            assert line.strip(), f"empty hit for {term!r} in {name}"
+            assert not line.startswith("#"), f"heading returned for {term!r} in {name}"
