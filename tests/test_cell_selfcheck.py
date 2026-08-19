@@ -980,3 +980,74 @@ def test_undeclared_empty_env_value_still_malformed(monkeypatch, tmp_path, capsy
     ], "cursor-lin", capsys=capsys, resolver=_resolver())
     assert rc == 1
     assert "MALFORMED" in out
+
+
+# ── PR #261 Copilot findings (confirmed by lab-ovh, DM 24824) ───────────────
+
+
+def test_quoted_env_value_matches_unquoted_resolver(monkeypatch, tmp_path, capsys):
+    """Finding 1: KEY="value" kept its quotes and could never match the
+    resolver's unquoted output — a false-positive generator in a drift
+    detector."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile('MESH_GATEWAY_URL="http://100.107.222.72:8788"\n'),
+    ], "lab-ovh", capsys=capsys, resolver=_resolver())
+    assert rc == 0, out
+    assert "RESOLVER DRIFT" not in out
+
+
+def test_quoted_wrong_value_still_drifts(monkeypatch, tmp_path, capsys):
+    """Non-vacuity partner: quote-stripping must not launder a genuinely
+    wrong quoted value into agreement."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile('MESH_GATEWAY_URL="http://10.9.9.9:8788"\n'),
+    ], "lab-ovh", capsys=capsys, resolver=_resolver())
+    assert rc == 1
+    assert "RESOLVER DRIFT" in out and "10.9.9.9" in out
+
+
+def test_multi_file_environment_file_directive_all_read():
+    """Finding 2: systemd permits multiple files on one directive. Taking
+    the RHS as one path makes every additional file silently UNREAD —
+    under-measurement reported as coverage, the worse failure mode."""
+    refs = sc.environment_file_refs(
+        "[Service]\n"
+        "EnvironmentFile=-/etc/default/a /etc/default/b\n"
+        'EnvironmentFile="-/etc/default/c with space"\n'
+    )
+    assert refs == ["/etc/default/a", "/etc/default/b", "/etc/default/c with space"]
+
+
+def test_single_file_directive_unchanged():
+    """Non-vacuity partner: the common single-file form still parses,
+    optional-dash stripped."""
+    assert sc.environment_file_refs("EnvironmentFile=-/etc/default/x\n") == ["/etc/default/x"]
+
+
+def test_wildcard_bind_address_is_not_a_target():
+    """Finding 3: 0.0.0.0/:: are wildcard BIND addresses. A unit pointing at
+    one is a misconfiguration to catch, not a loopback to bless — even when
+    a wildcard listener exists on the port."""
+    listeners = {("0.0.0.0", 8788)}
+    assert sc.gateway_reachability("http://0.0.0.0:8788", listeners) == "wildcard-target"
+    assert sc.gateway_reachability("http://[::]:8788", listeners) == "wildcard-target"
+
+
+def test_wildcard_listener_still_serves_loopback_target():
+    """Non-vacuity partner: a listener ON the wildcard address does serve a
+    loopback target — the listener side keeps the address valid."""
+    assert sc.gateway_reachability("http://localhost:8788", {("0.0.0.0", 8788)}) == "local-listening"
+
+
+def test_same_length_secrets_display_as_distinct_numbered_values(monkeypatch, tmp_path, capsys):
+    """Finding 4: two DIFFERENT 43-char tokens displayed as one repeated
+    string while reporting '2 values' — and two 43-char tokens is exactly
+    the peer-token case. Numbered redaction keeps the count visible."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile(f"MESH_GATEWAY_TOKEN={'a' * 43}\n", name="/e/a (via a.service)"),
+        _envfile(f"MESH_GATEWAY_TOKEN={'b' * 43}\n", name="/e/b (via b.service)"),
+    ], "lab-ovh", capsys=capsys, resolver=_resolver())
+    assert "DRIFT" in out
+    assert "<redacted #1, 43 chars>" in out and "<redacted #2, 43 chars>" in out
+    assert "['<redacted, 43 chars>', '<redacted, 43 chars>']" not in out
+    assert "a" * 43 not in out and "b" * 43 not in out

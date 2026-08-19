@@ -228,6 +228,12 @@ def extract_envfile(surface: dict) -> list[Row]:
         if not m:
             continue
         key, val = m.group(1), m.group(2)
+        # systemd env files permit KEY="value" / KEY='value'. A value that
+        # keeps its quotes can never match the resolver's unquoted output —
+        # a FALSE POSITIVE GENERATOR in a drift detector (PR #261, Copilot
+        # finding 1, confirmed by lab-ovh).
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
         if key not in _ENV_RESOLVER_KEYS and not key.startswith(("MESH_", "SWARPH_")):
             continue
         if is_placeholder(val):
@@ -241,13 +247,26 @@ def extract_envfile(surface: dict) -> list[Row]:
 
 
 def environment_file_refs(unit_text: str) -> list[str]:
-    """EnvironmentFile paths referenced by a unit. Leading '-' (optional file)
-    is systemd syntax, not part of the path."""
+    """EnvironmentFile paths referenced by a unit. systemd permits MULTIPLE
+    space-separated files on one directive, each optionally prefixed '-'
+    (optional file — systemd syntax, not part of the path) and quoting.
+    Taking the whole RHS as one path turns a multi-file directive into one
+    bogus path and every additional file goes UNREAD — silent
+    under-measurement reported as coverage (PR #261, Copilot finding 2,
+    confirmed by lab-ovh: the worse failure mode, because it looks like
+    success)."""
+    import shlex
     refs: list[str] = []
     for line in unit_text.splitlines():
         line = line.strip()
-        if line.startswith("EnvironmentFile="):
-            refs.append(line.split("=", 1)[1].strip().lstrip("-"))
+        if not line.startswith("EnvironmentFile="):
+            continue
+        rhs = line.split("=", 1)[1].strip()
+        try:
+            parts = shlex.split(rhs)
+        except ValueError:  # unbalanced quote — split dumbly, read what we can
+            parts = rhs.split()
+        refs.extend(p.lstrip("-") for p in parts if p.lstrip("-"))
     return refs
 
 
@@ -347,7 +366,14 @@ def gateway_reachability(url: str, listeners: set[tuple[str, int]]) -> str:
         return "unparseable"
     if not host:
         return "unparseable"
-    loopback = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "::"}
+    # 0.0.0.0 / :: are WILDCARD BIND addresses, not valid targets — a unit
+    # pointing at one is a real misconfiguration (the mesh gateway binds a
+    # specific tailnet IP, not the wildcard), so catch it rather than bless
+    # it (PR #261, Copilot finding 3). As LISTENER addresses they stay
+    # valid below: a wildcard listener does serve a loopback target.
+    if host in ("0.0.0.0", "::"):
+        return "wildcard-target"
+    loopback = {"localhost", "127.0.0.1", "::1"}
     if host in loopback:
         for lip, lport in listeners:
             if lport == port and (lip.startswith("127.") or lip in ("::1", "0.0.0.0", "::")):
@@ -767,7 +793,16 @@ def run_selfcheck(*, self_name: str, declaration: Path,
 
     def _show(key: str, vals: set[str]) -> list[str]:
         if key in secret_keys:
-            return sorted(f"<redacted, {len(v)} chars>" for v in vals)
+            # Two DIFFERENT same-length secrets must not display as one
+            # repeated string while reporting "2 values" (PR #261, Copilot
+            # finding 4) — two 43-char tokens is exactly the peer-token
+            # case. Number by sorted order: stable within the run, and the
+            # number-to-value mapping is never printed, so nothing leaks.
+            ordered = sorted(vals)
+            if len(ordered) == 1:
+                return [f"<redacted, {len(ordered[0])} chars>"]
+            return [f"<redacted #{i}, {len(v)} chars>"
+                    for i, v in enumerate(ordered, 1)]
         return sorted(vals)
 
     for key, vals in sorted(by_key.items()):
@@ -870,6 +905,10 @@ def run_selfcheck(*, self_name: str, declaration: Path,
                 print(f"  UNREACHABLE gateway {val} — no listener on this box; "
                       "if that host is remote this line does not apply, if it is "
                       "local the gateway is DOWN for anything pointing there")
+                drift = True
+            elif state == "wildcard-target":
+                print(f"  MALFORMED gateway {val} — 0.0.0.0/:: is a wildcard BIND "
+                      "address, not a target; nothing can dial it")
                 drift = True
             elif state == "unparseable":
                 print(f"  MALFORMED gateway value {val!r} does not parse as host:port")
