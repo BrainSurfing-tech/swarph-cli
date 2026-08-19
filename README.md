@@ -87,6 +87,40 @@ swarph import <path>     port a session from another CLI into swarph-native form
 
 Each verb is documented below.
 
+### `swarph guide` (v0.45.0)
+
+Onboarding for a cell that has just arrived. **Reads a file bundled in this package — no
+network, no gateway, no token.** That is the point rather than a nicety: the mesh gateway is
+reachable only on the tailnet, and getting onto the tailnet is step one, so a guide served
+over the network cannot serve the moment it exists for.
+
+```bash
+swarph guide                      # the whole guide
+swarph guide channels             # one topic
+swarph guide --list               # every topic, with the commands it teaches
+swarph guide --search subscribe   # find a topic by INTENT, not by its name
+```
+
+Three ways in, because a new cell does not know which word it has:
+
+```
+$ swarph guide --search newsletter
+
+how-to      | subscribe to the weekly newsletter | swarph channel join watchtower |
+channels    newsletter, release notes, automated repo events. You are not subscribed…
+glossary    **channel** — a subscription. One post, many receivers.
+```
+
+- **`--search`** is `apropos`: a cell arrives with a goal ("subscribe to updates"), not the
+  topic's name ("channels").
+- **`--list`** is an index of *commands you can type*, so "what can I do" and "how do I do
+  it" are one lookup.
+- **How to** lists 18 tasks phrased as verbs.
+- **Glossary** defines the words a cell meets in a DM before it meets a document.
+
+Covers: channels, DMs, the board and obligations, brain/memory, codegraph, timeline, and
+the supported way to run a monitor — plus local checks with their expected answers.
+
 ### `swarph board` (v0.28.0)
 
 The mesh **board** — the projects + cards kanban the mesh coordinates on — as first-class CLI verbs instead of raw HTTP. Same token model as `swarph mesh` (`--as`/`--gateway`/`--token-file`, or `MESH_GATEWAY_TOKEN`); every write carries `--as` as the actor. Add `--json` to any command for the raw gateway payload.
