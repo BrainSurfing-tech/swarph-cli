@@ -118,6 +118,9 @@ _VERB_HANDLERS: dict[str, str] = {
     "highlight": "swarph_cli.commands.highlight.run_highlight",
     "codegraph": "swarph_cli.commands.codegraph.run_codegraph",
     "bench": "swarph_cli.commands.bench.run_bench",
+    # #523: reads a file bundled in this package. NO network, no gateway,
+    # no token -- the audience is cells that have not set up yet.
+    "guide": "swarph_cli.commands.guide.run_guide",
     # Future: "list-peers", "list-adapters", etc.
 }
 

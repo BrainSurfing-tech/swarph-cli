@@ -116,8 +116,11 @@ where = ["src"]
 # shipped a README telling peers to run scripts/ensure_monitor.sh while the
 # wheel did NOT contain it -- non-.py files need declaring here, and a
 # clean-room install is what caught it.
+# v0.45: ship the guide (#523). `swarph guide` reads it via
+# importlib.resources, so an undeclared GUIDE.md passes every test in the
+# tree and fails on every installed wheel -- the 0.39.3 bug above, again.
 swarph_cli = ["systemd/*.service", "systemd/*.timer", "systemd/*.default",
-              "scripts/*.sh", "scripts/*.ps1"]
+              "scripts/*.sh", "scripts/*.ps1", "guide/*.md"]
 # v0.15: ship the bundled mesh-gateway schema so `swarph gateway serve`
 # can apply it at startup via MESH_SCHEMA_PATH (defaults next to server.py).
 "swarph_cli.gateway" = ["*.sql"]
