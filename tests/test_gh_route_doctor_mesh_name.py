@@ -20,6 +20,7 @@ false-negative direction gets its own test below.
 from __future__ import annotations
 
 import json
+import pathlib
 
 # NO sys.path tweak: pyproject.toml sets `pythonpath = ["src"]` for the whole suite
 # (line 133), and this was the ONLY file in tests/ that prepended it by hand. Copilot,
@@ -110,13 +111,28 @@ def test_an_UNREADABLE_config_is_NOT_reported_as_a_cell_named_after_its_file(
     mesh name nothing had asserted. That is the invents-a-fact failure the same
     docstring warns against.
 
-    Coverage that cannot be established must not be reported as coverage that was."""
+    Coverage that cannot be established must not be reported as coverage that was.
+
+    >>> THE FIRST VERSION USED chmod(0o000) AND WAS GREEN ON LINUX, RED ON WINDOWS. <<<
+    Windows does not make a file unreadable that way, so the config parsed and doctor
+    returned ['fine'] — the very false-green this test exists to forbid, produced BY the
+    test on the platform it was not written on. Caught by the macOS/Windows CI legs.
+
+    INJECT THE FAILURE, do not stage it on the real filesystem. Same rule given to
+    cursor-lin on #261 four hours earlier: a test that depends on real machine state
+    passes where it was written and fails where it was not.
+    """
     d = _box(tmp_path, monkeypatch, {"broken.yaml": "name: fine\n"})
-    (d / "broken.yaml").chmod(0o000)
-    try:
-        out = gh_route._cells_on_this_box()
-    finally:
-        (d / "broken.yaml").chmod(0o644)
+
+    real_read = pathlib.Path.read_text
+
+    def _boom(self, *a, **kw):
+        if self.name == "broken.yaml":
+            raise OSError(13, "Permission denied")
+        return real_read(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", _boom)
+    out = gh_route._cells_on_this_box()
 
     assert out == [], f"an unreadable config must not become a mesh name — got {out}"
     assert "UNREADABLE" in capsys.readouterr().err
