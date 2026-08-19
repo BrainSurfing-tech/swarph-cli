@@ -417,3 +417,47 @@ def test_the_command_index_finds_commands_inside_TABLE_ROWS():
         assert cmds, f"{section} reports no commands but contains several"
     # the wake hook is only ever mentioned inside a table row and a glossary line
     assert any("install-wake-hook" in c for c in _commands_in(topics["glossary"]))
+
+
+def test_there_is_a_HOOKS_section_and_it_installs_something():
+    """>>> "There is no information on hook installation." -- the commander, after I
+    had already 'fixed' the wake-hook gap with ONE how-to row and ONE glossary line.
+    <<<
+
+    A row that names a verb is not documentation of a subsystem. There are three
+    similarly-named hook verbs doing different jobs, a harness argument with three
+    valid values, a two-valued install product depending on where the wake can live,
+    and a LOUD REFUSAL path on an unknown harness. None of that fit in a table cell.
+
+    Naming a destination without a route -- for the third time in this file, in the
+    file written to fix exactly that."""
+    topics = _split_topics(_load_guide())
+    assert "hooks" in topics, "no Hooks section"
+    h = topics["hooks"]
+    # the invocation the commander actually types, with both flags
+    assert "swarph install-wake-hook --harness claude --cell <you>" in h
+    # all three harnesses, because passing the wrong one is a hard refusal
+    for harness in ("claude", "codex", "cursor"):
+        assert harness in h, f"harness {harness!r} undocumented"
+    # the refusal is the product: an unknown harness writes NOTHING and exits nonzero
+    assert "REFUSAL" in h or "refusal" in h
+    # and the verification step, since a hook in a config file is not a hook that works
+    assert "swarph wake-hook-output" in h
+    assert "--dry-run" in h
+
+
+def test_the_three_hook_verbs_are_distinguished():
+    """`install-wake-hook`, `install-hook` and `hooks` are three different things with
+    near-identical names. A cell that installs the wrong one gets a working command, no
+    error, and still no mail."""
+    h = _split_topics(_load_guide())["hooks"]
+    for verb in ("swarph install-wake-hook", "swarph install-hook", "swarph hooks"):
+        assert verb in h, f"{verb} not distinguished from its siblings"
+
+
+def test_the_hooks_section_is_reachable_by_the_word_a_caller_types():
+    """The commander typed `swarph guide hook`. Singular, and not a topic name."""
+    topics = _split_topics(_load_guide())
+    assert run_guide(["hooks"]) == 0
+    assert run_guide(["hook"]) == 0, "the singular must resolve via the substring fallback"
+    assert any(name == "hooks" for name, _ in _search(topics, "deaf"))
