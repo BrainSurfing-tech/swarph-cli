@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from swarph_cli.commands.guide import _load_guide, _search, _split_topics, run_guide
+from swarph_cli.commands.guide import (_commands_in, _load_guide, _search,
+                                        _split_topics, run_guide)
 
 
 def test_the_guide_loads_as_a_packaged_resource():
@@ -381,3 +382,38 @@ def test_search_never_returns_an_empty_or_heading_only_line():
         for name, line in _search(topics, term):
             assert line.strip(), f"empty hit for {term!r} in {name}"
             assert not line.startswith("#"), f"heading returned for {term!r} in {name}"
+
+
+def test_an_ignored_argument_is_REFUSED_not_swallowed(capsys):
+    """>>> AN IGNORED FILTER RETURNS AN UNFILTERED SUPERSET THAT LOOKS FILTERED. <<<
+
+    `swarph guide --list hook` ran the full index and DISCARDED 'hook' in silence, so
+    the caller reads a complete list as though it were hook-scoped. Found by the
+    commander typing it.
+
+    The gateway refuses exactly this on GET /messages, in those words -- so this CLI
+    was doing what its own server forbids. The rule was already written down in this
+    codebase; it just was not applied here."""
+    for flag in (["--list"], ["--search", "wake"]):
+        rc = run_guide([*flag, "hook"])
+        assert rc == 2, f"{flag} + topic must refuse, got rc={rc}"
+        err = capsys.readouterr().err
+        assert "silently ignored" in err
+        # and it must name BOTH readings, since either could be what was meant
+        assert "--search hook" in err and "guide hook" in err
+
+
+def test_the_command_index_finds_commands_inside_TABLE_ROWS():
+    """`how-to` listed NO commands and it is nothing but commands -- 18 markdown table
+    rows, each `| task | \\`swarph ...\\` |`. A startswith('swarph ') test saw none of
+    them, so the sections that under-reported were exactly the most command-dense ones:
+    how-to, check-your-own-setup, glossary.
+
+    A `--list` that shows an em-dash against the richest section teaches the reader
+    that section is empty."""
+    topics = _split_topics(_load_guide())
+    for section in ("how-to", "check-your-own-setup", "glossary"):
+        cmds = _commands_in(topics[section])
+        assert cmds, f"{section} reports no commands but contains several"
+    # the wake hook is only ever mentioned inside a table row and a glossary line
+    assert any("install-wake-hook" in c for c in _commands_in(topics["glossary"]))

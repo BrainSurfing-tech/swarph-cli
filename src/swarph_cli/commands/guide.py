@@ -23,6 +23,7 @@ channels, your wake_policy, your unread count). It must never become the only co
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 
 # >>> THE GUIDE IS PROSE, SO ITS OUTPUT IS THE MOST LIKELY IN THE WHOLE CLI TO CARRY A
@@ -85,17 +86,23 @@ def _split_topics(text: str) -> "dict[str, str]":
 
 def _commands_in(section: str) -> "list[str]":
     """The `swarph ...` invocations a section teaches, first line of each, deduped."""
+    # >>> `how-to` LISTED NO COMMANDS, AND IT IS NOTHING BUT COMMANDS. <<< The rows are
+    # markdown table cells -- `| get woken when a DM arrives | \`swarph install-wake-hook\` |`
+    # -- so a startswith("swarph ") test saw none of them. The sections that under-reported
+    # were exactly the most command-dense ones: how-to, check-your-own-setup, glossary.
+    # Match the invocation ANYWHERE in the line, not only at its start.
+    # (Commander, running `swarph guide --list`, 2026-08-19.)
     out: list[str] = []
-    for line in section.splitlines():
-        s = line.strip().lstrip("$ ").rstrip("\\").strip()
-        if not s.startswith("swarph "):
-            continue
+    for raw in section.splitlines():
+        for chunk in re.findall(r"(?:^|[|`$]\s*)(swarph\s+[a-z][a-z0-9-]*(?:\s+[a-z][a-z0-9-]*)?)",
+                                raw):
+            s = chunk.strip()
         # Truncate to verb + subcommand FIRST, then dedupe. Deduping the full line and
         # truncating after yields "swarph board cards" three times — the dedupe has to
         # run on the value actually printed, not on its input.
-        entry = " ".join(s.split()[:3]).rstrip(" \\")
-        if entry not in out:
-            out.append(entry)
+            entry = " ".join(s.split()[:3]).rstrip(" \\")
+            if entry not in out:
+                out.append(entry)
     return out
 
 
@@ -173,6 +180,19 @@ def run_guide(argv: "list[str]") -> int:
     if len(argv) >= 2 and argv[0] in ("search", "find", "apropos"):
         argv = ["--search", *argv[1:]]
     args = p.parse_args(argv)
+
+    # >>> AN IGNORED ARGUMENT RETURNS AN UNFILTERED SUPERSET THAT LOOKS FILTERED. <<<
+    # `swarph guide --list hook` ran the full list and DISCARDED "hook" in silence, so
+    # the caller reads a complete index as if it were a hook-scoped one. The gateway
+    # refuses precisely this on GET /messages, in those words -- and this CLI did what
+    # that server forbids. Refuse, and name the two things the caller might have meant.
+    if args.topic and (args.list or args.search):
+        other = "--list" if args.list else "--search"
+        print_safe(f"swarph guide: {other} takes no topic, and {args.topic!r} would have "
+                   f"been silently ignored.", stream=sys.stderr)
+        print_safe(f"  did you mean:  swarph guide --search {args.topic}", stream=sys.stderr)
+        print_safe(f"             or:  swarph guide {args.topic}", stream=sys.stderr)
+        return 2
 
     text = _load_guide()
     topics = _split_topics(text)
