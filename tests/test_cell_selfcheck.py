@@ -52,15 +52,27 @@ def _cron(text):
     return {"name": "(crontab)", "kind": "cron", "text": text, "live": True, "shared": True}
 
 
-# An inert resolver: NO gateway claim, no token, no socket table. Tests that
-# do not inject this would read the REAL box's env and /proc/net/tcp — the
-# "only passes on one box" trap this whole suite exists to avoid, one layer out.
+# An inert resolver: NO gateway claim, no token, an EMPTY but READ socket
+# table. Tests that do not inject this would read the REAL box's env and
+# /proc/net/tcp — the "only passes on one box" trap this whole suite exists
+# to avoid, one layer out. (PR #261 review: exactly that fall-through made
+# test_per_cell_declaration_wins_when_both_exist green on the author's box
+# and red on CI — the box's own MESH_GATEWAY_URL leaked into the verdict.)
 _INERT_RESOLVER = {
     "gateway": None,
     "token": (None, "no token resolvable"),
     "listeners": set(),
-    "socket_table_read": False,
+    "socket_table": "read",
 }
+
+
+@pytest.fixture(autouse=True)
+def _no_real_resolver(monkeypatch):
+    """Hermeticity is not opt-in: ANY call that forgets to inject a resolver
+    gets the inert one, never the environment of whatever runner executes
+    it. If a fall-through path exists at all, something will take it."""
+    monkeypatch.setattr(sc, "resolve_cell_inputs",
+                        lambda self_name: dict(_INERT_RESOLVER))
 
 
 def _run(monkeypatch, tmp_path, surfaces, self_name, expected=None, capsys=None,
@@ -735,7 +747,7 @@ def _envfile(text, owner="lab-ovh", live=True, name="/etc/default/x (via x.servi
 def _resolver(gateway="http://100.107.222.72:8788", token=("t" * 43, "peer file"),
               listeners=frozenset({("100.107.222.72", 8788)})):
     return {"gateway": gateway, "token": token, "listeners": set(listeners),
-            "socket_table_read": True}
+            "socket_table": "read"}
 
 
 def test_specimen1_wrong_host_env_literal_is_resolver_drift(monkeypatch, tmp_path, capsys):
@@ -762,14 +774,34 @@ def test_specimen1_also_caught_by_listener_when_literal_matches_default(monkeypa
     assert "UNREACHABLE" in out and "localhost:8788" in out
 
 
-def test_reachability_is_not_checked_without_a_socket_table(monkeypatch, tmp_path, capsys):
-    """Absent table must not report UNREACHABLE everywhere — the false-calm
-    lie inverted is false alarm."""
+def test_absent_socket_table_is_did_not_measure_not_false_clean(monkeypatch, tmp_path, capsys):
+    """macOS has no /proc (this repo's macOS leg exists because a /proc
+    dependency shipped undetected once already, card #492). A run that never
+    saw a socket table must say DID NOT MEASURE — not a silent skip, not a
+    false clean, and NOT UNREACHABLE everywhere (the false-calm lie inverted
+    is false alarm)."""
+    resolver = {"gateway": "http://100.107.222.72:8788",
+                "token": (None, "no token resolvable"),
+                "listeners": set(), "socket_table": "absent"}
     rc, out = _run(monkeypatch, tmp_path, [
-        _envfile("MESH_GATEWAY_URL=http://localhost:8788\n"),
-    ], "lab-ovh", capsys=capsys)  # inert resolver: socket_table_read False
+        _envfile("MESH_GATEWAY_URL=http://100.107.222.72:8788\n"),
+    ], "lab-ovh", capsys=capsys, resolver=resolver)
+    assert rc == 2
+    assert "DID NOT MEASURE" in out and "socket table" in out
     assert "UNREACHABLE" not in out
-    assert "reachability not checked" in out
+    assert "no /proc on this platform" in out
+
+
+def test_unreadable_socket_table_is_also_blind(monkeypatch, tmp_path, capsys):
+    """Non-vacuity partner: a PARTIAL read (one /proc file failed) is blind
+    too — half a socket table is not a measurement."""
+    resolver = {"gateway": None, "token": (None, "no token resolvable"),
+                "listeners": {("127.0.0.1", 22)}, "socket_table": "unreadable"}
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("a.service", "ExecStart=x --as lab-ovh --state-dir /s\n"),
+    ], "lab-ovh", capsys=capsys, resolver=resolver)
+    assert rc == 2
+    assert "DID NOT MEASURE" in out and "unreadable" in out
 
 
 def test_remote_gateway_is_not_marked_unreachable(monkeypatch, tmp_path, capsys):
@@ -924,3 +956,27 @@ def test_undeclared_surface_token_mismatch_still_fires(monkeypatch, tmp_path, ca
     assert rc == 1
     assert out.count("TOKEN MISMATCH") == 1  # only the undeclared surface
     assert "refresh-features-snapshot" in out.split("TOKEN MISMATCH")[1]
+
+
+def test_empty_env_value_is_declarable_by_surface(monkeypatch, tmp_path, capsys):
+    """PR #261 review: an EMPTY env value is ambiguous — 'deliberately
+    disabled' and 'never filled in' look identical (measured: the gateway's
+    empty MESH_GATEWAY_COMMANDER_TOKEN is vestigial and guarded, not a
+    hole). The declaration is how the operator says which."""
+    surface = "/home/ubuntu/mesh-gateway/.env (via mesh-gateway.service)"
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile("MESH_GATEWAY_COMMANDER_TOKEN=\n", name=surface, owner=None),
+    ], "cursor-lin",
+        expected={f"env:MESH_GATEWAY_COMMANDER_TOKEN@{surface}": ["<EMPTY>"]},
+        capsys=capsys, resolver=_resolver())
+    assert rc == 0, out
+    assert "DECLARED" in out and "MALFORMED" not in out
+
+
+def test_undeclared_empty_env_value_still_malformed(monkeypatch, tmp_path, capsys):
+    """Non-vacuity partner: without the declaration, empty is MALFORMED."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile("MESH_GATEWAY_COMMANDER_TOKEN=\n", owner=None),
+    ], "cursor-lin", capsys=capsys, resolver=_resolver())
+    assert rc == 1
+    assert "MALFORMED" in out

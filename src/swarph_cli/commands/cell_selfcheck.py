@@ -362,7 +362,14 @@ def gateway_reachability(url: str, listeners: set[tuple[str, int]]) -> str:
 
 def resolve_cell_inputs(self_name: str) -> dict:
     """THE IMPURE resolver read: env, token chain, socket table. Isolated so
-    tests inject a fixture dict and every verdict branch stays pure."""
+    tests inject a fixture dict and every verdict branch stays pure.
+
+    socket_table is a TRI-STATE: "read" (both /proc files parsed),
+    "unreadable" (present but a read failed), "absent" (no /proc at all —
+    macOS/Windows; this repo has a macOS CI leg precisely because a /proc
+    dependency shipped undetected once already, card #492). Both non-read
+    states are blind coverage: never a silent skip, never a false clean.
+    """
     listeners: set[tuple[str, int]] = set()
     tcp_texts = []
     tcp_ok = True
@@ -373,11 +380,17 @@ def resolve_cell_inputs(self_name: str) -> dict:
             tcp_ok = False
     if tcp_texts:
         listeners = parse_listen_sockets(tcp_texts)
+    if not tcp_texts:
+        socket_table = "absent"
+    elif not tcp_ok:
+        socket_table = "unreadable"
+    else:
+        socket_table = "read"
     return {
         "gateway": resolver_gateway(dict(os.environ)),
         "token": resolver_token(self_name, dict(os.environ), Path.home()),
         "listeners": listeners,
-        "socket_table_read": bool(tcp_texts) and tcp_ok,
+        "socket_table": socket_table,
     }
 
 
@@ -717,6 +730,18 @@ def run_selfcheck(*, self_name: str, declaration: Path,
 
     for r in mine:
         if r.live and r.value == "<EMPTY>":
+            # An EMPTY env value is ambiguous in a way a flag value is not:
+            # "deliberately disabled" and "never filled in" look identical
+            # (measured: MESH_GATEWAY_COMMANDER_TOKEN='' in the gateway's
+            # .env — vestigial, guarded in server.py, NOT a hole). So env
+            # rows may DECLARE empty by surface; flags may not (shape 4's
+            # `--cursor =` is a measured fixture and stays hard drift).
+            if r.key.startswith("env:"):
+                decl = declared.get(f"{r.key}@{r.surface}")
+                decl_list = decl if isinstance(decl, list) else ([decl] if decl else [])
+                if "<EMPTY>" in decl_list:
+                    print(f"  DECLARED  --{r.key} is empty   ({r.surface}) — a stated choice")
+                    continue
             print(f"  MALFORMED --{r.key} has no value   ({r.surface})")
             drift = True
 
@@ -802,14 +827,23 @@ def run_selfcheck(*, self_name: str, declaration: Path,
     resolved_gw = resolver.get("gateway")  # None = the resolver makes NO CLAIM
     listeners = resolver.get("listeners", set())
     resolved_tok, tok_source = resolver.get("token") or (None, "no token resolvable")
-    socket_read = bool(resolver.get("socket_table_read"))
+    socket_state = resolver.get("socket_table", "absent")
 
-    if socket_read:
+    if socket_state == "read":
         print(f"  COVERAGE  {'resolver comparison':18s} read      "
               "gateway + token vs resolver; listeners from the local socket table")
     else:
-        print(f"  COVERAGE  {'resolver comparison':18s} read      "
-              "gateway + token vs resolver; socket table ABSENT — reachability not checked")
+        # NOT a silent skip and NOT a false clean (PR #261 review): a run
+        # that never saw a socket table cannot have checked reachability,
+        # so the socket table is blind coverage -> DID NOT MEASURE. On
+        # macOS there is no /proc at all; this is the same vocabulary as
+        # an unreadable EnvironmentFile, reused rather than invented.
+        reason = ("absent — no /proc on this platform (Linux-only surface)"
+                  if socket_state == "absent" else
+                  "unreadable — a /proc/net/tcp* read failed")
+        coverage.append({"class": "socket table", "read": False, "detail": reason})
+        blind.append({"class": "socket table", "read": False, "detail": reason})
+        print(f"  COVERAGE  {'socket table':18s} NOT READ  {reason}")
 
     gw_rows = [r for r in mine if r.live and r.value != "<EMPTY>"
                and r.key in ("gateway", "env:MESH_GATEWAY_URL")]
@@ -829,7 +863,7 @@ def run_selfcheck(*, self_name: str, declaration: Path,
     # absent table would report UNREACHABLE everywhere, which is the
     # false-calm lie inverted: false alarm. local-silent on the RESOLVED
     # value means the cell's own CLI cannot reach the mesh either.
-    if socket_read:
+    if socket_state == "read":
         for val in sorted(set(gw_literals) | ({resolved_gw} if resolved_gw else set())):
             state = gateway_reachability(val, listeners)
             if state == "local-silent":
