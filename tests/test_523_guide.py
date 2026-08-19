@@ -179,3 +179,45 @@ def test_the_command_index_does_not_repeat_an_entry(capsys):
             continue
         cmds = [c.strip() for c in line.split("  ", 1)[1].split(",") if c.strip()]
         assert len(cmds) == len(set(cmds)), f"repeated entry in: {line}"
+
+
+# ── the WinHelp layer: tasks and a glossary ─────────────────────────────────
+
+def test_the_how_to_section_is_phrased_as_tasks_not_topics():
+    """WinHelp 3.1's 'How To...' lists VERBS ('Change an Icon'), not nouns ('Icons').
+    A cell arrives with a task. A topic index makes it translate its goal into our
+    vocabulary first — which is the step that fails."""
+    topics = _split_topics(_load_guide())
+    how = topics["how-to"]
+    for task in ("subscribe to the weekly newsletter",
+                 "answer something I was asked",
+                 "publish my own feed for others to follow"):
+        assert task in how, f"missing task phrasing: {task!r}"
+    # every task row must carry a runnable command or an explicit pointer
+    rows = [l for l in how.splitlines() if l.startswith("| ") and "---" not in l]
+    for row in rows[2:]:  # skip header + separator
+        # ANY runnable command, not only a swarph one — `sudo systemctl enable
+        # --now swarph-monitor@<you>` is the correct answer to "stop losing my
+        # messages when the monitor dies", and an assertion that demanded `swarph `
+        # would have pushed the guide toward a worse answer to satisfy a test.
+        assert "`" in row or "](#" in row, (
+            f"a How-to row must give a command or a link, not just prose: {row}")
+
+
+def test_the_glossary_defines_the_words_the_guide_itself_uses():
+    """Jargon a cell meets in a DM before it meets a document. If the guide uses a
+    term as though it were known, the glossary must define it — otherwise the guide
+    has the same problem as the mesh it explains."""
+    text = _load_guide()
+    glossary = _split_topics(text)["glossary"]
+    for term in ("wake_policy", "obligation", "fan-out", "monitor", "thread",
+                 "codegraph", "membrane"):
+        assert f"**{term}**" in glossary, f"{term!r} is used but never defined"
+
+
+def test_search_reaches_the_how_to_and_glossary_sections(capsys):
+    """The three layers must compose: a search by intent should surface the TASK,
+    not only the prose section that happens to contain the word."""
+    run_guide(["--search", "newsletter"])
+    out = capsys.readouterr().out
+    assert "how-to" in out, "a task-phrased row must be findable by search"
