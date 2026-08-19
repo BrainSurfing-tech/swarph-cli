@@ -112,11 +112,58 @@ def _cells_on_this_box() -> list:
     cells are one install away from a total `gh` refusal. lab-ovh runs eleven cells
     on one uid; a caller-scoped check there measures the wrong population, which is
     the defect this whole card family keeps finding.
+
+    >>> IT MUST RETURN THE MESH NAME, NOT THE FILENAME. <<< The router resolves
+    `SWARPH_SELF` (run_show, and the hook path) and looks THAT up in the mapping. A
+    preflight keyed on `p.stem` is asking a different question than the thing it
+    certifies, and the two only agree when the filename happens to equal the mesh name.
+
+    Found on lab-ovh 2026-08-18: `lab.yaml` carries `name: lab-ovh` with `role: lab` —
+    a deliberate split (commander, 2026-05-28: "I want lab to be lab"; the mesh name is
+    lab-ovh, the display role is lab). Doctor reported `lab -> (unmapped)` while
+    SWARPH_SELF=lab-ovh WAS mapped and would have worked.
+
+    Both directions are wrong, and the second is the dangerous one:
+      FALSE POSITIVE  doctor cries refusal for a cell that resolves fine
+      FALSE NEGATIVE  "fix" it by adding the FILENAME key and doctor goes GREEN while
+                      the router still looks up the mesh name — a preflight certifying
+                      an install that refuses every gh call. A green that means nothing
+                      is worse than a red that means nothing.
     """
+    import yaml  # local import — keeps `swarph --version` PyYAML-free (cell.py:254)
+
+    out = []
     try:
-        return sorted(p.stem for p in cells_dir().glob("*.yaml"))
+        files = sorted(cells_dir().glob("*.yaml"))
     except Exception:
         return []
+
+    for f in files:
+        try:
+            doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+            name = doc.get("name") if isinstance(doc, dict) else None
+        except OSError as exc:
+            # >>> AN UNREADABLE CONFIG IS NOT A CELL NAMED AFTER ITS FILE. <<< The first
+            # version's docstring promised this distinction and the CODE DID NOT MAKE IT:
+            # OSError and no-name-found both set name=None and both fell through to
+            # f.stem, so an unreadable config was silently reported as a mesh name that
+            # nothing had asserted. gpu-wsl, reviewing PR #262: "the docstring asserts a
+            # safety property the code does not have, which is exactly the invents-a-fact
+            # failure that same docstring warns against."
+            #
+            # Report it as unreadable and let doctor surface it. Coverage lab cannot
+            # establish must not be reported as coverage it has.
+            print_safe(f"  UNREADABLE  {f.name}: {exc} — cannot determine this cell's "
+                       f"mesh name, so it is NOT counted as covered", file=sys.stderr)
+            continue
+        except yaml.YAMLError as exc:
+            print_safe(f"  UNPARSEABLE {f.name}: {exc} — cannot determine this cell's "
+                       f"mesh name, so it is NOT counted as covered", file=sys.stderr)
+            continue
+        # Fall back to the stem ONLY when the file parsed and declares no name — a real
+        # fact about a readable config, not a guess about an unreadable one.
+        out.append(name if isinstance(name, str) and name else f.stem)
+    return sorted(out)
 
 
 def run_doctor() -> int:
