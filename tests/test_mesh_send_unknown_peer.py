@@ -12,14 +12,9 @@ got the constrained input. All 63 came from the unconstrained side.
 """
 from __future__ import annotations
 
-import sys
-import types
-from pathlib import Path
-
-import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
+# NO sys.path tweak: pyproject sets `pythonpath = ["src"]` suite-wide, and every other
+# mesh test imports directly (tests/test_mesh_command.py:10). A manual prepend makes
+# import order depend on filesystem layout and can mask packaging regressions.
 from swarph_cli.commands import mesh
 
 
@@ -152,3 +147,48 @@ def test_a_name_with_no_plausible_match_suggests_NOTHING(monkeypatch):
     and inventing one would be the same misroute as the drop/droplet trap."""
     assert mesh._near_names("claude-service",
                             ["workstation-lc", "lab-ovh", "droplet"]) == []
+
+
+# ── Copilot's finding on #263: a 2xx of the WRONG SHAPE must not block ──────
+
+def test_a_2xx_with_an_UNEXPECTED_SHAPE_still_SENDS(monkeypatch, capsys):
+    """>>> THE GUARD MUST NOT FAIL CLOSED ON ITS OWN CONFUSION. <<< (Copilot, #263.)
+
+    The first version guarded the STATUS and the EMPTY case but assumed the body was a
+    dict of dicts. A 2xx carrying a bare list, or {detail: ...}, raised inside
+    payload.get()/p.get() and PROPAGATED — blocking the send. That is the exact opposite
+    of this function's contract and of the two tests written to pin it: a validator that
+    fails closed on its own failure IS the outage it was meant to prevent.
+
+    Each shape is asserted separately because they fail at different lines."""
+    for shape in ([], {"detail": "nope"}, {"peers": "not-a-list"},
+                  {"peers": [None, 42]}, "a string"):
+        monkeypatch.setattr(mesh, "_http_get_json", lambda u, t, **k: (200, shape))
+        assert mesh._check_recipient("anything", "http://gw", "t") is None, (
+            f"a 2xx with shape {shape!r} must fall through to the permissive path, "
+            f"not raise and not refuse")
+        assert "WITHOUT a recipient check" in capsys.readouterr().err
+
+
+def test_the_suggestions_are_SORTED_and_one_per_line(monkeypatch):
+    """Copilot, #263: one line in _near_names' own order reads as a ranked answer with a
+    best guess at the front. These are OPTIONS — 'drop' legitimately means either
+    droplet or drop-on-meta-edge, and difflib ranks the WRONG one first.
+
+    ASSERTED ON THE RENDERED MESSAGE, NOT ON _near_names' RETURN. The function
+    deliberately returns MATCH ORDER (prefix hits first, then fuzzy) — that ordering is
+    how it FINDS candidates. Sorting is a PRESENTATION decision made where the text is
+    built, and an earlier draft of this test asserted it one layer too low and failed
+    against correct code."""
+    monkeypatch.setattr(mesh, "_http_get_json", lambda u, t, **k: (200, {"peers": [
+        {"name": "droplet"}, {"name": "drop-on-meta-edge"}, {"name": "workstation-lc"}]}))
+
+    msg = mesh._check_recipient("drop", "http://gw", "t")
+
+    assert msg is not None
+    lines = [l.strip() for l in msg.splitlines() if l.strip()]
+    i = lines.index("Did you mean:")
+    shown = lines[i + 1:]
+    assert shown == sorted(shown), f"options must be sorted, not in match order: {shown}"
+    assert set(shown) == {"droplet", "drop-on-meta-edge"}, shown
+    assert len(shown) > 1, "one option would read as a ranked answer — the drop trap"

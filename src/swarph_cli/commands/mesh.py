@@ -395,16 +395,34 @@ def _check_recipient(to: str, gateway: str, token: str) -> str | None:
     this codebase, because the cost asymmetry runs the other way.
     """
     status, payload = _http_get_json(f"{gateway.rstrip('/')}/peers", token)
-    if status < 200 or status >= 300:
-        print(f"swarph mesh send: could not read the peer registry "
-              f"({status or 'unreachable'}) — sending WITHOUT a recipient check",
+
+    # >>> EVERY UNEXPECTED SHAPE IS A CANNOT-EVALUATE, NOT AN EXCEPTION. <<< (Copilot,
+    # reviewing #263.) The first version guarded the STATUS and the EMPTY case but
+    # assumed the BODY was a dict of dicts. A 2xx carrying a bare list or {detail: ...}
+    # would raise inside payload.get()/p.get() and propagate — BLOCKING THE SEND, which
+    # is the exact opposite of this function's stated contract and of the two tests
+    # written to pin it. A guard that fails closed on its own confusion is the outage it
+    # was meant to prevent.
+    #
+    # Same isinstance ladder monitor._verify_self_is_registered already uses
+    # (monitor.py:149-156) — reused rather than reinvented.
+    def _unchecked(why: str):
+        print(f"swarph mesh send: {why} — sending WITHOUT a recipient check",
               file=sys.stderr)
         return None
-    names = [p.get("name") for p in (payload.get("peers") or []) if p.get("name")]
+
+    if status < 200 or status >= 300:
+        return _unchecked(f"could not read the peer registry "
+                          f"({status or 'unreachable'})")
+    if not isinstance(payload, dict):
+        return _unchecked("unexpected /peers shape (not an object)")
+    peers = payload.get("peers")
+    if not isinstance(peers, list):
+        return _unchecked("unexpected /peers shape (no peer list)")
+    names = [p.get("name") for p in peers
+             if isinstance(p, dict) and isinstance(p.get("name"), str) and p.get("name")]
     if not names:
-        print("swarph mesh send: peer registry returned no names — sending WITHOUT "
-              "a recipient check", file=sys.stderr)
-        return None
+        return _unchecked("peer registry returned no names")
     if to in names:
         return None
 
@@ -415,7 +433,12 @@ def _check_recipient(to: str, gateway: str, token: str) -> str | None:
     if near:
         # SUGGEST, NEVER SUBSTITUTE. A mesh that silently reroutes a message to
         # whichever name it guessed is a much worse failure than refusing one.
-        msg += "\n  Did you mean:  " + "   ".join(near)
+        #
+        # SORTED, ONE PER LINE (Copilot, #263): a single line in _near_names' own order
+        # reads as a ranked answer with a best guess at the front. These are OPTIONS —
+        # `drop` legitimately means either droplet or drop-on-meta-edge, and the whole
+        # reason this returns several is that difflib ranks the WRONG one first.
+        msg += "\n  Did you mean:\n" + "\n".join(f"    {n}" for n in sorted(near))
     return msg
 
 
