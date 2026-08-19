@@ -87,3 +87,45 @@ def test_the_FALSE_NEGATIVE_direction_a_filename_key_must_NOT_satisfy_doctor(
     out = capsys.readouterr().out
     assert rc == 1, "a filename-keyed mapping must NOT certify the install"
     assert "lab-ovh" in out and "(unmapped)" in out
+
+
+# ── gpu-wsl's review findings on PR #262 ────────────────────────────────────
+
+def test_a_QUOTED_name_containing_a_hash_is_not_truncated(tmp_path, monkeypatch):
+    """gpu-wsl, reviewing #262: the first version stripped inline comments with an
+    unconditional split('#',1), which does not respect quoting — `name: "cell#7"`
+    truncated to 'cell'. A real parser costs nothing here: cell.py:254 already does a
+    LOCAL `import yaml` for this exact file format, specifically to keep
+    `swarph --version` PyYAML-free."""
+    _box(tmp_path, monkeypatch, {"q.yaml": 'name: "cell#7"\nrole: q\n'})
+
+    assert gh_route._cells_on_this_box() == ["cell#7"]
+
+
+def test_an_UNREADABLE_config_is_NOT_reported_as_a_cell_named_after_its_file(
+        tmp_path, monkeypatch, capsys):
+    """>>> THE DOCSTRING PROMISED THIS AND THE CODE DID NOT DO IT. <<< gpu-wsl: OSError
+    and no-name-found both set name=None and both fell through to f.stem identically,
+    with no test either direction — so an unreadable config was silently reported as a
+    mesh name nothing had asserted. That is the invents-a-fact failure the same
+    docstring warns against.
+
+    Coverage that cannot be established must not be reported as coverage that was."""
+    d = _box(tmp_path, monkeypatch, {"broken.yaml": "name: fine\n"})
+    (d / "broken.yaml").chmod(0o000)
+    try:
+        out = gh_route._cells_on_this_box()
+    finally:
+        (d / "broken.yaml").chmod(0o644)
+
+    assert out == [], f"an unreadable config must not become a mesh name — got {out}"
+    assert "UNREADABLE" in capsys.readouterr().err
+
+
+def test_a_readable_config_with_NO_name_still_falls_back_to_the_stem(tmp_path, monkeypatch):
+    """NON-VACUITY for the distinction above. The fallback must survive for the case it
+    was written for — a config that PARSED and simply declares no name is a real fact
+    about a readable file, unlike a guess about an unreadable one."""
+    _box(tmp_path, monkeypatch, {"nameless.yaml": "role: whatever\n"})
+
+    assert gh_route._cells_on_this_box() == ["nameless"]

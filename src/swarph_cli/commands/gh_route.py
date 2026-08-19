@@ -130,25 +130,40 @@ def _cells_on_this_box() -> list:
                       an install that refuses every gh call. A green that means nothing
                       is worse than a red that means nothing.
     """
+    import yaml  # local import — keeps `swarph --version` PyYAML-free (cell.py:254)
+
+    out = []
     try:
-        out = []
-        for f in sorted(cells_dir().glob("*.yaml")):
-            name = None
-            try:
-                for line in f.read_text(encoding="utf-8").splitlines():
-                    if line.startswith("name:"):
-                        # strip an inline `# comment` — these configs carry them
-                        name = line.split(":", 1)[1].split("#", 1)[0].strip().strip("'\"")
-                        break
-            except OSError:
-                name = None
-            # Fall back to the stem ONLY when the file declares no name. Do not fall
-            # back on a READ ERROR silently — an unreadable config is unknown coverage,
-            # and reporting its filename as a mesh name invents a fact.
-            out.append(name or f.stem)
-        return sorted(out)
+        files = sorted(cells_dir().glob("*.yaml"))
     except Exception:
         return []
+
+    for f in files:
+        try:
+            doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+            name = doc.get("name") if isinstance(doc, dict) else None
+        except OSError as exc:
+            # >>> AN UNREADABLE CONFIG IS NOT A CELL NAMED AFTER ITS FILE. <<< The first
+            # version's docstring promised this distinction and the CODE DID NOT MAKE IT:
+            # OSError and no-name-found both set name=None and both fell through to
+            # f.stem, so an unreadable config was silently reported as a mesh name that
+            # nothing had asserted. gpu-wsl, reviewing PR #262: "the docstring asserts a
+            # safety property the code does not have, which is exactly the invents-a-fact
+            # failure that same docstring warns against."
+            #
+            # Report it as unreadable and let doctor surface it. Coverage lab cannot
+            # establish must not be reported as coverage it has.
+            print_safe(f"  UNREADABLE  {f.name}: {exc} — cannot determine this cell's "
+                       f"mesh name, so it is NOT counted as covered", file=sys.stderr)
+            continue
+        except yaml.YAMLError as exc:
+            print_safe(f"  UNPARSEABLE {f.name}: {exc} — cannot determine this cell's "
+                       f"mesh name, so it is NOT counted as covered", file=sys.stderr)
+            continue
+        # Fall back to the stem ONLY when the file parsed and declares no name — a real
+        # fact about a readable config, not a guess about an unreadable one.
+        out.append(name if isinstance(name, str) and name else f.stem)
+    return sorted(out)
 
 
 def run_doctor() -> int:
