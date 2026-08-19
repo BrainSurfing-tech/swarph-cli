@@ -192,3 +192,20 @@ def test_the_suggestions_are_SORTED_and_one_per_line(monkeypatch):
     assert shown == sorted(shown), f"options must be sorted, not in match order: {shown}"
     assert set(shown) == {"droplet", "drop-on-meta-edge"}, shown
     assert len(shown) > 1, "one option would read as a ranked answer — the drop trap"
+
+
+def test_a_CASE_VARIANT_of_a_real_peer_is_accepted_not_refused(monkeypatch):
+    """droplet, reviewing #263: the exact-match check was case-sensitive against raw
+    input, so `Droplet` would fall through to the suggestion path and be REFUSED — while
+    _near_names lowercases for its own comparison and would have suggested `droplet`,
+    the name the caller had effectively already typed.
+
+    Non-blocking per its review, and fixed here only because the formal approval was
+    dismissed by an earlier push anyway. An unnecessary refusal is a small failure, but
+    it is a failure of this function's only job."""
+    _registry(monkeypatch)
+
+    assert mesh._check_recipient("Droplet", "http://gw", "t") is None
+    assert mesh._check_recipient("DROPLET", "http://gw", "t") is None
+    # non-vacuity: a name that is not a peer in ANY casing is still refused
+    assert mesh._check_recipient("Nonesuch", "http://gw", "t") is not None

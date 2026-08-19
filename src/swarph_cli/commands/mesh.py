@@ -423,7 +423,13 @@ def _check_recipient(to: str, gateway: str, token: str) -> str | None:
              if isinstance(p, dict) and isinstance(p.get("name"), str) and p.get("name")]
     if not names:
         return _unchecked("peer registry returned no names")
-    if to in names:
+    # Case-insensitive (droplet, reviewing #263). The registry is the authority on the
+    # EXACT spelling, so a capitalised variant of a real peer is still that peer — it
+    # would otherwise fall through to the suggestion path and be REFUSED, when
+    # _near_names lowercases for its own comparison anyway and would have suggested the
+    # very name the caller already typed. An unnecessary refusal is a small failure, but
+    # it is a failure of THIS function's only job.
+    if to in names or to.lower() in {n.lower() for n in names}:
         return None
 
     near = _near_names(to, names)
