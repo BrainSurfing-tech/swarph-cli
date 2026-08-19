@@ -108,6 +108,7 @@ jobs:
       # away. Printed unconditionally so it survives a red.
       - name: What is this box, actually
         if: always()
+        continue-on-error: true
         run: |
           python - <<'PY'
           import platform, sys, sysconfig, tempfile
