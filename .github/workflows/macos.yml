@@ -1,0 +1,128 @@
+# macos.yml — the macOS gap-closer, and the argument is STRICTER than windows.yml's.
+#
+# windows.yml opens: "The swarph build host is Linux, so Windows-specific code has
+# only ever been validated by hand on workstation-lc." macOS has NO CELL AT ALL —
+# not one peer in the mesh runs it (board #491: 4 windows cells, 1 wsl, 10 linux,
+# 1 ios pwa, ZERO macos). So macOS has never been validated by hand OR by CI.
+#
+# >>> AN ENTIRE PLATFORM WITH NO REPORTER, AND THE ABSENCE OF A REPORTER LOOKS
+# EXACTLY LIKE THE ABSENCE OF A PROBLEM. <<< `pip install swarph-cli` claims to be
+# the whole product; on macOS that claim currently rests on nobody having tried.
+#
+# WHAT THIS RUNNER CAN SEE THAT NEITHER EXISTING RUNNER CAN:
+#   · Apple Silicon (macos-latest is arm64) — arm64 wheel resolution for every dep
+#   · BSD userland where it differs from GNU
+#   · case-INSENSITIVE-but-case-preserving default filesystem — a real source of
+#     import and path bugs that neither Linux nor Windows reproduces
+#   · Gatekeeper/quarantine on anything downloaded (the gbrain binary launcher)
+#
+# WHAT IT CANNOT AND MUST NOT BE READ AS COVERING: launchd. The package ships FOUR
+# systemd units and ZERO launchd plists, so the background-process story is
+# Linux-only by construction. A green here says the LIBRARY imports and the suite
+# passes; it says nothing about whether a cell can actually run as a daemon on a
+# Mac. Recorded so a green is not over-read.
+#
+# >>> NO NODE-ID FLOOR, DELIBERATELY, AND THIS IS THE PART TO NOT CARGO-CULT. <<<
+# windows.yml pins a fixed list of win32-only node ids because those paths exist
+# and cannot run elsewhere. NOTHING IS DARWIN-SPECIFIC IN THIS PACKAGE YET (two
+# files reference darwin at all). A floor over an empty subject does not abstain —
+# IT PASSES, vacuously — which is the single defect this repo found most often on
+# 2026-08-18. A floor gets added the day the first darwin-only path does, and not
+# before.
+#
+# >>> AND THE RE-ENTRY CONDITION IS WRITTEN HERE, NOW, BECAUSE A DELIBERATE ABSENCE
+# WITH NO TRIGGER SILENTLY BECOMES PERMANENT. <<< (drop-on-meta-edge, reviewing #259.)
+#
+#     ADD A DARWIN NODE-ID FLOOR THE DAY THE FIRST `sys.platform == "darwin"` BRANCH
+#     OR DARWIN-ONLY TEST LANDS IN THIS PACKAGE.
+#
+# Without that sentence the gap reopens the moment someone writes that branch, and BY
+# CONSTRUCTION NOBODY IS LOOKING — the floor's absence is invisible precisely because
+# it was justified once. Same defect as a ledger entry carrying a removal condition
+# and no start date (#115): correct when written, unfalsifiable about when it stopped
+# being correct.
+#
+# FIRST-RUN EXPECTATION, stated up front so a red is not a surprise and not a
+# scandal: nobody knows what breaks. The first run is DISCOVERY. If it is red, the
+# outcome is either a fix or a DECLARED exemption carrying a start date and the
+# condition that ends it — per the parity-ratchet lesson (#112/#115), where an
+# undated "expected red" outlived its reason by two weeks and six real divergences
+# accumulated behind it. No permanent expected-red without an expiry.
+
+name: macos
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  macos-tests:
+    name: pytest on macos-latest (py${{ matrix.python-version }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout (host-pinned harness ref)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install (editable + dev + server extras)
+        run: python -m pip install --upgrade pip && pip install -e ".[dev,gateway,service]"
+
+      # Same §5.3 discipline as windows.yml: re-derive the verdict from per-test
+      # junit records rather than trusting the exit code, and assert a host-known
+      # minimum actually RAN. A forged "0-ran-but-green" cannot pass this.
+      - name: Full suite + junit verdict re-derivation
+        run: |
+          pytest -q --junit-xml=junit.xml
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("junit.xml").getroot()
+          suites = root.findall("testsuite") or ([root] if root.tag == "testsuite" else [])
+          tests  = sum(int(s.get("tests", "0")) for s in suites)
+          skips  = sum(int(s.get("skipped", "0")) for s in suites)
+          bad    = sum(int(s.get("failures", "0")) + int(s.get("errors", "0")) for s in suites)
+          ran = tests - skips
+          print(f"tests={tests} ran={ran} skipped={skips} failures+errors={bad}")
+          assert bad == 0, f"{bad} failures/errors in junit"
+          assert ran >= 600, f"collect-suspect: only {ran} tests ran (floor 600)"
+          PY
+
+      # A platform report, not a gate. The point of a first macOS runner is to
+      # LEARN what this box is, and a run that only says pass/fail has thrown that
+      # away. Printed unconditionally so it survives a red.
+      - name: What is this box, actually
+        if: always()
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import platform, sys, sysconfig, tempfile
+          from pathlib import Path
+          print(f"platform.system()   {platform.system()}")
+          print(f"platform.machine()  {platform.machine()}        <- arm64 = Apple Silicon")
+          print(f"sys.platform        {sys.platform}")
+          print(f"mac_ver             {platform.mac_ver()[0]}")
+          print(f"platform tag        {sysconfig.get_platform()}")
+          print("case-sensitivity of the default filesystem:")
+          t = Path(tempfile.mkdtemp())
+          (t / "CaseTest").touch()
+          if (t / "casetest").exists():
+              print("  INSENSITIVE (macOS default) — import/path bugs live here")
+          else:
+              print("  sensitive")
+          PY
