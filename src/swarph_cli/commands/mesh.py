@@ -19,6 +19,7 @@ imports from here; the import is one-directional on purpose.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import stat
@@ -340,6 +341,113 @@ def _write_secret_file_mode_600(path: Path, value: str) -> None:
         path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
 
+
+def _near_names(to: str, names: list) -> list:
+    """Candidate peer names for a refused recipient. SEVERAL, deliberately.
+
+    >>> A CONFIDENT SINGLE SUGGESTION CAN ROUTE MAIL TO THE WRONG CELL. <<< Measured
+    against the real registry, `drop` scores 0.73 against `droplet` and 0.38 against
+    `drop-on-meta-edge` — so plain difflib ranks a REAL, DIFFERENT PEER first while the
+    intended one falls below any sane cutoff. `drop` had 17 undelivered messages on
+    2026-08-18 and every one was meant for drop-on-meta-edge.
+
+    So: union prefix matches, tail-token matches, and fuzzy matches, and show up to
+    three WITHOUT ranking one as the answer. Being handed three names forces a choice;
+    being handed one invites a reflex.
+
+    Cutoff is 0.5, not difflib's 0.6 default, because the case that cost three hours —
+    `ws-lc` vs `workstation-lc` — scores 0.53.
+    """
+    lowered = to.lower()
+    tail = lowered.rsplit("-", 1)[-1]
+    out = []
+    for n in names:
+        nl = n.lower()
+        if nl.startswith(lowered) or lowered.startswith(nl.split("-", 1)[0]):
+            out.append(n)                      # prefix either way: drop -> BOTH droplets
+        elif tail and len(tail) > 1 and nl.endswith("-" + tail):
+            out.append(n)                      # ws-LC -> workstation-LC
+    for n in difflib.get_close_matches(to, names, n=3, cutoff=0.5):
+        if n not in out:
+            out.append(n)
+    return out[:3]
+
+
+def _check_recipient(to: str, gateway: str, token: str) -> str | None:
+    """Refuse a send to a peer the LIVE registry does not contain.
+
+    >>> THE LIST MUST BE LIVE, NOT CACHED. <<< A stale local copy refuses a peer that
+    registered an hour ago, which turns a typo-guard into an outage for exactly the
+    newest cells. The commander's wording when he asked for this: "compare it to the
+    live peers list".
+
+    Returns an error message to print, or None to proceed.
+
+    WHY THIS EXISTS: on 2026-08-18 the mesh held 63 undelivered messages across 14
+    recipient names that are not peers. The gateway accepts any string as `to_node`,
+    stores it, and returns 200. Top two were `drop` (17) and `lab` (16) — ROLE names,
+    where the mesh names are drop-on-meta-edge and lab-ovh. Nobody's client said a word.
+
+    >>> IF THE REGISTRY CANNOT BE READ, PROCEED — DO NOT BLOCK. <<< A validator that
+    fails closed on its OWN failure converts every gateway hiccup into total messaging
+    loss, which is far worse than the bug it prevents. Warn, and send. This is the
+    CANNOT-EVALUATE branch and it is deliberately the permissive one, unlike most in
+    this codebase, because the cost asymmetry runs the other way.
+    """
+    status, payload = _http_get_json(f"{gateway.rstrip('/')}/peers", token)
+
+    # >>> EVERY UNEXPECTED SHAPE IS A CANNOT-EVALUATE, NOT AN EXCEPTION. <<< (Copilot,
+    # reviewing #263.) The first version guarded the STATUS and the EMPTY case but
+    # assumed the BODY was a dict of dicts. A 2xx carrying a bare list or {detail: ...}
+    # would raise inside payload.get()/p.get() and propagate — BLOCKING THE SEND, which
+    # is the exact opposite of this function's stated contract and of the two tests
+    # written to pin it. A guard that fails closed on its own confusion is the outage it
+    # was meant to prevent.
+    #
+    # Same isinstance ladder monitor._verify_self_is_registered already uses
+    # (monitor.py:149-156) — reused rather than reinvented.
+    def _unchecked(why: str):
+        print(f"swarph mesh send: {why} — sending WITHOUT a recipient check",
+              file=sys.stderr)
+        return None
+
+    if status < 200 or status >= 300:
+        return _unchecked(f"could not read the peer registry "
+                          f"({status or 'unreachable'})")
+    if not isinstance(payload, dict):
+        return _unchecked("unexpected /peers shape (not an object)")
+    peers = payload.get("peers")
+    if not isinstance(peers, list):
+        return _unchecked("unexpected /peers shape (no peer list)")
+    names = [p.get("name") for p in peers
+             if isinstance(p, dict) and isinstance(p.get("name"), str) and p.get("name")]
+    if not names:
+        return _unchecked("peer registry returned no names")
+    # Case-insensitive (droplet, reviewing #263). The registry is the authority on the
+    # EXACT spelling, so a capitalised variant of a real peer is still that peer — it
+    # would otherwise fall through to the suggestion path and be REFUSED, when
+    # _near_names lowercases for its own comparison anyway and would have suggested the
+    # very name the caller already typed. An unnecessary refusal is a small failure, but
+    # it is a failure of THIS function's only job.
+    if to in names or to.lower() in {n.lower() for n in names}:
+        return None
+
+    near = _near_names(to, names)
+    msg = (f"swarph mesh send: REFUSED — {to!r} is not a registered peer.\n"
+           f"  The gateway would accept it, store it, and return 200. Nobody would "
+           f"read it.")
+    if near:
+        # SUGGEST, NEVER SUBSTITUTE. A mesh that silently reroutes a message to
+        # whichever name it guessed is a much worse failure than refusing one.
+        #
+        # SORTED, ONE PER LINE (Copilot, #263): a single line in _near_names' own order
+        # reads as a ranked answer with a best guess at the front. These are OPTIONS —
+        # `drop` legitimately means either droplet or drop-on-meta-edge, and the whole
+        # reason this returns several is that difflib ranks the WRONG one first.
+        msg += "\n  Did you mean:\n" + "\n".join(f"    {n}" for n in sorted(near))
+    return msg
+
+
 def _run_send(args: argparse.Namespace) -> int:
     try:
         content = resolve_content(args.content, getattr(args, "content_file", None))
@@ -354,6 +462,11 @@ def _run_send(args: argparse.Namespace) -> int:
         "kind": args.kind,
         "content": content,
     }
+    refusal = _check_recipient(args.to, args.gateway, token)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 1
+
     status, payload = _post_json(
         f"{args.gateway.rstrip('/')}/messages",
         body,
