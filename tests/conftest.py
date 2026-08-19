@@ -144,7 +144,13 @@ def _hermetic_swarph_home(monkeypatch, tmp_path_factory):
                                       str(pathlib.Path(real_home) / ".local")))
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
+    # cursor-lin, review of PR #264: the SAME DOOR HAS A THIRD HINGE. cell.py honours
+    # XDG_CONFIG_HOME (:78) *and* XDG_STATE_HOME (:90) for the state root. Deleting one
+    # and not the other is the MESH_GATEWAY_TOKEN/URL pairing again, one layer down.
+    # Both are invisible to the completeness lock, whose prefix filter is SWARPH_/MESH_/
+    # GBRAIN_ — a guard cannot check the case it is not looking at.
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
 
 
 @pytest.fixture(autouse=True)

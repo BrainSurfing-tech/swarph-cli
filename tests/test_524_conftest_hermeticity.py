@@ -39,15 +39,36 @@ _EXEMPT = {
     "SWARPH_TMUX_TARGET": "stripped via _SWARPH_ENV",
 }
 
-_ENV_RE = re.compile(r'(?:os\.environ(?:\.get)?\(|getenv\()"([A-Z][A-Z0-9_]*)"')
+# Direct reads: os.environ["X"], os.environ.get("X"), getenv("X"). Quote-tolerant —
+# a single-quoted read was invisible to the first version.
+_ENV_RE = re.compile(r"""(?:os\.environ(?:\.get)?\(|getenv\()['"]([A-Z][A-Z0-9_]*)['"]""")
+
+# >>> COMPUTED NAMES, AND THIS IS THE HOLE cursor-lin FOUND WITH LIVE INSTANCES. <<<
+# brain_ask.py:178 passes env_keys=("GBRAIN_TOKEN", "SWARPH_BRAIN_TOKEN") down to
+# tokens.py:284's `os.environ.get(key)` — a COMPUTED name the direct pattern cannot see.
+# Both were covered only because someone hand-added them to _SWARPH_ENV, which is
+# precisely the failure mode this lock exists to kill: remove them and the lock stays
+# green while the suite leaks.
+_ENV_KEYS_RE = re.compile(r"env_keys\s*=\s*\(([^)]*)\)", re.S)
+_QUOTED_RE = re.compile(r"""['"]([A-Z][A-Z0-9_]*)['"]""")
 
 
 def _env_vars_read_by_source() -> set:
+    """Names the source reads, from BOTH the direct and the computed-name shapes.
+
+    RESIDUAL LIMIT, stated rather than hidden: a name assembled at runtime (f-string,
+    concatenation, a list built from config) is invisible to any static scan. This
+    closes the two shapes that exist today; it does not make the derivation total, and
+    a lock that claimed to be total would be the more dangerous artifact.
+    """
     found = set()
     for py in SRC.rglob("*.py"):
-        for name in _ENV_RE.findall(py.read_text(encoding="utf-8", errors="replace")):
-            if name.startswith(("SWARPH_", "MESH_", "GBRAIN_")):
-                found.add(name)
+        body = py.read_text(encoding="utf-8", errors="replace")
+        names = set(_ENV_RE.findall(body))
+        for group in _ENV_KEYS_RE.findall(body):
+            names.update(_QUOTED_RE.findall(group))
+        found.update(n for n in names
+                     if n.startswith(("SWARPH_", "MESH_", "GBRAIN_")))
     return found
 
 
@@ -75,6 +96,28 @@ def test_the_exemptions_are_real_and_carry_a_reason():
         "exemption list becomes a place for entries nobody re-examines.")
     for name, reason in _EXEMPT.items():
         assert reason.strip(), f"{name} is exempted with no reason"
+
+
+def test_the_derivation_sees_a_COMPUTED_env_name():
+    """>>> THE NON-VACUITY PROOF THAT ACTUALLY BITES. <<< The first version of this file
+    proved itself by removing MESH_GATEWAY_URL — which is DERIVATION-VISIBLE, so it only
+    ever tested the easy shape. GBRAIN_TOKEN is read solely via env_keys=(...) into a
+    computed os.environ.get(key); if the scan cannot see it, removing it from _SWARPH_ENV
+    leaves the lock GREEN while the suite leaks. (cursor-lin, review of PR #264.)"""
+    read = _env_vars_read_by_source()
+    for computed in ("GBRAIN_TOKEN", "SWARPH_BRAIN_TOKEN"):
+        assert computed in read, (
+            f"{computed} is read only through env_keys=(...) and the derivation missed "
+            "it — the lock would stay green while that var leaked")
+
+
+def test_both_xdg_roots_are_cleared():
+    """cell.py honours XDG_CONFIG_HOME (:78) AND XDG_STATE_HOME (:90). Clearing one and
+    not the other is the MESH_GATEWAY_TOKEN/URL pairing one layer down — and both are
+    outside this lock's SWARPH_/MESH_/GBRAIN_ prefix filter, so only a named test sees
+    it."""
+    assert not os.environ.get("XDG_CONFIG_HOME")
+    assert not os.environ.get("XDG_STATE_HOME")
 
 
 def test_the_gateway_url_specifically_is_stripped():
