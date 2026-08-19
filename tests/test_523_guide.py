@@ -264,7 +264,7 @@ def test_every_path_survives_a_cp1252_console(argv):
     STRONG, AND gpu-wsl DISPROVED IT BY TRYING TO REPRODUCE THE CRASH AND FAILING. <<<
     On a genuine fr-FR box he set `chcp 1252` AND `PYTHONUTF8=0`, ran the PRE-fix
     commit, and got no crash: `stdout.encoding` stayed utf-8 because that box's system
-    ANSI codepage (HKLM\...\Nls\CodePage\ACP) is 65001 -- the Windows "Use Unicode
+    ANSI codepage (HKLM ... CodePage ACP) is 65001 -- the Windows "Use Unicode
     UTF-8 worldwide" beta setting. `chcp` moves the CONSOLE display codepage; it does
     not move the ACP that `locale.getpreferredencoding()` reads.
 

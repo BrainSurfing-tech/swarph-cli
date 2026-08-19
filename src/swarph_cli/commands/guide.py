@@ -30,10 +30,34 @@ import sys
 # CHARACTER AN 8-BIT CONSOLE CANNOT REPRESENT. <<< On cp1252 (a French Windows box) a bare
 # `print` of an em-dash raises UnicodeEncodeError, and the verb dies.
 #
-# `--list` survived and `--search` did not, which is why this shipped: --list emits topic
-# anchors and `swarph ...` commands, all ASCII. --search emits matched PROSE LINES. The
-# code path was identical; only the DATA flowing through it differed, so a Linux test of
-# both said nothing about either.
+# >>> THE MECHANISM BELOW WAS INFERRED AND IS WRONG. KEPT, WITH THE CORRECTION, BECAUSE
+# THE INFERENCE IS THE INSTRUCTIVE PART. <<<
+#
+# lab wrote: "--list survived and --search did not: --list emits topic anchors and
+# commands, all ASCII; --search emits prose." MEASURED AGAINST THE SHIPPED 0.45.0 WHEEL,
+# that is BACKWARDS:
+#
+#     guide wake            0 non-ASCII   <- THE INVOCATION ACTUALLY REPORTED
+#     guide --list          4 non-ASCII
+#     guide channels        3 non-ASCII
+#     guide --search wake   1 non-ASCII
+#
+# The commander reported `swarph guide 'wake'` "doesn't work". That path emits PURE
+# ASCII and exits 2 with a topic list -- IT CANNOT RAISE UnicodeEncodeError. What he hit
+# was the #520 discovery defect: no wake content existed and the error named nouns
+# instead of a route. Both of which are fixed here (the Hooks section, and the error now
+# says `try: swarph guide --search wake`).
+#
+# lab read "search doesn't work" as `--search`, inferred an encoding mechanism from a
+# --list/--search asymmetry that does not exist, and built a test suite around it.
+# gpu-wsl then could not reproduce the crash on a real fr-FR box -- CORRECTLY, because
+# there was no crash on that path. One `swarph guide 'wake' | count non-ASCII` would
+# have settled it before any of that.
+#
+# WHAT SURVIVES: cp1252 IS a real hazard for the CONTENT paths above (--list, a topic,
+# --search all emit non-ASCII pre-fix), so print_safe and the pure-ASCII GUIDE.md are
+# correct defence-in-depth. They fix a bug NOBODY REPORTED, which is fine -- but the
+# record must not claim they fixed the reported one.
 #
 # console_safe.print_safe already existed with 44 call sites when this module was written
 # with bare `print`. Its own docstring records the lesson: "A protection sited inside one
