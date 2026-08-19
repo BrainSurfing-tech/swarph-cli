@@ -129,7 +129,7 @@ def test_the_module_self_check_passes():
              "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
     )
     assert r.returncode == 0, r.stderr
-    assert "ok —" in r.stdout
+    assert "ok - " in r.stdout
 
 
 # ── `apropos`: search by INTENT, not by knowing the topic's name ─────────────
@@ -221,3 +221,53 @@ def test_search_reaches_the_how_to_and_glossary_sections(capsys):
     run_guide(["--search", "newsletter"])
     out = capsys.readouterr().out
     assert "how-to" in out, "a task-phrased row must be findable by search"
+
+
+# ── the Windows report: `--search` died on a cp1252 console (card #527) ─────
+
+def test_the_guide_is_pure_ascii():
+    """>>> A DOCUMENT THAT MUST BE READABLE ON EVERY PLATFORM SHOULD NOT NEED A GUARD
+    TO BE READABLE. <<< print_safe stops the crash and costs a mangled glyph; on a
+    257-line onboarding page aimed at a cell that has just arrived, a page full of
+    `?` is a poor first contact. 28 characters (em-dash x26, ellipsis, arrow) bought
+    nothing that `--`, `...` and `->` do not."""
+    text = _load_guide()
+    bad = sorted({c for c in text if ord(c) > 127})
+    assert not bad, f"non-ASCII in GUIDE.md: {[hex(ord(c)) for c in bad]}"
+
+
+def test_guide_py_never_uses_a_bare_print():
+    """THE ACTUAL BUG, locked. `--list` worked on Windows and `--search` did not: the
+    code path was identical, only the DATA differed. --list emits topic anchors and
+    `swarph ...` commands (ASCII); --search emits matched PROSE. So a Linux test of
+    both said nothing about either, and the failure was invisible to every check that
+    ran before release.
+
+    console_safe.print_safe already had 44 call sites when this module was written
+    with bare `print`. Its own docstring says why: 'A protection sited inside one
+    module protects one module.'"""
+    src = (Path(__file__).resolve().parents[1]
+           / "src/swarph_cli/commands/guide.py").read_text(encoding="utf-8")
+    offenders = [ln.strip() for ln in src.splitlines()
+                 if ln.lstrip().startswith("print(")]
+    assert not offenders, (
+        f"guide.py must print via console_safe.print_safe, found: {offenders}")
+
+
+@pytest.mark.parametrize("argv", [["--list"], ["--search", "subscribe"],
+                                  ["channels"], ["no-such-topic"]])
+def test_every_path_survives_a_cp1252_console(argv):
+    """EXECUTION, on the condition itself. PYTHONIOENCODING=cp1252 reproduces a French
+    Windows console exactly, on Linux, in CI -- the environment modelled as data
+    rather than as a platform we do not have."""
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "import sys;from swarph_cli.commands.guide import run_guide;"
+         "sys.exit(run_guide(sys.argv[1:]))", *argv],
+        capture_output=True, text=True,
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env={**__import__("os").environ, "PYTHONIOENCODING": "cp1252",
+             "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+    )
+    assert "UnicodeEncodeError" not in r.stderr, r.stderr
+    assert r.returncode in (0, 2), f"rc={r.returncode}\n{r.stderr}"

@@ -25,6 +25,20 @@ from __future__ import annotations
 import argparse
 import sys
 
+# >>> THE GUIDE IS PROSE, SO ITS OUTPUT IS THE MOST LIKELY IN THE WHOLE CLI TO CARRY A
+# CHARACTER AN 8-BIT CONSOLE CANNOT REPRESENT. <<< On cp1252 (a French Windows box) a bare
+# `print` of an em-dash raises UnicodeEncodeError, and the verb dies.
+#
+# `--list` survived and `--search` did not, which is why this shipped: --list emits topic
+# anchors and `swarph ...` commands, all ASCII. --search emits matched PROSE LINES. The
+# code path was identical; only the DATA flowing through it differed, so a Linux test of
+# both said nothing about either.
+#
+# console_safe.print_safe already existed with 44 call sites when this module was written
+# with bare `print`. Its own docstring records the lesson: "A protection sited inside one
+# module protects one module." Reported from Windows by the commander, 2026-08-19.
+from ..console_safe import print_safe
+
 # `files()` is the packaged-resource reader — it works from an installed wheel, a zip,
 # and an editable checkout alike. Reading via __file__ would work in the source tree and
 # break for the people who `pip install`, which is the audience.
@@ -129,7 +143,7 @@ def run_guide(argv: "list[str]") -> int:
         # with the commands it teaches.
         for name, body in topics.items():
             cmds = _commands_in(body)
-            print(f"{name:<22} {', '.join(cmds[:3]) if cmds else '—'}")
+            print_safe(f"{name:<22} {', '.join(cmds[:3]) if cmds else '-'}")
         return 0
 
     if args.search:
@@ -138,35 +152,35 @@ def run_guide(argv: "list[str]") -> int:
         # reproduced inside its own fix.
         hits = _search(topics, args.search)
         if not hits:
-            print(f"swarph guide: nothing matches {args.search!r}. "
-                  f"Topics: {', '.join(topics)}", file=sys.stderr)
+            print_safe(f"swarph guide: nothing matches {args.search!r}. "
+                       f"Topics: {', '.join(topics)}", stream=sys.stderr)
             return 2
         for name, line in hits:
-            print(f"{name:<22} {line}")
+            print_safe(f"{name:<22} {line}")
         return 0
 
     if not args.topic:
-        print(text)
+        print_safe(text)
         return 0
 
     key = args.topic.strip().lower().replace(" ", "-").lstrip("#")
     if key in topics:
-        print(topics[key])
+        print_safe(topics[key])
         return 0
 
     # Substring fallback before failing: `swarph guide channel` should find `channels`.
     hits = [k for k in topics if key in k]
     if len(hits) == 1:
-        print(topics[hits[0]])
+        print_safe(topics[hits[0]])
         return 0
 
     # >>> NAME THE ALTERNATIVES. <<< "unknown topic" tells the caller it was wrong and
     # not what to do instead, which is the same defect as an onboarding page that names a
     # destination without a route.
-    print(f"swarph guide: no topic {args.topic!r}."
-          + (f" Did you mean: {', '.join(hits)}?" if hits else ""),
-          file=sys.stderr)
-    print(f"Topics: {', '.join(topics)}", file=sys.stderr)
+    print_safe(f"swarph guide: no topic {args.topic!r}."
+               + (f" Did you mean: {', '.join(hits)}?" if hits else ""),
+               stream=sys.stderr)
+    print_safe(f"Topics: {', '.join(topics)}", stream=sys.stderr)
     return 2
 
 
@@ -183,7 +197,7 @@ def demo() -> None:
     # the section returned is the section asked for, not the whole file
     assert topics["channels"].startswith("## Channels")
     assert "## Start here" not in topics["channels"]
-    print(f"ok — {len(topics)} topics: {', '.join(topics)}")
+    print_safe(f"ok - {len(topics)} topics: {', '.join(topics)}")
 
 
 if __name__ == "__main__":  # pragma: no cover
