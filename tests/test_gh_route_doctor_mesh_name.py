@@ -20,11 +20,11 @@ false-negative direction gets its own test below.
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
+# NO sys.path tweak: pyproject.toml sets `pythonpath = ["src"]` for the whole suite
+# (line 133), and this was the ONLY file in tests/ that prepended it by hand. Copilot,
+# reviewing #262: a manual path tweak makes this file import differently from every
+# other test and can hide packaging/import problems the rest of the suite would catch.
 from swarph_cli.commands import gh_route
 
 
