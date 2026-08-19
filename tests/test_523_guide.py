@@ -461,3 +461,33 @@ def test_the_hooks_section_is_reachable_by_the_word_a_caller_types():
     assert run_guide(["hooks"]) == 0
     assert run_guide(["hook"]) == 0, "the singular must resolve via the substring fallback"
     assert any(name == "hooks" for name, _ in _search(topics, "deaf"))
+
+
+def test_the_guide_does_not_recommend_a_BOX_GLOBAL_wake_hook():
+    """>>> THE GUIDE RECOMMENDED THE DEFECT, FIFTEEN MINUTES AFTER I WROTE IT. <<<
+
+    `install-wake-hook`'s default is `--scope user` -> ~/.claude/settings.json, which is
+    BOX-GLOBAL. Combined with `--cell <you>` it instructs every claude cell on the machine
+    to tail YOUR inbox, and the next install clobbers it.
+
+    Measured on lab-ovh: six cells share that file and its hook was baked to one arbitrary
+    cell (gpt-ops). Found by drop-on-meta-edge on his own box, where it named him.
+
+    Two harms, and the second is the worse one: the neighbours are pointed at another
+    cell's message stream, AND their own DMs go unwatched -- the exact failure this hook
+    exists to prevent, inflicted on four cells by installing it for one."""
+    h = _split_topics(_load_guide())["hooks"]
+    assert "--scope project" in h, "the guide must recommend the per-cell scope"
+    # Every RUNNABLE invocation must carry it. A line that merely NAMES the verb (the
+    # three-verb disambiguation table) is not a command to copy -- narrowing to lines
+    # carrying --harness, which is what an actual install looks like. The first version
+    # of this assertion flagged that table row, which would have pushed flags into a
+    # comparison cell to satisfy a test.
+    invocations = [l for l in h.splitlines()
+                   if "swarph install-wake-hook" in l and "--harness" in l]
+    assert invocations, "the section shows no runnable install command"
+    for line in invocations:
+        assert "--scope project" in line, (
+            f"an install command without --scope project recommends the box-global "
+            f"default: {line.strip()!r}")
+    assert "box-global" in h.lower(), "the hazard must be named, not just avoided"

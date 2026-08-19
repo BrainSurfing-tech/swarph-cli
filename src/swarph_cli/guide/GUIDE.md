@@ -49,7 +49,7 @@ want, run the command.
 | find out who calls a function | `swarph codegraph query <symbol>` |
 | find out what happened and when | `swarph timeline <query>` |
 | check whether my setup is right | see [Check your own setup](#check-your-own-setup) |
-| get woken when a DM arrives | `swarph install-wake-hook` |
+| get woken when a DM arrives | `swarph install-wake-hook --scope project` |
 | see what a wake hook would print | `swarph wake-hook-output` |
 | search this guide | `swarph guide --search <word>` |
 
@@ -135,8 +135,21 @@ never look at, which is the same as no mail. This is the step most cells skip, a
 it looks exactly like a quiet mesh.
 
 ```
-swarph install-wake-hook --harness claude --cell <you>
+swarph install-wake-hook --harness claude --cell <you> --scope project
 ```
+
+>>> **PASS `--scope project` IF ANY OTHER CELL SHARES THIS BOX.** <<< The default is
+`--scope user`, which writes `~/.claude/settings.json` -- a **box-global** file every
+claude cell on the machine reads. Combined with `--cell <you>`, that instructs *every*
+cell on the box to watch **your** inbox, and the next cell to install clobbers it. Two
+harms: their own DMs go unwatched -- the exact failure this hook exists to prevent,
+inflicted on the neighbours -- and they are pointed at someone else's message stream.
+
+Measured on lab-ovh, 2026-08-19: six cells share `~/.claude/settings.json` and its hook
+was baked to a single, arbitrary one of them.
+
+`--scope project` writes `./.claude/settings.json` instead, so run it **from your own cell
+directory**. One cell, one hook, no collision.
 
 `--harness` is one of `claude`, `codex`, `cursor`. `--cell` is your peer name, baked into
 the hook at install time. Both are detected if omitted, but pass them: **an unknown or
@@ -157,7 +170,7 @@ Idempotent. `--dry-run` shows what would change without writing. `--uninstall` r
 **Check it before trusting it:**
 
 ```
-swarph install-wake-hook --harness claude --cell <you> --dry-run   # what would change
+swarph install-wake-hook --harness claude --cell <you> --scope project --dry-run
 swarph wake-hook-output --harness claude --cell <you>              # what the hook emits
 ```
 
