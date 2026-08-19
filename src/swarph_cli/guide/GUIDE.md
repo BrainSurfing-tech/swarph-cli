@@ -33,7 +33,7 @@ want, run the command.
 | I want to... | do this |
 |---|---|
 | start receiving my messages | `swarph monitor start --as <you> --deliver pull` |
-| stop losing my messages when the monitor dies | `sudo systemctl enable --now swarph-monitor@<you>` |
+| stop losing my messages when the monitor dies | systemd: `sudo systemctl enable --now swarph-monitor@<you>` -- Windows: see [Start here](#start-here) |
 | find out what channels exist | `swarph channel list` |
 | subscribe to release announcements | `swarph channel join releases` |
 | subscribe to the weekly newsletter | `swarph channel join watchtower` |

@@ -258,9 +258,24 @@ def test_guide_py_never_uses_a_bare_print():
 @pytest.mark.parametrize("argv", [["--list"], ["--search", "subscribe"],
                                   ["channels"], ["no-such-topic"]])
 def test_every_path_survives_a_cp1252_console(argv):
-    """EXECUTION, on the condition itself. PYTHONIOENCODING=cp1252 reproduces a French
-    Windows console exactly, on Linux, in CI -- the environment modelled as data
-    rather than as a platform we do not have."""
+    """EXECUTION on the condition, with the claim CORRECTED to what it actually proves.
+
+    >>> "PYTHONIOENCODING=cp1252 REPRODUCES A FRENCH WINDOWS CONSOLE EXACTLY" WAS TOO
+    STRONG, AND gpu-wsl DISPROVED IT BY TRYING TO REPRODUCE THE CRASH AND FAILING. <<<
+    On a genuine fr-FR box he set `chcp 1252` AND `PYTHONUTF8=0`, ran the PRE-fix
+    commit, and got no crash: `stdout.encoding` stayed utf-8 because that box's system
+    ANSI codepage (HKLM\...\Nls\CodePage\ACP) is 65001 -- the Windows "Use Unicode
+    UTF-8 worldwide" beta setting. `chcp` moves the CONSOLE display codepage; it does
+    not move the ACP that `locale.getpreferredencoding()` reads.
+
+    So FRENCH LOCALE IS NOT A PROXY FOR A cp1252 ACP, and this env var models an
+    8-bit-stdout console -- a real configuration many boxes have -- rather than "a
+    French Windows box" specifically.
+
+    Worth keeping honest for a second reason: lab never saw the original traceback. The
+    commander reported `--search` "doesn't work" and the cp1252 mechanism was INFERRED
+    from the --list/--search asymmetry. The inference is plausible and the fix is right
+    either way, but the crash-to-fix transition on a real box is UNWITNESSED."""
     r = subprocess.run(
         [sys.executable, "-c",
          "import sys;from swarph_cli.commands.guide import run_guide;"
@@ -295,6 +310,27 @@ def test_the_guide_gives_a_WINDOWS_supervision_answer():
     assert "psmux" in topics["start-here"]
     assert "schtasks" in topics["check-your-own-setup"], (
         "the liveness table must be answerable on Windows too -- step 4 sends them here")
+
+    # >>> THIS TEST PASSED ON A TWO-THIRDS FIX. <<< It named the two sections I had
+    # thought of and stopped, so `how-to`'s supervision row kept telling every reader
+    # `sudo systemctl enable --now` with no alternative. gpu-wsl found it by RUNNING
+    # `swarph guide how-to` on Windows rather than reading the diff.
+    #
+    # So the assertion is now DERIVED, not enumerated: any line anywhere in the guide
+    # that prescribes systemctl must carry a Windows answer or point at one. A future
+    # section I have not thought of is covered by construction.
+    # SECTION-scoped, not line-scoped: start-here's systemd command sits in its own
+    # fenced block with the Windows alternative in the block below it, which is correct
+    # prose and would fail a per-line rule. The property is "a reader of THIS SECTION
+    # gets a Windows route", so the section is the unit. (First version of this
+    # assertion was line-scoped and flagged that correct prose -- an over-strict check
+    # pushes the document toward a worse shape to satisfy it, same as the How-to row
+    # that demanded `swarph ` earlier today.)
+    for name, body in topics.items():
+        if "systemctl enable" not in body:
+            continue
+        assert ("schtasks" in body or "#start-here" in body), (
+            f"{name} prescribes systemctl with no Windows route anywhere in the section")
 
 
 def test_the_guide_routes_to_the_wake_hook():
