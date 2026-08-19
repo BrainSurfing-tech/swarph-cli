@@ -76,7 +76,14 @@ def test_every_swarph_env_var_is_stripped_or_explicitly_exempted():
     """>>> THE LOCK. <<< MESH_GATEWAY_URL leaked for as long as it did because the list
     was hand-maintained and nothing compared it to reality. Adding a new env var to the
     source now fails here until someone decides, in writing, which side it is on."""
-    from tests.conftest import _SWARPH_ENV  # noqa: PLC0415 - deliberate late import
+    # NOT `from tests.conftest import ...`: that resolves only because
+    # `python -m pytest` puts the CWD on sys.path so `tests` imports as a namespace
+    # package. CI runs BARE `pytest`, which does not — ModuleNotFoundError, green
+    # where written and red on CI. `import conftest` resolves under both, because
+    # pytest's prepend import mode puts the TEST FILE'S OWN DIR on sys.path.
+    # (cursor-lin, review of PR #264 — fourth instance of this class today.)
+    import conftest as _cf  # noqa: PLC0415 - deliberate late import
+    _SWARPH_ENV = _cf._SWARPH_ENV
 
     read = _env_vars_read_by_source()
     unguarded = sorted(read - set(_SWARPH_ENV) - set(_EXEMPT))
@@ -123,7 +130,8 @@ def test_both_xdg_roots_are_cleared():
 def test_the_gateway_url_specifically_is_stripped():
     """The one that actually broke, named so a future refactor of the list cannot drop
     it without a test saying its name."""
-    from tests.conftest import _SWARPH_ENV  # noqa: PLC0415
+    import conftest as _cf  # noqa: PLC0415
+    _SWARPH_ENV = _cf._SWARPH_ENV
 
     assert "MESH_GATEWAY_URL" in _SWARPH_ENV
 
