@@ -52,12 +52,37 @@ def _cron(text):
     return {"name": "(crontab)", "kind": "cron", "text": text, "live": True, "shared": True}
 
 
-def _run(monkeypatch, tmp_path, surfaces, self_name, expected=None, capsys=None):
+# An inert resolver: NO gateway claim, no token, an EMPTY but READ socket
+# table. Tests that do not inject this would read the REAL box's env and
+# /proc/net/tcp — the "only passes on one box" trap this whole suite exists
+# to avoid, one layer out. (PR #261 review: exactly that fall-through made
+# test_per_cell_declaration_wins_when_both_exist green on the author's box
+# and red on CI — the box's own MESH_GATEWAY_URL leaked into the verdict.)
+_INERT_RESOLVER = {
+    "gateway": None,
+    "token": (None, "no token resolvable"),
+    "listeners": set(),
+    "socket_table": "read",
+}
+
+
+@pytest.fixture(autouse=True)
+def _no_real_resolver(monkeypatch):
+    """Hermeticity is not opt-in: ANY call that forgets to inject a resolver
+    gets the inert one, never the environment of whatever runner executes
+    it. If a fall-through path exists at all, something will take it."""
+    monkeypatch.setattr(sc, "resolve_cell_inputs",
+                        lambda self_name: dict(_INERT_RESOLVER))
+
+
+def _run(monkeypatch, tmp_path, surfaces, self_name, expected=None, capsys=None,
+         resolver=None):
     monkeypatch.setattr(sc, "discover_surfaces", lambda: surfaces)
     decl = tmp_path / "cell_expected.json"
     if expected is not None:
         decl.write_text(json.dumps(expected), encoding="utf-8")
-    rc = sc.run_selfcheck(self_name=self_name, declaration=decl)
+    rc = sc.run_selfcheck(self_name=self_name, declaration=decl,
+                          resolver=resolver or _INERT_RESOLVER)
     return rc, capsys.readouterr().out
 
 
@@ -319,7 +344,9 @@ def test_runs_as_a_bare_file_in_isolated_mode(tmp_path):
          "--declaration", str(tmp_path / "absent.json")],
         capture_output=True, text=True, timeout=60,
     )
-    assert proc.returncode in (0, 1), f"crashed instead of reporting:\n{proc.stderr}"
+    # 2 (DID NOT MEASURE) is a REPORTING outcome, not a crash: on a box where
+    # a followed EnvironmentFile is root-owned, blind coverage must exit 2.
+    assert proc.returncode in (0, 1, 2), f"crashed instead of reporting:\n{proc.stderr}"
     assert "cell selfcheck: test-cell" in proc.stdout, proc.stdout
     assert "Traceback" not in proc.stderr, proc.stderr
 
@@ -446,7 +473,10 @@ def test_verdict_line_states_what_it_is_a_verdict_about(monkeypatch, tmp_path, c
     assert rc == 0, out
     assert "verdict: consistent" in out
     assert "surfaces agree with each other" in out
-    assert "NOT compared against resolver output" in out
+    # GAP 1 is held now: the scope line must say the resolver comparison
+    # happened, not that it did not.
+    assert "AND with resolver output" in out
+    assert "NOT compared against resolver output" not in out
 
 
 def test_coverage_is_printed_even_on_a_clean_run(monkeypatch, tmp_path, capsys):
@@ -657,8 +687,16 @@ def test_dropin_parent_unit_is_the_instance_not_the_template():
     )
 
 
-def test_list_swarph_unit_files_reads_instance_dropins(tmp_path):
-    """A glob that only matches `*.service` is blind to the file systemd actually runs."""
+def test_unit_discovery_reads_instance_dropins_and_content_relevance(tmp_path):
+    """Two measured blindnesses, one test each half:
+
+    1. A glob matching only `*.service` is blind to the drop-in file systemd
+       actually runs (the SEVENTH SHAPE — cursor-lin's live values exist only
+       in swarph-monitor@cursor-lin.service.d/override.conf).
+    2. A glob matching only *swarph* NAMES is blind to the unit that was dead
+       76 days on lab-ovh: refresh-features-snapshot.service is relevant by
+       CONTENT, not name.
+    """
     (tmp_path / "swarph-monitor@.service").write_text(
         "ExecStart=swarph monitor start --as %i\n", encoding="utf-8"
     )
@@ -668,11 +706,17 @@ def test_list_swarph_unit_files_reads_instance_dropins(tmp_path):
         "ExecStart=swarph monitor start --as cursor-lin --token-file /t\n",
         encoding="utf-8",
     )
-    (tmp_path / "mdmonitor.service").write_text("not ours\n", encoding="utf-8")
-    names = [p.relative_to(tmp_path).as_posix() for p in sc.list_swarph_unit_files(tmp_path)]
-    assert "swarph-monitor@.service" in names
-    assert "swarph-monitor@cursor-lin.service.d/override.conf" in names
-    assert "mdmonitor.service" not in names
+    candidates = [p.relative_to(tmp_path).as_posix()
+                  for p in sorted(tmp_path.glob("*.service"))
+                  + sorted(tmp_path.glob("*.service.d/*.conf"))]
+    assert "swarph-monitor@.service" in candidates
+    assert "swarph-monitor@cursor-lin.service.d/override.conf" in candidates
+
+    assert sc.unit_is_relevant("mdmonitor.service", "not ours\n") is False
+    assert sc.unit_is_relevant(
+        "refresh-features-snapshot.service",
+        "Description=swarph feature-registry — refresh metaedge snapshot\n",
+    ) is True
 
 
 def test_instance_dropin_text_is_owned_by_the_named_cell():
@@ -687,3 +731,323 @@ def test_instance_dropin_text_is_owned_by_the_named_cell():
     assert by_key["gateway"] == "http://100.107.222.72:8788"
     assert by_key["token-file"].endswith("cursor-lin.peer_token")
     assert all(r.owner == "cursor-lin" for r in rows)
+
+
+# ── Resolver comparison (GAP 1) — the two 76-days-dead specimens ────────────
+# Both from lab-ovh, 2026-08-18: refresh-features-snapshot died 2026-06-03 and
+# its watchdog alerted into a void ~2000x/week. Specimen 1: wrong host.
+# Specimen 2: wrong-era credential, hidden behind specimen 1.
+
+
+def _envfile(text, owner="lab-ovh", live=True, name="/etc/default/x (via x.service)"):
+    return {"name": name, "kind": "envfile", "text": text, "live": live,
+            "owner": owner}
+
+
+def _resolver(gateway="http://100.107.222.72:8788", token=("t" * 43, "peer file"),
+              listeners=frozenset({("100.107.222.72", 8788)})):
+    return {"gateway": gateway, "token": token, "listeners": set(listeners),
+            "socket_table": "read"}
+
+
+def test_specimen1_wrong_host_env_literal_is_resolver_drift(monkeypatch, tmp_path, capsys):
+    """MESH_GATEWAY_URL=localhost:8788 while the resolver says tailnet."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile("MESH_GATEWAY_URL=http://localhost:8788\n"),
+    ], "lab-ovh", capsys=capsys, resolver=_resolver())
+    assert rc == 1
+    assert "RESOLVER DRIFT" in out
+    assert "localhost:8788" in out
+    assert "100.107.222.72:8788" in out
+
+
+def test_specimen1_also_caught_by_listener_when_literal_matches_default(monkeypatch, tmp_path, capsys):
+    """The subtle half: the dead unit's literal EQUALED the resolver default
+    (both localhost). Literal-vs-resolver alone reports agreement — the
+    socket table is what catches 'nothing listens there'."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile("MESH_GATEWAY_URL=http://localhost:8788\n"),
+    ], "lab-ovh", capsys=capsys,
+        resolver=_resolver(gateway="http://localhost:8788"))
+    assert rc == 1
+    assert "RESOLVER DRIFT" not in out  # literal == resolver: agreement
+    assert "UNREACHABLE" in out and "localhost:8788" in out
+
+
+def test_absent_socket_table_is_did_not_measure_not_false_clean(monkeypatch, tmp_path, capsys):
+    """macOS has no /proc (this repo's macOS leg exists because a /proc
+    dependency shipped undetected once already, card #492). A run that never
+    saw a socket table must say DID NOT MEASURE — not a silent skip, not a
+    false clean, and NOT UNREACHABLE everywhere (the false-calm lie inverted
+    is false alarm)."""
+    resolver = {"gateway": "http://100.107.222.72:8788",
+                "token": (None, "no token resolvable"),
+                "listeners": set(), "socket_table": "absent"}
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile("MESH_GATEWAY_URL=http://100.107.222.72:8788\n"),
+    ], "lab-ovh", capsys=capsys, resolver=resolver)
+    assert rc == 2
+    assert "DID NOT MEASURE" in out and "socket table" in out
+    assert "UNREACHABLE" not in out
+    assert "no /proc on this platform" in out
+
+
+def test_unreadable_socket_table_is_also_blind(monkeypatch, tmp_path, capsys):
+    """Non-vacuity partner: a PARTIAL read (one /proc file failed) is blind
+    too — half a socket table is not a measurement."""
+    resolver = {"gateway": None, "token": (None, "no token resolvable"),
+                "listeners": {("127.0.0.1", 22)}, "socket_table": "unreadable"}
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("a.service", "ExecStart=x --as lab-ovh --state-dir /s\n"),
+    ], "lab-ovh", capsys=capsys, resolver=resolver)
+    assert rc == 2
+    assert "DID NOT MEASURE" in out and "unreadable" in out
+
+
+def test_remote_gateway_is_not_marked_unreachable(monkeypatch, tmp_path, capsys):
+    """A cell whose gateway is on ANOTHER box must not report UNREACHABLE
+    for a listener that was never supposed to be local."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile("MESH_GATEWAY_URL=http://203.0.113.9:8788\n"),
+    ], "lab-ovh", capsys=capsys,
+        resolver=_resolver(gateway="http://203.0.113.9:8788"))
+    assert rc == 0, out
+    assert "UNREACHABLE" not in out
+
+
+def test_specimen2_wrong_era_token_is_mismatch_and_redacted(monkeypatch, tmp_path, capsys):
+    """64-char pre-migration literal vs 43-char peer token. The LENGTH PAIR
+    is the finding; neither value may appear in the output."""
+    old_token = "ab" * 32  # 64 chars, the pre-#311 shape
+    new_token = "cd" * 21 + "e"  # 43 chars
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile(f"MESH_GATEWAY_TOKEN={old_token}\n"),
+    ], "lab-ovh", capsys=capsys, resolver=_resolver(token=(new_token, "peer file")))
+    assert rc == 1
+    assert "TOKEN MISMATCH" in out
+    assert "64 chars" in out and "43 chars" in out
+    assert old_token not in out and new_token not in out  # redaction is the test
+
+
+def test_token_match_is_ok_and_still_redacted(monkeypatch, tmp_path, capsys):
+    """Non-vacuity partner: a MATCHING literal must not mismatch."""
+    tok = "z" * 43
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile(f"MESH_GATEWAY_TOKEN={tok}\n"),
+    ], "lab-ovh", capsys=capsys, resolver=_resolver(token=(tok, "peer file")))
+    assert rc == 0, out
+    assert "TOKEN MISMATCH" not in out
+    assert "matches resolved credential" in out
+    assert tok not in out
+
+
+def test_unparseable_gateway_is_malformed_not_silent(monkeypatch, tmp_path, capsys):
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("a.service", "ExecStart=x --as lab-ovh --gateway =\n"),
+    ], "lab-ovh", capsys=capsys, resolver=_resolver())
+    assert "MALFORMED" in out  # empty value, caught by the existing shape
+
+
+def test_no_resolver_claim_bucket_is_counted(monkeypatch, tmp_path, capsys):
+    """The bucket's SIZE is reported so it cannot quietly grow into the
+    place findings go to die (lab-ovh, DM 24706). Bucket members are
+    env-file mesh keys the resolver does not own."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile("MESH_GATEWAY_URL=http://100.107.222.72:8788\n"
+                 "MESH_OUTBOX_DIR=/var/spool/mesh\n"
+                 "SWARPH_LEGACY_THING=1\n"),
+    ], "lab-ovh", capsys=capsys, resolver=_resolver())
+    assert "NO-RESOLVER-CLAIM" in out
+    assert "2 literal(s)" in out
+    assert "env:MESH_OUTBOX_DIR" in out and "env:SWARPH_LEGACY_THING" in out
+    # the resolver-owned key is NOT in the bucket
+    assert "env:MESH_GATEWAY_URL" not in out.split("NO-RESOLVER-CLAIM")[1]
+
+
+def test_bucket_empty_when_only_owned_keys(monkeypatch, tmp_path, capsys):
+    """Non-vacuity partner: owned keys alone must produce an empty bucket."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile("MESH_GATEWAY_URL=http://100.107.222.72:8788\n"),
+    ], "lab-ovh", capsys=capsys, resolver=_resolver())
+    assert "NO-RESOLVER-CLAIM  0 literal(s)" in out
+
+
+def test_declared_gateway_divergence_is_not_drift(monkeypatch, tmp_path, capsys):
+    """Intentional divergence stays declarable at the resolver layer too."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile("MESH_GATEWAY_URL=http://localhost:8788\n"),
+    ], "lab-ovh", expected={"gateway": ["http://localhost:8788"]},
+        capsys=capsys, resolver=_resolver())
+    assert "DECLARED" in out
+    assert "RESOLVER DRIFT" not in out
+
+
+def test_envfile_extraction_ignores_unowned_keys_and_placeholders():
+    rows = sc.extract_envfile(_envfile(
+        "MESH_GATEWAY_URL=http://x:1\n"
+        "RANDOM_LOCAL_THING=42\n"
+        "MESH_GATEWAY_TOKEN=${TOKEN_FROM_ELSEWHERE}\n"
+        "# comment\n"
+    ))
+    assert [r.key for r in rows] == ["env:MESH_GATEWAY_URL"]
+    assert rows[0].secret is False
+
+
+def test_envfile_token_row_is_marked_secret():
+    rows = sc.extract_envfile(_envfile("MESH_GATEWAY_TOKEN=abc123\n"))
+    assert rows[0].secret is True
+    assert sc.display_value(rows[0]) == "<redacted, 6 chars>"
+
+
+def test_parse_listen_sockets_reads_proc_net_tcp_shape():
+    # 0100007F:2254 = 127.0.0.1:8788 LISTEN; the tailnet specimen row
+    # 48DE6B64:2254 = 100.107.222.72:8788 LISTEN (little-endian hex).
+    text = (
+        "  sl  local_address rem_address   st ...\n"
+        "   0: 48DE6B64:2254 00000000:0000 0A ...\n"
+        "   1: 0100007F:8A2E 00000000:0000 0A ...\n"
+        "   2: 0100007F:2254 00000000:0000 05 ...\n"  # not LISTEN
+    )
+    listeners = sc.parse_listen_sockets([text])
+    assert ("100.107.222.72", 8788) in listeners
+    assert ("127.0.0.1", 35374) in listeners
+    assert ("127.0.0.1", 8788) not in listeners  # st != 0A
+
+
+def test_gateway_reachability_classes():
+    listeners = {("100.107.222.72", 8788), ("127.0.0.1", 22)}
+    assert sc.gateway_reachability("http://100.107.222.72:8788", listeners) == "local-listening"
+    assert sc.gateway_reachability("http://localhost:8788", listeners) == "local-silent"
+    assert sc.gateway_reachability("http://127.0.0.1:22", listeners) == "local-listening"
+    assert sc.gateway_reachability("http://203.0.113.9:8788", listeners) == "remote-unchecked"
+    assert sc.gateway_reachability("not a url at all :::", listeners) in (
+        "unparseable", "remote-unchecked")  # never local-silent on garbage
+
+
+def test_gateway_own_token_is_declarable_by_surface_and_length(monkeypatch, tmp_path, capsys):
+    """The gateway's OWN env file carries a server-side token that should
+    never equal a peer token (measured: mesh-gateway.service on lab-ovh).
+    A permanent red line there trains ignoring the signal — so it is
+    declarable, by surface + redacted length, with no secret in the file."""
+    surface = "/home/ubuntu/mesh-gateway/.env (via mesh-gateway.service)"
+    server_tok = "s" * 43
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile(f"MESH_GATEWAY_TOKEN={server_tok}\n", name=surface, owner=None),
+    ], "cursor-lin",
+        expected={f"env:MESH_GATEWAY_TOKEN@{surface}": ["<redacted, 43 chars>"]},
+        capsys=capsys, resolver=_resolver(token=("p" * 43, "peer file")))
+    assert rc == 0, out
+    assert "DECLARED" in out
+    assert "TOKEN MISMATCH" not in out
+    assert server_tok not in out
+
+
+def test_undeclared_surface_token_mismatch_still_fires(monkeypatch, tmp_path, capsys):
+    """Non-vacuity partner for the declaration path: a DIFFERENT surface
+    with the same-length token is not covered by the declaration."""
+    surface = "/home/ubuntu/mesh-gateway/.env (via mesh-gateway.service)"
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile(f"MESH_GATEWAY_TOKEN={'s' * 43}\n", name=surface, owner=None),
+        _envfile(f"MESH_GATEWAY_TOKEN={'x' * 43}\n", owner=None,
+                 name="/etc/default/refresh-features-snapshot (via refresh-features-snapshot.service)"),
+    ], "cursor-lin",
+        expected={f"env:MESH_GATEWAY_TOKEN@{surface}": ["<redacted, 43 chars>"]},
+        capsys=capsys, resolver=_resolver(token=("p" * 43, "peer file")))
+    assert rc == 1
+    assert out.count("TOKEN MISMATCH") == 1  # only the undeclared surface
+    assert "refresh-features-snapshot" in out.split("TOKEN MISMATCH")[1]
+
+
+def test_empty_env_value_is_declarable_by_surface(monkeypatch, tmp_path, capsys):
+    """PR #261 review: an EMPTY env value is ambiguous — 'deliberately
+    disabled' and 'never filled in' look identical (measured: the gateway's
+    empty MESH_GATEWAY_COMMANDER_TOKEN is vestigial and guarded, not a
+    hole). The declaration is how the operator says which."""
+    surface = "/home/ubuntu/mesh-gateway/.env (via mesh-gateway.service)"
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile("MESH_GATEWAY_COMMANDER_TOKEN=\n", name=surface, owner=None),
+    ], "cursor-lin",
+        expected={f"env:MESH_GATEWAY_COMMANDER_TOKEN@{surface}": ["<EMPTY>"]},
+        capsys=capsys, resolver=_resolver())
+    assert rc == 0, out
+    assert "DECLARED" in out and "MALFORMED" not in out
+
+
+def test_undeclared_empty_env_value_still_malformed(monkeypatch, tmp_path, capsys):
+    """Non-vacuity partner: without the declaration, empty is MALFORMED."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile("MESH_GATEWAY_COMMANDER_TOKEN=\n", owner=None),
+    ], "cursor-lin", capsys=capsys, resolver=_resolver())
+    assert rc == 1
+    assert "MALFORMED" in out
+
+
+# ── PR #261 Copilot findings (confirmed by lab-ovh, DM 24824) ───────────────
+
+
+def test_quoted_env_value_matches_unquoted_resolver(monkeypatch, tmp_path, capsys):
+    """Finding 1: KEY="value" kept its quotes and could never match the
+    resolver's unquoted output — a false-positive generator in a drift
+    detector."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile('MESH_GATEWAY_URL="http://100.107.222.72:8788"\n'),
+    ], "lab-ovh", capsys=capsys, resolver=_resolver())
+    assert rc == 0, out
+    assert "RESOLVER DRIFT" not in out
+
+
+def test_quoted_wrong_value_still_drifts(monkeypatch, tmp_path, capsys):
+    """Non-vacuity partner: quote-stripping must not launder a genuinely
+    wrong quoted value into agreement."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile('MESH_GATEWAY_URL="http://10.9.9.9:8788"\n'),
+    ], "lab-ovh", capsys=capsys, resolver=_resolver())
+    assert rc == 1
+    assert "RESOLVER DRIFT" in out and "10.9.9.9" in out
+
+
+def test_multi_file_environment_file_directive_all_read():
+    """Finding 2: systemd permits multiple files on one directive. Taking
+    the RHS as one path makes every additional file silently UNREAD —
+    under-measurement reported as coverage, the worse failure mode."""
+    refs = sc.environment_file_refs(
+        "[Service]\n"
+        "EnvironmentFile=-/etc/default/a /etc/default/b\n"
+        'EnvironmentFile="-/etc/default/c with space"\n'
+    )
+    assert refs == ["/etc/default/a", "/etc/default/b", "/etc/default/c with space"]
+
+
+def test_single_file_directive_unchanged():
+    """Non-vacuity partner: the common single-file form still parses,
+    optional-dash stripped."""
+    assert sc.environment_file_refs("EnvironmentFile=-/etc/default/x\n") == ["/etc/default/x"]
+
+
+def test_wildcard_bind_address_is_not_a_target():
+    """Finding 3: 0.0.0.0/:: are wildcard BIND addresses. A unit pointing at
+    one is a misconfiguration to catch, not a loopback to bless — even when
+    a wildcard listener exists on the port."""
+    listeners = {("0.0.0.0", 8788)}
+    assert sc.gateway_reachability("http://0.0.0.0:8788", listeners) == "wildcard-target"
+    assert sc.gateway_reachability("http://[::]:8788", listeners) == "wildcard-target"
+
+
+def test_wildcard_listener_still_serves_loopback_target():
+    """Non-vacuity partner: a listener ON the wildcard address does serve a
+    loopback target — the listener side keeps the address valid."""
+    assert sc.gateway_reachability("http://localhost:8788", {("0.0.0.0", 8788)}) == "local-listening"
+
+
+def test_same_length_secrets_display_as_distinct_numbered_values(monkeypatch, tmp_path, capsys):
+    """Finding 4: two DIFFERENT 43-char tokens displayed as one repeated
+    string while reporting '2 values' — and two 43-char tokens is exactly
+    the peer-token case. Numbered redaction keeps the count visible."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        _envfile(f"MESH_GATEWAY_TOKEN={'a' * 43}\n", name="/e/a (via a.service)"),
+        _envfile(f"MESH_GATEWAY_TOKEN={'b' * 43}\n", name="/e/b (via b.service)"),
+    ], "lab-ovh", capsys=capsys, resolver=_resolver())
+    assert "DRIFT" in out
+    assert "<redacted #1, 43 chars>" in out and "<redacted #2, 43 chars>" in out
+    assert "['<redacted, 43 chars>', '<redacted, 43 chars>']" not in out
+    assert "a" * 43 not in out and "b" * 43 not in out
