@@ -130,3 +130,52 @@ def test_the_module_self_check_passes():
     )
     assert r.returncode == 0, r.stderr
     assert "ok —" in r.stdout
+
+
+# ── `apropos`: search by INTENT, not by knowing the topic's name ─────────────
+
+def test_search_finds_a_topic_by_intent_not_by_its_name(capsys):
+    """>>> THE DISCOVERY AFFORDANCE. <<< A cell arrives wanting to 'subscribe to
+    updates'; it does not know the word 'channels'. Requiring the topic name is the
+    #520 discovery defect reproduced inside its own fix — which is exactly what
+    FreeDOS Help's `apropos` existed to solve."""
+    rc = run_guide(["--search", "subscribe"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "channels" in out
+    assert "subscri" in out.lower()
+
+
+def test_search_finds_the_board_by_the_word_a_caller_would_use(capsys):
+    rc = run_guide(["--search", "owes"])
+    assert rc == 0
+    assert "the-board" in capsys.readouterr().out
+
+
+def test_search_with_no_match_exits_nonzero_and_names_the_topics(capsys):
+    rc = run_guide(["--search", "zzzz-no-such-thing"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "Topics:" in err and "channels" in err
+
+
+def test_the_list_is_an_index_of_COMMANDS_not_chapter_titles(capsys):
+    """FreeDOS Help's contents screen lists commands you can type, so 'what can I do'
+    and 'how do I do it' are one lookup. Each topic shows the commands it teaches."""
+    rc = run_guide(["--list"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "swarph channel join" in out
+    assert "swarph monitor start" in out
+    assert "swarph mesh reply" in out
+
+
+def test_the_command_index_does_not_repeat_an_entry(capsys):
+    """Deduping the full line and truncating afterwards printed 'swarph board cards'
+    three times — the dedupe has to run on the value actually printed."""
+    run_guide(["--list"])
+    for line in capsys.readouterr().out.splitlines():
+        if "  " not in line:
+            continue
+        cmds = [c.strip() for c in line.split("  ", 1)[1].split(",") if c.strip()]
+        assert len(cmds) == len(set(cmds)), f"repeated entry in: {line}"

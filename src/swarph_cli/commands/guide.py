@@ -69,6 +69,41 @@ def _split_topics(text: str) -> "dict[str, str]":
     return {k: "\n".join(v).rstrip() + "\n" for k, v in topics.items()}
 
 
+def _commands_in(section: str) -> "list[str]":
+    """The `swarph ...` invocations a section teaches, first line of each, deduped."""
+    out: list[str] = []
+    for line in section.splitlines():
+        s = line.strip().lstrip("$ ").rstrip("\\").strip()
+        if not s.startswith("swarph "):
+            continue
+        # Truncate to verb + subcommand FIRST, then dedupe. Deduping the full line and
+        # truncating after yields "swarph board cards" three times — the dedupe has to
+        # run on the value actually printed, not on its input.
+        entry = " ".join(s.split()[:3]).rstrip(" \\")
+        if entry not in out:
+            out.append(entry)
+    return out
+
+
+def _search(topics: "dict[str, str]", term: str) -> "list[tuple[str, str]]":
+    """Return (topic, first matching line) per topic — `apropos`, not full-text dump.
+
+    Matches the WHOLE guide including prose, because the caller is searching by intent
+    ('subscribe', 'who owes me') and the word they know may appear only in a sentence.
+    One line per topic keeps the answer readable; the topic name is the actionable part.
+    """
+    needle = term.strip().lower()
+    hits: list[tuple[str, str]] = []
+    for name, body in topics.items():
+        for line in body.splitlines():
+            if needle in line.lower():
+                clean = line.strip().lstrip("#").strip().lstrip("> ").strip()
+                if clean:
+                    hits.append((name, clean[:96]))
+                    break
+    return hits
+
+
 def run_guide(argv: "list[str]") -> int:
     p = argparse.ArgumentParser(
         prog="swarph guide",
@@ -79,14 +114,35 @@ def run_guide(argv: "list[str]") -> int:
                    help="a topic anchor, e.g. channels. Omit for the whole guide.")
     p.add_argument("--list", action="store_true",
                    help="list the topic anchors and exit")
+    p.add_argument("--search", metavar="TERM",
+                   help="find topics by INTENT rather than by name (FreeDOS `apropos`). "
+                        "Searches the commands and the prose.")
     args = p.parse_args(argv)
 
     text = _load_guide()
     topics = _split_topics(text)
 
     if args.list:
-        for name in topics:
-            print(name)
+        # >>> THE FRONT PAGE IS AN INDEX OF THINGS YOU CAN TYPE. <<< FreeDOS Help's
+        # contents screen lists COMMANDS (apropos, fdisk, format), not chapter titles,
+        # so "what can I do" and "how do I do it" are one lookup. Each topic is shown
+        # with the commands it teaches.
+        for name, body in topics.items():
+            cmds = _commands_in(body)
+            print(f"{name:<22} {', '.join(cmds[:3]) if cmds else '—'}")
+        return 0
+
+    if args.search:
+        # `apropos`: an LLM arrives with an INTENT ("subscribe to updates"), not the
+        # topic's name ("channels"). Requiring the name is the #520 discovery defect
+        # reproduced inside its own fix.
+        hits = _search(topics, args.search)
+        if not hits:
+            print(f"swarph guide: nothing matches {args.search!r}. "
+                  f"Topics: {', '.join(topics)}", file=sys.stderr)
+            return 2
+        for name, line in hits:
+            print(f"{name:<22} {line}")
         return 0
 
     if not args.topic:
