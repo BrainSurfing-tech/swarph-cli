@@ -110,13 +110,18 @@ jobs:
         if: always()
         run: |
           python - <<'PY'
-          import platform, sys, sysconfig
+          import platform, sys, sysconfig, tempfile
+          from pathlib import Path
           print(f"platform.system()   {platform.system()}")
           print(f"platform.machine()  {platform.machine()}        <- arm64 = Apple Silicon")
           print(f"sys.platform        {sys.platform}")
           print(f"mac_ver             {platform.mac_ver()[0]}")
           print(f"platform tag        {sysconfig.get_platform()}")
+          print("case-sensitivity of the default filesystem:")
+          t = Path(tempfile.mkdtemp())
+          (t / "CaseTest").touch()
+          if (t / "casetest").exists():
+              print("  INSENSITIVE (macOS default) — import/path bugs live here")
+          else:
+              print("  sensitive")
           PY
-          echo "case-sensitivity of the default filesystem:"
-          t=$(mktemp -d); touch "$t/CaseTest"
-          if [ -e "$t/casetest" ]; then echo "  INSENSITIVE (macOS default) — import/path bugs live here"; else echo "  sensitive"; fi
