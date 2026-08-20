@@ -228,6 +228,23 @@ def test_arm_rendering_antigravity_emits_inject_steps(monkeypatch, capsys):
     assert "tmux:gemini-researcher" in msg
 
 
+def test_antigravity_suppresses_repeat_invocation_inject_steps(monkeypatch, capsys):
+    status = {
+        "running": True,
+        "sinks": [{"name": "tmux:gemini-researcher", "is_push": True}],
+    }
+    # Mock stdin receiving invocationNum > 1
+    monkeypatch.setattr(who, "_read_stdin_payload", lambda: {"invocationNum": 2})
+    rc = _run_output(
+        ["--harness", "antigravity"], monkeypatch,
+        cell_name="gemini-researcher", monitor_json=status,
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"injectSteps": []}
+
+
+
 
 
 def test_arm_rendering_without_cell_refuses_loudly(monkeypatch, capsys):

@@ -49,12 +49,15 @@ _KNOWN_HARNESSES = _ARM_HARNESSES + _INJECT_HARNESSES + _VERIFY_HARNESSES
 _FILTER_MODULE = "swarph_cli.scripts.dm_notify_filter"
 
 
-def _drain_stdin() -> None:
+def _read_stdin_payload() -> dict[str, Any]:
     try:
         if not sys.stdin.isatty():
-            sys.stdin.read()
+            raw = sys.stdin.read()
+            if raw.strip():
+                return json.loads(raw)
     except Exception:
         pass
+    return {}
 
 
 def _emit(payload: dict[str, Any], *, harness: str) -> int:
@@ -72,17 +75,21 @@ def _emit(payload: dict[str, Any], *, harness: str) -> int:
         print(json.dumps({"additional_context": context}))
     elif harness in _INJECT_HARNESSES:
         # Antigravity PreInvocation shape: {"injectSteps": [{"ephemeralMessage": "..."}]}
-        print(
-            json.dumps(
-                {
-                    "injectSteps": [
-                        {
-                            "ephemeralMessage": context,
-                        }
-                    ]
-                }
+        if not context:
+            print(json.dumps({"injectSteps": []}))
+        else:
+            print(
+                json.dumps(
+                    {
+                        "injectSteps": [
+                            {
+                                "ephemeralMessage": context,
+                            }
+                        ]
+                    }
+                )
             )
-        )
+
     elif harness in _ARM_HARNESSES:
         # Claude Code / Codex SessionStart shape.
         print(
@@ -395,7 +402,7 @@ def run_wake_hook_output(argv: Optional[list[str]] = None) -> int:
     )
     args = p.parse_args(argv)
 
-    _drain_stdin()
+    stdin_data = _read_stdin_payload()
 
     harness = args.harness.strip().lower()
     if harness not in _KNOWN_HARNESSES:
@@ -412,6 +419,13 @@ def run_wake_hook_output(argv: Optional[list[str]] = None) -> int:
             harness="unknown",  # dual-envelope refusal; see _emit
         )
 
+    # Antigravity PreInvocation fires per invocation. Only inject on the first turn (invocationNum == 1)
+    # to prevent turn-by-turn context spam.
+    if harness == "antigravity":
+        inv_num = stdin_data.get("invocationNum")
+        if isinstance(inv_num, int) and inv_num > 1:
+            return _emit({"context": ""}, harness=harness)
+
     cell_name, cell_source = _resolve_cell(args.cell)
 
     if harness in _ARM_HARNESSES:
@@ -421,3 +435,4 @@ def run_wake_hook_output(argv: Optional[list[str]] = None) -> int:
     return _emit(
         {"context": _verify_report(cell_name, cell_source)}, harness=harness
     )
+
