@@ -94,7 +94,7 @@ def _event_key(harness: str) -> tuple[str, ...]:
     if harness == "codex":
         return ("SessionStart",)
     if harness == "antigravity":
-        return ("swarph-wake-hook", "SessionStart")
+        return ("swarph-wake-hook", "PreInvocation")
     return ("sessionStart",)
 
 

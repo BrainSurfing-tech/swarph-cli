@@ -59,10 +59,10 @@ def test_antigravity_entry_shape_matches_hooks_schema(isolated_home):
     assert iwh._config_path("antigravity", "user") == isolated_home / ".gemini" / "config" / "hooks.json"
 
 
-def test_install_antigravity_writes_swarph_wake_hook_sessionstart(isolated_home):
+def test_install_antigravity_writes_swarph_wake_hook_preinvocation(isolated_home):
     config, changed = iwh._install({}, "antigravity")
     assert changed is True
-    entries = config["swarph-wake-hook"]["SessionStart"]
+    entries = config["swarph-wake-hook"]["PreInvocation"]
     assert len(entries) == 1
     assert iwh._is_owned_entry(entries[0])
 
@@ -84,7 +84,8 @@ def test_install_antigravity_preserves_preexisting_named_hooks(isolated_home):
     assert "retry-agent-execution-error" in config
     assert "swarph-wake-hook" in config
     assert config["retry-agent-execution-error"]["Stop"][0]["command"] == "./hooks/retry-agent-execution-error.py"
-    assert len(config["swarph-wake-hook"]["SessionStart"]) == 1
+    assert len(config["swarph-wake-hook"]["PreInvocation"]) == 1
+
 
 
 
@@ -203,6 +204,30 @@ def test_arm_rendering_codex_uses_same_shape(monkeypatch, capsys):
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert "hookSpecificOutput" in out
+
+
+def test_arm_rendering_antigravity_emits_inject_steps(monkeypatch, capsys):
+    status = {
+        "running": True,
+        "sinks": [
+            {"name": "tmux:gemini-researcher", "is_push": True},
+            {"name": "pull", "is_push": False},
+        ],
+    }
+    rc = _run_output(
+        ["--harness", "antigravity"], monkeypatch,
+        cell_name="gemini-researcher", monitor_json=status,
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "injectSteps" in out
+    assert len(out["injectSteps"]) == 1
+    assert "ephemeralMessage" in out["injectSteps"][0]
+    msg = out["injectSteps"][0]["ephemeralMessage"]
+    assert "DM wake ARMED" in msg
+    assert "tmux:gemini-researcher" in msg
+
+
 
 
 def test_arm_rendering_without_cell_refuses_loudly(monkeypatch, capsys):

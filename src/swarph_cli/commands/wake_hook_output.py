@@ -40,9 +40,10 @@ from swarph_cli.cell import (
     load_cell,
 )
 
-_ARM_HARNESSES = ("claude", "codex", "muse", "antigravity")
+_ARM_HARNESSES = ("claude", "codex", "muse")
+_INJECT_HARNESSES = ("antigravity",)
 _VERIFY_HARNESSES = ("cursor",)
-_KNOWN_HARNESSES = _ARM_HARNESSES + _VERIFY_HARNESSES
+_KNOWN_HARNESSES = _ARM_HARNESSES + _INJECT_HARNESSES + _VERIFY_HARNESSES
 
 
 _FILTER_MODULE = "swarph_cli.scripts.dm_notify_filter"
@@ -69,6 +70,19 @@ def _emit(payload: dict[str, Any], *, harness: str) -> int:
     if harness in _VERIFY_HARNESSES:
         # Cursor sessionStart: {"env": {...}, "additional_context": "..."}
         print(json.dumps({"additional_context": context}))
+    elif harness in _INJECT_HARNESSES:
+        # Antigravity PreInvocation shape: {"injectSteps": [{"ephemeralMessage": "..."}]}
+        print(
+            json.dumps(
+                {
+                    "injectSteps": [
+                        {
+                            "ephemeralMessage": context,
+                        }
+                    ]
+                }
+            )
+        )
     elif harness in _ARM_HARNESSES:
         # Claude Code / Codex SessionStart shape.
         print(
@@ -93,6 +107,7 @@ def _emit(payload: dict[str, Any], *, harness: str) -> int:
                 }
             )
         )
+
     return 0
 
 
