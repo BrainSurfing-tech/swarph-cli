@@ -565,23 +565,71 @@ def _run_reply(args: argparse.Namespace) -> int:
     # seat", written inside the tool built to kill it. (grok-researcher, blocking
     # review on PR #253.) The threadless branch was already honest; this one now
     # matches it. Report the fact that was returned; name the thing that was not.
+    #
+    # >>> #525 SHIPPED THE CLOSE FACT, SO THE DISCLAIMER IS NOW CONDITIONAL ON THE SERVER
+    # THAT ANSWERED — NOT ON A VERSION, A DATE, OR ANYTHING ANYONE HAS TO REMEMBER. <<<
+    # The gateway returns `obligation_check` (no_thread / checked / not_applicable /
+    # not_checked) alongside `closed_obligations`. Gate on the FIELD'S PRESENCE:
+    #
+    #   present  -> report the server's fact, which is the whole point of the card
+    #   absent   -> keep the disclaimer, because the server really did not say
+    #
+    # A merge is not a deploy. #123 merged at 09:54 while the live gateway had been up
+    # since the previous morning, serving pre-#525 code with no signal anywhere that the
+    # two had diverged (card #496, one layer over). Keying on a version would have made
+    # this command assert a fact the running server was not returning. Keying on the field
+    # means it corrects itself the moment the gateway restarts and nobody sequences
+    # anything. (drop-on-meta-edge, who measured the pid and the mtime.)
+    #
+    # AND IT HONOURS grok's PR #253 REVIEW RATHER THAN REVERSING IT: the rule was never
+    # assert what you do not know. When the server does not say, this still does not claim.
+    check = payload.get("obligation_check")
+    closed = payload.get("closed_obligations")
     if args.json:
         print(json.dumps({
             "id": payload.get("id"), "to_node": to_node, "kind": args.kind,
             "thread_id": thread_id,
-            # attached_to_thread is what this command KNOWS. Deliberately not named
-            # closed_obligation: an automated caller must not read a delivery fact as
-            # a closure fact. (gpu-wsl: both outcomes return 0 and most callers here
+            # attached_to_thread is what this command KNOWS on its own. Deliberately not
+            # named closed_obligation: an automated caller must not read a delivery fact
+            # as a closure fact. (gpu-wsl: both outcomes return 0 and most callers here
             # are automated, so stdout prose is not a signal.)
             "attached_to_thread": bool(thread_id),
-            "closed_obligation": None,
+            # `null` on BOTH keys when the server said nothing — which is what an older
+            # gateway is. A caller distinguishes "no obligation closed" from "this server
+            # cannot tell me" by obligation_check being null, exactly as the server-side
+            # field distinguishes them for itself.
+            "closed_obligations": closed if check else None,
+            "obligation_check": check,
+            # >>> KEPT, AND NO LONGER ALWAYS null. <<< This key predates the server
+            # fact and every response it ever produced carried null, so no caller can
+            # depend on a non-null value -- but a caller doing
+            # `.get("closed_obligation", False)` reads a MISSING key as a confident
+            # False, which is the exact ambiguity the null was added to prevent
+            # (test_JSON_output_never_claims_a_closure_it_cannot_see). Dropping it
+            # would silently turn "cannot tell" into "no" for those callers on the day
+            # closures started being reported. It is a VIEW of closed_obligations, not
+            # a second source: first id, or None.
+            "closed_obligation": (closed[0] if check and closed else None),
         }, indent=2))
         return 0
-    if thread_id:
+    if check:
+        if closed:
+            ids = ", ".join(f"#{i}" for i in closed)
+            print(f"replied id={payload.get('id')} to={to_node} kind={args.kind} "
+                  f"in thread {thread_id} — CLOSED obligation {ids} (reported by the "
+                  f"gateway, not inferred here).")
+        elif check == "checked":
+            print(f"replied id={payload.get('id')} to={to_node} kind={args.kind} "
+                  f"in thread {thread_id} — the gateway LOOKED and closed nothing: no "
+                  f"obligation on this thread is held by {self_name}.")
+        else:
+            print(f"replied id={payload.get('id')} to={to_node} kind={args.kind} "
+                  f"— no obligation lookup ran ({check}), so nothing closed.")
+    elif thread_id:
         print(f"replied id={payload.get('id')} to={to_node} kind={args.kind} "
               f"in thread {thread_id} — if {self_name} holds an open obligation on "
               f"this thread the gateway closes it, and THIS COMMAND CANNOT CONFIRM "
-              f"THAT: the send returns no close fact. Check the card.")
+              f"THAT: this gateway returns no close fact. Check the card.")
     else:
         print(f"replied id={payload.get('id')} to={to_node} kind={args.kind} "
               f"— NOT IN A THREAD: message {args.message_id} carries no thread_id, so "

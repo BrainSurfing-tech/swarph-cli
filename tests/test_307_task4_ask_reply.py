@@ -291,6 +291,11 @@ def test_JSON_output_never_claims_a_closure_it_cannot_see(monkeypatch, capsys):
     assert d["attached_to_thread"] is True
     assert d["closed_obligation"] is None, "this command cannot see a closure"
     assert d["thread_id"] == "t-abc"
+    # #525: the gateway in this fixture returns NO obligation_check, which is what an
+    # older gateway is. The disclaimer must survive that -- and `null` on both keys is
+    # how the caller tells "this server cannot say" from "nothing closed".
+    assert d["obligation_check"] is None
+    assert d["closed_obligations"] is None
 
 
 def test_JSON_marks_a_threadless_reply_as_unattached(monkeypatch, capsys):
@@ -303,3 +308,73 @@ def test_JSON_marks_a_threadless_reply_as_unattached(monkeypatch, capsys):
     d = _json.loads(capsys.readouterr().out)
     assert d["attached_to_thread"] is False
     assert d["closed_obligation"] is None
+
+
+# ── #525: the CLI reports the server's fact when the server states it ────────
+
+def test_JSON_reports_the_close_fact_WHEN_THE_SERVER_STATES_IT(monkeypatch, capsys):
+    """>>> THE DISCLAIMER WAS RIGHT UNTIL #525 AND WOULD HAVE STAYED WRONG AFTER IT. <<<
+    grok blocked PR #253 to put the refusal in, correctly: the endpoint returned no close
+    fact, so claiming one was prose on exit 0. #525 removed the reason for it.
+
+    Gated on the FIELD'S PRESENCE, never on a version or a date. A merge is not a deploy:
+    #123 merged while the live gateway had been serving pre-#525 code for 22 hours with
+    nothing anywhere joining the two. Keying on a version would make this command assert a
+    fact the running server does not return. (drop-on-meta-edge.)
+    """
+    import json as _json
+    _inbox(monkeypatch, [{"id": 99, "from_node": "droplet", "thread_id": "t-abc"}])
+    _posts(monkeypatch, mesh, payload={"id": 100, "closed_obligations": [12],
+                                       "obligation_check": "checked"})
+
+    mesh.run_mesh(["reply", "99", "--content", "x", "--gateway", "http://gw", "--json"])
+
+    d = _json.loads(capsys.readouterr().out)
+    assert d["closed_obligations"] == [12]
+    assert d["obligation_check"] == "checked"
+    assert d["closed_obligation"] == 12, (
+        "the legacy singular key must carry the fact too -- a caller doing "
+        ".get('closed_obligation', False) would otherwise read a real closure as False")
+
+
+def test_a_LOOKED_AND_FOUND_NONE_reply_is_not_reported_as_a_closure(monkeypatch, capsys):
+    """NON-VACUITY partner. Same field present, empty list: the server looked and closed
+    nothing. That must read as a FINDING, and must not become a claim of closure."""
+    import json as _json
+    _inbox(monkeypatch, [{"id": 99, "from_node": "droplet", "thread_id": "t-abc"}])
+    _posts(monkeypatch, mesh, payload={"id": 100, "closed_obligations": [],
+                                       "obligation_check": "checked"})
+
+    mesh.run_mesh(["reply", "99", "--content", "x", "--gateway", "http://gw", "--json"])
+
+    d = _json.loads(capsys.readouterr().out)
+    assert d["closed_obligations"] == []
+    assert d["obligation_check"] == "checked"
+    assert d["closed_obligation"] is None
+
+
+def test_an_OLD_GATEWAY_still_gets_the_disclaimer_not_a_claim(monkeypatch, capsys):
+    """>>> THE BRANCH THE LIVE MESH IS ON RIGHT NOW. <<< No obligation_check in the
+    response means the server did not say, so this command must not say either -- the
+    rule grok drew on #253, unchanged. Stdout, not --json: prose is what a human reads."""
+    _inbox(monkeypatch, [{"id": 99, "from_node": "droplet", "thread_id": "t-abc"}])
+    _posts(monkeypatch, mesh, payload={"id": 100})
+
+    mesh.run_mesh(["reply", "99", "--content", "x", "--gateway", "http://gw"])
+
+    out = capsys.readouterr().out
+    assert "CANNOT CONFIRM" in out
+    assert "CLOSED obligation" not in out
+
+
+def test_the_stdout_line_names_the_obligation_when_the_server_did(monkeypatch, capsys):
+    _inbox(monkeypatch, [{"id": 99, "from_node": "droplet", "thread_id": "t-abc"}])
+    _posts(monkeypatch, mesh, payload={"id": 100, "closed_obligations": [12],
+                                       "obligation_check": "checked"})
+
+    mesh.run_mesh(["reply", "99", "--content", "x", "--gateway", "http://gw"])
+
+    out = capsys.readouterr().out
+    assert "CLOSED obligation #12" in out
+    assert "CANNOT CONFIRM" not in out
+
