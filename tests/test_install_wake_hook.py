@@ -52,20 +52,22 @@ def test_claude_entry_shape_matches_settings_schema():
     assert "--harness claude" in hook["command"]
 
 
-def test_install_cursor_writes_sessionStart_list(isolated_home):
-    config, changed = iwh._install({}, "cursor")
-    assert changed is True
-    entries = config["sessionStart"]
-    assert len(entries) == 1
-    assert iwh._is_owned_entry(entries[0])
+def test_antigravity_entry_shape_matches_hooks_schema(isolated_home):
+    entry = iwh._new_entry("antigravity")
+    assert entry["matcher"] == ""
+    hook = entry["hooks"][0]
+    assert hook["type"] == "command"
+    assert "--harness antigravity" in hook["command"]
+    assert iwh._config_path("antigravity", "user") == isolated_home / ".gemini" / "config" / "hooks.json"
 
 
-def test_install_claude_writes_hooks_sessionstart(isolated_home):
-    config, changed = iwh._install({}, "claude")
+def test_install_antigravity_writes_hooks_sessionstart(isolated_home):
+    config, changed = iwh._install({}, "antigravity")
     assert changed is True
     entries = config["hooks"]["SessionStart"]
     assert len(entries) == 1
     assert iwh._is_owned_entry(entries[0])
+
 
 
 def test_install_is_idempotent(isolated_home):
@@ -112,14 +114,18 @@ def test_unknown_harness_refuses_loudly_and_writes_nothing(isolated_home, capsys
 
 
 def test_undetectable_harness_refuses_loudly(isolated_home, monkeypatch, capsys):
-    for var in ("CURSOR_DATA_DIR", "CURSOR_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT",
-                "CLAUDECODE", "CODEX_CI", "CODEX_SANDBOX"):
+    for var in (
+        "CURSOR_DATA_DIR", "CURSOR_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDECODE", "CODEX_CI", "CODEX_SANDBOX", "MUSE_CODE", "MUSE_SESSION_ID", "MUSE",
+        "ANTIGRAVITY_AGENT", "ANTIGRAVITY_CLI", "ANTIGRAVITY_WORKSPACE", "GEMINI_CLI_SESSION",
+    ):
         monkeypatch.delenv(var, raising=False)
     # --dry-run keeps argv non-empty so the piped-invocation usage guard
     # (not-a-TTY stdin in pytest) doesn't short-circuit before detection.
     rc = iwh.run_install_wake_hook(["--dry-run"])
     assert rc == 2
     assert "LOUD REFUSAL" in capsys.readouterr().err
+
 
 
 def test_refusal_branch_is_not_vacuous(isolated_home, capsys):
