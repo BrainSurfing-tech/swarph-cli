@@ -39,7 +39,7 @@ from swarph_cli.commands.wake_hook_output import _tmux_session_cell
 
 
 _VERB = "wake-hook-output"
-_KNOWN_HARNESSES = ("claude", "codex", "cursor")
+_KNOWN_HARNESSES = ("claude", "codex", "cursor", "muse")
 
 
 def _command(harness: str, cell: Optional[str] = None) -> str:
@@ -61,6 +61,8 @@ def _config_path(harness: str, scope: str) -> Path:
         return base / ".codex" / "hooks.json"
     if harness == "cursor":
         return base / ".cursor" / "hooks.json"
+    if harness == "muse":
+        return base / ".config" / "muse" / "settings.json"
     raise ValueError(f"install-wake-hook: unknown harness {harness!r}")
 
 
@@ -88,6 +90,8 @@ def _event_key(harness: str) -> tuple[str, ...]:
         return ("hooks", "SessionStart")
     if harness == "codex":
         return ("SessionStart",)
+    if harness == "muse":
+        return ("hooks", "SessionStart")
     return ("sessionStart",)
 
 
@@ -189,6 +193,8 @@ def _detect_harness() -> Optional[str]:
         return "claude"
     if env.get("CODEX_CI") or env.get("CODEX_SANDBOX"):
         return "codex"
+    if env.get("MUSE_CODE") or env.get("MUSE_SESSION_ID") or env.get("MUSE"):
+        return "muse"
     return None
 
 
@@ -369,7 +375,7 @@ def run_install_wake_hook(argv: Optional[list[str]] = None) -> int:
         product = (
             "arm-instruction (the session-start hook emits the "
             "tail -F inbox.log | dm_notify_filter watch as session context)"
-            if harness in ("claude", "codex")
+            if harness in ("claude", "codex", "muse")
             else "verify-and-report (the session-start hook checks the "
             "swarph monitor's push sink and says loudly if none exists)"
         )

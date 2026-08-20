@@ -23,7 +23,46 @@ channels, your wake_policy, your unread count). It must never become the only co
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+
+# >>> THE GUIDE IS PROSE, SO ITS OUTPUT IS THE MOST LIKELY IN THE WHOLE CLI TO CARRY A
+# CHARACTER AN 8-BIT CONSOLE CANNOT REPRESENT. <<< On cp1252 (a French Windows box) a bare
+# `print` of an em-dash raises UnicodeEncodeError, and the verb dies.
+#
+# >>> THE MECHANISM BELOW WAS INFERRED AND IS WRONG. KEPT, WITH THE CORRECTION, BECAUSE
+# THE INFERENCE IS THE INSTRUCTIVE PART. <<<
+#
+# lab wrote: "--list survived and --search did not: --list emits topic anchors and
+# commands, all ASCII; --search emits prose." MEASURED AGAINST THE SHIPPED 0.45.0 WHEEL,
+# that is BACKWARDS:
+#
+#     guide wake            0 non-ASCII   <- THE INVOCATION ACTUALLY REPORTED
+#     guide --list          4 non-ASCII
+#     guide channels        3 non-ASCII
+#     guide --search wake   1 non-ASCII
+#
+# The commander reported `swarph guide 'wake'` "doesn't work". That path emits PURE
+# ASCII and exits 2 with a topic list -- IT CANNOT RAISE UnicodeEncodeError. What he hit
+# was the #520 discovery defect: no wake content existed and the error named nouns
+# instead of a route. Both of which are fixed here (the Hooks section, and the error now
+# says `try: swarph guide --search wake`).
+#
+# lab read "search doesn't work" as `--search`, inferred an encoding mechanism from a
+# --list/--search asymmetry that does not exist, and built a test suite around it.
+# gpu-wsl then could not reproduce the crash on a real fr-FR box -- CORRECTLY, because
+# there was no crash on that path. One `swarph guide 'wake' | count non-ASCII` would
+# have settled it before any of that.
+#
+# WHAT SURVIVES: cp1252 IS a real hazard for the CONTENT paths above (--list, a topic,
+# --search all emit non-ASCII pre-fix), so print_safe and the pure-ASCII GUIDE.md are
+# correct defence-in-depth. They fix a bug NOBODY REPORTED, which is fine -- but the
+# record must not claim they fixed the reported one.
+#
+# console_safe.print_safe already existed with 44 call sites when this module was written
+# with bare `print`. Its own docstring records the lesson: "A protection sited inside one
+# module protects one module." Reported from Windows by the commander, 2026-08-19.
+from ..console_safe import print_safe
 
 # `files()` is the packaged-resource reader — it works from an installed wheel, a zip,
 # and an editable checkout alike. Reading via __file__ would work in the source tree and
@@ -71,18 +110,41 @@ def _split_topics(text: str) -> "dict[str, str]":
 
 def _commands_in(section: str) -> "list[str]":
     """The `swarph ...` invocations a section teaches, first line of each, deduped."""
+    # >>> `how-to` LISTED NO COMMANDS, AND IT IS NOTHING BUT COMMANDS. <<< The rows are
+    # markdown table cells -- `| get woken when a DM arrives | \`swarph install-wake-hook\` |`
+    # -- so a startswith("swarph ") test saw none of them. The sections that under-reported
+    # were exactly the most command-dense ones: how-to, check-your-own-setup, glossary.
+    # Match the invocation ANYWHERE in the line, not only at its start.
+    # (Commander, running `swarph guide --list`, 2026-08-19.)
     out: list[str] = []
-    for line in section.splitlines():
-        s = line.strip().lstrip("$ ").rstrip("\\").strip()
-        if not s.startswith("swarph "):
-            continue
+    for raw in section.splitlines():
+        for chunk in re.findall(r"(?:^|[|`$]\s*)(swarph\s+[a-z][a-z0-9-]*(?:\s+[a-z][a-z0-9-]*)?)",
+                                raw):
+            s = chunk.strip()
         # Truncate to verb + subcommand FIRST, then dedupe. Deduping the full line and
         # truncating after yields "swarph board cards" three times — the dedupe has to
         # run on the value actually printed, not on its input.
-        entry = " ".join(s.split()[:3]).rstrip(" \\")
-        if entry not in out:
-            out.append(entry)
+            entry = " ".join(s.split()[:3]).rstrip(" \\")
+            if entry not in out:
+                out.append(entry)
     return out
+
+
+_TERM_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _is_term(clean: str) -> bool:
+    """Is the leading bold run a glossary TERM, or just a bolded sentence?
+
+    >>> SCORE 3 MEANS 'THIS LINE DEFINES THE WORD YOU ASKED FOR'. <<< The test for it was
+    `startswith("**" + needle)`, which a bolded SENTENCE passes as readily as a term:
+    `**The monitor fetches your mail.**` scored 3 as a definition of "the". A word boundary
+    after the needle does not separate them -- both are followed by a space. Length does: a
+    glossary term is one to three words (`wake hook`, `wake_policy`, `channel`), a lead-in
+    sentence is not. (drop-on-meta-edge, non-blocking #2 on PR #267.)
+    """
+    m = _TERM_RE.match(clean)
+    return bool(m) and len(m.group(1).split()) <= 3
 
 
 def _search(topics: "dict[str, str]", term: str) -> "list[tuple[str, str]]":
@@ -92,16 +154,52 @@ def _search(topics: "dict[str, str]", term: str) -> "list[tuple[str, str]]":
     ('subscribe', 'who owes me') and the word they know may appear only in a sentence.
     One line per topic keeps the answer readable; the topic name is the actionable part.
     """
+    # >>> THE FIRST MATCHING LINE IS OFTEN THE WORST ONE. <<< Searching "channel"
+    # returned `## Channels` (the heading -- tautological), a wrapped mid-sentence
+    # fragment from start-here, and -- the actively misleading one -- the TAIL OF THE
+    # MONITOR DEFINITION from the glossary, because it mentions "channels" and sorts
+    # earlier in the file than the channel definition itself.
+    #
+    # So rank rather than take-the-first. A result that answers is worth more than a
+    # result that merely contains the word. (Commander, running it, 2026-08-19.)
     needle = term.strip().lower()
     hits: list[tuple[str, str]] = []
     for name, body in topics.items():
+        best = None
         for line in body.splitlines():
-            if needle in line.lower():
-                clean = line.strip().lstrip("#").strip().lstrip("> ").strip()
-                if clean:
-                    hits.append((name, clean[:96]))
+            low = line.lower()
+            if needle not in low:
+                continue
+            clean = line.strip().lstrip("#").strip().lstrip("> ").strip()
+            if not clean:
+                continue
+            # the section heading restates the topic name and answers nothing
+            if line.startswith("## "):
+                continue
+            score = 0
+            # PREFIX, not exact: searching "wake" must reach `**wake hook** -- ...`,
+            # which is the definition a caller asking about "wake" wants. Requiring
+            # `**wake**` exactly scored that line a 1 and let a how-to row about MUTING
+            # a channel outrank it.
+            if clean.lower().startswith(f"**{needle}") and _is_term(clean):
+                score = 3          # a glossary DEFINITION of (a term starting with) the word
+            elif clean.startswith("|"):
+                score = 2          # a how-to row: a task plus its command
+            elif clean.startswith(("`", "swarph ", "**")):
+                score = 1          # a command or a bolded lead-in
+            if best is None or score > best[0]:
+                best = (score, clean[:96])
+                if score == 3:
                     break
-    return hits
+        if best is not None:
+            hits.append((best[0], name, best[1]))
+    # >>> BEST-FIRST, NOT FILE ORDER. <<< The topic-fallback prints
+    # "read one: <first hit>", and file order made that point at whichever section
+    # happened to appear earliest -- for `wake`, a how-to row about MUTING a channel
+    # rather than the glossary definition of a wake hook. An actionable line that names
+    # the worst answer is worse than no line.
+    hits.sort(key=lambda h: -h[0])
+    return [(name, line) for _score, name, line in hits]
 
 
 def run_guide(argv: "list[str]") -> int:
@@ -117,7 +215,35 @@ def run_guide(argv: "list[str]") -> int:
     p.add_argument("--search", metavar="TERM",
                    help="find topics by INTENT rather than by name (FreeDOS `apropos`). "
                         "Searches the commands and the prose.")
+    # >>> AN LLM CELL TYPES `guide search wake` LONG BEFORE IT TYPES `--search`. <<<
+    # cursor-win measured all three dialects on a live box, and only one of them reached
+    # the careful error:
+    #
+    #     guide --search wake    ok
+    #     guide wake             "no topic 'wake'"      <- names alternatives
+    #     guide search wake      argparse: unrecognized arguments  <- a USAGE DUMP that
+    #                                                                 does not mention
+    #                                                                 --search at all
+    #
+    # argparse rejects the third before run_guide is ever entered, so the "name the
+    # alternatives" branch cannot fire. The natural spelling must BE the correct spelling:
+    # a two-token rewrite, before parsing.
+    if len(argv) >= 2 and argv[0] in ("search", "find", "apropos"):
+        argv = ["--search", *argv[1:]]
     args = p.parse_args(argv)
+
+    # >>> AN IGNORED ARGUMENT RETURNS AN UNFILTERED SUPERSET THAT LOOKS FILTERED. <<<
+    # `swarph guide --list hook` ran the full list and DISCARDED "hook" in silence, so
+    # the caller reads a complete index as if it were a hook-scoped one. The gateway
+    # refuses precisely this on GET /messages, in those words -- and this CLI did what
+    # that server forbids. Refuse, and name the two things the caller might have meant.
+    if args.topic and (args.list or args.search):
+        other = "--list" if args.list else "--search"
+        print_safe(f"swarph guide: {other} takes no topic, and {args.topic!r} would have "
+                   f"been silently ignored.", stream=sys.stderr)
+        print_safe(f"  did you mean:  swarph guide --search {args.topic}", stream=sys.stderr)
+        print_safe(f"             or:  swarph guide {args.topic}", stream=sys.stderr)
+        return 2
 
     text = _load_guide()
     topics = _split_topics(text)
@@ -129,7 +255,7 @@ def run_guide(argv: "list[str]") -> int:
         # with the commands it teaches.
         for name, body in topics.items():
             cmds = _commands_in(body)
-            print(f"{name:<22} {', '.join(cmds[:3]) if cmds else '—'}")
+            print_safe(f"{name:<22} {', '.join(cmds[:3]) if cmds else '-'}")
         return 0
 
     if args.search:
@@ -138,35 +264,79 @@ def run_guide(argv: "list[str]") -> int:
         # reproduced inside its own fix.
         hits = _search(topics, args.search)
         if not hits:
-            print(f"swarph guide: nothing matches {args.search!r}. "
-                  f"Topics: {', '.join(topics)}", file=sys.stderr)
+            print_safe(f"swarph guide: nothing matches {args.search!r}. "
+                       f"Topics: {', '.join(topics)}", stream=sys.stderr)
             return 2
         for name, line in hits:
-            print(f"{name:<22} {line}")
+            print_safe(f"{name:<22} {line}")
         return 0
 
     if not args.topic:
-        print(text)
+        print_safe(text)
         return 0
 
     key = args.topic.strip().lower().replace(" ", "-").lstrip("#")
     if key in topics:
-        print(topics[key])
+        print_safe(topics[key])
         return 0
 
     # Substring fallback before failing: `swarph guide channel` should find `channels`.
     hits = [k for k in topics if key in k]
     if len(hits) == 1:
-        print(topics[hits[0]])
+        print_safe(topics[hits[0]])
+        return 0
+
+    # >>> A BARE WORD IS AN INTENT, NOT A TOPIC NAME. SEARCH IS THE FALLBACK, NOT A FLAG
+    # YOU HAVE TO LEARN. <<< (Commander, 2026-08-20: "its not searching its looking for a
+    # topic, so topics are the default.")
+    #
+    # The previous behaviour required the caller to already know our vocabulary, failed
+    # when they did not, and then TOLD THEM ABOUT A FLAG — a second round trip to reach
+    # an answer we already had. That is the #520 defect (naming a destination without a
+    # route) surviving inside its own fix, one layer in: we routed them instead of
+    # answering them.
+    #
+    # Exact and substring topic matches still WIN, so `guide channels` prints the topic
+    # rather than search results. Only the former error path changes.
+    #
+    # >>> `len(hits) == 1` ABOVE IS A PROXY FOR THAT PROPERTY, NOT THE PROPERTY. <<< It is
+    # true for the case it was written against (channel -> channels) and false for every
+    # AMBIGUOUS one: `guide how` computed hits=['how-to', ...] on line 266, then fell
+    # through to the body-line search and returned before the "Did you mean" line at the
+    # bottom ever ran. So the weaker evidence (a word appearing in a sentence) won over the
+    # stronger (a word in a TOPIC NAME), and the header went on to say no such topic exists
+    # while `read one:` pointed somewhere else entirely. `guide and` did the same with
+    # memory-and-the-brain and code-and-history both sitting in `hits`.
+    #
+    # A TOPIC-NAME MATCH BEATS A BODY-LINE MATCH. That is the rule the comment above
+    # already claimed; this is the branch that implements it.
+    # (drop-on-meta-edge, seat-A re-review of PR #267 at 17ecd17c, and he ran the patch
+    # rather than proposing it.)
+    if hits:
+        print_safe(f"No topic named {args.topic!r}. "
+                   f"Topics matching: {', '.join(hits)}")
+        print_safe(f"\n  read one:  swarph guide {hits[0]}")
+        return 0
+
+    found = _search(topics, key)
+    if found:
+        print_safe(f"No topic named {args.topic!r}. Closest matches:\n")
+        for name, line in found:
+            print_safe(f"{name:<22} {line}")
+        print_safe(f"\n  read one:  swarph guide {found[0][0]}")
         return 0
 
     # >>> NAME THE ALTERNATIVES. <<< "unknown topic" tells the caller it was wrong and
     # not what to do instead, which is the same defect as an onboarding page that names a
     # destination without a route.
-    print(f"swarph guide: no topic {args.topic!r}."
-          + (f" Did you mean: {', '.join(hits)}?" if hits else ""),
-          file=sys.stderr)
-    print(f"Topics: {', '.join(topics)}", file=sys.stderr)
+    # Point at --search, not only at the topic list. The caller arrived with an INTENT
+    # word that is not a topic name -- which is the exact failure --search was built for,
+    # so the error should route them into it rather than list nouns at them. (cursor-win.)
+    print_safe(f"swarph guide: no topic {args.topic!r}."
+               + (f" Did you mean: {', '.join(hits)}?" if hits else ""),
+               stream=sys.stderr)
+    print_safe(f"  try:  swarph guide --search {args.topic}", stream=sys.stderr)
+    print_safe(f"Topics: {', '.join(topics)}", stream=sys.stderr)
     return 2
 
 
@@ -183,7 +353,7 @@ def demo() -> None:
     # the section returned is the section asked for, not the whole file
     assert topics["channels"].startswith("## Channels")
     assert "## Start here" not in topics["channels"]
-    print(f"ok — {len(topics)} topics: {', '.join(topics)}")
+    print_safe(f"ok - {len(topics)} topics: {', '.join(topics)}")
 
 
 if __name__ == "__main__":  # pragma: no cover
