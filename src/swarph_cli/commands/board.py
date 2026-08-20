@@ -12,11 +12,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional
+
+# #532 — negative-branch marker detection. THREE COPIES exist and no single
+# suite pins all three: here, mesh-gateway server.py (_accept_state), and
+# mesh-gateway scripts/obligation_sweep.py. Unpinned-by-design is not the same
+# decision as standalone-by-design — each repo's tests pin the same seven
+# phrases. The detector is TWO-SIDED (drop-on-meta-edge, PR #124): it
+# over-reads wishes ("must not fail") and under-reads real checks without the
+# token ("Otherwise reject"); word boundaries remove the incidental compounds
+# (failover, fail-safe, failsafe). Detection is named, never concluded — no
+# substring test can know a falsifier exists.
+_FAIL_MARKER_RE = re.compile(r"(?<![\w-])fail(?:s|ed|ing|ures?)?(?![\w-])", re.IGNORECASE)
 
 from swarph_cli.commands._content import ContentError, add_content_args, resolve_content
 from swarph_cli.commands._display import sanitize_terminal as _s
@@ -215,12 +227,28 @@ def _format_ask(d) -> str:
     An obligation with no timeout never goes red on its own, and the operator has to
     be told that AT THE MOMENT THEY CREATE IT — afterwards it looks identical to one
     that simply is not late yet.
+
+    #532 applies the same rule to the falsifier: an obligation with no accept
+    check reads RED in the sweep, and one whose check has no FAIL branch is
+    marked NO-FAIL-BRANCH — both are said AT MINT TIME, because afterwards the
+    rows look identical to sound ones.
     """
     when = d.get("timeout_at")
     deadline = f"overdue after {when}" if when else (
         "NO TIMEOUT — this never goes red on its own; pass --timeout-hours if it should")
+    accept = d.get("accept")
+    if not accept:
+        falsifier = ("NO ACCEPT CHECK — reads RED in the sweep; pass --accept "
+                     "\"PASS = ... | FAIL = ...\" naming an observable and a way "
+                     "it comes out negative")
+    elif not _FAIL_MARKER_RE.search(str(accept)):
+        falsifier = ("accept check has NO FAIL BRANCH — marked NO-FAIL-BRANCH in "
+                     "the sweep; a check that cannot come out negative is not one")
+    else:
+        falsifier = f"accept: {accept}"
     return (f"obligation #{d.get('id')} on card #{d.get('card_id')}: "
             f"{d.get('holder')} owes it, status={d.get('status')}, {deadline}\n"
+            f"  {falsifier}\n"
             f"  thread {d.get('thread_uuid')} — the holder's reply in this thread closes it")
 
 
@@ -301,6 +329,11 @@ def _build_parser() -> argparse.ArgumentParser:
     ck.add_argument("--timeout-hours", type=int, default=None,
                     help="hours until this obligation reads OVERDUE (default: none, "
                          "which means it never goes red on its own)")
+    ck.add_argument("--accept", default=None, metavar='"PASS = ... | FAIL = ..."',
+                    help="the falsifiable check that closes this obligation "
+                         "(#532). Omitting it mints an obligation that reads RED "
+                         "in the sweep; a check with no FAIL branch is marked "
+                         "NO-FAIL-BRANCH — 'verify it works' is not a check")
     ck.add_argument("--kind", default="action", help="obligation kind (default: action)")
     ck.add_argument("--json", action="store_true"); _add_common(ck)
 
@@ -426,6 +459,8 @@ def run_board(argv: list[str]) -> int:
                     "kind": args.kind}
             if args.timeout_hours is not None:
                 body["timeout_hours"] = args.timeout_hours
+            if args.accept is not None:
+                body["accept"] = args.accept
             st, d = _post_json(f"{gw}/board/cards/{args.id}/ask", body, token)
             return _out(st, d, _format_ask, args.json)
         if args.command == "say":
