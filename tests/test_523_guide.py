@@ -625,3 +625,21 @@ def test_a_bolded_SENTENCE_is_not_a_definition():
     assert _is_term("**wake hook** -- what wakes a cell")
     assert _is_term("**wake_policy** -- how much reaches you")
     assert not _is_term("**The monitor fetches your mail.**")
+
+
+def test_the_sentence_filter_is_WIRED_INTO_THE_RANKING():
+    """>>> A CONTRACT TEST ON A HELPER PROVES THE HELPER IS RIGHT, NOT THAT IT RUNS. <<<
+    test_a_bolded_SENTENCE_is_not_a_definition imports `_is_term` and asserts on it
+    directly. At the parent it failed with ImportError -- because the SYMBOL was new, not
+    because the ranking was wrong. Delete `and _is_term(clean)` from the scoring branch
+    and leave the function defined: all 46 tests still pass and the bug is back.
+
+    So assert the OUTCOME. (drop-on-meta-edge, who measured it against both trees rather
+    than proposing it -- the same non-vacuity standard he held my other three to.)
+    """
+    from swarph_cli.commands.guide import _load_guide, _split_topics, _search
+    topics = _split_topics(_load_guide())
+    top_topic, top_line = _search(topics, "the")[0]
+    assert not top_line.startswith("**The monitor fetches your mail"), (
+        f"a bolded SENTENCE is ranked as the definition of 'the': "
+        f"{top_topic} -> {top_line!r}")
