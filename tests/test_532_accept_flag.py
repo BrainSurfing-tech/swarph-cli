@@ -57,6 +57,8 @@ def test_fail_marker_regex_two_sided_truth():
     assert R.search("PASS = x | FAIL = absent")
     assert R.search("the deploy must not fail")      # over-read: a wish
     assert R.search("check it doesn't fail")          # over-read: vacuous
+    assert R.search("PASS = zero failures; otherwise reject")  # plural - drop's one character
+    assert R.search("test failures are expected")
     # not detected
     assert not R.search("failover is out of scope for this task")
     assert not R.search("Fail-safe defaults are assumed")

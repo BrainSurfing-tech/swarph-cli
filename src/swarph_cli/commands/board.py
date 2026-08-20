@@ -28,7 +28,7 @@ from typing import Optional
 # token ("Otherwise reject"); word boundaries remove the incidental compounds
 # (failover, fail-safe, failsafe). Detection is named, never concluded — no
 # substring test can know a falsifier exists.
-_FAIL_MARKER_RE = re.compile(r"(?<![\w-])fail(?:s|ed|ing|ure)?(?![\w-])", re.IGNORECASE)
+_FAIL_MARKER_RE = re.compile(r"(?<![\w-])fail(?:s|ed|ing|ures?)?(?![\w-])", re.IGNORECASE)
 
 from swarph_cli.commands._content import ContentError, add_content_args, resolve_content
 from swarph_cli.commands._display import sanitize_terminal as _s
