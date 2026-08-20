@@ -160,8 +160,12 @@ def _search(topics: "dict[str, str]", term: str) -> "list[tuple[str, str]]":
             if line.startswith("## "):
                 continue
             score = 0
-            if clean.lower().startswith(f"**{needle}**"):
-                score = 3          # a glossary DEFINITION of the searched word
+            # PREFIX, not exact: searching "wake" must reach `**wake hook** -- ...`,
+            # which is the definition a caller asking about "wake" wants. Requiring
+            # `**wake**` exactly scored that line a 1 and let a how-to row about MUTING
+            # a channel outrank it.
+            if clean.lower().startswith(f"**{needle}"):
+                score = 3          # a glossary DEFINITION of (a term starting with) the word
             elif clean.startswith("|"):
                 score = 2          # a how-to row: a task plus its command
             elif clean.startswith(("`", "swarph ", "**")):
@@ -171,8 +175,14 @@ def _search(topics: "dict[str, str]", term: str) -> "list[tuple[str, str]]":
                 if score == 3:
                     break
         if best is not None:
-            hits.append((name, best[1]))
-    return hits
+            hits.append((best[0], name, best[1]))
+    # >>> BEST-FIRST, NOT FILE ORDER. <<< The topic-fallback prints
+    # "read one: <first hit>", and file order made that point at whichever section
+    # happened to appear earliest -- for `wake`, a how-to row about MUTING a channel
+    # rather than the glossary definition of a wake hook. An actionable line that names
+    # the worst answer is worse than no line.
+    hits.sort(key=lambda h: -h[0])
+    return [(name, line) for _score, name, line in hits]
 
 
 def run_guide(argv: "list[str]") -> int:
@@ -257,6 +267,26 @@ def run_guide(argv: "list[str]") -> int:
     hits = [k for k in topics if key in k]
     if len(hits) == 1:
         print_safe(topics[hits[0]])
+        return 0
+
+    # >>> A BARE WORD IS AN INTENT, NOT A TOPIC NAME. SEARCH IS THE FALLBACK, NOT A FLAG
+    # YOU HAVE TO LEARN. <<< (Commander, 2026-08-20: "its not searching its looking for a
+    # topic, so topics are the default.")
+    #
+    # The previous behaviour required the caller to already know our vocabulary, failed
+    # when they did not, and then TOLD THEM ABOUT A FLAG — a second round trip to reach
+    # an answer we already had. That is the #520 defect (naming a destination without a
+    # route) surviving inside its own fix, one layer in: we routed them instead of
+    # answering them.
+    #
+    # Exact and substring topic matches still WIN, so `guide channels` prints the topic
+    # rather than search results. Only the former error path changes.
+    found = _search(topics, key)
+    if found:
+        print_safe(f"No topic named {args.topic!r}. Closest matches:\n")
+        for name, line in found:
+            print_safe(f"{name:<22} {line}")
+        print_safe(f"\n  read one:  swarph guide {found[0][0]}")
         return 0
 
     # >>> NAME THE ALTERNATIVES. <<< "unknown topic" tells the caller it was wrong and

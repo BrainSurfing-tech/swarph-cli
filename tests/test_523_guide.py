@@ -355,7 +355,14 @@ def test_the_guide_routes_to_the_wake_hook():
     (["search", "wake"], 0),        # >>> the spelling an LLM types FIRST <<<
     (["find", "wake"], 0),
     (["apropos", "wake"], 0),
-    (["wake"], 2),                  # a bare intent word: must NAME the alternative
+    # SUPERSEDED 2026-08-20: a bare intent word now ANSWERS (rc=0) instead of naming
+    # the alternative. This row asserted rc=2 and was correct for the design it was
+    # written against -- the commander then changed the design: "its not searching
+    # it's looking for a topic, so topics are the default", i.e. a bare word is an
+    # INTENT and search is the fallback rather than a flag to learn. Kept as a row with
+    # the new expectation rather than deleted, so the change of contract is visible
+    # here and not only in a commit message.
+    (["wake"], 0),
 ])
 def test_every_dialect_of_the_intent_word(argv, expect_rc, capsys):
     """cursor-win measured all three on a live box and only ONE reached the careful
@@ -372,9 +379,9 @@ def test_every_dialect_of_the_intent_word(argv, expect_rc, capsys):
     BE the correct spelling."""
     assert run_guide(argv) == expect_rc
     cap = capsys.readouterr()
-    if expect_rc == 2:
-        assert "--search wake" in cap.err, (
-            "an unknown topic must route the caller INTO --search, not list nouns at them")
+    if expect_rc == 0 and argv == ["wake"]:
+        # answered rather than routed -- the point of the supersession above
+        assert "**wake hook**" in cap.out
 
 
 def test_search_returns_the_line_that_ANSWERS_not_the_first_line_that_matches():
@@ -527,3 +534,53 @@ def test_the_guide_does_not_recommend_a_BOX_GLOBAL_wake_hook():
             f"an install command without --scope project recommends the box-global "
             f"default: {line.strip()!r}")
     assert "box-global" in h.lower(), "the hazard must be named, not just avoided"
+
+
+# ── a bare word is an INTENT, not a topic name (commander, 2026-08-20) ──────
+
+def test_a_bare_word_that_names_no_topic_SEARCHES_instead_of_failing(capsys):
+    """>>> "its not searching its looking for a topic, so topics are the default" --
+    the commander, after typing `swarph guide 'wake'` and getting a list of nouns. <<<
+
+    The old path required the caller to already know our vocabulary, failed when they
+    did not, and then TOLD THEM ABOUT A FLAG. That is a second round trip to reach an
+    answer we already had -- the #520 defect (naming a destination without a route)
+    surviving inside its own fix, one layer in: we routed them instead of answering.
+
+    rc=0 now, not 2: an answer was produced. Failing is reserved for finding nothing."""
+    rc = run_guide(["wake"])
+    assert rc == 0, "a bare word with matches must ANSWER, not error"
+    out = capsys.readouterr().out
+    assert "No topic named 'wake'" in out, "still say the topic does not exist"
+    assert "**wake hook**" in out, "the definition must be among the matches"
+
+
+def test_the_topic_fallback_points_at_the_BEST_match_not_the_first(capsys):
+    """The fallback prints `read one: swarph guide <x>`. That line is the actionable
+    one, so it must name the best hit, not whichever section sorts earliest in the
+    file. Before the sort, `guide wake` pointed at a how-to row about MUTING a channel
+    -- the opposite of what the caller asked. AN ACTIONABLE LINE THAT NAMES THE WORST
+    ANSWER IS WORSE THAN NO LINE."""
+    run_guide(["wake"])
+    out = capsys.readouterr().out
+    body = out.split("Closest matches:", 1)[1]
+    first_hit = body.strip().splitlines()[0].split()[0]
+    assert f"read one:  swarph guide {first_hit}" in out
+    assert first_hit == "glossary", (
+        f"the wake-hook DEFINITION should rank first, got {first_hit!r}")
+
+
+def test_an_exact_or_substring_topic_still_wins_over_search(capsys):
+    """NON-VACUITY, and the property that keeps this change safe: `guide hooks` must
+    print the SECTION, not search results, or the fallback has eaten the primary path."""
+    assert run_guide(["hooks"]) == 0
+    assert capsys.readouterr().out.startswith("## Hooks")
+    assert run_guide(["hook"]) == 0          # substring
+    assert capsys.readouterr().out.startswith("## Hooks")
+
+
+def test_a_word_matching_NOTHING_still_refuses(capsys):
+    """The refusal survives. Search-as-fallback must not turn every input into a
+    success -- a guide that always answers cannot be trusted when it does."""
+    assert run_guide(["zzzz-no-such-thing"]) == 2
+    assert "Topics:" in capsys.readouterr().err
