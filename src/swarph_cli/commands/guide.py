@@ -130,6 +130,23 @@ def _commands_in(section: str) -> "list[str]":
     return out
 
 
+_TERM_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _is_term(clean: str) -> bool:
+    """Is the leading bold run a glossary TERM, or just a bolded sentence?
+
+    >>> SCORE 3 MEANS 'THIS LINE DEFINES THE WORD YOU ASKED FOR'. <<< The test for it was
+    `startswith("**" + needle)`, which a bolded SENTENCE passes as readily as a term:
+    `**The monitor fetches your mail.**` scored 3 as a definition of "the". A word boundary
+    after the needle does not separate them -- both are followed by a space. Length does: a
+    glossary term is one to three words (`wake hook`, `wake_policy`, `channel`), a lead-in
+    sentence is not. (drop-on-meta-edge, non-blocking #2 on PR #267.)
+    """
+    m = _TERM_RE.match(clean)
+    return bool(m) and len(m.group(1).split()) <= 3
+
+
 def _search(topics: "dict[str, str]", term: str) -> "list[tuple[str, str]]":
     """Return (topic, first matching line) per topic — `apropos`, not full-text dump.
 
@@ -164,7 +181,7 @@ def _search(topics: "dict[str, str]", term: str) -> "list[tuple[str, str]]":
             # which is the definition a caller asking about "wake" wants. Requiring
             # `**wake**` exactly scored that line a 1 and let a how-to row about MUTING
             # a channel outrank it.
-            if clean.lower().startswith(f"**{needle}"):
+            if clean.lower().startswith(f"**{needle}") and _is_term(clean):
                 score = 3          # a glossary DEFINITION of (a term starting with) the word
             elif clean.startswith("|"):
                 score = 2          # a how-to row: a task plus its command
@@ -281,6 +298,26 @@ def run_guide(argv: "list[str]") -> int:
     #
     # Exact and substring topic matches still WIN, so `guide channels` prints the topic
     # rather than search results. Only the former error path changes.
+    #
+    # >>> `len(hits) == 1` ABOVE IS A PROXY FOR THAT PROPERTY, NOT THE PROPERTY. <<< It is
+    # true for the case it was written against (channel -> channels) and false for every
+    # AMBIGUOUS one: `guide how` computed hits=['how-to', ...] on line 266, then fell
+    # through to the body-line search and returned before the "Did you mean" line at the
+    # bottom ever ran. So the weaker evidence (a word appearing in a sentence) won over the
+    # stronger (a word in a TOPIC NAME), and the header went on to say no such topic exists
+    # while `read one:` pointed somewhere else entirely. `guide and` did the same with
+    # memory-and-the-brain and code-and-history both sitting in `hits`.
+    #
+    # A TOPIC-NAME MATCH BEATS A BODY-LINE MATCH. That is the rule the comment above
+    # already claimed; this is the branch that implements it.
+    # (drop-on-meta-edge, seat-A re-review of PR #267 at 17ecd17c, and he ran the patch
+    # rather than proposing it.)
+    if hits:
+        print_safe(f"No topic named {args.topic!r}. "
+                   f"Topics matching: {', '.join(hits)}")
+        print_safe(f"\n  read one:  swarph guide {hits[0]}")
+        return 0
+
     found = _search(topics, key)
     if found:
         print_safe(f"No topic named {args.topic!r}. Closest matches:\n")

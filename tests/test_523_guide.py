@@ -584,3 +584,44 @@ def test_a_word_matching_NOTHING_still_refuses(capsys):
     success -- a guide that always answers cannot be trusted when it does."""
     assert run_guide(["zzzz-no-such-thing"]) == 2
     assert "Topics:" in capsys.readouterr().err
+
+
+def test_a_TOPIC_NAME_match_beats_a_body_line_match(capsys):
+    """>>> THE CODE COMPUTED THE RIGHT ANSWER AND THREW IT AWAY. <<< `guide how` built
+    hits=['how-to', ...] -- real topic-NAME matches -- used it only at len(hits)==1, and
+    with two or more fell through to the body-line search, returned early, and printed
+    "No topic named 'how'" above a list that did not contain how-to. Weaker evidence beat
+    stronger, and the header then denied the stronger evidence existed.
+
+    THE SUITE PASSED 43/43 BEFORE THE FIX AND 43/43 AFTER IT. This test is the one that
+    lands with the fix; without it the next refactor re-breaks the same branch silently.
+    (drop-on-meta-edge, seat-A re-review of PR #267.)
+    """
+    assert run_guide(["how"]) == 0
+    out = capsys.readouterr().out
+    assert "how-to" in out, f"'how' must reach the how-to topic: {out!r}"
+    assert "read one:  swarph guide how-to" in out
+
+
+def test_a_word_inside_TWO_topic_names_names_them_both(capsys):
+    """`and` sits in memory-and-the-brain AND code-and-history. Both are topics; the
+    answer must be both of them, not a body-line search that mentions neither."""
+    assert run_guide(["and"]) == 0
+    out = capsys.readouterr().out
+    assert "memory-and-the-brain" in out and "code-and-history" in out
+    # >>> PINNED TO THE TOPIC-NAME BRANCH, NOT TO 'BOTH NAMES APPEAR SOMEWHERE'. <<< The
+    # first version of this test passed BEFORE the fix too: the body-line search happens
+    # to match a sentence in each of those two sections, so both names printed for the
+    # wrong reason. Asserting the header proves WHICH branch answered.
+    assert "Topics matching:" in out
+
+
+def test_a_bolded_SENTENCE_is_not_a_definition():
+    """Score 3 means 'this line defines your word'. `**The monitor fetches your mail.**`
+    is a bolded sentence, and under startswith("**"+needle) it scored 3 as a definition
+    of "the". A term is one to three words; a lead-in sentence is not.
+    (drop-on-meta-edge, non-blocking #2 on PR #267.)"""
+    from swarph_cli.commands.guide import _is_term
+    assert _is_term("**wake hook** -- what wakes a cell")
+    assert _is_term("**wake_policy** -- how much reaches you")
+    assert not _is_term("**The monitor fetches your mail.**")
