@@ -44,6 +44,26 @@ def test_format_ask_still_names_missing_timeout():
     assert "NO TIMEOUT" in out
 
 
+# ── the marker regex: drop-on-meta-edge's seven phrases, pinned in BOTH repos ──
+
+def test_fail_marker_regex_two_sided_truth():
+    """Three copies of this detector exist (here, gateway server.py, gateway
+    obligation_sweep.py) and no single suite reaches all of them — so each repo
+    pins the same seven phrases. TWO-SIDED on purpose: over-reads are asserted
+    as detections (the state names what was checked, never that a falsifier
+    exists), under-reads stay on the warning surface (the safe direction)."""
+    R = board._FAIL_MARKER_RE
+    # detected
+    assert R.search("PASS = x | FAIL = absent")
+    assert R.search("the deploy must not fail")      # over-read: a wish
+    assert R.search("check it doesn't fail")          # over-read: vacuous
+    # not detected
+    assert not R.search("failover is out of scope for this task")
+    assert not R.search("Fail-safe defaults are assumed")
+    assert not R.search("PASS: exit 0 ... Otherwise reject.")   # under-read
+    assert not R.search("PASS: count>0; NEGATIVE: count==0")    # under-read
+
+
 # ── the flag reaches the POST body ──────────────────────────────────────────
 
 def test_ask_posts_accept_when_given(monkeypatch):

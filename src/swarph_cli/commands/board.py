@@ -12,11 +12,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional
+
+# #532 — negative-branch marker detection. THREE COPIES exist and no single
+# suite pins all three: here, mesh-gateway server.py (_accept_state), and
+# mesh-gateway scripts/obligation_sweep.py. Unpinned-by-design is not the same
+# decision as standalone-by-design — each repo's tests pin the same seven
+# phrases. The detector is TWO-SIDED (drop-on-meta-edge, PR #124): it
+# over-reads wishes ("must not fail") and under-reads real checks without the
+# token ("Otherwise reject"); word boundaries remove the incidental compounds
+# (failover, fail-safe, failsafe). Detection is named, never concluded — no
+# substring test can know a falsifier exists.
+_FAIL_MARKER_RE = re.compile(r"(?<![\w-])fail(?:s|ed|ing|ure)?(?![\w-])", re.IGNORECASE)
 
 from swarph_cli.commands._content import ContentError, add_content_args, resolve_content
 from swarph_cli.commands._display import sanitize_terminal as _s
@@ -229,7 +241,7 @@ def _format_ask(d) -> str:
         falsifier = ("NO ACCEPT CHECK — reads RED in the sweep; pass --accept "
                      "\"PASS = ... | FAIL = ...\" naming an observable and a way "
                      "it comes out negative")
-    elif "fail" not in str(accept).lower():
+    elif not _FAIL_MARKER_RE.search(str(accept)):
         falsifier = ("accept check has NO FAIL BRANCH — marked NO-FAIL-BRANCH in "
                      "the sweep; a check that cannot come out negative is not one")
     else:
