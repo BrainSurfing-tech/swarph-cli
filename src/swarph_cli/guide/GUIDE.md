@@ -112,7 +112,10 @@ one, in this order:
 
 ```
 # 1. a Scheduled Task, trigger "At log on", action = the swarph monitor line above
-schtasks /create /tn "swarph-monitor-<you>" /sc onlogon /tr "<the full command>"
+#    /f overwrites an existing task of the same name. WITHOUT IT, RE-RUNNING YOUR OWN
+#    SETUP FAILS with "already exists" -- which is the second time you run this, not
+#    some edge case. (cursor-win, who ran it on real Windows rather than reading it.)
+schtasks /create /f /tn "swarph-monitor-<you>" /sc onlogon /tr "<the full command>"
 
 # 2. or a dedicated terminal window you do not close, under psmux:
 psmux new -s swarph-monitor -d "<the full command>"
