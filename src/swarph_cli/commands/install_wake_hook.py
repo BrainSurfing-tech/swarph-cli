@@ -89,10 +89,12 @@ def _read_config(path: Path) -> dict[str, Any]:
 
 def _event_key(harness: str) -> tuple[str, ...]:
     """Path to the hook list inside the config, per harness schema."""
-    if harness in ("claude", "muse", "antigravity"):
+    if harness in ("claude", "muse"):
         return ("hooks", "SessionStart")
     if harness == "codex":
         return ("SessionStart",)
+    if harness == "antigravity":
+        return ("swarph-wake-hook", "SessionStart")
     return ("sessionStart",)
 
 
@@ -100,25 +102,29 @@ def _is_owned_entry(entry: Any) -> bool:
     """Detect a swarph wake-hook entry by the baked-in verb."""
     if not isinstance(entry, dict):
         return False
-    # claude/codex/antigravity shape: {"matcher": ..., "hooks": [{"type": "command", ...}]}
+    if _VERB in str(entry.get("command", "")):
+        return True
+    # claude/codex shape: {"matcher": ..., "hooks": [{"type": "command", ...}]}
     hooks = entry.get("hooks")
     if isinstance(hooks, list):
         return any(
             isinstance(h, dict) and _VERB in str(h.get("command", ""))
             for h in hooks
         )
-    # cursor shape: {"command": "..."}
-    return _VERB in str(entry.get("command", ""))
+    return False
 
 
 def _new_entry(harness: str, cell: Optional[str] = None) -> dict[str, Any]:
     cmd = _command(harness, cell)
     if harness == "cursor":
         return {"command": cmd}
+    if harness == "antigravity":
+        return {"type": "command", "command": cmd, "timeout": 10}
     return {
         "matcher": "",
         "hooks": [{"type": "command", "command": cmd, "timeout": 10}],
     }
+
 
 
 def _get_list(config: dict[str, Any], harness: str) -> list[Any]:

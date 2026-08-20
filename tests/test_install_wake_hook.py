@@ -54,19 +54,38 @@ def test_claude_entry_shape_matches_settings_schema():
 
 def test_antigravity_entry_shape_matches_hooks_schema(isolated_home):
     entry = iwh._new_entry("antigravity")
-    assert entry["matcher"] == ""
-    hook = entry["hooks"][0]
-    assert hook["type"] == "command"
-    assert "--harness antigravity" in hook["command"]
+    assert entry["type"] == "command"
+    assert "--harness antigravity" in entry["command"]
     assert iwh._config_path("antigravity", "user") == isolated_home / ".gemini" / "config" / "hooks.json"
 
 
-def test_install_antigravity_writes_hooks_sessionstart(isolated_home):
+def test_install_antigravity_writes_swarph_wake_hook_sessionstart(isolated_home):
     config, changed = iwh._install({}, "antigravity")
     assert changed is True
-    entries = config["hooks"]["SessionStart"]
+    entries = config["swarph-wake-hook"]["SessionStart"]
     assert len(entries) == 1
     assert iwh._is_owned_entry(entries[0])
+
+
+def test_install_antigravity_preserves_preexisting_named_hooks(isolated_home):
+    existing = {
+        "retry-agent-execution-error": {
+            "Stop": [
+                {
+                    "command": "./hooks/retry-agent-execution-error.py",
+                    "timeout": 45,
+                    "type": "command"
+                }
+            ]
+        }
+    }
+    config, changed = iwh._install(existing, "antigravity")
+    assert changed is True
+    assert "retry-agent-execution-error" in config
+    assert "swarph-wake-hook" in config
+    assert config["retry-agent-execution-error"]["Stop"][0]["command"] == "./hooks/retry-agent-execution-error.py"
+    assert len(config["swarph-wake-hook"]["SessionStart"]) == 1
+
 
 
 
