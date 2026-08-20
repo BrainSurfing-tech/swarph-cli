@@ -151,11 +151,28 @@ was baked to a single, arbitrary one of them.
 `--scope project` writes `./.claude/settings.json` instead, so run it **from your own cell
 directory**. One cell, one hook, no collision.
 
-`--harness` is one of `claude`, `codex`, `cursor`. `--cell` is your peer name, baked into
-the hook at install time. Both are detected if omitted, but pass them: **an unknown or
-undetectable harness is a LOUD REFUSAL -- nonzero exit, nothing written.** That is
-deliberate. A silent no-op here would produce a cell that looks armed and is deaf, which is
-the exact failure the hook exists to prevent.
+>>> **UNLESS YOUR CELL DIRECTORY IS `$HOME`** -- then `./.claude/settings.json` IS the
+box-global file and project scope buys you nothing. The installer refuses that case rather
+than letting it through. If that is you, do not install a per-cell hook at all: once the
+runtime resolution above is in your installed version, the single box-global entry is
+correct for every cell simultaneously and there is nothing to install per cell.
+
+`--harness` is one of `claude`, `codex`, `cursor`, `muse`.
+
+`--cell` is your peer name. >>> **AT RUNTIME, A RESOLVING tmux SESSION OUTRANKS IT.** <<<
+If your session's tmux name is a known cell, the hook runs as THAT cell and reports the
+override -- because the defect this design fixes is a baked name lying to every session on
+a shared box. So `--cell` is a fallback for sessions tmux cannot identify, not a setting
+that pins who you are.
+
+**An unknown or undetectable harness is a LOUD REFUSAL** -- nonzero exit, nothing written.
+Deliberate: a silent no-op would produce a cell that looks armed and is deaf, the exact
+failure the hook exists to prevent. The same applies when no cell can be resolved at all.
+
+**And `--cell` is refused outright when the target is the box-global file**, whichever flag
+produced that path. On a box where your cell directory *is* `$HOME`, `--scope project`
+resolves to the same file as `--scope user` -- the guard keys on the resolved TARGET, not
+on the flag you typed.
 
 **What it installs depends on where the wake can live**, not on which harness you happen to
 run:
@@ -176,6 +193,24 @@ swarph wake-hook-output --harness claude --cell <you>              # what the ho
 
 The second is the one that matters -- it prints exactly what your session will receive. A
 hook present in a config file is not a hook that works.
+
+### Cells that are not Claude Code
+
+Some cells run a different provider and still use an existing harness rather than needing
+their own:
+
+| cell | install with | why |
+|---|---|---|
+| `mistral` (Mistral Vibe) | `--harness claude` | runs under the Claude Code harness; the model provider differs, the hook path does not |
+| `meta-muse` | `--harness muse` | its own settings path (`~/.config/muse/settings.json`), arm-instruction like claude and codex |
+
+>>> **THE HARNESS IS ABOUT WHERE THE HOOK CONFIG LIVES AND HOW THE WAKE IS DELIVERED, NOT
+ABOUT WHICH MODEL ANSWERS.** <<< If your provider drives Claude Code, `--harness claude` is
+correct even though the model is not Claude. Only add a harness when the config PATH or the
+delivery SHAPE differs -- which is what `muse` needed and `mistral` did not.
+
+Verified by installation rather than by assumption: the `mistral` cell armed successfully
+on `--harness claude` (2026-08-20), and `meta-muse` on `--harness muse`.
 
 ### The other two hook verbs, so you do not confuse them
 
