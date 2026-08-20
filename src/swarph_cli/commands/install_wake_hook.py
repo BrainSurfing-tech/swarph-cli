@@ -39,7 +39,7 @@ from swarph_cli.commands.wake_hook_output import _tmux_session_cell
 
 
 _VERB = "wake-hook-output"
-_KNOWN_HARNESSES = ("claude", "codex", "cursor", "muse")
+_KNOWN_HARNESSES = ("claude", "codex", "cursor", "muse", "antigravity")
 
 
 def _command(harness: str, cell: Optional[str] = None) -> str:
@@ -63,7 +63,10 @@ def _config_path(harness: str, scope: str) -> Path:
         return base / ".cursor" / "hooks.json"
     if harness == "muse":
         return base / ".config" / "muse" / "settings.json"
+    if harness == "antigravity":
+        return base / ".gemini" / "config" / "hooks.json"
     raise ValueError(f"install-wake-hook: unknown harness {harness!r}")
+
 
 
 def _read_config(path: Path) -> dict[str, Any]:
@@ -86,12 +89,12 @@ def _read_config(path: Path) -> dict[str, Any]:
 
 def _event_key(harness: str) -> tuple[str, ...]:
     """Path to the hook list inside the config, per harness schema."""
-    if harness == "claude":
+    if harness in ("claude", "muse"):
         return ("hooks", "SessionStart")
     if harness == "codex":
         return ("SessionStart",)
-    if harness == "muse":
-        return ("hooks", "SessionStart")
+    if harness == "antigravity":
+        return ("swarph-wake-hook", "SessionStart")
     return ("sessionStart",)
 
 
@@ -99,6 +102,8 @@ def _is_owned_entry(entry: Any) -> bool:
     """Detect a swarph wake-hook entry by the baked-in verb."""
     if not isinstance(entry, dict):
         return False
+    if _VERB in str(entry.get("command", "")):
+        return True
     # claude/codex shape: {"matcher": ..., "hooks": [{"type": "command", ...}]}
     hooks = entry.get("hooks")
     if isinstance(hooks, list):
@@ -106,18 +111,20 @@ def _is_owned_entry(entry: Any) -> bool:
             isinstance(h, dict) and _VERB in str(h.get("command", ""))
             for h in hooks
         )
-    # cursor shape: {"command": "..."}
-    return _VERB in str(entry.get("command", ""))
+    return False
 
 
 def _new_entry(harness: str, cell: Optional[str] = None) -> dict[str, Any]:
     cmd = _command(harness, cell)
     if harness == "cursor":
         return {"command": cmd}
+    if harness == "antigravity":
+        return {"type": "command", "command": cmd, "timeout": 10}
     return {
         "matcher": "",
         "hooks": [{"type": "command", "command": cmd, "timeout": 10}],
     }
+
 
 
 def _get_list(config: dict[str, Any], harness: str) -> list[Any]:
@@ -195,13 +202,22 @@ def _detect_harness() -> Optional[str]:
         return "codex"
     if env.get("MUSE_CODE") or env.get("MUSE_SESSION_ID") or env.get("MUSE"):
         return "muse"
+    if (
+        env.get("ANTIGRAVITY_AGENT")
+        or env.get("ANTIGRAVITY_CLI")
+        or env.get("ANTIGRAVITY_WORKSPACE")
+        or env.get("GEMINI_CLI_SESSION")
+    ):
+        return "antigravity"
     return None
+
 
 
 _USAGE = """\
 Usage:
-  swarph install-wake-hook [--harness claude|codex|cursor]
+  swarph install-wake-hook [--harness claude|codex|cursor|muse|antigravity]
                            [--scope user|project] [--uninstall] [--dry-run]
+
 
 Installs the silent-wake session-start hook (board card #482). The product
 depends on where the wake lives: claude/codex get an arm-instruction (the

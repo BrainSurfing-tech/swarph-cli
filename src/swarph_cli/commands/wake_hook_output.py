@@ -40,9 +40,10 @@ from swarph_cli.cell import (
     load_cell,
 )
 
-_ARM_HARNESSES = ("claude", "codex", "muse")
+_ARM_HARNESSES = ("claude", "codex", "muse", "antigravity")
 _VERIFY_HARNESSES = ("cursor",)
 _KNOWN_HARNESSES = _ARM_HARNESSES + _VERIFY_HARNESSES
+
 
 _FILTER_MODULE = "swarph_cli.scripts.dm_notify_filter"
 
