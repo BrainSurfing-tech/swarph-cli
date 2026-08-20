@@ -260,17 +260,27 @@ def run_install_wake_hook(argv: Optional[list[str]] = None) -> int:
     # fleet-wide misconfiguration with a single-cell author: every session
     # on the box is told to tail one arbitrary cell's inbox, and the next
     # cell's install silently evicts the last (measured live: gpt-ops
-    # 14:03, cursor-lin 14:48, nothing told gpt-ops). Runtime resolution
-    # (task 1) makes user-scope installs correct WITHOUT a baked name.
-    if args.cell and args.scope == "user" and not args.uninstall:
+    # 14:03, cursor-lin 14:48, mistral 08:55 — three evictions, zero
+    # notifications). Compare PATHS, not flags: --scope project run from
+    # the box's home directory lands on the SAME box-global file (a cell
+    # whose cell.yaml cwd IS the home directory would otherwise become
+    # the next evictor while following the guide's own advice). Runtime
+    # resolution (task 1) makes box-global installs correct WITHOUT a
+    # baked name.
+    if (
+        args.cell
+        and not args.uninstall
+        and target == _config_path(harness, "user")
+    ):
         print(
             "swarph install-wake-hook: LOUD REFUSAL — --cell with a "
             f"box-global target ({target}) arms ONE cell's wake in a file "
             "EVERY session on the box reads, and silently evicts the "
             "previously installed cell's (card #527). The two valid "
-            "combinations: --scope user WITHOUT --cell (the hook resolves "
-            "the cell at runtime from the tmux session name), or --scope "
-            "project WITH --cell (a per-project file only that project's "
+            "combinations: a box-global install WITHOUT --cell (the hook "
+            "resolves the cell at runtime from the tmux session name), or "
+            "--scope project WITH --cell run from a directory that is NOT "
+            "the box's home (a per-project file only that project's "
             "sessions read). Nothing was written.",
             file=sys.stderr,
         )

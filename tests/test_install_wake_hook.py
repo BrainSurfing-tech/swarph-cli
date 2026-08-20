@@ -516,16 +516,37 @@ def test_cell_with_user_scope_refuses_and_writes_nothing(isolated_home, capsys):
 def test_cell_with_project_scope_installs(isolated_home, monkeypatch, capsys):
     """Non-vacuity partner: the refusal must not swallow the VALID
     per-cell combination."""
-    monkeypatch.chdir(isolated_home)
+    proj = isolated_home / "gpt-ops"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
     rc = iwh.run_install_wake_hook(
         ["--harness", "claude", "--cell", "gpt-ops", "--scope", "project"]
     )
     assert rc == 0
     settings = json.loads(
-        (isolated_home / ".claude" / "settings.json").read_text(encoding="utf-8")
+        (proj / ".claude" / "settings.json").read_text(encoding="utf-8")
     )
     cmd = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
     assert "--cell gpt-ops" in cmd
+
+
+def test_project_scope_from_home_is_the_same_box_global_file(
+    isolated_home, monkeypatch, capsys
+):
+    """The guard compares PATHS, not flags: --scope project run from the
+    box's home directory lands on ~/.claude/settings.json — the same
+    box-global file — and must be refused with --cell. cursor-lin's own
+    cell.yaml cwd IS the box home; following the guide's advice literally
+    would have made that cell the fourth evictor in the same slot."""
+    monkeypatch.chdir(isolated_home)
+    rc = iwh.run_install_wake_hook(
+        ["--harness", "claude", "--cell", "cursor-lin", "--scope", "project"]
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "LOUD REFUSAL" in err
+    assert "NOT the box's home" in err
+    assert not (isolated_home / ".claude" / "settings.json").exists()
 
 
 def test_user_scope_without_cell_installs(isolated_home, capsys):
@@ -558,10 +579,19 @@ def test_uninstall_is_exempt_from_the_pair_guard(isolated_home, capsys):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def project_dir(isolated_home, monkeypatch):
+    """A project directory that is NOT the box home, so the box-global
+    path guard does not fire."""
+    proj = isolated_home / "some-project"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    return proj
+
+
 def test_baked_cell_disagreeing_with_own_session_warns(
-    isolated_home, monkeypatch, capsys
+    project_dir, monkeypatch, capsys
 ):
-    monkeypatch.chdir(isolated_home)
     monkeypatch.setattr(
         iwh, "_tmux_session_cell",
         lambda: ("cursor-lin", "tmux session 'cursor-lin'"),
@@ -577,10 +607,9 @@ def test_baked_cell_disagreeing_with_own_session_warns(
 
 
 def test_baked_cell_agreeing_with_own_session_is_quiet(
-    isolated_home, monkeypatch, capsys
+    project_dir, monkeypatch, capsys
 ):
     """Non-vacuity partner: agreement must not warn."""
-    monkeypatch.chdir(isolated_home)
     monkeypatch.setattr(
         iwh, "_tmux_session_cell",
         lambda: ("gpt-ops", "tmux session 'gpt-ops'"),
@@ -592,10 +621,9 @@ def test_baked_cell_agreeing_with_own_session_is_quiet(
     assert "WARNING" not in capsys.readouterr().err
 
 
-def test_unresolvable_own_session_is_quiet(isolated_home, monkeypatch, capsys):
+def test_unresolvable_own_session_is_quiet(project_dir, monkeypatch, capsys):
     """Non-vacuity partner: an installer outside tmux (or in an unknown
     session) has no disagreement to report."""
-    monkeypatch.chdir(isolated_home)
     monkeypatch.setattr(iwh, "_tmux_session_cell", lambda: None)
     rc = iwh.run_install_wake_hook(
         ["--harness", "claude", "--cell", "gpt-ops", "--scope", "project"]
