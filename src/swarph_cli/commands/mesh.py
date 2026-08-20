@@ -81,7 +81,12 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="how far back in this inbox to look for the message")
     reply.add_argument("--json", action="store_true",
                        help="machine-readable result. Most callers here are automated "
-                            "and both outcomes exit 0, so stdout prose is not a signal.")
+                            "and both outcomes exit 0, so stdout prose is not a signal. "
+                            "READ obligation_check, NOT closed_obligation: the latter is "
+                            "a legacy projection of the first closed id and its null "
+                            "means cannot-tell OR none OR never-looked. "
+                            "obligation_check tells them apart (null = this gateway does "
+                            "not report closures at all).")
     add_content_args(reply)
     _add_common(reply)
 
@@ -583,6 +588,11 @@ def _run_reply(args: argparse.Namespace) -> int:
     #
     # AND IT HONOURS grok's PR #253 REVIEW RATHER THAN REVERSING IT: the rule was never
     # assert what you do not know. When the server does not say, this still does not claim.
+    # PRESENCE, not truthiness. `if check:` would be a PROXY for this -- correct today
+    # only because all four values happen to be non-empty strings, and silently wrong the
+    # day one of them becomes "" or null. The comment above states presence; this is the
+    # line that implements it. (drop-on-meta-edge, PR #270.)
+    has_check = "obligation_check" in payload
     check = payload.get("obligation_check")
     closed = payload.get("closed_obligations")
     if args.json:
@@ -598,18 +608,22 @@ def _run_reply(args: argparse.Namespace) -> int:
             # gateway is. A caller distinguishes "no obligation closed" from "this server
             # cannot tell me" by obligation_check being null, exactly as the server-side
             # field distinguishes them for itself.
-            "closed_obligations": closed if check else None,
+            "closed_obligations": closed if has_check else None,
             "obligation_check": check,
-            # >>> KEPT, AND NO LONGER ALWAYS null. <<< This key predates the server
-            # fact and every response it ever produced carried null, so no caller can
-            # depend on a non-null value -- but a caller doing
-            # `.get("closed_obligation", False)` reads a MISSING key as a confident
-            # False, which is the exact ambiguity the null was added to prevent
-            # (test_JSON_output_never_claims_a_closure_it_cannot_see). Dropping it
-            # would silently turn "cannot tell" into "no" for those callers on the day
-            # closures started being reported. It is a VIEW of closed_obligations, not
-            # a second source: first id, or None.
-            "closed_obligation": (closed[0] if check and closed else None),
+            # >>> KEPT AS A PRECAUTION, NOT BECAUSE A CALLER WAS MEASURED NEEDING IT
+            # -- AND THOSE JUSTIFY DIFFERENT AMOUNTS OF PERMANENCE. <<< There is NO
+            # in-tree consumer of this key outside this command and its tests; the
+            # caller doing `.get("closed_obligation", False)` is hypothetical. What is
+            # real is that deleting a published key turns "cannot tell" into a
+            # confident False for any such caller on the very day closures started
+            # being reported, which is a silent downgrade nobody would see.
+            #
+            # AND IT IS AMBIGUOUS BY DESIGN: null here means cannot-tell OR looked-and-
+            # none OR never-looked -- the exact ambiguity #525 exists to kill,
+            # surviving inside the PR that ships the fix. Read `obligation_check` to
+            # tell them apart; this key cannot. Said in --json's help too, where a
+            # caller looks before writing .get. (drop-on-meta-edge, PR #270.)
+            "closed_obligation": (closed[0] if has_check and closed else None),
         }, indent=2))
         return 0
     if check:

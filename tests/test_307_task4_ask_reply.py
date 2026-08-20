@@ -378,3 +378,57 @@ def test_the_stdout_line_names_the_obligation_when_the_server_did(monkeypatch, c
     assert "CLOSED obligation #12" in out
     assert "CANNOT CONFIRM" not in out
 
+
+
+def test_the_gate_is_the_FIELD_BEING_PRESENT_not_its_value_being_truthy(monkeypatch, capsys):
+    """>>> THE COMMENT SAYS PRESENCE; `if check:` WOULD SAY TRUTHINESS. <<< The two agree
+    today only because all four values are non-empty strings, so a falsy one -- a server
+    that reports the field with an empty value -- would flip this command back to "the
+    server did not say" while the server plainly did.
+
+    FOURTH INSTANCE IN ONE DAY of a comment stating the property correctly with a line
+    under it implementing something narrower that happened to agree: len(hits)==1 for
+    "name matches win", a unit test for "the helper is consulted", obligation_check set
+    before the query it describes, and this. The comment is the SPEC, not decoration.
+    (drop-on-meta-edge, PR #270.)
+    """
+    import json as _json
+    _inbox(monkeypatch, [{"id": 99, "from_node": "droplet", "thread_id": "t-abc"}])
+    _posts(monkeypatch, mesh, payload={"id": 100, "closed_obligations": [],
+                                       "obligation_check": ""})
+
+    mesh.run_mesh(["reply", "99", "--content", "x", "--gateway", "http://gw", "--json"])
+
+    d = _json.loads(capsys.readouterr().out)
+    assert d["closed_obligations"] == [], (
+        "the server DID report closed_obligations -- nulling it because the companion "
+        "field was falsy would hide a fact the server stated")
+    assert d["obligation_check"] == ""
+
+
+def test_closed_obligation_ALONE_cannot_tell_the_three_nulls_apart(monkeypatch, capsys):
+    """>>> THE AMBIGUITY #525 EXISTS TO KILL, SURVIVING INSIDE THE PR THAT SHIPS THE FIX --
+    AND KEPT ON PURPOSE. <<< The legacy singular key reads null for all three of:
+
+        old gateway (cannot tell) | checked, none closed | never looked
+
+    A caller reading only that key is exactly where it started. The key stays as a
+    precaution against silently downgrading a hypothetical `.get(key, False)` caller to a
+    confident False -- there is NO in-tree consumer, so this is a precaution rather than a
+    measured need, and those justify different amounts of permanence. This test exists so
+    the ambiguity is DOCUMENTED rather than discovered. (drop-on-meta-edge, PR #270.)
+    """
+    import json as _json
+    seen = []
+    for payload in ({"id": 100},
+                    {"id": 100, "closed_obligations": [], "obligation_check": "checked"},
+                    {"id": 100, "closed_obligations": [], "obligation_check": "no_thread"}):
+        _inbox(monkeypatch, [{"id": 99, "from_node": "droplet", "thread_id": "t-abc"}])
+        _posts(monkeypatch, mesh, payload=payload)
+        mesh.run_mesh(["reply", "99", "--content", "x", "--gateway", "http://gw", "--json"])
+        seen.append(_json.loads(capsys.readouterr().out))
+
+    assert [d["closed_obligation"] for d in seen] == [None, None, None]
+    assert [d["obligation_check"] for d in seen] == [None, "checked", "no_thread"], (
+        "obligation_check is the ONLY field that separates the three -- if this ever "
+        "collapses, the card's defect is back")
