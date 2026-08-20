@@ -95,19 +95,71 @@ def _emit(payload: dict[str, Any], *, harness: str) -> int:
     return 0
 
 
-def _resolve_cell(explicit: Optional[str] = None) -> tuple[Optional[str], str]:
-    """Cell-name resolution, most-explicit first. Returns (name, source).
+def _tmux_session_cell() -> Optional[tuple[str, str]]:
+    """Session-local identity: the tmux session name, validated against
+    cells_dir. Returns (name, source) or None.
 
-    1. ``--cell`` baked into the installed hook command
-    2. ``$SWARPH_SELF`` — the mesh's existing self-name convention
+    The precedent is the Stop hook in the same settings file, which resolves
+    identity from `tmux display-message -p '#S'`. Copy its RESOLUTION, never
+    its FALLBACK (card #527): a session outside tmux must fall THROUGH to the
+    next source, never default to the box owner. An unknown session name
+    falls through too — a tmux session called "scratch" must not invent a
+    cell called "scratch".
+    """
+    if not os.environ.get("TMUX"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["tmux", "display-message", "-p", "#S"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5,
+        )
+    except Exception:
+        return None
+    session = proc.stdout.strip()
+    if proc.returncode != 0 or not session:
+        return None
+    candidate = cells_dir() / f"{session}.yaml"
+    if not candidate.is_file():
+        return None
+    try:
+        cell = load_cell(candidate)
+    except CellError:
+        return None
+    name = getattr(cell, "name", None) or getattr(cell, "role", None) or session
+    return str(name), f"tmux session '{session}'"
+
+
+def _resolve_cell(explicit: Optional[str] = None) -> tuple[Optional[str], str]:
+    """Cell-name resolution, MOST-LOCAL first. Returns (name, source).
+
+    1. tmux session name (session-local, validated against cells_dir) —
+       outranks ``--cell`` BECAUSE the defect in card #527 is a box-global
+       baked name lying to every session on a multi-cell box; the
+       session-local signal must outrank it or the fix is void
+    2. ``--cell`` baked into the installed hook command (explicit, but only
+       as local as the scope it was installed at)
+    3. ``$SWARPH_SELF`` — the mesh's existing self-name convention
        (``swarph monitor --as`` honors it too). On a shared box this is
-       THE BOX OWNER'S identity (mesh's own --as help says so), so the
-       source is reported alongside the name: a verified verdict about
-       the wrong cell is worse than no verdict.
-    3. cwd discovery: ./cell.yaml, then cells_dir/<basename(cwd)>.yaml —
+       THE BOX OWNER'S identity (mesh's own --as help says so; the box-wide
+       settings env may pin it, card #360), so the source is reported
+       alongside the name: a verified verdict about the wrong cell is worse
+       than no verdict.
+    4. cwd discovery: ./cell.yaml, then cells_dir/<basename(cwd)>.yaml —
        weakest, since harness sessions do not necessarily start in a
        cell-named directory
+    5. unresolved — the caller must REFUSE LOUDLY, never guess
     """
+    tmux = _tmux_session_cell()
+    if tmux is not None:
+        name, source = tmux
+        # An overridden --cell must be NAMED, never silently ignored
+        # (lab-ovh on #527: same defect shape as an ignored filter
+        # returning an unfiltered superset that looks filtered). The
+        # precedence stands — the override is reported, not swallowed.
+        if explicit and explicit != name:
+            source = f"{source} (overrode install-time --cell '{explicit}')"
+        return name, source
     if explicit:
         return explicit, "install-time --cell"
     env_self = os.environ.get("SWARPH_SELF", "").strip()
@@ -137,13 +189,41 @@ def _sidecar_dir(cell_name: str) -> Path:
     return Path.home() / "swarph_state" / cell_name / "mesh-sidecar"
 
 
-def _arm_instruction(cell_name: Optional[str]) -> str:
+def _provenance_note(source: str) -> str:
+    """Name the resolution source so a wrong-cell outcome is VISIBLE. The
+    $SWARPH_SELF case gets the full warning: on a shared box it is the box
+    owner's identity (card #360), and a confident line about the wrong cell
+    is worse than no line."""
+    if source == "$SWARPH_SELF":
+        return (
+            " (identity from $SWARPH_SELF — on a shared box that is the box "
+            "owner's cell; if this session is not that cell, this line is "
+            "about the wrong wake)"
+        )
+    return f" (identity from {source})"
+
+
+def _arm_instruction(cell_name: Optional[str], source: str = "unresolved") -> str:
     interpreter = sys.executable
-    if cell_name:
-        inbox = _sidecar_dir(cell_name) / "inbox.log"
-        tail = f'tail -n 0 -F "{inbox}"'
-    else:
-        tail = 'tail -n 0 -F "$HOME/swarph_state/<cell>/mesh-sidecar/inbox.log"'
+    if not cell_name:
+        # CANNOT-RESOLVE is a LOUD REFUSAL, never a placeholder (card #527
+        # task 1): an instruction that says "substitute <cell> yourself"
+        # invites the session to guess — and on a shared box the guess is
+        # the box-wide $SWARPH_SELF, i.e. the box owner, i.e. the F3
+        # wrong-cell hazard armed by the session's own hand.
+        return (
+            "[swarph silent-wake] CANNOT RESOLVE which cell this session is: "
+            "no tmux session name matching a cell, no install-time --cell, "
+            "no $SWARPH_SELF, no cell.yaml discoverable from this cwd. "
+            "DO NOT arm a DM watch for a guessed cell — a watch on the wrong "
+            "inbox is worse than none: it looks armed while your own DMs "
+            "arrive unnoticed. Once you know which cell this session is, arm "
+            "it yourself: `tail -n 0 -F \"$HOME/swarph_state/<cell>/mesh-sidecar/"
+            f"inbox.log\" | \"{interpreter}\" -u -m {_FILTER_MODULE}` and verify "
+            "with `swarph monitor status --as <cell>`."
+        )
+    inbox = _sidecar_dir(cell_name) / "inbox.log"
+    tail = f'tail -n 0 -F "{inbox}"'
     pipeline = f'{tail} | "{interpreter}" -u -m {_FILTER_MODULE}'
     return (
         "[swarph silent-wake] This cell's DM wake lives in THIS harness. "
@@ -162,20 +242,17 @@ def _arm_instruction(cell_name: Optional[str]) -> str:
         "(grok-researcher transcript probe, 2026-08-18: 13 historical "
         "mid_turn_aborts from watchdog+tmux wake overlap), and the abort "
         "is invisible in every success counter."
-        + (
-            ""
-            if cell_name
-            else "\n(No cell.yaml discovered from this cwd — substitute this "
-            "cell's name for <cell> in the inbox path.)"
-        )
+        + _provenance_note(source)
     )
 
 
 def _verify_report(cell_name: Optional[str], source: str = "unresolved") -> str:
     if not cell_name:
         return (
-            "[swarph silent-wake] CANNOT VERIFY the DM wake: no cell.yaml "
-            "discovered from this cwd, so I do not know which cell this "
+            "[swarph silent-wake] CANNOT VERIFY the DM wake: every "
+            "resolution source failed — no tmux session name matching a "
+            "cell, no install-time --cell, no $SWARPH_SELF, no cell.yaml "
+            "discoverable from this cwd — so I do not know which cell this "
             "session is. If this session is a mesh cell, DMs may arrive "
             "unnoticed. Run `swarph monitor status --as <cell>` yourself."
         )
@@ -297,8 +374,8 @@ def run_wake_hook_output(argv: Optional[list[str]] = None) -> int:
     p.add_argument(
         "--cell",
         default=None,
-        help="cell name baked in at install time (wins over $SWARPH_SELF "
-        "and cwd discovery)",
+        help="cell name baked in at install time (outranked by the tmux "
+        "session name, wins over $SWARPH_SELF and cwd discovery)",
     )
     args = p.parse_args(argv)
 
@@ -322,7 +399,9 @@ def run_wake_hook_output(argv: Optional[list[str]] = None) -> int:
     cell_name, cell_source = _resolve_cell(args.cell)
 
     if harness in _ARM_HARNESSES:
-        return _emit({"context": _arm_instruction(cell_name)}, harness=harness)
+        return _emit(
+            {"context": _arm_instruction(cell_name, cell_source)}, harness=harness
+        )
     return _emit(
         {"context": _verify_report(cell_name, cell_source)}, harness=harness
     )
