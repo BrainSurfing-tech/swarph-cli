@@ -37,7 +37,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import mesh
@@ -93,6 +96,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
     stop = sub.add_parser("stop", help="stop this peer's monitor")
     _add_common(stop)
+
+    hcheck = sub.add_parser(
+        "heartbeat-check",
+        help="#544 Proposal A/B: independently verify the drain heartbeat and "
+             "escalate DEGRADED, with cause named, to the gateway",
+    )
+    hcheck.add_argument(
+        "--stale-after-s",
+        type=int,
+        default=None,
+        help="heartbeat age past which the monitor is considered not draining. "
+             "DEFAULT IS DERIVED from the running monitor's own poll interval "
+             "(6 intervals, floor 60s), NOT a constant -- a threshold shorter "
+             "than the poll interval reports DEGRADED forever. An explicit "
+             "value below 2 intervals is REFUSED for that reason.",
+    )
+    _add_common(hcheck)
 
     return p
 
@@ -418,6 +438,18 @@ def _collect(args: argparse.Namespace) -> dict:
         "running": pstatus == "live_ours",
         "pidfile_status": pstatus,
         "pid": (rec or {}).get("pid"),
+        # The RUNNING monitor's own poll interval, recorded by write_pidfile.
+        # heartbeat-check derives its staleness threshold from this instead of
+        # inventing a constant -- see _resolve_stale_after.
+        "poll_s": (rec or {}).get("poll_s"),
+        # When the LIVE writer started -- lets heartbeat-check tell a writer
+        # that has had time to emit and did not (feature absent) from one that
+        # has only just come up.
+        "started_at": (rec or {}).get("started_at"),
+        # The writer's OWN declaration that it can emit a heartbeat. Absent =>
+        # a build predating the feature. Established independently of the
+        # heartbeat file, because inferring it from that file is circular.
+        "emits_heartbeat": (rec or {}).get("emits_heartbeat"),
         "configured_sinks": [s.name for s in sinks],
         "observation_cursor": observed,
         # `none` keeps no ledger, so there is nothing to subtract. Saying "0
@@ -543,6 +575,382 @@ def _cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── heartbeat-check (#544 Proposal A/B) ────────────────────────────────────
+
+_CAUSE_PATTERNS = [
+    (re.compile(r"UnicodeEncodeError|UnicodeDecodeError|charmap"), "encoding"),
+    (re.compile(r"\b40[13]\b|Unauthorized|Forbidden"), "auth"),
+    (re.compile(r"\b429\b|rate.?limit", re.IGNORECASE), "quota"),
+    (re.compile(r"gateway 5\d\d"), "gateway"),
+    (re.compile(r"MonitorSinkError|SinkError"), "sink"),
+]
+
+
+def _unit_identity(unit: str) -> "str | None":
+    """The cell a unit runs as, or None when it names NOBODY.
+
+    >>> `--as` IS NOT THE ONLY WAY A MONITOR GETS ITS IDENTITY. <<< (lab-ovh,
+    measured, DM 25772.) `_self_name_was_derived` shows $SWARPH_SELF alone is
+    sufficient, so a unit carrying `Environment=SWARPH_SELF=<PEER>` and NO
+    `--as` runs perfectly -- and was invisible to the ExecStart-only probe this
+    replaces, silently dropping out of its own check.
+
+    The hole is REACHABLE, not theoretical: the shipped unit sets BOTH, so the
+    `--as` flag reads as redundant to anyone tidying that file, and deleting it
+    leaves a working monitor nothing can attribute. The redundancy inviting the
+    edit lives in the very file the check depends on.
+
+    Returns None for a unit naming neither -- the caller must treat that as
+    NOT ATTRIBUTABLE (a third state), never fold it into "not mine".
+    """
+    try:
+        out = subprocess.run(
+            ["systemctl", "show", unit, "-p", "ExecStart", "-p", "Environment"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        text = out.stdout or ""
+    except OSError:
+        text = ""
+    m = re.search(r"--as[\s=]+([\w.-]+)", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"SWARPH_SELF=([\w.-]+)", text)
+    return m.group(1) if m else None
+
+
+def _unit_names_this_cell(unit: str, self_name: str) -> bool:
+    """Does this unit provably run as THIS cell? THE UNIT NAME IS A PROXY.
+
+    A unit NAME suggests ownership; the invocation (`--as`, or $SWARPH_SELF in
+    its environment) PROVES it. Trusting the name is the same error class as
+    trusting $SWARPH_SELF inherited from a multiplexer server (cursor-win's
+    psmux identity leak).
+    """
+    return _unit_identity(unit) == self_name
+
+
+def _unit_exists(unit: str) -> bool:
+    """Whether systemd knows this unit at all — used by the guard suite to tell
+    a real negative from a vacuous one (no unit to misattribute is not a pass)."""
+    try:
+        out = subprocess.run(
+            ["systemctl", "list-unit-files", unit, "--no-legend", "--no-pager"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+    except OSError:
+        return False
+    if unit in (out.stdout or ""):
+        return True
+    # A unit can be loaded without a unit FILE (runtime/transient), so ask the
+    # other way too rather than reporting a false absence.
+    probe = subprocess.run(
+        ["systemctl", "show", unit, "-p", "LoadState", "--value"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    return (probe.stdout or "").strip() == "loaded"
+
+
+def _candidate_units(self_name: str) -> list:
+    """Units that may supervise THIS cell — ownership proved, never assumed.
+
+    >>> FOUND BY INDUCING A REAL OUTAGE (science-claude, 2026-08-21). <<< This
+    used to fall back to the bare `swarph-monitor.service`. On lab-ovh that unit
+    is LAB-OVH'S MONITOR (`--as lab-ovh`, measured). So stopping science-claude's
+    own unit produced `cause=unrecognized`: the probe found lab's unit active,
+    scanned LAB'S JOURNAL, matched nothing, and reported a plausible-looking
+    wrong answer instead of the true `supervisor_absent`.
+
+    That is this card's own defect committed by this card's own detector —
+    reading ANOTHER CELL'S state and reporting it as this one's. The template's
+    header already warns why: "A GENERIC SERVICE NAME ON A MULTI-CELL HOST IS A
+    COLLISION WAITING FOR A RESTART." A generic name cannot be attributed to any
+    particular cell, so it is never accepted on the strength of its name.
+
+    The template INSTANCE is safe by construction (%i IS the cell name). Anything
+    else must prove itself, which also covers legitimately non-templated units
+    like `swarph-monitor-gridiron.service`.
+    """
+    units, _unattributable = _partition_units(self_name)
+    return units
+
+
+def _partition_units(self_name: str) -> tuple:
+    """(mine, unattributable) — THREE states, never two.
+
+    attributable-to-me · attributable-to-another · NOT ATTRIBUTABLE. lab-ovh's
+    correction (DM 25772): silently dropping the third folds it into the second,
+    which is this card's own Family B-DUAL defect. An ACTIVE swarph-monitor unit
+    naming nobody might be this cell's supervisor, so concluding
+    `supervisor_absent` while one exists is a determinate negative the evidence
+    does not support.
+    """
+    mine = [f"swarph-monitor@{self_name}.service"]
+    unattributable = []
+    try:
+        listing = subprocess.run(
+            ["systemctl", "list-units", "swarph-monitor*", "--all",
+             "--no-legend", "--no-pager", "--plain"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+    except OSError:
+        return mine, unattributable
+    for line in (listing.stdout or "").splitlines():
+        name = line.split()[0] if line.split() else ""
+        if not name.endswith(".service") or name in mine:
+            continue
+        who = _unit_identity(name)
+        if who == self_name:
+            mine.append(name)
+        elif who is None:
+            unattributable.append(name)
+    return mine, unattributable
+
+
+def _classify_drain_failure(self_name: str, pidfile_status: str,
+                            hb: dict = None, live_pid=None,
+                            writer_uptime_s=None, interval_s: int = 30,
+                            emits_heartbeat=None) -> str:
+    """Name the cause from OUTSIDE the dead process.
+
+    Never guesses among the journal-derived causes without a matching pattern in
+    the process's own error text -- an unmatched stale-with-live-supervisor case
+    is reported `unrecognized` rather than forced into the nearest label, per the
+    design's own non-vacuity requirement.
+
+    >>> SEVENTH CAUSE, FOUND BY INDUCING A REAL OUTAGE (2026-08-21): THE WRITER
+    MAY SIMPLY NOT HAVE THE FEATURE. <<< The design named six causes and folded
+    this one into `silent_hang`, because a hung writer and a writer that never
+    implements the heartbeat produce THE IDENTICAL ARTEFACT: a file that does not
+    advance. Measured here: lab-ovh's shared editable clone sits on `main`, which
+    carries ZERO occurrences of `drain_heartbeat`, so science-claude's supervised
+    monitor CANNOT write one -- and heartbeat-check called that `silent_hang`, a
+    confident wrong answer on a perfectly healthy cell.
+
+    That is not an edge case; DURING ANY ROLLOUT IT IS THE MAJORITY CASE. Every
+    cell not yet upgraded reports DEGRADED, the fleet goes red at once, and a
+    permanent red trains readers to skip the row -- obligation_sweep.py's own
+    recorded lesson, reproduced by the detector meant to prevent it.
+
+    `pid` in the heartbeat is what separates them: if the LIVE writer has been up
+    longer than a couple of intervals and the newest heartbeat still carries a
+    DIFFERENT pid, that writer has had time to write one and has not -- it does
+    not have the feature. Same shape as Family B-DUAL's law: one message for two
+    causes hides which one you have, so the state gets SPLIT rather than
+    special-cased.
+    """
+    # CAPABILITY FIRST, AND FROM THE WRITER'S OWN DECLARATION -- never inferred
+    # from the heartbeat file (lab-ovh, DM 25744: asking the artifact whether the
+    # artifact is supported is circular). A live writer whose pidfile carries no
+    # `emits_heartbeat` key predates the feature and CANNOT emit one; that is a
+    # different fact from a writer that can and stopped, and it resolves on the
+    # FIRST check rather than after two intervals of waiting.
+    if pidfile_status == "live_ours" and not emits_heartbeat:
+        return "writer_lacks_heartbeat"
+
+    if hb is None and pidfile_status == "live_ours":
+        # A live capable writer has not completed an iteration yet.
+        return "heartbeat_absent"
+
+    # Secondary discriminator, kept for the case where the pidfile is stale or
+    # foreign so no declaration is readable: a heartbeat carrying a DIFFERENT
+    # pid than the live writer, which has had time to write one and has not.
+    hb_pid = hb.get("pid")
+    if (pidfile_status == "live_ours" and live_pid and hb_pid != live_pid
+            and (writer_uptime_s or 0) > 2 * interval_s):
+        return "writer_lacks_heartbeat"
+
+    if pidfile_status == "live_ours":
+        # pidfile says the process IS running, but its heartbeat has not
+        # advanced -- the process exists but is not doing the work. No OS
+        # supervisor catches this; it is exactly what A/B exist to catch.
+        return "silent_hang"
+
+    units, unattributable = _partition_units(self_name)
+    for unit in units:
+        try:
+            probe = subprocess.run(
+                ["systemctl", "is-active", unit], capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
+        except OSError:
+            continue
+        if probe.returncode == 0 and probe.stdout.strip() == "active":
+            try:
+                journal = subprocess.run(
+                    ["journalctl", "-u", unit, "-n", "80", "--no-pager"],
+                    capture_output=True, text=True, timeout=5,
+                    encoding="utf-8", errors="replace",
+                )
+                text = journal.stdout or ""
+            except (subprocess.SubprocessError, OSError):
+                text = ""
+            for pattern, cause in _CAUSE_PATTERNS:
+                if pattern.search(text):
+                    return cause
+            # A supervisor claims this cell is running and nothing in its
+            # recent journal matches a known cause -- name that plainly
+            # rather than assert a cause with no evidence behind it.
+            return "unrecognized"
+
+    # THE THIRD ATTRIBUTION STATE, before any determinate negative. An ACTIVE
+    # swarph-monitor unit that names NOBODY may well be this cell's supervisor;
+    # calling it absent asserts more than the evidence carries. CANNOT_EVALUATE
+    # in the shape this verb can express (lab-ovh, DM 25772).
+    for unit in unattributable or []:
+        try:
+            probe = subprocess.run(
+                ["systemctl", "is-active", unit], capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
+        except OSError:
+            continue
+        if probe.returncode == 0 and probe.stdout.strip() == "active":
+            return "supervisor_unattributable"
+
+    # No pidfile match, no active unit for this cell, and nothing ambiguous --
+    # exactly workstation-lc's own death: a clean exit with nothing configured
+    # to restart it. NOTE this is the NORMAL case on a box where most monitors
+    # are started by hand (ensure_monitor.sh), not an anomaly: 7 of 10 on
+    # lab-ovh have no unit at all.
+    return "supervisor_absent"
+
+
+def _register_capabilities(self_name: str, gateway: str, token_file, caps: dict) -> int:
+    """Push capabilities via the SAME upsert path `swarph mesh register` uses.
+
+    Not a new gateway surface -- `#544`'s Q1 resolution (droplet, AI² review,
+    msg 25394) is that wake/drain state belongs on the existing peer
+    capabilities dict, and this reuses it verbatim rather than adding a
+    second write path for the same fact.
+    """
+    ns = argparse.Namespace(
+        self_name=self_name,
+        url=None,
+        capability=[f"{k}={json.dumps(v)}" for k, v in caps.items()],
+        force=True,
+        gateway=gateway,
+        token_file=token_file,
+    )
+    return mesh._run_register(ns)
+
+
+_DEFAULT_POLL_S_FALLBACK = 30      # only when no pidfile records the real one
+_STALE_INTERVALS = 6               # how many missed polls before DEGRADED
+_MIN_INTERVALS = 2                 # below this, DEGRADED is guaranteed, not measured
+
+
+def _resolve_stale_after(explicit, poll_s) -> tuple[int, str]:
+    """(threshold_seconds, how_it_was_decided). Raises on a guaranteed-red value.
+
+    >>> A STALENESS THRESHOLD IS NOT AN INDEPENDENT CONSTANT. IT IS A FUNCTION
+    OF THE POLL INTERVAL. <<< The heartbeat can only advance once per poll, so a
+    threshold shorter than the interval reports DEGRADED on a perfectly healthy
+    cell, every time, forever.
+
+    FOUND BY RUNNING IT (2026-08-21): the first arm of this verb's own induced
+    test used --stale-after-s 5 against a 30s poll and reported
+    `DEGRADED cause=silent_hang` on a cell that was draining normally. The logic
+    was right; the number was invented. That is the same defect lab-ovh made an
+    hour earlier setting obligation due dates to 168h/120h/144h by feel, and the
+    same one science-claude made choosing 180 here -- a number nobody derived.
+
+    A permanent red is worse than no check: obligation_sweep.py's own docstring
+    already records why ("a permanent red trains readers to skip the row, and
+    then the real ones go unread too"). So an explicit sub-2-interval value is
+    REFUSED rather than honoured -- the caller is asking for a detector that
+    cannot come out negative.
+    """
+    interval = int(poll_s) if poll_s else _DEFAULT_POLL_S_FALLBACK
+    if explicit is None:
+        derived = max(_STALE_INTERVALS * interval, 60)
+        src = (f"derived: {_STALE_INTERVALS} x {interval}s poll"
+               + (" (poll interval UNKNOWN -- no pidfile, assumed "
+                  f"{_DEFAULT_POLL_S_FALLBACK}s)" if not poll_s else ""))
+        return derived, src
+    if explicit < _MIN_INTERVALS * interval:
+        raise RuntimeError(
+            f"--stale-after-s {explicit} is below {_MIN_INTERVALS} poll "
+            f"intervals ({_MIN_INTERVALS} x {interval}s = "
+            f"{_MIN_INTERVALS * interval}s). The heartbeat advances at most "
+            f"once per poll, so this threshold would report DEGRADED on a "
+            f"HEALTHY cell every time -- a detector that cannot come out "
+            f"negative. REFUSING rather than reporting a red it did not earn."
+        )
+    return explicit, "explicit"
+
+
+def _cmd_heartbeat_check(args: argparse.Namespace) -> int:
+    if not args.self_name:
+        print(
+            "swarph monitor heartbeat-check: refusing to run with an ambiently-"
+            "resolved identity -- pass --as explicitly. Proposal A's own "
+            "constraint: this must never trust inherited env for identity.",
+            file=sys.stderr,
+        )
+        return 2
+
+    info = _collect(args)
+    self_name = info["self"]
+    state_dir = Path(info["state_dir"])
+    hb_path = state_dir / "drain_heartbeat.json"
+    since_path = state_dir / "drain_degraded_since.json"
+
+    now = time.time()
+    last_ts = None
+    hb = None
+    try:
+        hb = json.loads(hb_path.read_text(encoding="utf-8"))
+        last_ts = float(hb["ts"])
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        pass
+    age = (now - last_ts) if last_ts is not None else None
+    stale_after_s, threshold_src = _resolve_stale_after(
+        args.stale_after_s, info.get("poll_s"))
+    stale = age is None or age > stale_after_s
+
+    configured_sinks = info["configured_sinks"]
+    caps = {
+        "wake_sinks": ",".join(configured_sinks) or "(none)",
+        "wake_route": (
+            "push" if any(r["is_push"] for r in info["sinks"])
+            else "pull" if any(s != "none" for s in configured_sinks)
+            else "none"
+        ),
+    }
+
+    if not stale:
+        since_path.unlink(missing_ok=True)
+        caps["drain_status"] = "OK"
+        caps["drain_heartbeat_age_s"] = round(age, 1)
+        rc = _register_capabilities(self_name, args.gateway, args.token_file, caps)
+        print(f"heartbeat-check {self_name}: OK age={age:.0f}s "
+              f"(threshold {stale_after_s}s, {threshold_src})")
+        return rc
+
+    interval_s = int(info.get("poll_s") or _DEFAULT_POLL_S_FALLBACK)
+    started_at = (info.get("started_at") or 0)
+    cause = _classify_drain_failure(
+        self_name, info["pidfile_status"], hb=hb, live_pid=info.get("pid"),
+        writer_uptime_s=(now - started_at) if started_at else None,
+        interval_s=interval_s, emits_heartbeat=info.get("emits_heartbeat"))
+    try:
+        since = float(json.loads(since_path.read_text(encoding="utf-8"))["since"])
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        since = now
+        mesh._write_cursor_atomic(since_path, {"since": since})
+
+    caps["drain_status"] = "DEGRADED"
+    caps["degraded_cause"] = cause
+    caps["degraded_since"] = since
+    caps["drain_heartbeat_age_s"] = round(age, 1) if age is not None else None
+    rc = _register_capabilities(self_name, args.gateway, args.token_file, caps)
+    age_desc = f"{age:.0f}s" if age is not None else "never observed"
+    print(f"heartbeat-check {self_name}: DEGRADED cause={cause} "
+          f"age={age_desc} (threshold {stale_after_s}s, {threshold_src})",
+          file=sys.stderr)
+    return 1 if rc == 0 else rc
+
+
 def run_monitor(argv: list[str]) -> int:
     parser = _build_parser()
     try:
@@ -553,6 +961,8 @@ def run_monitor(argv: list[str]) -> int:
             return _cmd_status(args)
         if args.command == "stop":
             return _cmd_stop(args)
+        if args.command == "heartbeat-check":
+            return _cmd_heartbeat_check(args)
         parser.error(f"unknown command: {args.command}")
     except mesh.MonitorSinkError as exc:
         print(f"swarph monitor: {exc}", file=sys.stderr)

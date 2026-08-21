@@ -1167,6 +1167,7 @@ class MonitorState:
         self.ledgers_path = self.state_dir / "ledgers.json"
         self.inbox_log_path = self.state_dir / "inbox.log"
         self.pidfile_path = self.state_dir / _MONITOR_PIDFILE
+        self.heartbeat_path = self.state_dir / "drain_heartbeat.json"
         # `observed` is the real dict; `cursor` is what the engine touches. The
         # deprecated sidecar swaps `cursor` for a view (see _LegacyCursorView).
         self.observed = _read_cursor(self.cursor_path)
@@ -1555,6 +1556,19 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
     if poll_channels:
         _poll_channel_subscriptions(state)
 
+    # #544 Proposal A drain heartbeat: "I completed a drain iteration
+    # successfully at T" -- unconditional, whether or not new DMs existed.
+    # Every early `return` above (status==0, >=500, >=400) skips this on
+    # purpose: those are failed iterations, not successful ones. A silent
+    # hang inside _http_get_json also never reaches here, which is the
+    # point -- staleness of this file is the signal, not its content.
+    # `pid` is LOAD-BEARING, not diagnostic garnish: it is the only thing that
+    # separates "the writer hung" from "the writer never had this feature".
+    # Both present as a frozen file, and during any rollout the second is the
+    # COMMON case -- see _classify_drain_failure's `writer_lacks_heartbeat`.
+    _write_cursor_atomic(state.heartbeat_path, {
+        "ts": time.time(), "iterations": state.iterations, "pid": os.getpid()})
+
 
 def _monitor_loop(state: MonitorState) -> int:
     print(
@@ -1728,6 +1742,14 @@ def write_pidfile(path: Path, *, self_name: str, sinks: list, poll_s: int) -> No
         "poll_s": poll_s,
         "started_at": time.time(),
         "cmdline": _proc_cmdline(os.getpid()),
+        # DECLARED CAPABILITY, written by the writer itself at start (lab-ovh,
+        # DM 25744): "capability has to be established from something OTHER than
+        # the signal itself -- asking the artifact whether the artifact is
+        # supported is circular." Inferring heartbeat support from the heartbeat
+        # file is exactly that circle. A build without this key predates the
+        # feature and CANNOT emit one, which is a different fact from a writer
+        # that can and has stopped -- and the two must never share a cause.
+        "emits_heartbeat": True,
     }
     tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
     tmp.write_text(json.dumps(rec, indent=2, sort_keys=True), encoding="utf-8")
