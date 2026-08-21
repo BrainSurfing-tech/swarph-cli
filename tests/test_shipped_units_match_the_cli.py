@@ -157,6 +157,19 @@ def _monitor_unit() -> str:
     return _MONITOR_UNIT.read_text(encoding="utf-8")
 
 
+def _join_continuations(text: str) -> str:
+    """systemd directives may span lines with a trailing backslash.
+
+    >>> AND deploy/sidecar/claude-tmux@.service ALREADY DOES (line 39-41). <<<
+    (drop-on-meta-edge, review of PR #283.) A scanner that filters on
+    `line.startswith("ExecStart=")` sees only the FIRST physical line, so anything on a
+    continuation is invisible -- while being just as discarded by a drop-in, which is
+    the exact failure the guard exists to catch. The blind spot is demonstrated by a
+    file in this repo, not hypothesised.
+    """
+    return re.sub(r"\\\s*\n\s*", " ", text)
+
+
 def _uncommented(text: str) -> str:
     return "\n".join(l for l in text.splitlines() if not l.strip().startswith("#"))
 
@@ -173,15 +186,27 @@ def _pinned_gateway_values(text: str) -> list:
     pinned address commented out is still the thing someone uncomments.
     """
     out = []
-    for line in text.splitlines():
+    for line in _join_continuations(text).splitlines():
         m = re.search(r"MESH_GATEWAY_URL=(\S*)", line)
-        if m and m.group(1) != "<GATEWAY>":
-            out.append(line.strip())
+        if not m:
+            continue
+        # systemd-LEGAL forms that are NOT pins (drop, review of PR #283):
+        #   Environment="MESH_GATEWAY_URL=<GATEWAY>"   quoting is ordinary
+        #   Environment=MESH_GATEWAY_URL=              an explicit UNSET
+        # >>> A GUARD THAT REDS ON LEGITIMATE INPUT IS ONE THE NEXT PERSON DELETES. <<<
+        # That is this repo's own reasoning from the #276 docstring case, arriving in
+        # the guard built from that lesson. Neither form is in the shipped unit today,
+        # so nothing was broken -- the cost was guard LONGEVITY, not correctness.
+        value = m.group(1).strip('"\'')
+        if value in ("", "<GATEWAY>"):
+            continue
+        out.append(line.strip())
     return out
 
 
 def _has_execstart_gateway_flag(text: str) -> bool:
-    return any("--gateway" in l for l in _uncommented(text).splitlines()
+    return any("--gateway" in l
+               for l in _uncommented(_join_continuations(text)).splitlines()
                if l.startswith("ExecStart="))
 
 
@@ -263,3 +288,43 @@ def test_the_execstart_guard_ignores_a_flag_inside_a_COMMENT():
     deleted by the next person, which is how the property is lost."""
     assert not _has_execstart_gateway_flag(
         "# do not put --gateway on ExecStart\nExecStart=/x/swarph monitor\n")
+
+
+# --- #283 review, drop-on-meta-edge: three boundary cases ---------------------
+
+def test_the_execstart_guard_sees_continuation_lines():
+    """>>> DEMONSTRATED, NOT HYPOTHESISED: deploy/sidecar/claude-tmux@.service ships a
+    multi-line ExecStart today. <<< A --gateway on line 2 of such a directive is just
+    as discarded by a drop-in as one on line 1, so a guard blind to it is blind to the
+    failure it exists to catch."""
+    unit = ("[Service]\n"
+            "ExecStart=/bin/sh -lc 'x' \\\n"
+            "  --gateway http://lab-ovh:8788\n")
+    assert _has_execstart_gateway_flag(unit)
+
+
+def test_the_real_repo_has_a_multiline_execstart():
+    """The premise above is a fact about this repo. If it stops being true the test
+    above is testing a shape nothing uses, and someone should know."""
+    sidecar = (ROOT / "deploy" / "sidecar" / "claude-tmux@.service")
+    if not sidecar.exists():
+        pytest.skip("sidecar unit not present")
+    body = sidecar.read_text(encoding="utf-8")
+    assert "\\\n" in body, "no continuation left in deploy/ — the blind spot is now theoretical"
+
+
+@pytest.mark.parametrize("line", [
+    'Environment="MESH_GATEWAY_URL=<GATEWAY>"',   # quoting is ordinary systemd
+    "Environment=MESH_GATEWAY_URL=",              # an explicit unset
+])
+def test_the_pin_guard_does_not_red_on_legal_non_pins(line):
+    """A guard that fires on legitimate input gets deleted, and then the property is
+    gone entirely. The direction of this class of bug is the safe one -- it costs
+    longevity, not correctness -- which is exactly why it survives review."""
+    assert _pinned_gateway_values(line + "\n") == []
+
+
+def test_a_quoted_REAL_pin_is_still_caught():
+    """Stripping quotes must not become a hole: the quoted form of a real address is
+    still a pin."""
+    assert _pinned_gateway_values('Environment="MESH_GATEWAY_URL=http://lab-ovh:8788"\n')
