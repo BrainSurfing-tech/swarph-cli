@@ -30,6 +30,25 @@ Type=simple
 User=<USER>
 Environment=SWARPH_SELF=<PEER>
 Environment=HOME=<HOME>
+# GATEWAY: deliberately UNSET, and this comment is the reason (#560).
+#
+# The monitor reaches the gateway via swarph-cli's code default, which #276 changed
+# from `http://localhost:8788` to the mesh's tailnet address. Before that change a
+# unit with no gateway line pointed every off-box cell at ITSELF -- present and
+# resolvable and wrong, which is the worst shape a default can have.
+#
+# >>> Environment=, NOT A FLAG ON ExecStart. <<< (science-claude, measured on lab-ovh
+# 2026-08-21.) Every drop-in on that box overrides ExecStart -- `ExecStart=` to clear,
+# then its own line -- so a --gateway baked into the template's ExecStart is DISCARDED
+# by exactly the cells that use drop-ins, and would have protected only the cells that
+# needed no protection. Environment= survives an ExecStart override. An explicit
+# --gateway flag still wins over it (argparse: explicit beats env-derived default), so
+# a cell that sets one keeps it.
+#
+# OFF-MESH INSTALL: uncomment and set. The code default is a TAILNET address and is
+# correct only for cells on this mesh; anywhere else it is a wrong-by-name pointer of
+# the same class #276 removed.
+# Environment=MESH_GATEWAY_URL=<GATEWAY>
 ExecStart=<HOME>/.local/bin/swarph monitor start --as <PEER> --deliver pull --foreground
 Restart=always
 RestartSec=10

@@ -122,3 +122,57 @@ def test_shipped_unit_flags_are_accepted_by_the_cli(unit, verb, flags):
         f"declare them. This unit is shipped in this repo — a rename here breaks "
         f"every box running it, silently, at next restart."
     )
+
+
+# --- #560: the shipped unit's gateway posture -------------------------------
+#
+# science-claude fixed lab-ovh's INSTALLED template on 2026-08-21 and correctly left
+# the SHIPPED one alone: it carries <PEER>/<HOME>/<USER> placeholders and deploys to
+# other boxes, so hardcoding this mesh's tailnet IP into it would be wrong.
+#
+# >>> BUT "RELIES ON THE CODE DEFAULT" AND "NOBODY THOUGHT ABOUT IT" LOOK IDENTICAL IN
+# A FILE THAT SIMPLY HAS NO GATEWAY LINE. <<< Before #276 that same absence pointed
+# every off-box cell at localhost:8788 -- itself. Present, resolvable, and wrong.
+# These tests make the silence a stated decision, so the next reader does not "fix" it
+# by pasting an address in.
+
+def _monitor_unit() -> str:
+    return (ROOT / "deploy" / "monitor" / "swarph-monitor.service").read_text(
+        encoding="utf-8")
+
+
+def test_shipped_unit_has_no_hardcoded_gateway_address():
+    """It deploys to boxes that are not on this tailnet."""
+    import re
+    body = "\n".join(l for l in _monitor_unit().splitlines()
+                     if not l.strip().startswith("#"))
+    hits = re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", body)
+    assert not hits, (
+        f"the shipped unit pins an IP {hits} — it installs on other boxes, where that "
+        "address is a wrong-by-name pointer of the same class #276 removed"
+    )
+
+
+def test_the_gateway_absence_is_documented_as_a_choice():
+    """A missing line cannot distinguish 'decided' from 'forgotten'. The comment is
+    what carries the difference, so it is the thing under test."""
+    u = _monitor_unit()
+    assert "MESH_GATEWAY_URL" in u, "no off-mesh escape hatch is offered anywhere"
+    assert "#276" in u, "the comment must name the code default it relies on"
+
+
+def test_the_escape_hatch_is_environment_not_an_execstart_flag():
+    """>>> MEASURED, NOT PREFERRED (science-claude, lab-ovh, 2026-08-21). <<< Every
+    drop-in on a multi-cell box overrides ExecStart wholesale, so a --gateway baked
+    into the template's ExecStart is DISCARDED by exactly the cells that use drop-ins
+    — protecting only the cells that needed no protection. Environment= survives an
+    ExecStart override."""
+    u = _monitor_unit()
+    assert "# Environment=MESH_GATEWAY_URL=<GATEWAY>" in u, (
+        "the escape hatch must be a commented Environment= line"
+    )
+    exec_lines = [l for l in u.splitlines() if l.startswith("ExecStart=")]
+    assert exec_lines, "no ExecStart in the unit"
+    assert not any("--gateway" in l for l in exec_lines), (
+        "a --gateway on ExecStart is discarded by any drop-in that overrides ExecStart"
+    )
