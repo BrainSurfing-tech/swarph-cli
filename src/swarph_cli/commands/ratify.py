@@ -57,7 +57,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--gateway",
-        default=os.environ.get("MESH_GATEWAY_URL", "http://localhost:8788"),
+        default=os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788"),
         help="mesh-gateway base URL.",
     )
     p.add_argument(

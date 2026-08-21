@@ -84,7 +84,17 @@ from swarph_cli.commands.mesh import _post_json
 _DEFAULT_THRESHOLD_SEC = 1800  # 30 minutes
 _DEFAULT_A1_RETRIES = 3
 _DEFAULT_A1_BACKOFF_SEC = 60
-_DEFAULT_GATEWAY_URL = "http://localhost:8788"
+# TAILNET IP, NOT localhost and NOT a MagicDNS name (commander, 2026-08-21).
+# The mesh-gateway binds HOST=100.107.222.72 ONLY — localhost has never been bound, so this
+# default failed as a bare "Connection refused" with no cause named. It cost 792 silent
+# card-export failures over 8 days, and it turned a WORKING hand-started monitor into a
+# DEAF SUPERVISED one the moment it was moved to a systemd unit (the unit passes no
+# --gateway, so it fell through to this constant).
+# An IP over MagicDNS on purpose: a name needs MagicDNS enabled, the right search domain,
+# and no local collision; the IP needs only that tailscale is up, which is the real
+# precondition anyway. MESH_GATEWAY_URL overrides it — that env var is the escape hatch
+# for anyone outside this mesh, and optional inside it.
+_DEFAULT_GATEWAY_URL = os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788")
 # F3 — tmux pane_activity gate threshold. If pane has activity within this
 # many seconds, suppress A1 (session is working, not stalled). 600s (10min)
 # is comfortably above legitimate-pause noise + comfortably below the
@@ -180,7 +190,7 @@ Flags:
   --cursor PATH        cursor JSON path; default $TMPDIR/<role>-cursor.json
                        fallback /tmp/lab-claude-cursor.json
   --threshold SEC      darkness threshold; default 1800 (30 min)
-  --gateway URL        mesh-gateway URL for unread-DM check; default localhost:8788
+  --gateway URL        mesh-gateway URL for unread-DM check; default 100.107.222.72:8788
   --tmux-session NAME  tmux session name; default = cell role
   --peer NAME          mesh peer name for unread-DM query; default = cell name
   --no-respawn         A1 only; don't escalate to A2 (dry-run mode)

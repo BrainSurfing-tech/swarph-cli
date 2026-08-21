@@ -37,7 +37,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_GATEWAY = os.environ.get("MESH_GATEWAY_URL", "http://localhost:8788")
+DEFAULT_GATEWAY = os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788")
 TIMEOUT_S = 6
 MAX_ROWS = 6
 
