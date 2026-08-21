@@ -220,8 +220,15 @@ def format_human(rows, term) -> str:
         lines.append(f"{i}. {r['name']}  [{r['kind']}]  {r['repo']}  {loc}{callers}")
         if r["signature"]:
             lines.append(f"     {r['signature']}")
-        if r["docstring"]:
-            first = r["docstring"].strip().splitlines()[0][:100] if r["docstring"].strip() else ""
+        # >>> .get, AND ONLY HERE. <<< The RELAYED rows (#552) carry seven keys --
+        # repo, name, kind, file_path, start_line, callers, signature -- and NOT
+        # docstring, which the endpoint does not project. Every other key is common
+        # to both producers, so they stay subscripted: a missing `name` or
+        # `file_path` is a BROKEN PAYLOAD and must raise rather than format as blank.
+        # Loosening all of them would turn a real fault into a quiet half-answer.
+        doc = (r.get("docstring") or "").strip()
+        if doc:
+            first = doc.splitlines()[0][:100]
             if first:
                 lines.append(f"     {first}")
     return "\n".join(lines)
