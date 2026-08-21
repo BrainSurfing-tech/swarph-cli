@@ -242,3 +242,42 @@ def test_argv_path_embedders_measured_from_ACTUAL_ARGV(tmp_path):
         f"argv path-embedders changed: {embedders}. codex AND antigravity were "
         "fixed in #314; a new entry is a new instance of the Windows re-split bug."
     )
+
+
+def test_no_membrane_overrides_launch():
+    """#318: the win32 blocking branch lived in FIVE of six launch() overrides;
+    antigravity never grew one. A fix carried by N overrides is a fix the
+    (N+1)th membrane misses, so launch() is concrete in the base and this pins
+    it: no subclass may shadow it. A membrane that genuinely needs a different
+    launch must now override KNOWINGLY — and this test fails loudly when it
+    tries."""
+    for key, m in spawn.MEMBRANES.items():
+        assert type(m).launch is spawn.ProviderMembrane.launch, (
+            f"{key} overrides launch() — the per-OS exec branch belongs to the "
+            f"base, or the next membrane re-loses it (antigravity, #318)"
+        )
+
+
+def test_every_membrane_windows_launch_blocks(monkeypatch, tmp_path):
+    """The codex test below proved ONE membrane. Antigravity shipped a bare
+    os.execve for months — the pane-collapse bug — because the branch was
+    per-membrane. Drive EVERY membrane through the win32 path: subprocess.run
+    must be called and execve must NOT be, for each of them."""
+    for key, m in spawn.MEMBRANES.items():
+        cell = types.SimpleNamespace(cwd=tmp_path, name=key, provider=key,
+                                     role=key, git_identity=None)
+        run = MagicMock(return_value=types.SimpleNamespace(returncode=0))
+        monkeypatch.setattr(spawn.sys, "platform", "win32")
+        monkeypatch.setattr(spawn.os, "chdir", lambda _cwd: None)
+        monkeypatch.setattr(spawn.subprocess, "run", run)
+        execve = MagicMock()
+        monkeypatch.setattr(spawn.os, "execve", execve)
+        try:
+            m.launch(cell, f"C:/bin/{key}.exe", [key])
+        except Exception:
+            pass  # provider env prep may need fixtures; the CALLS are the assert
+        assert run.called, f"{key}: win32 launch did not block on subprocess.run"
+        assert not execve.called, (
+            f"{key}: win32 launch reached os.execve — the pane-collapse bug "
+            f"(#318)"
+        )

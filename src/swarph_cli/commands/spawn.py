@@ -1583,8 +1583,48 @@ class ProviderMembrane:
         return None
 
     def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
-        """chdir + env setup + exec-replace. Only returns on exec failure."""
-        raise NotImplementedError
+        """chdir + per-provider env + exec. CONCRETE in the base (#318).
+
+        Every membrane's launch was the same three steps differing only in the
+        env builder — which was ALREADY a class attribute (``env_builder``) —
+        and each override had to re-discover the win32 branch on its own.
+        Antigravity never did: it carried a bare ``os.execve`` for months,
+        which on Windows is emulated as spawn-and-exit, NOT a replace — this
+        Python process exits and a NEW provider process is spawned, so inside
+        a tmux/psmux pane the pane's root command exits and the pane COLLAPSES
+        with the provider orphaned (the v0.12.0 Windows breakage). A fix that
+        lives in N overrides is a fix the (N+1)th membrane will miss; it lives
+        here now, and a membrane that needs a different launch must override
+        KNOWINGLY, not by copying the shape and dropping a branch.
+
+          * POSIX: ``os.execve`` = a TRUE in-place replace; the provider
+            inherits stdio/signals under the same PID, so when this IS a tmux
+            pane's root command the pane keeps running the provider.
+          * win32: a BLOCKING ``subprocess.run`` keeps THIS process alive as
+            the pane root with the provider as its child, until it exits.
+
+        argv[0] is the conventional argv0; the real exe is ``binary``.
+        """
+        try:
+            os.chdir(cell.cwd)
+        except OSError as exc:
+            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}",
+                  file=sys.stderr)
+            return 1
+        env = self.env_builder(cell)
+        env.update(_git_identity_env(cell))  # per-cell git author (RACI)
+        if sys.platform == "win32":
+            try:
+                return subprocess.run([binary, *argv[1:]], env=env).returncode
+            except OSError as exc:
+                print(f"swarph spawn: launch failed: {exc}", file=sys.stderr)
+                return 1
+        try:
+            os.execve(binary, argv, env)
+        except OSError as exc:
+            print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
+            return 1
+        return 0  # unreachable on POSIX (execve replaces); for the type checker
 
     def memory_sync_files(self, cell) -> list:
         """Provider-specific memory files to snapshot: (repo-relative, source-abs)
@@ -1644,47 +1684,10 @@ class ClaudeMembrane(ProviderMembrane):
     # keeping an override that only calls super() is how a provider-generic step
     # gets re-narrowed later. Same collapse GrokMembrane took in the #129 tmux hoist.
 
-    def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
-        try:
-            os.chdir(cell.cwd)
-        except OSError as exc:
-            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
-            return 1
-
-        # Launch with the billing-redirect-scrubbed env (NOT raw inherited env) so
-        # a parent-set ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN can't silently flip
-        # the spawned claude off subscription billing. SWARPH_SPAWN=1 (set in
-        # _claude_env) tells a `swarph install-hook` SessionStart hook the prompt
-        # was already injected via --append-system-prompt, so it skips double-
-        # injection. The env carries to the child either way.
-        env = _claude_env(cell)
-        env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
-
-        # Per-OS launch mechanism — the SAME split as the tmux attach, for the
-        # SAME reason:
-        #  * POSIX: os.execve = a TRUE in-place replace. The claude session
-        #    inherits stdio/signals cleanly under the same PID, so when this IS a
-        #    tmux pane's root command tmux keeps the pane running claude.
-        #  * Windows: os.exec* is emulated as spawn-and-exit, NOT a replace — this
-        #    Python process exits and a NEW claude process is spawned. Inside a
-        #    tmux/psmux pane that COLLAPSES the pane (its root command exited),
-        #    orphaning claude => "tmux created but no claude" (the v0.12.0 Windows
-        #    breakage: the create path's inner `swarph spawn` reaches here). A
-        #    BLOCKING subprocess.run keeps THIS process alive as the pane root with
-        #    claude as its child, so the pane survives until claude exits. argv[0]
-        #    is the conventional "claude" argv0; the real exe is `binary`.
-        if sys.platform == "win32":
-            try:
-                return subprocess.run([binary, *argv[1:]], env=env).returncode
-            except OSError as exc:
-                print(f"swarph spawn: launch failed: {exc}", file=sys.stderr)
-                return 1
-        try:
-            os.execve(binary, argv, env)
-        except OSError as exc:
-            print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
-            return 1
-        return 0  # unreachable on POSIX (execve replaces); keeps type checker happy
+    # NO launch OVERRIDE — the base carries chdir + env_builder + the win32
+    # blocking branch (#318). The env lore that lived here: _claude_env scrubs
+    # billing-redirect vars (ANTHROPIC_BASE_URL/AUTH_TOKEN) and sets
+    # SWARPH_SPAWN=1 so an install-hook SessionStart skips double-injection.
 
     def memory_sync_files(self, cell) -> list:
         files = []
@@ -1749,34 +1752,10 @@ class CodexMembrane(ProviderMembrane):
             "Install Codex CLI or set PATH explicitly."
         )
 
-    def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
-        # chdir, like claude/grok/vibe. #314: codex was one of TWO membranes that
-        # never chdir'd, compensating by shipping the cwd as an argv string
-        # (`-C <abs path>`) — which re-splits on Windows when the path has spaces,
-        # producing an unexpected-argument error. With the
-        # process cwd correct, _build_codex_argv passes `-C .` and no path-shaped
-        # string crosses the exec boundary at all.
-        try:
-            os.chdir(cell.cwd)
-        except OSError as exc:
-            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
-            return 1
-        env = _scrubbed_codex_env(cell)
-        env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
-        # Windows os.execve spawns Codex and exits this process instead of replacing
-        # it. Keep the psmux pane root alive until Codex exits, matching Claude.
-        if sys.platform == "win32":
-            try:
-                return subprocess.run([binary, *argv[1:]], env=env).returncode
-            except OSError as exc:
-                print(f"swarph spawn: launch failed: {exc}", file=sys.stderr)
-                return 1
-        try:
-            os.execve(binary, argv, env)
-        except OSError as exc:
-            print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
-            return 1
-        return 0  # unreachable, keeps type checker happy
+    # NO launch OVERRIDE — base carries it (#318). #314's lesson stays: with the
+    # process cwd correct, _build_codex_argv passes `-C .` and no path-shaped
+    # string crosses the exec boundary (an absolute Windows path with spaces
+    # re-splits there).
 
     def memory_sync_files(self, cell) -> list:
         files = []
@@ -1821,30 +1800,10 @@ class AntigravityMembrane(ProviderMembrane):
             "Install Antigravity CLI or set PATH explicitly."
         )
 
-    def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
-        # chdir, like claude/grok/vibe. #314: antigravity was the OTHER membrane
-        # that never chdir'd, AND it embeds the cwd in argv via `--add-dir` — so it
-        # carried BOTH halves of the codex defect, not the quieter half.
-        # >>> THE COMMENT HERE PREVIOUSLY SAID "its argv carries no path". THAT WAS
-        # FALSE. It came from grepping source for `str(cell.cwd)` against guessed
-        # function names and misfiling line 467 under claude; the argv-measuring
-        # test in test_spawn_base_hoist.py refuted it immediately. Claude embeds no
-        # path at all. Trust the built argv, not a read of the builder. <<<
-        try:
-            os.chdir(cell.cwd)
-        except OSError as exc:
-            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
-            return 1
-        # execve carries exactly the scrubbed env to the child without mutating
-        # this process's os.environ first (so a failed exec leaves us intact).
-        env = _agy_env(cell)
-        env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
-        try:
-            os.execve(binary, argv, env)
-        except OSError as exc:
-            print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
-            return 1
-        return 0  # unreachable, keeps type checker happy
+    # NO launch OVERRIDE — and this one is the card's specimen: antigravity's
+    # override carried a BARE os.execve for months, the only membrane with no
+    # win32 blocking branch. The base carries it now (#318). #314's lesson
+    # stays: `--add-dir` embeds the cwd in argv, so the chdir is load-bearing.
 
     def memory_sync_files(self, cell) -> list:
         files = []
@@ -2388,34 +2347,9 @@ class GrokMembrane(ProviderMembrane):
             "Install the Grok CLI or set PATH explicitly."
         )
 
-    def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
-        try:
-            os.chdir(cell.cwd)
-        except OSError as exc:
-            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
-            return 1
-        # Isolated-HOME + billing-scrubbed env carried to grok without mutating
-        # this process's os.environ first (a failed exec leaves us intact).
-        env = _grok_env(cell)
-        env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
-        # Per-OS launch — the SAME split as claude.launch (v0.12.1 fix): on
-        # Windows os.exec* is emulated as spawn-and-exit (not a real replace),
-        # which collapses the tmux pane (its root command exits, orphaning grok);
-        # a BLOCKING subprocess.run keeps THIS process as the pane root with grok
-        # as its child until grok exits. POSIX uses execve for a true in-place
-        # replace so the pane keeps running grok under the same PID.
-        if sys.platform == "win32":
-            try:
-                return subprocess.run([binary, *argv[1:]], env=env).returncode
-            except OSError as exc:
-                print(f"swarph spawn: launch failed: {exc}", file=sys.stderr)
-                return 1
-        try:
-            os.execve(binary, argv, env)
-        except OSError as exc:
-            print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
-            return 1
-        return 0  # unreachable on POSIX (execve replaces); keeps type checker happy
+    # NO launch OVERRIDE — base carries it (#318). The env lore that lived
+    # here: _grok_env carries the isolated-HOME + billing-scrubbed env without
+    # mutating this process's os.environ first (a failed exec leaves us intact).
 
     def memory_sync_files(self, cell) -> list:
         # Grok cells run under an isolated HOME (_GROK_CELL_HOME_SUBDIR); memory
@@ -2484,30 +2418,7 @@ class VibeMembrane(ProviderMembrane):
             "Install the Mistral Vibe CLI or set PATH explicitly."
         )
 
-    def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
-        try:
-            os.chdir(cell.cwd)
-        except OSError as exc:
-            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
-            return 1
-        env = _vibe_env(cell)
-        env.update(_git_identity_env(cell))
-        # Per-OS split, identical to claude/grok: Windows os.exec* is emulated as
-        # spawn-and-exit, which collapses the tmux pane; a BLOCKING
-        # subprocess.run keeps THIS process as the pane root. POSIX execve does a
-        # true in-place replace.
-        if sys.platform == "win32":
-            try:
-                return subprocess.run([binary, *argv[1:]], env=env).returncode
-            except OSError as exc:
-                print(f"swarph spawn: launch failed: {exc}", file=sys.stderr)
-                return 1
-        try:
-            os.execve(binary, argv, env)
-        except OSError as exc:
-            print(f"swarph spawn: launch failed: {exc}", file=sys.stderr)
-            return 1
-        return 0
+    # NO launch OVERRIDE — base carries it (#318).
 
     def memory_sync_files(self, cell: Cell) -> list[tuple[str, Path]]:
         """`vibehistory` is vibe's durable conversation log — the cell's memory.
@@ -2616,30 +2527,7 @@ class CursorMembrane(ProviderMembrane):
             "| bash) or set PATH explicitly."
         )
 
-    def launch(self, cell: Cell, binary: str, argv: list[str]) -> int:
-        try:
-            os.chdir(cell.cwd)
-        except OSError as exc:
-            print(f"swarph spawn: cannot chdir to {cell.cwd}: {exc}", file=sys.stderr)
-            return 1
-        env = _cursor_env(cell)
-        env.update(_git_identity_env(cell))  # per-cell git author (RACI attribution)
-        # Per-OS split, identical to claude/grok/vibe: Windows os.exec* is
-        # emulated as spawn-and-exit, which collapses the psmux pane whose root
-        # command it was; a BLOCKING subprocess.run keeps THIS process as the
-        # pane root. POSIX execve does a true in-place replace.
-        if sys.platform == "win32":
-            try:
-                return subprocess.run([binary, *argv[1:]], env=env).returncode
-            except OSError as exc:
-                print(f"swarph spawn: launch failed: {exc}", file=sys.stderr)
-                return 1
-        try:
-            os.execve(binary, argv, env)
-        except OSError as exc:
-            print(f"swarph spawn: exec failed: {exc}", file=sys.stderr)
-            return 1
-        return 0  # unreachable on POSIX (execve replaces); keeps type checker happy
+    # NO launch OVERRIDE — base carries it (#318).
 
     def memory_sync_files(self, cell) -> list:
         """WORKSPACE instruction files only — the two cursor actually reads from
