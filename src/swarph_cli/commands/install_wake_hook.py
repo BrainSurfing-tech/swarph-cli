@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -123,7 +124,11 @@ def _is_owned_entry(entry: Any) -> bool:
 
 
 def _new_entry(harness: str, cell: Optional[str] = None) -> dict[str, Any]:
-    cmd = _command(harness, cell)
+    # Codex's Windows runner consumes the primary ``command`` field; unlike
+    # Claude's runner it does not reliably dispatch a separate commandWindows
+    # field. Render the primary command natively on Windows, while retaining
+    # commandWindows for consumers that do understand the compatibility key.
+    cmd = _command(harness, cell, windows=(harness == "codex" and os.name == "nt"))
     if harness == "cursor":
         return {"command": cmd}
     if harness == "antigravity":
