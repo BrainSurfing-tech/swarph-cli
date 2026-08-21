@@ -587,13 +587,15 @@ def _classify_drain_failure(self_name: str, pidfile_status: str) -> str:
 
     for unit in (f"swarph-monitor@{self_name}.service", "swarph-monitor.service"):
         probe = subprocess.run(
-            ["systemctl", "is-active", unit], capture_output=True, text=True
+            ["systemctl", "is-active", unit], capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
         )
         if probe.returncode == 0 and probe.stdout.strip() == "active":
             try:
                 journal = subprocess.run(
                     ["journalctl", "-u", unit, "-n", "80", "--no-pager"],
                     capture_output=True, text=True, timeout=5,
+                    encoding="utf-8", errors="replace",
                 )
                 text = journal.stdout or ""
             except (subprocess.SubprocessError, OSError):
