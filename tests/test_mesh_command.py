@@ -38,7 +38,9 @@ def test_mesh_send_posts_message_shape(monkeypatch, capsys):
         ]
     )
     assert rc == 0
-    assert captured["url"] == "http://localhost:8788/messages"
+    # Default is the TAILNET IP since 2026-08-21 (#546). Assert against the CONSTANT, not a
+    # literal: pinning 'localhost' here is what let the defect survive a test suite.
+    assert captured["url"] == f"{mesh._DEFAULT_GATEWAY}/messages"
     assert captured["token"] == "tok"
     assert captured["body"] == {
         "from_node": "gpt-ops",
@@ -166,7 +168,7 @@ def test_mesh_register_mints_token_file_mode_600(monkeypatch, tmp_path, capsys):
         ]
     )
     assert rc == 0
-    assert captured["url"] == "http://localhost:8788/peers/register"
+    assert captured["url"] == f"{mesh._DEFAULT_GATEWAY}/peers/register"
     assert captured["token"] == "shared-auth"
     assert captured["body"] == {
         "name": "gpt-ops",

@@ -289,7 +289,10 @@ def unit_is_relevant(name: str, text: str) -> bool:
 # If the canonical chain grows a leg, this one must too — that is the known
 # cost of the circularity break, stated here rather than discovered.
 
-_RESOLVER_DEFAULT_GATEWAY = "http://localhost:8788"
+# TAILNET IP, NOT localhost and NOT a MagicDNS name (commander, 2026-08-21).
+# The mesh-gateway binds HOST=100.107.222.72 ONLY; localhost has never been bound.
+# MESH_GATEWAY_URL overrides — the escape hatch for anyone outside this mesh.
+_RESOLVER_DEFAULT_GATEWAY = os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788")
 
 
 def resolver_gateway(env: dict) -> str:
