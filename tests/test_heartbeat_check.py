@@ -8,9 +8,27 @@ the tests being here rather than the feature shipping on its unit-level logic.
 
 from __future__ import annotations
 
+import shutil
+import sys
+
 import pytest
 
 from swarph_cli.commands import monitor
+
+
+def _has_systemd_units() -> bool:
+    if sys.platform == "win32" or shutil.which("systemctl") is None:
+        return False
+    try:
+        return monitor._unit_exists("swarph-monitor.service")
+    except OSError:
+        return False
+
+
+_NEEDS_SYSTEMD_UNITS = pytest.mark.skipif(
+    not _has_systemd_units(),
+    reason="requires systemd monitor units on this host — control vacuous, NOT a pass",
+)
 
 
 # ── the invented-constant defect ─────────────────────────────────────────────
@@ -121,6 +139,7 @@ def test_the_four_causes_are_distinct_values():
 
 # ── the cross-cell attribution defect ────────────────────────────────────────
 
+@_NEEDS_SYSTEMD_UNITS
 def test_a_unit_is_only_this_cells_if_its_ExecStart_NAMES_this_cell():
     """>>> IT READ ANOTHER CELL'S SUPERVISOR AND CALLED IT THIS ONE'S. <<<
 
@@ -155,6 +174,7 @@ def test_a_unit_is_only_this_cells_if_its_ExecStart_NAMES_this_cell():
         "must never be accepted on the strength of its name")
 
 
+@_NEEDS_SYSTEMD_UNITS
 def test_candidate_units_never_returns_a_unit_belonging_to_another_cell():
     for unit in monitor._candidate_units("science-claude"):
         if unit == "swarph-monitor@science-claude.service":
@@ -164,10 +184,6 @@ def test_candidate_units_never_returns_a_unit_belonging_to_another_cell():
 
 
 # ── lab-ovh's Q1 finding: --as is NOT the only identity path ─────────────────
-
-def _has_systemd_units() -> bool:
-    return monitor._unit_exists("swarph-monitor.service")
-
 
 def test_identity_resolves_from_SWARPH_SELF_when_ExecStart_has_no_as_flag():
     """>>> `--as` IS NOT THE ONLY WAY A MONITOR GETS ITS IDENTITY. <<<
@@ -186,8 +202,7 @@ def test_identity_resolves_from_SWARPH_SELF_when_ExecStart_has_no_as_flag():
     assert _re.search(r"SWARPH_SELF=([\w.-]+)", unit_text).group(1) == "somecell"
 
 
-@pytest.mark.skipif(not _has_systemd_units(),
-                    reason="no swarph-monitor units on this host — control vacuous, NOT a pass")
+@_NEEDS_SYSTEMD_UNITS
 def test_identity_is_read_from_the_invocation_on_real_units():
     """The generic unit is lab-ovh's; the template instances name their own
     cell. Both paths exercised against real units rather than fixtures."""
@@ -195,6 +210,7 @@ def test_identity_is_read_from_the_invocation_on_real_units():
         "a live monitor unit must be attributable to SOME cell")
 
 
+@_NEEDS_SYSTEMD_UNITS
 def test_a_unit_naming_nobody_is_NOT_claimed_by_this_cell():
     """Third state: not-attributable is neither mine nor another's. Folding it
     into 'not mine' is the Family B-DUAL defect this card is about."""
