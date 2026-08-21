@@ -133,7 +133,7 @@ def test_no_loopback_gateway_default_anywhere_in_src():
     for path in _src_root().rglob("*.py"):
         # encoding="utf-8" is load-bearing: without it Windows reads with the locale
         # codec (charmap) and the sweep crashes on the first non-ASCII byte in src/.
-        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        for i, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             stripped = line.strip()
             # A COMMENT MAY NAME THE DEFECT IT DESCRIBES. cell_selfcheck.py:204 explains
             # this exact bug and must not be flagged as committing it.
