@@ -1157,6 +1157,7 @@ class MonitorState:
         self.ledgers_path = self.state_dir / "ledgers.json"
         self.inbox_log_path = self.state_dir / "inbox.log"
         self.pidfile_path = self.state_dir / _MONITOR_PIDFILE
+        self.heartbeat_path = self.state_dir / "drain_heartbeat.json"
         # `observed` is the real dict; `cursor` is what the engine touches. The
         # deprecated sidecar swaps `cursor` for a view (see _LegacyCursorView).
         self.observed = _read_cursor(self.cursor_path)
@@ -1544,6 +1545,14 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
     # collect data nothing in it reads.
     if poll_channels:
         _poll_channel_subscriptions(state)
+
+    # #544 Proposal A drain heartbeat: "I completed a drain iteration
+    # successfully at T" -- unconditional, whether or not new DMs existed.
+    # Every early `return` above (status==0, >=500, >=400) skips this on
+    # purpose: those are failed iterations, not successful ones. A silent
+    # hang inside _http_get_json also never reaches here, which is the
+    # point -- staleness of this file is the signal, not its content.
+    _write_cursor_atomic(state.heartbeat_path, {"ts": time.time(), "iterations": state.iterations})
 
 
 def _monitor_loop(state: MonitorState) -> int:

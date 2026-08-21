@@ -37,7 +37,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import mesh
@@ -93,6 +96,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
     stop = sub.add_parser("stop", help="stop this peer's monitor")
     _add_common(stop)
+
+    hcheck = sub.add_parser(
+        "heartbeat-check",
+        help="#544 Proposal A/B: independently verify the drain heartbeat and "
+             "escalate DEGRADED, with cause named, to the gateway",
+    )
+    hcheck.add_argument(
+        "--stale-after-s",
+        type=int,
+        default=180,
+        help="heartbeat age past which the monitor is considered not draining "
+             "(default 180s -- 6x the 30s default poll)",
+    )
+    _add_common(hcheck)
 
     return p
 
@@ -543,6 +560,136 @@ def _cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── heartbeat-check (#544 Proposal A/B) ────────────────────────────────────
+
+_CAUSE_PATTERNS = [
+    (re.compile(r"UnicodeEncodeError|UnicodeDecodeError|charmap"), "encoding"),
+    (re.compile(r"\b40[13]\b|Unauthorized|Forbidden"), "auth"),
+    (re.compile(r"\b429\b|rate.?limit", re.IGNORECASE), "quota"),
+    (re.compile(r"gateway 5\d\d"), "gateway"),
+    (re.compile(r"MonitorSinkError|SinkError"), "sink"),
+]
+
+
+def _classify_drain_failure(self_name: str, pidfile_status: str) -> str:
+    """Name one of #544 Proposal B's six causes from OUTSIDE the dead process.
+
+    Never guesses among the five journal-derived causes without a matching
+    pattern in the process's own error text -- an unmatched stale-with-live-
+    supervisor case is reported `unrecognized` rather than forced into the
+    nearest label, per the design's own non-vacuity requirement.
+    """
+    if pidfile_status == "live_ours":
+        # pidfile says the process IS running, but its heartbeat has not
+        # advanced -- the process exists but is not doing the work. No OS
+        # supervisor catches this; it is exactly what A/B exist to catch.
+        return "silent_hang"
+
+    for unit in (f"swarph-monitor@{self_name}.service", "swarph-monitor.service"):
+        probe = subprocess.run(
+            ["systemctl", "is-active", unit], capture_output=True, text=True
+        )
+        if probe.returncode == 0 and probe.stdout.strip() == "active":
+            try:
+                journal = subprocess.run(
+                    ["journalctl", "-u", unit, "-n", "80", "--no-pager"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                text = journal.stdout or ""
+            except (subprocess.SubprocessError, OSError):
+                text = ""
+            for pattern, cause in _CAUSE_PATTERNS:
+                if pattern.search(text):
+                    return cause
+            # A supervisor claims this cell is running and nothing in its
+            # recent journal matches a known cause -- name that plainly
+            # rather than assert a cause with no evidence behind it.
+            return "unrecognized"
+
+    # No pidfile match AND no active supervising unit for this cell --
+    # exactly workstation-lc's own death: a clean exit with nothing
+    # configured to restart it.
+    return "supervisor_absent"
+
+
+def _register_capabilities(self_name: str, gateway: str, token_file, caps: dict) -> int:
+    """Push capabilities via the SAME upsert path `swarph mesh register` uses.
+
+    Not a new gateway surface -- `#544`'s Q1 resolution (droplet, AI² review,
+    msg 25394) is that wake/drain state belongs on the existing peer
+    capabilities dict, and this reuses it verbatim rather than adding a
+    second write path for the same fact.
+    """
+    ns = argparse.Namespace(
+        self_name=self_name,
+        url=None,
+        capability=[f"{k}={json.dumps(v)}" for k, v in caps.items()],
+        force=True,
+        gateway=gateway,
+        token_file=token_file,
+    )
+    return mesh._run_register(ns)
+
+
+def _cmd_heartbeat_check(args: argparse.Namespace) -> int:
+    if not args.self_name:
+        print(
+            "swarph monitor heartbeat-check: refusing to run with an ambiently-"
+            "resolved identity -- pass --as explicitly. Proposal A's own "
+            "constraint: this must never trust inherited env for identity.",
+            file=sys.stderr,
+        )
+        return 2
+
+    info = _collect(args)
+    self_name = info["self"]
+    state_dir = Path(info["state_dir"])
+    hb_path = state_dir / "drain_heartbeat.json"
+    since_path = state_dir / "drain_degraded_since.json"
+
+    now = time.time()
+    last_ts = None
+    try:
+        last_ts = float(json.loads(hb_path.read_text(encoding="utf-8"))["ts"])
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        pass
+    age = (now - last_ts) if last_ts is not None else None
+    stale = age is None or age > args.stale_after_s
+
+    caps = {
+        "wake_sinks": ",".join(info["configured_sinks"]) or "(none)",
+        "wake_route": "push" if any(
+            r["is_push"] for r in info["sinks"]
+        ) else "pull",
+    }
+
+    if not stale:
+        since_path.unlink(missing_ok=True)
+        caps["drain_status"] = "OK"
+        caps["drain_heartbeat_age_s"] = round(age, 1)
+        rc = _register_capabilities(self_name, args.gateway, args.token_file, caps)
+        print(f"heartbeat-check {self_name}: OK age={age:.0f}s "
+              f"(threshold {args.stale_after_s}s)")
+        return rc
+
+    cause = _classify_drain_failure(self_name, info["pidfile_status"])
+    try:
+        since = float(json.loads(since_path.read_text(encoding="utf-8"))["since"])
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        since = now
+        mesh._write_cursor_atomic(since_path, {"since": since})
+
+    caps["drain_status"] = "DEGRADED"
+    caps["degraded_cause"] = cause
+    caps["degraded_since"] = since
+    caps["drain_heartbeat_age_s"] = round(age, 1) if age is not None else None
+    rc = _register_capabilities(self_name, args.gateway, args.token_file, caps)
+    age_desc = f"{age:.0f}s" if age is not None else "never observed"
+    print(f"heartbeat-check {self_name}: DEGRADED cause={cause} "
+          f"age={age_desc} (threshold {args.stale_after_s}s)", file=sys.stderr)
+    return 1 if rc == 0 else rc
+
+
 def run_monitor(argv: list[str]) -> int:
     parser = _build_parser()
     try:
@@ -553,6 +700,8 @@ def run_monitor(argv: list[str]) -> int:
             return _cmd_status(args)
         if args.command == "stop":
             return _cmd_stop(args)
+        if args.command == "heartbeat-check":
+            return _cmd_heartbeat_check(args)
         parser.error(f"unknown command: {args.command}")
     except mesh.MonitorSinkError as exc:
         print(f"swarph monitor: {exc}", file=sys.stderr)
