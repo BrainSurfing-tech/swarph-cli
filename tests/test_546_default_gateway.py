@@ -156,7 +156,8 @@ def test_the_source_sweep_can_fail(tmp_path, monkeypatch):
     fake = tmp_path / "swarph_cli"
     fake.mkdir()
     (fake / "bad.py").write_text(
-        'GW = os.environ.get("MESH_GATEWAY_URL", "http://localhost:8788")\n'
+        'GW = os.environ.get("MESH_GATEWAY_URL", "http://localhost:8788")\n',
+        encoding="utf-8",
     )
     monkeypatch.setattr(f"{__name__}._src_root", lambda: fake)
     with pytest.raises(AssertionError):
