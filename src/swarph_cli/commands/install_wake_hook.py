@@ -16,7 +16,7 @@ design), not by which harness happens to be detected:
 
 Hook config targets:
 * claude  → ``~/.claude/settings.json``  ``hooks.SessionStart``
-* codex   → ``~/.codex/hooks.json``      ``SessionStart``
+* codex   → ``~/.codex/hooks.json``      ``hooks.SessionStart``
 * cursor  → ``~/.cursor/hooks.json``     ``sessionStart``
 
 Idempotent, ``--uninstall``, ``--dry-run`` — same operator contract as
@@ -98,10 +98,8 @@ def _read_config(path: Path) -> dict[str, Any]:
 
 def _event_key(harness: str) -> tuple[str, ...]:
     """Path to the hook list inside the config, per harness schema."""
-    if harness in ("claude", "muse"):
+    if harness in ("claude", "codex", "muse"):
         return ("hooks", "SessionStart")
-    if harness == "codex":
-        return ("SessionStart",)
     if harness == "antigravity":
         return ("swarph-wake-hook", "SessionStart")
     return ("sessionStart",)

@@ -68,6 +68,14 @@ def test_codex_entry_has_windows_native_command():
     assert "--cell \"gpt-lc\"" in hook["commandWindows"]
 
 
+def test_install_codex_writes_hooks_sessionstart(isolated_home):
+    config, changed = iwh._install({}, "codex")
+    assert changed is True
+    entries = config["hooks"]["SessionStart"]
+    assert len(entries) == 1
+    assert iwh._is_owned_entry(entries[0])
+
+
 def test_antigravity_entry_shape_matches_hooks_schema(isolated_home):
     entry = iwh._new_entry("antigravity")
     assert entry["type"] == "command"
