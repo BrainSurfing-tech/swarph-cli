@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -1009,7 +1010,7 @@ def list_hooks(
 # A hook command containing any of these discards its own error stream: a dead
 # hook and a quiet one produce THE SAME OBSERVABLE (nothing). Measured on
 # lab-ovh 2026-08-18: 2 of 7 live hooks swallowed stderr unconditionally.
-_SWALLOW_TOKENS = ("2>/dev/null", "2>NUL", "2>nul", "|| true", "2>&1 >/dev/null")
+_SWALLOW_TOKENS = ("2>/dev/null", "2>NUL", "2>nul")
 
 # Tokens that make a command a shell COMPOUND — more than one resolvable unit.
 _COMPOUND_TOKENS = ("&&", "||", ";", "|", "$(", "`")
@@ -1039,6 +1040,30 @@ def _tokenize(command: str) -> list[str]:
     return [t.strip("'\"") for t in toks]
 
 
+def _stderr_discard_reason(command: str, toks: list[str]) -> str | None:
+    if any(tok in command for tok in _SWALLOW_TOKENS):
+        return "direct stderr redirection to null"
+
+    fd_target = {1: "stdout", 2: "stderr"}
+    null_sink = {"/dev/null", "nul"}
+    for tok in toks:
+        m_file = re.match(r"^(?:(\d+)?)>([^&].*)$", tok)
+        if m_file:
+            fd = int(m_file.group(1) or "1")
+            target = m_file.group(2).strip().strip("'\"").lower()
+            fd_target[fd] = "null" if target in null_sink else f"file:{target}"
+            continue
+        m_dup = re.match(r"^(?:(\d+)?)>&(\d+)$", tok)
+        if m_dup:
+            lhs = int(m_dup.group(1) or "1")
+            rhs = int(m_dup.group(2))
+            fd_target[lhs] = fd_target.get(rhs, f"fd:{rhs}")
+
+    if fd_target.get(2) == "null":
+        return "stderr redirected to null via ordered redirections"
+    return None
+
+
 def _verify_one(event: str, matcher: str, command: str) -> HookVerdict:
     """Resolve a single hook command: can its parts be found AT ALL?
 
@@ -1050,14 +1075,15 @@ def _verify_one(event: str, matcher: str, command: str) -> HookVerdict:
     """
     problems: list[str] = []
     notes: list[str] = []
-
-    for tok in _SWALLOW_TOKENS:
-        if tok in command:
-            notes.append(f"discards errors via '{tok}' — a dead hook and a "
-                         f"quiet one read identically (#462)")
-            break
+    diagnostics: list[str] = []
 
     toks = _tokenize(command)
+    swallow_reason = _stderr_discard_reason(command, toks)
+    if swallow_reason:
+        notes.append(f"discards errors ({swallow_reason}) — a dead hook and a "
+                     f"quiet one read identically (#462)")
+    if re.search(r"\|\|\s*true\b", command):
+        diagnostics.append("suppresses non-zero exit status via '|| true'")
     compound = any(t in command for t in _COMPOUND_TOKENS)
     if not toks:
         return HookVerdict(event, matcher, command, "UNRESOLVABLE",
@@ -1098,9 +1124,12 @@ def _verify_one(event: str, matcher: str, command: str) -> HookVerdict:
         return HookVerdict(event, matcher, command, "SWALLOWS-STDERR",
                            "; ".join(notes))
     if compound:
+        detail = ("compound shell command — parts resolve; firing "
+                  "itself is not statically provable")
+        if diagnostics:
+            detail = f"{detail}; {'; '.join(diagnostics)}"
         return HookVerdict(event, matcher, command, "OK-COMPOUND",
-                           "compound shell command — parts resolve; firing "
-                           "itself is not statically provable")
+                           detail)
     return HookVerdict(event, matcher, command, "OK", "command resolves")
 
 

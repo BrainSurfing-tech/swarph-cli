@@ -66,6 +66,36 @@ def test_swallowing_stderr_is_reported_but_not_broken(tmp_path):
     assert "SWALLOWS-STDERR" in text and "2>/dev/null" in text
 
 
+def test_redirection_order_controls_whether_stderr_is_discarded(tmp_path):
+    script = tmp_path / "h.py"
+    script.write_text("pass\n", encoding="utf-8")
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first = _settings(first_dir, {"Stop": _hook(f"python3 {script} 2>&1 >/dev/null")})
+    second = _settings(second_dir, {"Stop": _hook(f"python3 {script} >/dev/null 2>&1")})
+
+    lines_first: list[str] = []
+    lines_second: list[str] = []
+    assert verify_hooks(settings_path=first, out=lines_first.append) == 0
+    assert verify_hooks(settings_path=second, out=lines_second.append) == 0
+
+    assert "SWALLOWS-STDERR" not in "\n".join(lines_first)
+    assert "SWALLOWS-STDERR" in "\n".join(lines_second)
+
+
+def test_exit_status_suppression_is_not_reported_as_stderr_swallow(tmp_path):
+    script = tmp_path / "h.py"
+    script.write_text("pass\n", encoding="utf-8")
+    sp = _settings(tmp_path, {"Stop": _hook(f"python3 {script} || true")})
+    lines: list[str] = []
+    assert verify_hooks(settings_path=sp, out=lines.append) == 0
+    text = "\n".join(lines)
+    assert "SWALLOWS-STDERR" not in text
+    assert "OK-COMPOUND" in text
+
+
 def test_zero_hooks_is_an_explicit_line_not_an_empty_result(tmp_path):
     """#462's rule: absence must be SAID. An empty hook block and a missing
     one must never read the same."""
