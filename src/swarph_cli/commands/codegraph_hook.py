@@ -252,7 +252,10 @@ def run_codegraph_hook(argv: Optional[list] = None) -> int:
         return 0
     tp = _token_path(self_name)
     try:
-        token = tp.read_text().strip()
+        # encoding="utf-8": on Windows a bare read_text() uses the locale codec, and a
+        # non-ASCII byte in the token file crashes the hook with a charmap traceback
+        # that names a credential path.
+        token = tp.read_text(encoding="utf-8").strip()
     except OSError as e:
         _emit(f"CODEGRAPH UNAVAILABLE for '{term}' — peer token unreadable at {tp}: "
               f"{e}. Not a negative result: the graph was never asked.")
