@@ -1552,7 +1552,12 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
     # purpose: those are failed iterations, not successful ones. A silent
     # hang inside _http_get_json also never reaches here, which is the
     # point -- staleness of this file is the signal, not its content.
-    _write_cursor_atomic(state.heartbeat_path, {"ts": time.time(), "iterations": state.iterations})
+    # `pid` is LOAD-BEARING, not diagnostic garnish: it is the only thing that
+    # separates "the writer hung" from "the writer never had this feature".
+    # Both present as a frozen file, and during any rollout the second is the
+    # COMMON case -- see _classify_drain_failure's `writer_lacks_heartbeat`.
+    _write_cursor_atomic(state.heartbeat_path, {
+        "ts": time.time(), "iterations": state.iterations, "pid": os.getpid()})
 
 
 def _monitor_loop(state: MonitorState) -> int:
