@@ -668,8 +668,21 @@ def _meta_edge_public_key() -> Optional[str]:
     path = os.environ.get("META_EDGE_PUBLIC_KEY_FILE", "").strip()
     if path:
         try:
-            return Path(path).read_text().strip() or None
-        except OSError as e:
+            # encoding="utf-8" WITHOUT errors="replace", on purpose (#550): the
+            # deployed gateway's e51fd33 added replace, which never raises — a
+            # corrupt key file becomes a silently-mangled PEM that fails
+            # verification closed with NO operator signal. Here the bad byte
+            # raises UnicodeDecodeError, the except below catches it, and the
+            # documented warn-and-disable line actually fires — the operator
+            # learns their key file is corrupt instead of auth going silently
+            # dead. Drop's spec: encoding= AND the widened except, both needed.
+            return Path(path).read_text(encoding="utf-8").strip() or None
+        # ValueError as well as OSError: UnicodeDecodeError is a ValueError, so the
+        # original clause could not catch it. The CALLER at _authorize is BARE --
+        # `_looks_like_jwt(token) and _meta_edge_public_key()` -- so anything
+        # escaping this function 500s every JWT-shaped request, i.e. the
+        # commander's SSO path. Belt and braces on an auth guard is cheap.
+        except (OSError, ValueError) as e:
             log.warning("META_EDGE_PUBLIC_KEY_FILE unreadable (%s); Meta-Edge auth disabled", e)
             return None
     return None

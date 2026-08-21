@@ -378,3 +378,31 @@ def test_user_identity_denied_at_operator_gated_route(gw, client, sign):
         headers=_bearer(SHARED_TOKEN),
     )
     assert r2.status_code == 200, r2.text
+
+
+def test_non_utf8_key_file_warns_and_disables_not_escapes(tmp_path, monkeypatch, caplog):
+    """#550 — THE EXCEPT CLAUSE WAS NARROWER THAN THE RAISE SURFACE.
+
+    The handler documents warn-and-disable for an unreadable key, but the read
+    was unencoded and UnicodeDecodeError is a ValueError, not an OSError — a
+    cp1252-byte key file escaped the `except OSError` entirely. Worse, the guard
+    call at _authorize is BARE (`_looks_like_jwt(token) and
+    _meta_edge_public_key()`), so the escape 500s every JWT-shaped request —
+    the commander's SSO path. Production half shipped as mesh-gateway #126;
+    this is the fork parity fix. Trigger per drop: an operator-managed PEM
+    acquiring a non-utf-8 byte (a paste through a cp1252-writing tool). A BOM
+    would NOT trigger it (U+FEFF is valid utf-8) — 0x9d is the honest trigger.
+    """
+    from swarph_cli.gateway import server
+
+    key_file = tmp_path / "key.pem"
+    key_file.write_bytes(b"-----BEGIN PUBLIC KEY-----\nMII\x9dIjANBgkqhkiG\n-----END PUBLIC KEY-----\n")
+    monkeypatch.setenv("META_EDGE_PUBLIC_KEY_FILE", str(key_file))
+    monkeypatch.delenv("META_EDGE_PUBLIC_KEY", raising=False)
+
+    with caplog.at_level("WARNING"):
+        result = server._meta_edge_public_key()
+    assert result is None, "a non-decodable key file must read as auth-disabled, not crash"
+    assert any("Meta-Edge auth disabled" in r.message for r in caplog.records), (
+        "the documented warn-and-disable log line must actually fire"
+    )

@@ -31,7 +31,9 @@ def run_compress(argv: list[str]) -> int:
     if not path.exists():
         print(f"[compress] no such file: {path}", file=sys.stderr)
         return 2
-    source = path.read_text()
+    # utf-8 explicitly: a bare read_text() uses the locale codec, and on Windows
+    # (charmap) a non-ASCII byte in a marked file crashes the verb (#550).
+    source = path.read_text(encoding="utf-8")
     marker = parse_marker(source)
     if marker is None:
         print(f"[compress] REFUSE: {path} carries no swarph:compress marker — leaving untouched", file=sys.stderr)
@@ -47,7 +49,7 @@ def run_compress(argv: list[str]) -> int:
         print(f"[compress] archival: {path.name} {len(source)}B → {len(res.live)}B live "
               f"(+{len(res.archive)}B → {archive_path.name}); saved {saved}B always-loaded")
         if args.apply:
-            archive_path.write_text(res.archive)
+            archive_path.write_text(res.archive, encoding="utf-8")
             _atomic_write(path, res.live)
             print(f"[compress] applied (.bak left, archive {archive_path.name})")
         return 0
