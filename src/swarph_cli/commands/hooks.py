@@ -1003,6 +1003,169 @@ def list_hooks(
 
 
 # --------------------------------------------------------------------------- #
+# verify (#462): prove an installed hook still FIRES — or at least still CAN
+# --------------------------------------------------------------------------- #
+
+# A hook command containing any of these discards its own error stream: a dead
+# hook and a quiet one produce THE SAME OBSERVABLE (nothing). Measured on
+# lab-ovh 2026-08-18: 2 of 7 live hooks swallowed stderr unconditionally.
+_SWALLOW_TOKENS = ("2>/dev/null", "2>NUL", "2>nul", "|| true", "2>&1 >/dev/null")
+
+# Tokens that make a command a shell COMPOUND — more than one resolvable unit.
+_COMPOUND_TOKENS = ("&&", "||", ";", "|", "$(", "`")
+
+_SCRIPT_EXTS = (".py", ".sh", ".ps1", ".cmd", ".bat", ".vbs", ".js")
+
+
+@dataclass(frozen=True)
+class HookVerdict:
+    """One configured hook's verify outcome. ``status`` is one of:
+    OK | OK-COMPOUND | SWALLOWS-STDERR | MISSING | UNRESOLVABLE."""
+
+    event: str
+    matcher: str
+    command: str
+    status: str
+    detail: str
+
+
+def _tokenize(command: str) -> list[str]:
+    """Split a hook command into tokens, honouring quotes, without a shell."""
+    import shlex
+    try:
+        toks = shlex.split(command, posix=(os.name != "nt"))
+    except ValueError:
+        toks = command.split()
+    return [t.strip("'\"") for t in toks]
+
+
+def _verify_one(event: str, matcher: str, command: str) -> HookVerdict:
+    """Resolve a single hook command: can its parts be found AT ALL?
+
+    Existence is not firing (#462's own title) — but a hook whose interpreter
+    or script is GONE cannot fire, and that is the half a static check CAN
+    prove. The swallow audit is the other half: a hook that discards stderr
+    is armed-and-deaf BY DESIGN, so it is reported even when everything
+    resolves.
+    """
+    problems: list[str] = []
+    notes: list[str] = []
+
+    for tok in _SWALLOW_TOKENS:
+        if tok in command:
+            notes.append(f"discards errors via '{tok}' — a dead hook and a "
+                         f"quiet one read identically (#462)")
+            break
+
+    toks = _tokenize(command)
+    compound = any(t in command for t in _COMPOUND_TOKENS)
+    if not toks:
+        return HookVerdict(event, matcher, command, "UNRESOLVABLE",
+                           "empty command")
+
+    head = toks[0]
+    looks_like_path = ("/" in head or "\\" in head or head.startswith("~")
+                       or head.endswith(_SCRIPT_EXTS))
+    if looks_like_path:
+        p = Path(head).expanduser()
+        if not p.exists():
+            problems.append(f"script {head!r} does not exist")
+        elif os.name != "nt" and not os.access(p, os.X_OK) and \
+                head.endswith(_SCRIPT_EXTS):
+            problems.append(f"script {head!r} is not executable")
+    elif "=" in head:
+        # A shell ASSIGNMENT prefix (`s=$(...)`, `FOO=1 cmd ...`) — the verb
+        # position is later in the compound, and the script-argument walk
+        # below is what can still be proven.
+        pass
+    else:
+        # A bare verb: an interpreter, a CLI on PATH, or a shell builtin.
+        if shutil.which(head) is None and head not in ("echo", "cd", "set"):
+            problems.append(f"verb {head!r} not found on PATH")
+
+    # Any token that names a script path must exist (interpreter prefixes are
+    # the common shape: `python3 ~/.swarph/hooks/x.py`).
+    for tok in toks[1:]:
+        if tok.endswith(_SCRIPT_EXTS) and ("/" in tok or "\\" in tok
+                                           or tok.startswith("~")):
+            if not Path(tok).expanduser().exists():
+                problems.append(f"script argument {tok!r} does not exist")
+
+    if problems:
+        return HookVerdict(event, matcher, command, "MISSING",
+                           "; ".join(problems))
+    if notes:
+        return HookVerdict(event, matcher, command, "SWALLOWS-STDERR",
+                           "; ".join(notes))
+    if compound:
+        return HookVerdict(event, matcher, command, "OK-COMPOUND",
+                           "compound shell command — parts resolve; firing "
+                           "itself is not statically provable")
+    return HookVerdict(event, matcher, command, "OK", "command resolves")
+
+
+def verify_hooks(
+    *,
+    settings_path=_DEFAULT_SETTINGS_PATH,
+    out=print,
+) -> int:
+    """``swarph hooks verify`` — per-hook existence + swallow report.
+
+    #462: nothing verified that an installed hook still FIRES; a dead hook and
+    a quiet one were indistinguishable. This verb proves the static half
+    (interpreter/script/verb EXISTS) and names the dynamic half unprovable
+    (firing needs a marker convention — the liveness half of the card).
+
+    ABSENCE IS AN EXPLICIT LINE, never an empty result: a settings file with
+    no hooks says so, in words.
+
+    Exit 1 if any hook is MISSING/UNRESOLVABLE. SWALLOWS-STDERR is a printed
+    warning, not a failure — the hook CAN fire, it just could never tell you
+    it stopped.
+    """
+    path = Path(settings_path).expanduser()
+    if not path.exists():
+        out(f"swarph hooks verify: {path} does not exist — ZERO hooks "
+            f"configured. If you expected hooks here, that absence IS the "
+            f"finding.")
+        return 1
+    settings = _load_settings(str(path))
+    hooks_block = (settings or {}).get("hooks") or {}
+    verdicts: list[HookVerdict] = []
+    for event in sorted(hooks_block):
+        for entry in hooks_block[event] or []:
+            matcher = entry.get("matcher", "")
+            for h in entry.get("hooks", []) or []:
+                if h.get("type", "command") != "command":
+                    verdicts.append(HookVerdict(event, matcher, str(h),
+                                                "UNRESOLVABLE",
+                                                f"non-command hook type "
+                                                f"{h.get('type')!r}"))
+                    continue
+                verdicts.append(_verify_one(event, matcher,
+                                            h.get("command", "")))
+
+    if not verdicts:
+        out(f"swarph hooks verify: {path} configures ZERO hooks — an empty "
+            f"hook block and a missing one must never read the same.")
+        return 1
+
+    worst = 0
+    for v in verdicts:
+        label = f"{v.event}" + (f"[{v.matcher}]" if v.matcher else "")
+        out(f"{v.status:<16} {label:<28} {v.command}")
+        if v.status not in ("OK", "OK-COMPOUND"):
+            out(f"{'':<16} {'':<28} -> {v.detail}")
+        if v.status in ("MISSING", "UNRESOLVABLE"):
+            worst = 1
+    n_bad = sum(1 for v in verdicts if v.status in ("MISSING", "UNRESOLVABLE"))
+    n_swallow = sum(1 for v in verdicts if v.status == "SWALLOWS-STDERR")
+    out(f"-- {len(verdicts)} hook(s): {n_bad} broken, {n_swallow} deaf-by-design "
+        f"(existence proven; FIRING needs the liveness-marker half of #462)")
+    return worst
+
+
+# --------------------------------------------------------------------------- #
 # CLI surface (T3): swarph hooks add <name|path> [--yes]
 # --------------------------------------------------------------------------- #
 
@@ -1094,6 +1257,12 @@ def run_hooks(
     sub.add_parser("list", help="list builtin hooks and their install status")
 
     sub.add_parser(
+        "verify",
+        help="prove every CONFIGURED hook can still fire: interpreter/script "
+        "resolves, per-hook report, swallow audit (#462)",
+    )
+
+    sub.add_parser(
         "touch-activity",
         help="touch this cell's watchdog liveness marker (used by the "
         "activity-marker bundle on PreToolUse/Stop; #2). Best-effort, always 0.",
@@ -1143,6 +1312,9 @@ def run_hooks(
 
     if args.action == "list":
         return list_hooks(settings_path=settings_path, hooks_home=hooks_home)
+
+    if args.action == "verify":
+        return verify_hooks(settings_path=settings_path)
 
     if args.action == "remove":
         try:
