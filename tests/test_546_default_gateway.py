@@ -18,6 +18,7 @@ Fixing one and missing three is precisely how this shape survives, so the guard 
 AGREEMENT, not correctness of any single value.
 """
 import json
+import pytest
 import os
 import subprocess
 import sys
@@ -90,3 +91,71 @@ def test_the_guard_can_fail():
     assert all("localhost" in v for v in vals.values())
     bad = {k: v for k, v in vals.items() if "localhost" in v}
     assert bad, "the detector found nothing in a deliberately-bad configuration"
+
+
+# ---------------------------------------------------------------------------
+# SOURCE-LEVEL SWEEP — added after cursor-lin's review of PR #276.
+#
+# >>> THE SITES LIST ABOVE CANNOT SEE EVERYTHING, AND THAT IS NOT FIXABLE BY
+# ADDING ROWS. <<< Four more sites carried the identical defect and were
+# invisible to both the original grep AND to an attribute-based guard:
+#
+#     commands/daemon.py:88        argparse default  (the daemon itself)
+#     commands/onboard.py:114      argparse default
+#     commands/ratify.py:60        argparse default
+#     commands/codegraph_hook.py:40  module constant
+#
+# Three are ARGPARSE DEFAULTS — not module attributes, so no amount of
+# extending SITES would ever reach them. And the original search missed all
+# four because their default lives INSIDE os.environ.get(...) rather than
+# after a bare '=', so `grep 'GATEWAY.*= *"http'` could not match.
+#
+# Had this merged with SITES alone, the package would have disagreed with
+# itself 4-versus-4 UNDER A GUARD COVERING HALF OF IT — a green that proves
+# nothing, which is the exact shape this whole card is about. cursor-lin's
+# words: "post-merge the package disagrees with itself 4v4 under a guard
+# covering half".
+#
+# A SOURCE SWEEP CATCHES ANY SHAPE, including ones nobody has invented yet.
+# ---------------------------------------------------------------------------
+
+import pathlib
+
+
+def _src_root():
+    here = pathlib.Path(__file__).resolve().parent.parent
+    return here / "src" / "swarph_cli"
+
+
+def test_no_loopback_gateway_default_anywhere_in_src():
+    """No file under src/ may name a loopback gateway as a DEFAULT, in any form."""
+    offenders = []
+    for path in _src_root().rglob("*.py"):
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            stripped = line.strip()
+            # A COMMENT MAY NAME THE DEFECT IT DESCRIBES. cell_selfcheck.py:204 explains
+            # this exact bug and must not be flagged as committing it.
+            if stripped.startswith("#"):
+                continue
+            if "8788" not in line:
+                continue
+            if "localhost:8788" in line or "127.0.0.1:8788" in line:
+                offenders.append(f"{path.relative_to(_src_root())}:{i}: {line.strip()[:90]}")
+    assert not offenders, (
+        "a loopback gateway default survives in src/ — the mesh-gateway binds the "
+        "tailnet IP only, so this fails as a bare 'Connection refused' with no cause "
+        "named:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_source_sweep_can_fail(tmp_path, monkeypatch):
+    """>>> PROVE THE SWEEP FIRES. <<< A detector that has only ever seen a clean
+    tree is indistinguishable from one that matches nothing."""
+    fake = tmp_path / "swarph_cli"
+    fake.mkdir()
+    (fake / "bad.py").write_text(
+        'GW = os.environ.get("MESH_GATEWAY_URL", "http://localhost:8788")\n'
+    )
+    monkeypatch.setattr(f"{__name__}._src_root", lambda: fake)
+    with pytest.raises(AssertionError):
+        test_no_loopback_gateway_default_anywhere_in_src()

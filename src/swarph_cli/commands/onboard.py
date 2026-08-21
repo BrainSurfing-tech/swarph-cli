@@ -111,8 +111,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--gateway",
-        default=os.environ.get("MESH_GATEWAY_URL", "http://localhost:8788"),
-        help="mesh-gateway base URL (default: $MESH_GATEWAY_URL or http://localhost:8788)",
+        default=os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788"),
+        help="mesh-gateway base URL (default: $MESH_GATEWAY_URL or http://100.107.222.72:8788)",
     )
     p.add_argument(
         "--token-file",

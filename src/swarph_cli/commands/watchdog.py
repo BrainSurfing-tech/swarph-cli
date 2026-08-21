@@ -190,7 +190,7 @@ Flags:
   --cursor PATH        cursor JSON path; default $TMPDIR/<role>-cursor.json
                        fallback /tmp/lab-claude-cursor.json
   --threshold SEC      darkness threshold; default 1800 (30 min)
-  --gateway URL        mesh-gateway URL for unread-DM check; default localhost:8788
+  --gateway URL        mesh-gateway URL for unread-DM check; default 100.107.222.72:8788
   --tmux-session NAME  tmux session name; default = cell role
   --peer NAME          mesh peer name for unread-DM query; default = cell name
   --no-respawn         A1 only; don't escalate to A2 (dry-run mode)
