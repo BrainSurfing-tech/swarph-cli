@@ -308,16 +308,22 @@ def run_codegraph(argv) -> int:
         # would break the hook that fires on every grep in the fleet. The availability
         # signal therefore goes to stderr, where it costs no consumer anything.
         #
-        # HONEST RESIDUAL, stated rather than papered over: a consumer reading ONLY
-        # stdout still cannot tell "no index" from "no matches". The gateway solved this
-        # properly with a 503; matching it here needs a contract change that breaks a
-        # live caller, so it is DEFERRED, not solved. The hook itself redirects stderr to
-        # /dev/null and will keep seeing an empty list -- correct for its purpose.
+        # HONEST RESIDUAL, narrowed: --json consumers still cannot tell "no index" from
+        # "no matches", because the gateway's 503 has no representation in a bare list
+        # and wrapping it breaks a live caller. DEFERRED, not solved. The hook redirects
+        # stderr to /dev/null and keeps seeing an empty list -- correct for its purpose.
         print(f"swarph codegraph: NO INDEX AVAILABLE (source={source}) — this is NOT a "
               f"negative result; nothing was searched.", file=sys.stderr)
 
     if a.json:
         print(json.dumps(rows, indent=2))
+    elif not index_present:
+        # >>> THE WARNING IS NOT ENOUGH IF THE LIE IS STILL PRINTED UNDER IT. <<<
+        # `format_human` says "No structural matches for X" -- a claim about the CODE,
+        # made when nothing was searched. On the human path we own both streams, so we
+        # simply do not make it. Silence on stdout plus the stderr line is the honest
+        # pair; a warning above a contradicting result just asks the reader to pick.
+        pass
     else:
         print(format_human(rows, a.query))
     return 0

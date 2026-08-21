@@ -129,6 +129,27 @@ def test_local_flag_bypasses_a_configured_gateway(monkeypatch, tmp_path, capsys)
     assert "NO INDEX AVAILABLE" in cap.err, "absence must be announced, not flattened into []"
 
 
+def test_no_index_does_not_print_a_claim_about_the_code(monkeypatch, tmp_path, capsys):
+    """>>> A WARNING ABOVE A CONTRADICTING RESULT IS NOT A FIX. <<<
+
+    The commander ran `swarph codegraph mamma` -- a word he KNEW was absent, which
+    establishes what a true negative looks like -- and got the identical line a cell
+    with no index at all gets. Adding a stderr warning left "No structural matches
+    for: 'mamma'" printed underneath it: a claim about the CODE, made when nothing
+    was searched, and the only line a stdout-only reader sees.
+
+    The human path owns both streams, so it simply does not make the claim.
+    """
+    rc = cg.run_codegraph(["mamma", "--local", "--index", str(tmp_path / "absent.db")])
+    assert rc == 0
+    cap = capsys.readouterr()
+    assert "No structural matches" not in cap.out, (
+        "a negative claim about the code was printed for a search that never ran"
+    )
+    assert cap.out.strip() == "", f"stdout must stay silent when nothing was searched: {cap.out!r}"
+    assert "NO INDEX AVAILABLE" in cap.err
+
+
 def test_relay_failure_is_loud(monkeypatch, tmp_path, capsys):
     """>>> A SILENT DEGRADE TO AN EMPTY LOCAL INDEX IS THE BUG, NOT THE FALLBACK. <<<
 
