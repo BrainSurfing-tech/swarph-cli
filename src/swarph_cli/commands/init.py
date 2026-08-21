@@ -256,8 +256,19 @@ def run_init(argv: list[str]) -> int:
     # doc, which is the forge-clean path). Deferred follow-up: a careful
     # single-process register that captures→mode-600→verifies the raw token.
     print(f"\nready: swarph spawn {name}")
-    print(f"next:  the cell self-registers + adopts its per-peer token from its "
-          f"OWN context (see SWARPH_PEER_TOKEN_ADOPTION.md); then `swarph ratify {name}`.")
+    # Name only surfaces a fresh cell can actually reach. This line used to cite
+    # SWARPH_PEER_TOKEN_ADOPTION.md — a doc shipped NOWHERE (journey walkthrough,
+    # 2026-08-21); the #464 audit's origin story is exactly "the only pointer to
+    # getting a token is a file that is not shipped", and pointing at it again
+    # here reopens the wound the probe ladder was built to close. ORDER MATTERS:
+    # the cell self-registers FIRST (mints + captures its once-only token from
+    # its own context); an operator running `swarph onboard` first mints the
+    # token into a process that discards it, and the cell's later self-register
+    # returns token_status=existing with nothing.
+    print(f"next:  from the CELL'S OWN context: `swarph mesh register --as {name}` "
+          f"(mints + stores its once-only per-peer token, mode 600); then a witness "
+          f"runs `swarph ratify {name}`. Status at any point: "
+          f"`swarph onboard --check {name}`.")
     return 0
 
 

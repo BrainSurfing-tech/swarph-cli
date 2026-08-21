@@ -574,11 +574,32 @@ def _probe_onboarding(peer: str, gateway: str) -> list:
                              f"{bound!r}, NOT {peer!r}. Every by-name lookup in the tree "
                              f"resolves the wrong credential. Do not ratify on this."))
         except urllib.error.HTTPError as e:
-            rows.append(("MISSING", "token identifies as this peer",
-                         f"HTTP {e.code}. A token that exists but is refused is DEAD, not "
-                         f"missing -- mint-once means re-registering returns 200 with a "
-                         f"null token and changes nothing. Recovery needs a deregister "
-                         f"first, which is an operator action."))
+            if e.code in (401, 403):
+                # The gateway ANSWERED the identity call with a refusal — that is
+                # a claim about the token, and the DEAD reading is earned.
+                rows.append(("MISSING", "token identifies as this peer",
+                             f"HTTP {e.code}. A token that exists but is refused is DEAD, not "
+                             f"missing -- mint-once means re-registering returns 200 with a "
+                             f"null token and changes nothing. Recovery needs a deregister "
+                             f"first, which is an operator action."))
+            else:
+                # >>> 404 IS ROUTE-ABSENT, NOT TOKEN-DEAD. <<< Demonstrated
+                # 2026-08-21 on a scratch fork-gateway: the fork does not serve
+                # /whoami (a deployed-gateway route), so this branch fired on
+                # EVERY fresh cell with "token is DEAD ... deregister to
+                # recover" — a destructive remedy prescribed for a token minted
+                # seconds earlier. A route the gateway does not serve (404) or
+                # a gateway that fails mid-call (5xx) means THE PROBE CANNOT
+                # SEE this rung, which is the exact state '?' exists for. The
+                # doctrine two rungs up applies here too: a probe that cannot
+                # see says so; it does not cry DEAD and prescribe surgery.
+                rows.append((_UNKNOWN, "token identifies as this peer",
+                             f"HTTP {e.code} on /whoami -- this gateway does not serve the "
+                             f"identity route (or failed answering it), so the rung is "
+                             f"UNDETERMINED. This says NOTHING about the token, which may "
+                             f"be perfectly healthy -- token recovery is not indicated by "
+                             f"this result. /whoami shipped on the reference gateway; a "
+                             f"fork deployment predating it cannot be probed this way."))
         except Exception as e:
             rows.append((_UNKNOWN, "token identifies as this peer",
                          f"could not determine: {type(e).__name__}"))
@@ -804,6 +825,21 @@ def run_onboard(argv: list[str]) -> int:
         print_safe(
             f"      ok (already ratified — peer existed pre-Phase-5.5 or was "
             f"witness-flipped already)"
+        )
+    elif body.get("token_status") == "existing":
+        # >>> A RE-REGISTER IS NOT A MINT, AND THE LINE MUST SAY SO. <<<
+        # Demonstrated 2026-08-21 (journey walkthrough): the cell-first order —
+        # cell self-registers and captures its token, THEN the operator onboards —
+        # lands here, and the old output printed the fresh-mint line
+        # "ok (registered_unratified=true)" for a call that minted NOTHING. An
+        # operator reading that believes a once-only token was just delivered to
+        # somebody and goes looking for it. It does not exist. Success-shaped
+        # silence about "nothing changed" is the failure family this verb's own
+        # checklist (#464) was built to kill.
+        print_safe(
+            f"      ok (already registered — token_status=existing, NO token "
+            f"minted on this call; the once-only token was delivered at first "
+            f"registration)"
         )
     else:
         print_safe(f"      ok (registered_unratified=true)")

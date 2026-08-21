@@ -91,3 +91,24 @@ def test_init_symlink_cwd(tmp_path):
     link = cwd / "cell.yaml"
     assert link.is_symlink()
     assert link.resolve() == (cells_dir() / "linked.yaml").resolve()
+
+
+def test_init_next_steps_cite_only_shipped_surfaces(tmp_path, capsys):
+    """>>> JOURNEY-WALKTHROUGH FINDING, 2026-08-21. <<< init's "next:" line sent
+    every fresh cell to SWARPH_PEER_TOKEN_ADOPTION.md — a file shipped NOWHERE
+    (not in the repo, not in docs/). This is the #464 audit's own origin story
+    ("the only pointer to getting one is a file that is not shipped") still live
+    at the init site. The next-steps text may only name verbs and files a fresh
+    cell can actually reach: `swarph mesh register`, `swarph onboard --check`,
+    `swarph ratify`.
+    """
+    rc = run_init(["ptr-cell", "--provider", "claude", "--non-interactive"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    next_line = next(l for l in out.splitlines() if l.strip().startswith("next:"))
+    assert "SWARPH_PEER_TOKEN_ADOPTION" not in next_line, (
+        "do not point a fresh cell at a doc that is not shipped"
+    )
+    assert "swarph mesh register" in next_line, (
+        "the self-register verb is the forge-clean token path — name it"
+    )

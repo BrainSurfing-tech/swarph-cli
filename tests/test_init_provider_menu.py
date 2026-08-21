@@ -185,3 +185,78 @@ def test_identity_rung_uses_a_DISCRIMINATING_route_not_a_readable_one(monkeypatc
         "a token bound to a DIFFERENT peer must not pass an identity rung"
     )
     assert "MISMATCH" in mismatch[1] and "cellB" in mismatch[1]
+
+
+# ── journey-walkthrough findings (2026-08-21, scratch fork-gateway run) ──────
+
+def _probe_with_whoami_error(monkeypatch, http_code):
+    """Drive _probe_onboarding with /whoami raising HTTPError(http_code).
+
+    Same stub discipline as _probe_with_peer_row: the network and the token file
+    are fabricated, the classifier under test is the only live logic.
+    """
+    import io, json as _json
+    import urllib.error
+    from swarph_cli.commands import onboard
+
+    class _Resp:
+        def __init__(self, payload): self._p = _json.dumps(payload).encode()
+        def read(self): return self._p
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _urlopen(req, timeout=8):
+        url = req if isinstance(req, str) else req.full_url
+        if url.endswith("/whoami"):
+            raise urllib.error.HTTPError(url, http_code, "err", None, io.BytesIO(b""))
+        if url.endswith("/peers"):
+            return _Resp({"peers": [{"name": "cellA", "ratified": True,
+                                     "capabilities": {"x": 1},
+                                     "registered_at": "2026-08-21",
+                                     "last_health": "2026-08-21"}]})
+        return _Resp({})
+
+    monkeypatch.setattr(onboard.urllib.request, "urlopen", _urlopen)
+    monkeypatch.setattr(onboard.pathlib.Path, "exists", lambda self: True)
+    monkeypatch.setattr(onboard.pathlib.Path, "read_text", lambda self, **k: "tok")
+    monkeypatch.setattr(onboard.pathlib.Path, "stat",
+                        lambda self: type("S", (), {"st_mode": 0o600})())
+    return {lbl: (mk, dt) for mk, lbl, dt in
+            onboard._probe_onboarding("cellA", "http://gw:8788")}
+
+
+def test_whoami_404_is_UNDETERMINED_not_a_dead_token(monkeypatch):
+    """>>> THE RUNG THAT PRESCRIBES DEREGISTERING A HEALTHY TOKEN. <<<
+
+    Demonstrated 2026-08-21 on a scratch fork-gateway: the fork does not serve
+    /whoami (deployed-gateway route), so the identity rung's HTTPError branch
+    fired on EVERY fresh cell with "HTTP 404 ... token is DEAD ... recovery needs
+    a deregister" — a destructive remedy prescribed for a token minted seconds
+    earlier. 404 means THE ROUTE is absent: the probe cannot see the rung, which
+    is the exact state '?' exists for. A checklist that cries DEAD on every fresh
+    cell trains operators to deregister working tokens.
+    """
+    mark, detail = _probe_with_whoami_error(monkeypatch, 404)["token identifies as this peer"]
+    assert mark == "?", f"route-absent must be undetermined, got {mark!r}: {detail}"
+    assert "DEAD" not in detail and "deregister" not in detail.lower(), (
+        "a route the gateway does not serve must not prescribe token recovery"
+    )
+    assert "/whoami" in detail
+
+
+def test_whoami_403_is_STILL_a_dead_token(monkeypatch):
+    """NON-VACUITY for the split above: a gateway that ANSWERS the identity call
+    with a refusal (401/403) is making a claim about the token — that reading
+    stays MISSING/DEAD. Only route-absence (404) and gateway-failure (5xx) move
+    to '?'."""
+    mark, detail = _probe_with_whoami_error(monkeypatch, 403)["token identifies as this peer"]
+    assert mark == "MISSING"
+    assert "DEAD" in detail
+
+
+def test_whoami_500_is_undetermined_not_a_dead_token(monkeypatch):
+    """A gateway 500 is the GATEWAY failing, not the token being refused — the
+    probe cannot see the rung."""
+    mark, detail = _probe_with_whoami_error(monkeypatch, 500)["token identifies as this peer"]
+    assert mark == "?"
+    assert "DEAD" not in detail
