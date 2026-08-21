@@ -895,11 +895,14 @@ def _cmd_heartbeat_check(args: argparse.Namespace) -> int:
         args.stale_after_s, info.get("poll_s"))
     stale = age is None or age > stale_after_s
 
+    configured_sinks = info["configured_sinks"]
     caps = {
-        "wake_sinks": ",".join(info["configured_sinks"]) or "(none)",
-        "wake_route": "push" if any(
-            r["is_push"] for r in info["sinks"]
-        ) else "pull",
+        "wake_sinks": ",".join(configured_sinks) or "(none)",
+        "wake_route": (
+            "push" if any(r["is_push"] for r in info["sinks"])
+            else "pull" if any(s != "none" for s in configured_sinks)
+            else "none"
+        ),
     }
 
     if not stale:
