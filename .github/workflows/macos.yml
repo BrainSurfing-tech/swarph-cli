@@ -51,10 +51,18 @@
 
 name: macos
 
+# >>> DEACTIVATED 2026-08-21, COMMANDER'S CALL: "not ready." <<< The lane went
+# red on main (test_397_gh_identity_router token-routing, test_watchdog proc
+# ancestry — both Darwin-vs-Linux environment facts, not product regressions
+# observed on any real cell) and was MERGE-BLOCKING on PR #286: a red lane
+# that gates is worse than no lane (#554). Manual dispatch stays live so the
+# fix work can run it.
+#
+# RE-ENTRY CONDITION (this file's own doctrine — no permanent expected-red
+# without an expiry): re-enable pull_request/push when #554 lands — i.e. the
+# two red suites are fixed or carry declared exemptions with start dates and
+# end conditions, and the lane goes green on main by dispatch FIRST.
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
