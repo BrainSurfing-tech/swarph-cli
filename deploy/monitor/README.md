@@ -14,6 +14,26 @@ sed -e "s#<PEER>#$(whoami)-cell#g" -e "s#<HOME>#$HOME#g" -e "s#<USER>#$(id -un)#
 sudo systemctl daemon-reload && sudo systemctl enable --now swarph-monitor
 ```
 
+### Gateway
+
+The unit ships with **no gateway line**. It relies on swarph-cli's code default, which is
+this mesh's tailnet address (`#276` — it was `localhost:8788` before, which pointed every
+off-box cell at itself).
+
+**Installing somewhere that is not on this tailnet?** Uncomment the last `Environment=`
+line in the unit and set it:
+
+```sh
+sudo systemctl edit swarph-monitor      # or edit the unit directly
+# [Service]
+# Environment=MESH_GATEWAY_URL=http://your-gateway:8788
+```
+
+Use `Environment=`, not a `--gateway` flag in `ExecStart`: drop-ins on a multi-cell box
+override `ExecStart` wholesale, so a flag placed there is discarded by exactly the cells
+that use drop-ins. An explicit `--gateway` on a cell's own `ExecStart` still wins over the
+environment, so cells that set one keep it.
+
 ## Verify — at the destination, not from the install command
 
 ```sh
