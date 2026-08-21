@@ -601,6 +601,24 @@ def _unit_names_this_cell(unit: str, self_name: str) -> bool:
                           out.stdout or ""))
 
 
+def _unit_exists(unit: str) -> bool:
+    """Whether systemd knows this unit at all — used by the guard suite to tell
+    a real negative from a vacuous one (no unit to misattribute is not a pass)."""
+    out = subprocess.run(
+        ["systemctl", "list-unit-files", unit, "--no-legend", "--no-pager"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if unit in (out.stdout or ""):
+        return True
+    # A unit can be loaded without a unit FILE (runtime/transient), so ask the
+    # other way too rather than reporting a false absence.
+    probe = subprocess.run(
+        ["systemctl", "show", unit, "-p", "LoadState", "--value"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    return (probe.stdout or "").strip() == "loaded"
+
+
 def _candidate_units(self_name: str) -> list:
     """Units that may supervise THIS cell — ownership proved, never assumed.
 
