@@ -16,7 +16,7 @@ design), not by which harness happens to be detected:
 
 Hook config targets:
 * claude  → ``~/.claude/settings.json``  ``hooks.SessionStart``
-* codex   → ``~/.codex/hooks.json``      ``SessionStart``
+* codex   → ``~/.codex/hooks.json``      ``hooks.SessionStart``
 * cursor  → ``~/.cursor/hooks.json``     ``sessionStart``
 
 Idempotent, ``--uninstall``, ``--dry-run`` — same operator contract as
@@ -42,11 +42,19 @@ _VERB = "wake-hook-output"
 _KNOWN_HARNESSES = ("claude", "codex", "cursor", "muse", "antigravity")
 
 
-def _command(harness: str, cell: Optional[str] = None) -> str:
+def _command(
+    harness: str, cell: Optional[str] = None, *, windows: bool = False
+) -> str:
     interpreter = str(Path(sys.executable).resolve())
-    cmd = f"{shlex.quote(interpreter)} -m swarph_cli {_VERB} --harness {harness}"
+    # Hook runners use the POSIX command on Unix and commandWindows on
+    # Windows.  POSIX quoting produces a literal leading apostrophe in
+    # PowerShell, so keep the Windows form separately and use native
+    # double-quoted executable syntax there.
+    executable = f'"{interpreter}"' if windows else shlex.quote(interpreter)
+    cmd = f"{executable} -m swarph_cli {_VERB} --harness {harness}"
     if cell:
-        cmd += f" --cell {shlex.quote(cell)}"
+        cell_arg = f'"{cell}"' if windows else shlex.quote(cell)
+        cmd += f" --cell {cell_arg}"
     return cmd
 
 
@@ -89,10 +97,8 @@ def _read_config(path: Path) -> dict[str, Any]:
 
 def _event_key(harness: str) -> tuple[str, ...]:
     """Path to the hook list inside the config, per harness schema."""
-    if harness in ("claude", "muse"):
+    if harness in ("claude", "codex", "muse"):
         return ("hooks", "SessionStart")
-    if harness == "codex":
-        return ("SessionStart",)
     if harness == "antigravity":
         return ("swarph-wake-hook", "PreInvocation")
     return ("sessionStart",)
@@ -120,9 +126,12 @@ def _new_entry(harness: str, cell: Optional[str] = None) -> dict[str, Any]:
         return {"command": cmd}
     if harness == "antigravity":
         return {"type": "command", "command": cmd, "timeout": 10}
+    hook: dict[str, Any] = {"type": "command", "command": cmd, "timeout": 10}
+    if harness == "codex":
+        hook["commandWindows"] = _command(harness, cell, windows=True)
     return {
         "matcher": "",
-        "hooks": [{"type": "command", "command": cmd, "timeout": 10}],
+        "hooks": [hook],
     }
 
 

@@ -52,6 +52,26 @@ def test_claude_entry_shape_matches_settings_schema():
     assert "--harness claude" in hook["command"]
 
 
+def test_codex_entry_has_windows_native_command():
+    entry = iwh._new_entry("codex", "gpt ops")
+    hook = entry["hooks"][0]
+    assert hook["command"] == iwh._command("codex", "gpt ops")
+    assert "--cell 'gpt ops'" in hook["command"]
+    assert hook["commandWindows"].startswith('"')
+    assert "-m swarph_cli wake-hook-output --harness codex" in hook[
+        "commandWindows"
+    ]
+    assert '--cell "gpt ops"' in hook["commandWindows"]
+
+
+def test_install_codex_writes_hooks_sessionstart(isolated_home):
+    config, changed = iwh._install({}, "codex")
+    assert changed is True
+    entries = config["hooks"]["SessionStart"]
+    assert len(entries) == 1
+    assert iwh._is_owned_entry(entries[0])
+
+
 def test_antigravity_entry_shape_matches_hooks_schema(isolated_home):
     entry = iwh._new_entry("antigravity")
     assert entry["type"] == "command"
