@@ -738,10 +738,8 @@ def _classify_drain_failure(self_name: str, pidfile_status: str,
     if pidfile_status == "live_ours" and not emits_heartbeat:
         return "writer_lacks_heartbeat"
 
-    if hb is None:
-        # Capability is declared (or unknowable), and nothing was ever written.
-        # Distinct from a frozen file: there is no advancing writer to accuse of
-        # hanging, so do not accuse one.
+    if hb is None and pidfile_status == "live_ours":
+        # A live capable writer has not completed an iteration yet.
         return "heartbeat_absent"
 
     # Secondary discriminator, kept for the case where the pidfile is stale or
