@@ -446,6 +446,10 @@ def _collect(args: argparse.Namespace) -> dict:
         # that has had time to emit and did not (feature absent) from one that
         # has only just come up.
         "started_at": (rec or {}).get("started_at"),
+        # The writer's OWN declaration that it can emit a heartbeat. Absent =>
+        # a build predating the feature. Established independently of the
+        # heartbeat file, because inferring it from that file is circular.
+        "emits_heartbeat": (rec or {}).get("emits_heartbeat"),
         "configured_sinks": [s.name for s in sinks],
         "observation_cursor": observed,
         # `none` keeps no ledger, so there is nothing to subtract. Saying "0
@@ -633,7 +637,8 @@ def _candidate_units(self_name: str) -> list:
 
 def _classify_drain_failure(self_name: str, pidfile_status: str,
                             hb: dict = None, live_pid=None,
-                            writer_uptime_s=None, interval_s: int = 30) -> str:
+                            writer_uptime_s=None, interval_s: int = 30,
+                            emits_heartbeat=None) -> str:
     """Name the cause from OUTSIDE the dead process.
 
     Never guesses among the journal-derived causes without a matching pattern in
@@ -662,21 +667,28 @@ def _classify_drain_failure(self_name: str, pidfile_status: str,
     causes hides which one you have, so the state gets SPLIT rather than
     special-cased.
     """
+    # CAPABILITY FIRST, AND FROM THE WRITER'S OWN DECLARATION -- never inferred
+    # from the heartbeat file (lab-ovh, DM 25744: asking the artifact whether the
+    # artifact is supported is circular). A live writer whose pidfile carries no
+    # `emits_heartbeat` key predates the feature and CANNOT emit one; that is a
+    # different fact from a writer that can and stopped, and it resolves on the
+    # FIRST check rather than after two intervals of waiting.
+    if pidfile_status == "live_ours" and not emits_heartbeat:
+        return "writer_lacks_heartbeat"
+
     if hb is None:
-        # No heartbeat file has EVER existed. Distinct from a frozen one: there
-        # is no writer to accuse of hanging, so do not accuse one.
+        # Capability is declared (or unknowable), and nothing was ever written.
+        # Distinct from a frozen file: there is no advancing writer to accuse of
+        # hanging, so do not accuse one.
         return "heartbeat_absent"
 
+    # Secondary discriminator, kept for the case where the pidfile is stale or
+    # foreign so no declaration is readable: a heartbeat carrying a DIFFERENT
+    # pid than the live writer, which has had time to write one and has not.
     hb_pid = hb.get("pid")
     if (pidfile_status == "live_ours" and live_pid and hb_pid != live_pid
             and (writer_uptime_s or 0) > 2 * interval_s):
         return "writer_lacks_heartbeat"
-
-    if hb_pid is None and pidfile_status == "live_ours":
-        # Written by a build that predates the pid field -- cannot run the
-        # discriminator above, so refuse to pick between the two causes it
-        # exists to separate.
-        return "writer_lacks_heartbeat_or_hang_UNRESOLVED"
 
     if pidfile_status == "live_ours":
         # pidfile says the process IS running, but its heartbeat has not
@@ -827,7 +839,7 @@ def _cmd_heartbeat_check(args: argparse.Namespace) -> int:
     cause = _classify_drain_failure(
         self_name, info["pidfile_status"], hb=hb, live_pid=info.get("pid"),
         writer_uptime_s=(now - started_at) if started_at else None,
-        interval_s=interval_s)
+        interval_s=interval_s, emits_heartbeat=info.get("emits_heartbeat"))
     try:
         since = float(json.loads(since_path.read_text(encoding="utf-8"))["since"])
     except (OSError, ValueError, KeyError, json.JSONDecodeError):

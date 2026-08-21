@@ -1732,6 +1732,14 @@ def write_pidfile(path: Path, *, self_name: str, sinks: list, poll_s: int) -> No
         "poll_s": poll_s,
         "started_at": time.time(),
         "cmdline": _proc_cmdline(os.getpid()),
+        # DECLARED CAPABILITY, written by the writer itself at start (lab-ovh,
+        # DM 25744): "capability has to be established from something OTHER than
+        # the signal itself -- asking the artifact whether the artifact is
+        # supported is circular." Inferring heartbeat support from the heartbeat
+        # file is exactly that circle. A build without this key predates the
+        # feature and CANNOT emit one, which is a different fact from a writer
+        # that can and has stopped -- and the two must never share a cause.
+        "emits_heartbeat": True,
     }
     tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
     tmp.write_text(json.dumps(rec, indent=2, sort_keys=True), encoding="utf-8")
