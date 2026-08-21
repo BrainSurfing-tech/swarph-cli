@@ -136,6 +136,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow register when a local per-peer token file already exists",
     )
+    register.add_argument(
+        "--replace",
+        action="store_true",
+        help="REPLACE the advertised capability blob with exactly the "
+             "--capability keys given (sends full=true). Default is MERGE: "
+             "the peer's currently-registered keys are read first and "
+             "re-submitted, so updating one field does not destroy the rest "
+             "(#124).",
+    )
     _add_common(register)
 
     sidecar = sub.add_parser("sidecar", help="poll inbox and wake a tmux cell")
@@ -776,11 +785,36 @@ def _run_register(args: argparse.Namespace) -> int:
     for spec in args.capability:
         key, value = _parse_capability(spec)
         caps[key] = value
+    # >>> #124, CLIENT HALF: MERGE OVER THE STORED BLOB BY DEFAULT. <<< The
+    # gateway replaces capabilities wholesale, so submitting only the keys
+    # this invocation cares about silently destroys the rest (gemini-
+    # researcher's role/agent_type, lost to a model_default update). Read
+    # the peer's currently-registered blob and re-submit it merged:
+    # submitted keys override, stored-only keys survive. --replace opts into
+    # the deliberate wholesale replace (full=true, which the gateway's #124
+    # guard accepts without its 409). A register that CANNOT READ the
+    # registry — first registration, gateway unreachable — proceeds with
+    # what it has: the read must never BLOCK the write; there is nothing to
+    # destroy on a row that does not exist yet.
+    gateway = args.gateway.rstrip("/")
+    stored_caps: dict = {}
+    if not args.replace:
+        gstatus, gpayload = _http_get_json(f"{gateway}/peers/{self_name}", token)
+        if gstatus == 200 and isinstance(gpayload.get("capabilities"), dict):
+            stored_caps = gpayload["capabilities"]
+    if args.replace:
+        merged = caps or {"can_claim_tasks": True}
+    elif stored_caps or caps:
+        merged = {**stored_caps, **caps}
+    else:
+        merged = {"can_claim_tasks": True}
     body = {
         "name": self_name,
         "url": args.url or f"http://{self_name}:8787",
-        "capabilities": caps or {"can_claim_tasks": True},
+        "capabilities": merged,
     }
+    if args.replace:
+        body["full"] = True
     status, payload = _post_json(
         f"{args.gateway.rstrip('/')}/peers/register",
         body,
