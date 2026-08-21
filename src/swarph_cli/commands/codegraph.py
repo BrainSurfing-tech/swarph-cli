@@ -32,6 +32,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 
 DEFAULT_INDEX = os.path.expanduser("~/.swarph/codegraph/index.db")
 # NOTE: named DEFAULT_CALLER_CELL, not "*_CALLER" — this is an A8 caller-CELL
@@ -40,6 +41,13 @@ DEFAULT_INDEX = os.path.expanduser("~/.swarph/codegraph/index.db")
 # (tests/test_caller_meta_guard.py) which validates every `*_CALLER` constant
 # against that unrelated dotted-slug convention.
 DEFAULT_CALLER_CELL = "lab-ovh"
+
+# NOT 1 and NOT 2. A distinct code so "nothing was searched" can never be confused
+# with a crash or a usage error, and so a caller can branch on it specifically.
+# This is the AVAILABILITY axis, the same thing the gateway answers with a 503 --
+# separate from the VISIBILITY axis stdout carries. rc is the one channel the frozen
+# stdout contract left free.
+RC_NO_INDEX = 3
 
 # --- textsearch (ported verbatim from codegraph_index/textsearch.py) ------
 
@@ -219,17 +227,141 @@ def format_human(rows, term) -> str:
     return "\n".join(lines)
 
 
+def _resolve_gateway(arg) -> str:
+    """Gateway base URL for the SEARCH-RELAY path (#552).
+
+    >>> THE CANONICAL VARIABLE IS MESH_GATEWAY_URL, AND SWARPH_BRAIN_GATEWAY IS
+    DELIBERATELY *NOT* IN THIS CHAIN. <<<
+
+    The first draft copied `highlight`'s chain, which ends in SWARPH_BRAIN_GATEWAY.
+    drop-on-meta-edge measured what that actually resolves to on this box:
+
+        SWARPH_CODEGRAPH_GATEWAY   <unset>
+        SWARPH_GATEWAY             <unset>
+        SWARPH_BRAIN_GATEWAY       http://100.107.222.72:8788   <- brain-NAMED, MESH value
+        MESH_GATEWAY_URL           http://100.107.222.72:8788   <- correct, and NOT consulted
+
+    The relay worked ONLY because a brain-named variable was mis-set to the mesh
+    gateway's address. Every link that resolved was unset or wrong-by-name, and the
+    one that was right was the one not read -- while #546 canonicalised
+    MESH_GATEWAY_URL across four modules the same morning.
+
+    >>> AND THE FAILURE IS TRIGGERED BY SOMEONE DOING THE RIGHT THING. <<<
+    SWARPH_BRAIN_GATEWAY names the brain (:8792, mint :8793) -- a different service on
+    different ports. The day anyone points it where its NAME says, this POSTs to
+    :8792/codegraph: a mesh peer token handed to a service it was not minted for, a
+    non-2xx, the fallback, and droplet's original symptom returns ON THE DAY SOMEONE
+    FIXED A VARIABLE. A fallback to a differently-named service is not a safety net;
+    it re-arms the collision on the day it fires.
+
+    `--gateway` / `--local` override.
+    """
+    return (arg
+            or os.environ.get("SWARPH_CODEGRAPH_GATEWAY")
+            or os.environ.get("SWARPH_GATEWAY")
+            or os.environ.get("MESH_GATEWAY_URL")
+            or "").strip()
+
+
+def _query_via_gateway(gateway: str, query: str, limit: int, token_file):
+    """POST to the gateway's /codegraph — THE SERVER SEARCHES, WE GET THE ANSWER.
+
+    >>> WHY A RELAY AND NOT A SHIPPED INDEX (commander, 2026-08-21): one index,
+    one truth. Copying the db to every cell makes N stores that drift, which is
+    the divergence this fleet hit four separate ways the same week. <<<
+
+    The endpoint takes NO caller field on purpose -- the caller comes from the
+    bearer token and cannot be self-asserted the way `--caller-cell` can here.
+    So the relayed path is strictly *less* spoofable than the local one.
+
+    Returns (rows, index_present). index_present is False when the SERVER says
+    503 -- the availability axis, kept distinct from an empty result.
+    """
+    from swarph_cli.commands.mesh import _post_json, _resolve_token  # local import: keeps
+    # the local-only path free of any mesh dependency, so an offline cell still works.
+
+    self_name = os.environ.get("SWARPH_SELF") or DEFAULT_CALLER_CELL
+    token = _resolve_token(self_name, token_file)
+    body = {"query": query, "limit": max(1, min(int(limit), 25))}
+    status, payload = _post_json(gateway.rstrip("/") + "/codegraph", body, token)
+    if status == 503:
+        return [], False
+    if status >= 400:
+        raise RuntimeError(f"gateway returned {status}: {str(payload)[:160]}")
+    return (payload or {}).get("results", []), True
+
+
 def run_codegraph(argv) -> int:
     ap = argparse.ArgumentParser(
         prog="swarph codegraph",
         description="On-demand structural code search: find where a symbol is defined or what calls it, "
-                    "across the indexed repos. Natural-language query.")
+                    "across the indexed repos. Natural-language query. Queries the mesh gateway when one "
+                    "is configured (the server searches and returns the answer); falls back to a local index.")
     ap.add_argument("query", help="natural-language query, e.g. 'which function escapes HTML'")
     ap.add_argument("--index", default=DEFAULT_INDEX, help=f"index db (default {DEFAULT_INDEX})")
     ap.add_argument("--caller-cell", default=DEFAULT_CALLER_CELL, help="A8 caller identity (default lab-ovh)")
     ap.add_argument("--limit", type=int, default=8)
     ap.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    ap.add_argument("--gateway", default=None,
+                    help="mesh-gateway base URL for relayed search (else $SWARPH_CODEGRAPH_GATEWAY / "
+                         "$SWARPH_GATEWAY / $SWARPH_BRAIN_GATEWAY). The server holds the index.")
+    ap.add_argument("--local", action="store_true",
+                    help="force the local index even when a gateway is configured")
+    ap.add_argument("--token-file", default=None, help="explicit bearer token file")
     a = ap.parse_args(argv)
-    rows = structural_query(a.query, index_path=a.index, caller_cell=a.caller_cell, limit=a.limit)
-    print(json.dumps(rows, indent=2) if a.json else format_human(rows, a.query))
-    return 0
+
+    gateway = "" if a.local else _resolve_gateway(a.gateway)
+    source = "local"
+    if gateway:
+        try:
+            rows, index_present = _query_via_gateway(gateway, a.query, a.limit, a.token_file)
+            source = "gateway"
+        except Exception as exc:  # noqa: BLE001
+            # >>> LOUD, NEVER A SILENT FALL BACK TO LOCAL. <<< A relay failure that
+            # degrades quietly to an empty local index is indistinguishable from
+            # "no matches" -- the exact confusion this change exists to remove.
+            print(f"swarph codegraph: gateway {gateway} unreachable ({type(exc).__name__}: {exc}); "
+                  f"falling back to the local index at {a.index}", file=sys.stderr)
+            rows = structural_query(a.query, index_path=a.index,
+                                    caller_cell=a.caller_cell, limit=a.limit)
+            index_present = os.path.exists(os.path.expanduser(a.index))
+    else:
+        rows = structural_query(a.query, index_path=a.index,
+                                caller_cell=a.caller_cell, limit=a.limit)
+        index_present = os.path.exists(os.path.expanduser(a.index))
+
+    if not index_present:
+        # >>> STDERR, AND --json STAYS A BARE LIST. <<< .claude/hooks/codegraph-on-grep.sh
+        # does `rows=json.loads(...)` and iterates, so wrapping stdout in an envelope
+        # would break the hook that fires on every grep in the fleet. The availability
+        # signal therefore goes to stderr, where it costs no consumer anything.
+        #
+        # >>> THE EXIT CODE IS THE CHANNEL THAT WAS FREE ALL ALONG (drop, review of
+        # PR #279). <<< The stdout contract is frozen -- codegraph-on-grep.sh does
+        # json.loads() and iterates, so an envelope breaks the caller that fires on
+        # every grep in the fleet. But rc costs that contract NOTHING: a consumer
+        # that ignores rc sees exactly what it saw before, and one that reads it gets
+        # the availability axis the gateway already expresses as a 503.
+        #
+        # The hook itself already branches on `[ $rc -ne 0 ]` and reports the query as
+        # UNCORROBORATED, so this lands in a handler that exists.
+        #
+        # It also closes the ambiguity my previous commit MOVED rather than removed:
+        # dropping the false "No structural matches" line left the human path at NO
+        # STDOUT, NO STDERR (the hook redirects it), EXIT 0 -- and silence plus success
+        # reads as "ran fine, nothing found". Same rc closes both halves.
+        print(f"swarph codegraph: NO INDEX AVAILABLE (source={source}) — this is NOT a "
+              f"negative result; nothing was searched.", file=sys.stderr)
+
+    if a.json:
+        print(json.dumps(rows, indent=2))
+    elif not index_present:
+        # >>> A WARNING IS NOT ENOUGH IF THE CLAIM IS STILL PRINTED UNDER IT. <<<
+        # `format_human` says "No structural matches for X" -- a claim about the CODE,
+        # made when nothing was searched. The human path owns both streams, so it does
+        # not make the claim; a warning above a contradicting result just asks the
+        # reader to pick, and they pick the one that looks like a result.
+        pass
+    else:
+        print(format_human(rows, a.query))
+    return 0 if index_present else RC_NO_INDEX
