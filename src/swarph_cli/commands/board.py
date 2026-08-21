@@ -208,6 +208,41 @@ def _thread_recipient(card: dict, explicit_to: Optional[str]) -> str:
     )
 
 
+def _say_line(resp: dict, card_id, to_node: str) -> str:
+    """The post confirmation — AND any obligation the post just DISCHARGED.
+
+    >>> THE GATEWAY ALREADY SAID SO AND THIS CLI THREW IT AWAY. <<< POST
+    /messages returns `closed_obligations: [ids]` (server.py:4077-4099): any
+    message a HOLDER posts to a thread closes their oldest open obligation on
+    it, unconditionally, without consulting the `accept` falsifier #532 added.
+    The old formatter read `id` only, so the terminal printed "posted id=NNN"
+    and nothing else.
+
+    MEASURED CONSEQUENCE (science-claude, card #562): obligation #22 on card
+    #544 closed at 06:59:15 on a status post whose literal content was that the
+    work was NOT done — one membrane passing, four CANNOT_EVALUATE, two
+    proposals unstarted. IT STAYED WRONGLY CLOSED FOR SIX HOURS while its holder
+    said in five further messages that it was unmet, and nothing compared the
+    two. `obligation_sweep.py` could not catch it either: that sweep selects
+    `status = 'open'`, so a wrongly-closed row falls out of the set forever.
+
+    The signal existed, was correct, and travelled the wire. It died at the last
+    hop, in the formatter. A one-line print is not the fix for the auto-close
+    POLICY (that is #562's own question) -- it is the fix for the holder not
+    being told, which is what made six hours of divergence possible.
+    """
+    line = f"posted id={resp.get('id')} onto card #{card_id} (to {to_node})"
+    closed = resp.get("closed_obligations") or []
+    if closed:
+        ids = ", ".join(f"#{i}" for i in closed)
+        line += (f"\n  >>> THIS POST CLOSED OBLIGATION {ids}. <<< Posting to a "
+                 f"thread discharges your oldest open obligation on it — the "
+                 f"accept check was NOT evaluated. If the work is not actually "
+                 f"done, say so now: a closed obligation leaves the sweep set "
+                 f"and nothing will chase it again.")
+    return line
+
+
 def _card_say_payload(from_node: str, to_node: str, kind: str, content: str,
                       thread_uuid: str) -> dict:
     return {
@@ -496,8 +531,7 @@ def run_board(argv: list[str]) -> int:
             # explicit `propose` grant. `_out` passes `detail` through whole; it does
             # not need help, and a second copy of that logic is a second thing to
             # keep in sync.
-            return _out(st, d, lambda x: f"posted id={x.get('id')} onto card "
-                                         f"#{args.id} (to {to_node})", aj)
+            return _out(st, d, lambda x: _say_line(x, args.id, to_node), aj)
         if args.command == "ready":
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "move_ready": not args.clear}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} move_ready -> {x.get('move_ready')}", aj)
