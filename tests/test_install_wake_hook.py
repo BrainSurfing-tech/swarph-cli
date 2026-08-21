@@ -53,19 +53,15 @@ def test_claude_entry_shape_matches_settings_schema():
 
 
 def test_codex_entry_has_windows_native_command():
-    entry = iwh._new_entry("codex", "gpt-lc")
+    entry = iwh._new_entry("codex", "gpt ops")
     hook = entry["hooks"][0]
-    assert "--harness codex" in hook["command"]
-    if iwh.os.name == "nt":
-        assert hook["command"].startswith('"')
-        assert '--cell "gpt-lc"' in hook["command"]
-    else:
-        assert "--cell gpt-lc" in hook["command"]
+    assert hook["command"] == iwh._command("codex", "gpt ops")
+    assert "--cell 'gpt ops'" in hook["command"]
     assert hook["commandWindows"].startswith('"')
     assert "-m swarph_cli wake-hook-output --harness codex" in hook[
         "commandWindows"
     ]
-    assert "--cell \"gpt-lc\"" in hook["commandWindows"]
+    assert '--cell "gpt ops"' in hook["commandWindows"]
 
 
 def test_install_codex_writes_hooks_sessionstart(isolated_home):
