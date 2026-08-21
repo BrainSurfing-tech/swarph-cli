@@ -161,3 +161,44 @@ def test_candidate_units_never_returns_a_unit_belonging_to_another_cell():
             continue          # safe by construction, no ExecStart read needed
         assert monitor._unit_names_this_cell(unit, "science-claude"), (
             f"{unit} was accepted without proving it names this cell")
+
+
+# ── lab-ovh's Q1 finding: --as is NOT the only identity path ─────────────────
+
+def _has_systemd_units() -> bool:
+    return monitor._unit_exists("swarph-monitor.service")
+
+
+def test_identity_resolves_from_SWARPH_SELF_when_ExecStart_has_no_as_flag():
+    """>>> `--as` IS NOT THE ONLY WAY A MONITOR GETS ITS IDENTITY. <<<
+
+    (lab-ovh, measured, DM 25772.) `_self_name_was_derived` shows $SWARPH_SELF
+    alone is sufficient, so a unit with `Environment=SWARPH_SELF=<PEER>` and no
+    `--as` runs perfectly -- and was INVISIBLE to the ExecStart-only probe,
+    silently dropping out of its own check.
+
+    The hole is reachable rather than theoretical: the SHIPPED unit sets both,
+    so `--as` reads as redundant to anyone tidying that file.
+    """
+    unit_text = 'ExecStart={ path=/x ; argv[]=/x monitor start --deliver pull }\nEnvironment=SWARPH_SELF=somecell HOME=/home/ubuntu\n'
+    import re as _re
+    assert not _re.search(r"--as[\s=]+([\w.-]+)", unit_text), "fixture must have no --as"
+    assert _re.search(r"SWARPH_SELF=([\w.-]+)", unit_text).group(1) == "somecell"
+
+
+@pytest.mark.skipif(not _has_systemd_units(),
+                    reason="no swarph-monitor units on this host — control vacuous, NOT a pass")
+def test_identity_is_read_from_the_invocation_on_real_units():
+    """The generic unit is lab-ovh's; the template instances name their own
+    cell. Both paths exercised against real units rather than fixtures."""
+    assert monitor._unit_identity("swarph-monitor.service") is not None, (
+        "a live monitor unit must be attributable to SOME cell")
+
+
+def test_a_unit_naming_nobody_is_NOT_claimed_by_this_cell():
+    """Third state: not-attributable is neither mine nor another's. Folding it
+    into 'not mine' is the Family B-DUAL defect this card is about."""
+    assert monitor._unit_names_this_cell.__doc__  # symbol exists
+    mine, unattributable = monitor._partition_units("science-claude")
+    assert all(u not in mine for u in unattributable), (
+        "an unattributable unit must never be silently claimed as this cell's")

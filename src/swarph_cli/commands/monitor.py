@@ -586,19 +586,44 @@ _CAUSE_PATTERNS = [
 ]
 
 
-def _unit_names_this_cell(unit: str, self_name: str) -> bool:
-    """Does this unit's ExecStart actually name THIS cell? THE NAME IS A PROXY.
+def _unit_identity(unit: str) -> "str | None":
+    """The cell a unit runs as, or None when it names NOBODY.
 
-    A unit NAME suggests ownership; `--as <cell>` in its ExecStart PROVES it.
-    Checking the name only is the same error class as trusting $SWARPH_SELF
-    inherited from a multiplexer server (cursor-win's psmux identity leak).
+    >>> `--as` IS NOT THE ONLY WAY A MONITOR GETS ITS IDENTITY. <<< (lab-ovh,
+    measured, DM 25772.) `_self_name_was_derived` shows $SWARPH_SELF alone is
+    sufficient, so a unit carrying `Environment=SWARPH_SELF=<PEER>` and NO
+    `--as` runs perfectly -- and was invisible to the ExecStart-only probe this
+    replaces, silently dropping out of its own check.
+
+    The hole is REACHABLE, not theoretical: the shipped unit sets BOTH, so the
+    `--as` flag reads as redundant to anyone tidying that file, and deleting it
+    leaves a working monitor nothing can attribute. The redundancy inviting the
+    edit lives in the very file the check depends on.
+
+    Returns None for a unit naming neither -- the caller must treat that as
+    NOT ATTRIBUTABLE (a third state), never fold it into "not mine".
     """
     out = subprocess.run(
-        ["systemctl", "show", unit, "-p", "ExecStart", "--value"],
+        ["systemctl", "show", unit, "-p", "ExecStart", "-p", "Environment"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
-    return bool(re.search(rf"--as\s+{re.escape(self_name)}(\s|$|\")",
-                          out.stdout or ""))
+    text = out.stdout or ""
+    m = re.search(r"--as[\s=]+([\w.-]+)", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"SWARPH_SELF=([\w.-]+)", text)
+    return m.group(1) if m else None
+
+
+def _unit_names_this_cell(unit: str, self_name: str) -> bool:
+    """Does this unit provably run as THIS cell? THE UNIT NAME IS A PROXY.
+
+    A unit NAME suggests ownership; the invocation (`--as`, or $SWARPH_SELF in
+    its environment) PROVES it. Trusting the name is the same error class as
+    trusting $SWARPH_SELF inherited from a multiplexer server (cursor-win's
+    psmux identity leak).
+    """
+    return _unit_identity(unit) == self_name
 
 
 def _unit_exists(unit: str) -> bool:
@@ -639,7 +664,22 @@ def _candidate_units(self_name: str) -> list:
     else must prove itself, which also covers legitimately non-templated units
     like `swarph-monitor-gridiron.service`.
     """
-    units = [f"swarph-monitor@{self_name}.service"]
+    units, _unattributable = _partition_units(self_name)
+    return units
+
+
+def _partition_units(self_name: str) -> tuple:
+    """(mine, unattributable) — THREE states, never two.
+
+    attributable-to-me · attributable-to-another · NOT ATTRIBUTABLE. lab-ovh's
+    correction (DM 25772): silently dropping the third folds it into the second,
+    which is this card's own Family B-DUAL defect. An ACTIVE swarph-monitor unit
+    naming nobody might be this cell's supervisor, so concluding
+    `supervisor_absent` while one exists is a determinate negative the evidence
+    does not support.
+    """
+    mine = [f"swarph-monitor@{self_name}.service"]
+    unattributable = []
     listing = subprocess.run(
         ["systemctl", "list-units", "swarph-monitor*", "--all",
          "--no-legend", "--no-pager", "--plain"],
@@ -647,10 +687,14 @@ def _candidate_units(self_name: str) -> list:
     )
     for line in (listing.stdout or "").splitlines():
         name = line.split()[0] if line.split() else ""
-        if (name.endswith(".service") and name not in units
-                and _unit_names_this_cell(name, self_name)):
-            units.append(name)
-    return units
+        if not name.endswith(".service") or name in mine:
+            continue
+        who = _unit_identity(name)
+        if who == self_name:
+            mine.append(name)
+        elif who is None:
+            unattributable.append(name)
+    return mine, unattributable
 
 
 def _classify_drain_failure(self_name: str, pidfile_status: str,
@@ -714,7 +758,8 @@ def _classify_drain_failure(self_name: str, pidfile_status: str,
         # supervisor catches this; it is exactly what A/B exist to catch.
         return "silent_hang"
 
-    for unit in _candidate_units(self_name):
+    units, unattributable = _partition_units(self_name)
+    for unit in units:
         probe = subprocess.run(
             ["systemctl", "is-active", unit], capture_output=True, text=True,
             encoding="utf-8", errors="replace",
@@ -737,9 +782,23 @@ def _classify_drain_failure(self_name: str, pidfile_status: str,
             # rather than assert a cause with no evidence behind it.
             return "unrecognized"
 
-    # No pidfile match AND no active supervising unit for this cell --
-    # exactly workstation-lc's own death: a clean exit with nothing
-    # configured to restart it.
+    # THE THIRD ATTRIBUTION STATE, before any determinate negative. An ACTIVE
+    # swarph-monitor unit that names NOBODY may well be this cell's supervisor;
+    # calling it absent asserts more than the evidence carries. CANNOT_EVALUATE
+    # in the shape this verb can express (lab-ovh, DM 25772).
+    for unit in unattributable or []:
+        probe = subprocess.run(
+            ["systemctl", "is-active", unit], capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+        if probe.returncode == 0 and probe.stdout.strip() == "active":
+            return "supervisor_unattributable"
+
+    # No pidfile match, no active unit for this cell, and nothing ambiguous --
+    # exactly workstation-lc's own death: a clean exit with nothing configured
+    # to restart it. NOTE this is the NORMAL case on a box where most monitors
+    # are started by hand (ensure_monitor.sh), not an anomaly: 7 of 10 on
+    # lab-ovh have no unit at all.
     return "supervisor_absent"
 
 
