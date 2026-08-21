@@ -42,6 +42,13 @@ DEFAULT_INDEX = os.path.expanduser("~/.swarph/codegraph/index.db")
 # against that unrelated dotted-slug convention.
 DEFAULT_CALLER_CELL = "lab-ovh"
 
+# NOT 1 and NOT 2. A distinct code so "nothing was searched" can never be confused
+# with a crash or a usage error, and so a caller can branch on it specifically.
+# This is the AVAILABILITY axis, the same thing the gateway answers with a 503 --
+# separate from the VISIBILITY axis stdout carries. rc is the one channel the frozen
+# stdout contract left free.
+RC_NO_INDEX = 3
+
 # --- textsearch (ported verbatim from codegraph_index/textsearch.py) ------
 
 _STOP = {"the", "a", "an", "is", "are", "was", "how", "does", "do", "of", "to", "in", "on", "for", "and", "or",
@@ -223,15 +230,36 @@ def format_human(rows, term) -> str:
 def _resolve_gateway(arg) -> str:
     """Gateway base URL for the SEARCH-RELAY path (#552).
 
-    Mirrors `swarph highlight`'s resolver exactly, so a cell that already has
-    SWARPH_GATEWAY / SWARPH_BRAIN_GATEWAY set from the brain-ask rollout gets
-    relayed search with ZERO new per-cell config. `--gateway` / `--local`
-    override.
+    >>> THE CANONICAL VARIABLE IS MESH_GATEWAY_URL, AND SWARPH_BRAIN_GATEWAY IS
+    DELIBERATELY *NOT* IN THIS CHAIN. <<<
+
+    The first draft copied `highlight`'s chain, which ends in SWARPH_BRAIN_GATEWAY.
+    drop-on-meta-edge measured what that actually resolves to on this box:
+
+        SWARPH_CODEGRAPH_GATEWAY   <unset>
+        SWARPH_GATEWAY             <unset>
+        SWARPH_BRAIN_GATEWAY       http://100.107.222.72:8788   <- brain-NAMED, MESH value
+        MESH_GATEWAY_URL           http://100.107.222.72:8788   <- correct, and NOT consulted
+
+    The relay worked ONLY because a brain-named variable was mis-set to the mesh
+    gateway's address. Every link that resolved was unset or wrong-by-name, and the
+    one that was right was the one not read -- while #546 canonicalised
+    MESH_GATEWAY_URL across four modules the same morning.
+
+    >>> AND THE FAILURE IS TRIGGERED BY SOMEONE DOING THE RIGHT THING. <<<
+    SWARPH_BRAIN_GATEWAY names the brain (:8792, mint :8793) -- a different service on
+    different ports. The day anyone points it where its NAME says, this POSTs to
+    :8792/codegraph: a mesh peer token handed to a service it was not minted for, a
+    non-2xx, the fallback, and droplet's original symptom returns ON THE DAY SOMEONE
+    FIXED A VARIABLE. A fallback to a differently-named service is not a safety net;
+    it re-arms the collision on the day it fires.
+
+    `--gateway` / `--local` override.
     """
     return (arg
             or os.environ.get("SWARPH_CODEGRAPH_GATEWAY")
             or os.environ.get("SWARPH_GATEWAY")
-            or os.environ.get("SWARPH_BRAIN_GATEWAY")
+            or os.environ.get("MESH_GATEWAY_URL")
             or "").strip()
 
 
@@ -308,22 +336,32 @@ def run_codegraph(argv) -> int:
         # would break the hook that fires on every grep in the fleet. The availability
         # signal therefore goes to stderr, where it costs no consumer anything.
         #
-        # HONEST RESIDUAL, narrowed: --json consumers still cannot tell "no index" from
-        # "no matches", because the gateway's 503 has no representation in a bare list
-        # and wrapping it breaks a live caller. DEFERRED, not solved. The hook redirects
-        # stderr to /dev/null and keeps seeing an empty list -- correct for its purpose.
+        # >>> THE EXIT CODE IS THE CHANNEL THAT WAS FREE ALL ALONG (drop, review of
+        # PR #279). <<< The stdout contract is frozen -- codegraph-on-grep.sh does
+        # json.loads() and iterates, so an envelope breaks the caller that fires on
+        # every grep in the fleet. But rc costs that contract NOTHING: a consumer
+        # that ignores rc sees exactly what it saw before, and one that reads it gets
+        # the availability axis the gateway already expresses as a 503.
+        #
+        # The hook itself already branches on `[ $rc -ne 0 ]` and reports the query as
+        # UNCORROBORATED, so this lands in a handler that exists.
+        #
+        # It also closes the ambiguity my previous commit MOVED rather than removed:
+        # dropping the false "No structural matches" line left the human path at NO
+        # STDOUT, NO STDERR (the hook redirects it), EXIT 0 -- and silence plus success
+        # reads as "ran fine, nothing found". Same rc closes both halves.
         print(f"swarph codegraph: NO INDEX AVAILABLE (source={source}) — this is NOT a "
               f"negative result; nothing was searched.", file=sys.stderr)
 
     if a.json:
         print(json.dumps(rows, indent=2))
     elif not index_present:
-        # >>> THE WARNING IS NOT ENOUGH IF THE LIE IS STILL PRINTED UNDER IT. <<<
+        # >>> A WARNING IS NOT ENOUGH IF THE CLAIM IS STILL PRINTED UNDER IT. <<<
         # `format_human` says "No structural matches for X" -- a claim about the CODE,
-        # made when nothing was searched. On the human path we own both streams, so we
-        # simply do not make it. Silence on stdout plus the stderr line is the honest
-        # pair; a warning above a contradicting result just asks the reader to pick.
+        # made when nothing was searched. The human path owns both streams, so it does
+        # not make the claim; a warning above a contradicting result just asks the
+        # reader to pick, and they pick the one that looks like a result.
         pass
     else:
         print(format_human(rows, a.query))
-    return 0
+    return 0 if index_present else RC_NO_INDEX

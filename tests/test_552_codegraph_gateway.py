@@ -31,23 +31,50 @@ import pytest
 from swarph_cli.commands import codegraph as cg
 
 
-def test_gateway_resolves_through_the_same_env_chain_as_highlight(monkeypatch):
-    """ZERO new per-cell config: a cell already carrying SWARPH_GATEWAY from the
-    brain-ask rollout gets relayed search for free."""
-    for k in ("SWARPH_CODEGRAPH_GATEWAY", "SWARPH_GATEWAY", "SWARPH_BRAIN_GATEWAY"):
+def test_gateway_chain_ends_at_the_canonical_mesh_variable(monkeypatch):
+    """>>> THE CHAIN MUST END AT MESH_GATEWAY_URL, NOT SWARPH_BRAIN_GATEWAY. <<<
+
+    The first draft copied `highlight`'s chain. drop-on-meta-edge measured what that
+    resolves to on a real box: SWARPH_CODEGRAPH_GATEWAY and SWARPH_GATEWAY unset,
+    SWARPH_BRAIN_GATEWAY mis-set to the MESH gateway's address, and MESH_GATEWAY_URL
+    correct and never consulted. The relay worked only by that mis-set variable --
+    and #546 canonicalised MESH_GATEWAY_URL across four modules the same morning.
+    """
+    for k in ("SWARPH_CODEGRAPH_GATEWAY", "SWARPH_GATEWAY", "MESH_GATEWAY_URL",
+              "SWARPH_BRAIN_GATEWAY"):
         monkeypatch.delenv(k, raising=False)
     assert cg._resolve_gateway(None) == ""
 
-    monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://brain:8788")
-    assert cg._resolve_gateway(None) == "http://brain:8788"
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://mesh:8788")
+    assert cg._resolve_gateway(None) == "http://mesh:8788", "the canonical variable must be read"
 
-    monkeypatch.setenv("SWARPH_GATEWAY", "http://mesh:8788")
-    assert cg._resolve_gateway(None) == "http://mesh:8788", "SWARPH_GATEWAY outranks the brain fallback"
+    monkeypatch.setenv("SWARPH_GATEWAY", "http://generic:8788")
+    assert cg._resolve_gateway(None) == "http://generic:8788", "the swarph-specific var outranks it"
 
     monkeypatch.setenv("SWARPH_CODEGRAPH_GATEWAY", "http://cg:8788")
     assert cg._resolve_gateway(None) == "http://cg:8788", "the specific var outranks both"
 
     assert cg._resolve_gateway("http://explicit:8788") == "http://explicit:8788", "--gateway wins over all env"
+
+
+def test_brain_gateway_is_never_consulted(monkeypatch):
+    """>>> THE FAILURE IS TRIGGERED BY SOMEONE DOING THE RIGHT THING. <<<
+
+    SWARPH_BRAIN_GATEWAY names the brain -- :8792, mint :8793, a different service on
+    different ports. The day anyone points it where its NAME says, a chain containing
+    it POSTs to :8792/codegraph: a mesh peer token handed to a service it was not
+    minted for, a non-2xx, the fallback, and droplet's original symptom returns ON THE
+    DAY SOMEONE FIXED A VARIABLE.
+
+    A fallback to a differently-named service is not a safety net; it re-arms the
+    collision on the day it fires.
+    """
+    for k in ("SWARPH_CODEGRAPH_GATEWAY", "SWARPH_GATEWAY", "MESH_GATEWAY_URL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://100.107.222.72:8792")
+    assert cg._resolve_gateway(None) == "", (
+        "the brain gateway leaked into the codegraph relay chain"
+    )
 
 
 def test_503_is_index_absent_not_an_empty_result(monkeypatch):
@@ -120,7 +147,7 @@ def test_local_flag_bypasses_a_configured_gateway(monkeypatch, tmp_path, capsys)
 
     monkeypatch.setattr(cg, "_query_via_gateway", _boom)
     rc = cg.run_codegraph(["edge", "--local", "--index", str(tmp_path / "absent.db"), "--json"])
-    assert rc == 0
+    assert rc == cg.RC_NO_INDEX
     cap = capsys.readouterr()
     # --json STAYS A BARE LIST: .claude/hooks/codegraph-on-grep.sh does
     # json.loads(...) and iterates. Wrapping it would break the hook that fires
@@ -141,7 +168,7 @@ def test_no_index_does_not_print_a_claim_about_the_code(monkeypatch, tmp_path, c
     The human path owns both streams, so it simply does not make the claim.
     """
     rc = cg.run_codegraph(["mamma", "--local", "--index", str(tmp_path / "absent.db")])
-    assert rc == 0
+    assert rc == cg.RC_NO_INDEX
     cap = capsys.readouterr()
     assert "No structural matches" not in cap.out, (
         "a negative claim about the code was printed for a search that never ran"
@@ -163,6 +190,41 @@ def test_relay_failure_is_loud(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(cg, "_query_via_gateway", _boom)
     rc = cg.run_codegraph(["edge", "--index", str(tmp_path / "absent.db")])
-    assert rc == 0
+    assert rc == cg.RC_NO_INDEX
     err = capsys.readouterr().err
     assert "unreachable" in err and "falling back" in err, "the degrade must be announced on stderr"
+
+
+def test_rc_carries_availability_without_touching_stdout(tmp_path, capsys, monkeypatch):
+    """>>> rc IS THE CHANNEL THE FROZEN STDOUT CONTRACT LEFT FREE (drop, PR #279). <<<
+
+    Two things must hold at once, and they are what makes rc the right answer rather
+    than an envelope:
+
+      1. --json stays a BARE LIST, byte-identical to what codegraph-on-grep.sh already
+         parses on every grep in the fleet. A consumer ignoring rc sees no change.
+      2. A consumer that READS rc gets the availability axis -- the same distinction
+         the gateway already expresses as a 503, and the one thing an empty list can
+         never carry.
+
+    It also closes the ambiguity the previous commit MOVED: with stderr redirected
+    (which is exactly what the hook does), no-stdout + rc 0 read as "ran fine, nothing
+    found". Silence and success are not the same claim.
+    """
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    absent = str(tmp_path / "absent.db")
+
+    rc_absent = cg.run_codegraph(["edge", "--local", "--index", absent, "--json"])
+    out_absent = capsys.readouterr().out
+    assert json.loads(out_absent) == [], "the stdout contract moved -- the grep hook parses this"
+    assert rc_absent == cg.RC_NO_INDEX
+
+    # And a REAL negative against a PRESENT index must still be rc 0: the two cases
+    # differ in rc precisely because they differ in what was searched.
+    real = tmp_path / "present.db"
+    real.write_bytes(b"")
+    monkeypatch.setattr(cg, "structural_query", lambda *a, **k: [])
+    monkeypatch.setattr(cg.os.path, "exists", lambda p: True)
+    rc_present = cg.run_codegraph(["edge", "--local", "--index", str(real), "--json"])
+    assert json.loads(capsys.readouterr().out) == []
+    assert rc_present == 0, "a true negative is not an availability failure"
