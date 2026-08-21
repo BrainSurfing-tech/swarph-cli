@@ -86,8 +86,9 @@ def run_postcompact_hook_output(argv: list[str] | None = None) -> int:
         print(json.dumps({}))
         return 0
 
-    cutoff = dt.datetime.now(dt.timezone.utc) - _WINDOW
-    recent = [e for e in entries if e.ts >= cutoff]
+    now = dt.datetime.now(dt.timezone.utc)
+    cutoff = now - _WINDOW
+    recent = [e for e in entries if cutoff <= e.ts <= now]
     if not recent:
         print(json.dumps({}))
         return 0
