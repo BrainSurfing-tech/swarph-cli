@@ -821,26 +821,26 @@ def run_onboard(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 2
+    # >>> A RE-REGISTER IS NOT A MINT, AND EVERY BRANCH MUST SAY SO. <<<
+    # Demonstrated 2026-08-21 (journey walkthrough): the cell-first order — cell
+    # self-registers and captures its token, THEN the operator onboards — gets
+    # token_status=existing back: a call that minted NOTHING. The old output
+    # printed the fresh-mint line for it, and an operator reading that believes
+    # a once-only token was just delivered to somebody and goes looking for it.
+    # It does not exist. gpt-ops' #286 blocker: the fact must NOT depend on
+    # which ratification branch the row lands in — ratification state and mint
+    # state are two facts, and the mint one is the one that sends operators
+    # hunting for a credential that was never delivered.
+    no_mint = (" — token_status=existing, NO token minted on this call; the "
+               "once-only token was delivered at first registration")
+    existing = body.get("token_status") == "existing"
     if body.get("registered_unratified") is False:
         print_safe(
             f"      ok (already ratified — peer existed pre-Phase-5.5 or was "
-            f"witness-flipped already)"
+            f"witness-flipped already{no_mint if existing else ''})"
         )
-    elif body.get("token_status") == "existing":
-        # >>> A RE-REGISTER IS NOT A MINT, AND THE LINE MUST SAY SO. <<<
-        # Demonstrated 2026-08-21 (journey walkthrough): the cell-first order —
-        # cell self-registers and captures its token, THEN the operator onboards —
-        # lands here, and the old output printed the fresh-mint line
-        # "ok (registered_unratified=true)" for a call that minted NOTHING. An
-        # operator reading that believes a once-only token was just delivered to
-        # somebody and goes looking for it. It does not exist. Success-shaped
-        # silence about "nothing changed" is the failure family this verb's own
-        # checklist (#464) was built to kill.
-        print_safe(
-            f"      ok (already registered — token_status=existing, NO token "
-            f"minted on this call; the once-only token was delivered at first "
-            f"registration)"
-        )
+    elif existing:
+        print_safe(f"      ok (already registered{no_mint})")
     else:
         print_safe(f"      ok (registered_unratified=true)")
 
