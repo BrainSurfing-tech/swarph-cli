@@ -603,11 +603,14 @@ def _unit_identity(unit: str) -> "str | None":
     Returns None for a unit naming neither -- the caller must treat that as
     NOT ATTRIBUTABLE (a third state), never fold it into "not mine".
     """
-    out = subprocess.run(
-        ["systemctl", "show", unit, "-p", "ExecStart", "-p", "Environment"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
-    text = out.stdout or ""
+    try:
+        out = subprocess.run(
+            ["systemctl", "show", unit, "-p", "ExecStart", "-p", "Environment"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        text = out.stdout or ""
+    except OSError:
+        text = ""
     m = re.search(r"--as[\s=]+([\w.-]+)", text)
     if m:
         return m.group(1)
@@ -629,10 +632,13 @@ def _unit_names_this_cell(unit: str, self_name: str) -> bool:
 def _unit_exists(unit: str) -> bool:
     """Whether systemd knows this unit at all — used by the guard suite to tell
     a real negative from a vacuous one (no unit to misattribute is not a pass)."""
-    out = subprocess.run(
-        ["systemctl", "list-unit-files", unit, "--no-legend", "--no-pager"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+    try:
+        out = subprocess.run(
+            ["systemctl", "list-unit-files", unit, "--no-legend", "--no-pager"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+    except OSError:
+        return False
     if unit in (out.stdout or ""):
         return True
     # A unit can be loaded without a unit FILE (runtime/transient), so ask the
@@ -680,11 +686,14 @@ def _partition_units(self_name: str) -> tuple:
     """
     mine = [f"swarph-monitor@{self_name}.service"]
     unattributable = []
-    listing = subprocess.run(
-        ["systemctl", "list-units", "swarph-monitor*", "--all",
-         "--no-legend", "--no-pager", "--plain"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+    try:
+        listing = subprocess.run(
+            ["systemctl", "list-units", "swarph-monitor*", "--all",
+             "--no-legend", "--no-pager", "--plain"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+    except OSError:
+        return mine, unattributable
     for line in (listing.stdout or "").splitlines():
         name = line.split()[0] if line.split() else ""
         if not name.endswith(".service") or name in mine:
@@ -758,10 +767,13 @@ def _classify_drain_failure(self_name: str, pidfile_status: str,
 
     units, unattributable = _partition_units(self_name)
     for unit in units:
-        probe = subprocess.run(
-            ["systemctl", "is-active", unit], capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-        )
+        try:
+            probe = subprocess.run(
+                ["systemctl", "is-active", unit], capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
+        except OSError:
+            continue
         if probe.returncode == 0 and probe.stdout.strip() == "active":
             try:
                 journal = subprocess.run(
@@ -785,10 +797,13 @@ def _classify_drain_failure(self_name: str, pidfile_status: str,
     # calling it absent asserts more than the evidence carries. CANNOT_EVALUATE
     # in the shape this verb can express (lab-ovh, DM 25772).
     for unit in unattributable or []:
-        probe = subprocess.run(
-            ["systemctl", "is-active", unit], capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-        )
+        try:
+            probe = subprocess.run(
+                ["systemctl", "is-active", unit], capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
+        except OSError:
+            continue
         if probe.returncode == 0 and probe.stdout.strip() == "active":
             return "supervisor_unattributable"
 
