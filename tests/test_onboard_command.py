@@ -189,6 +189,93 @@ def test_run_onboard_happy_path(monkeypatch, tmp_path, capsys):
     assert "[manual]" in out
 
 
+def test_run_onboard_reports_reregister_as_existing_not_fresh_mint(
+    monkeypatch, tmp_path, capsys
+):
+    """>>> JOURNEY-WALKTHROUGH FINDING, 2026-08-21. <<< Onboarding an ALREADY-
+    REGISTERED peer printed "ok (registered_unratified=true)" — the fresh-mint
+    line — for what the gateway answered as token_status=existing: no token
+    minted, nothing changed. The operator reading that line believes a once-only
+    token was just delivered to somebody. It was not; the cell-first order (cell
+    self-registers, THEN operator onboards) is exactly the flow that hits this,
+    and the ladder's own doctrine applies: a success-shaped line that hides
+    "nothing happened" trains operators to look for a token that does not exist.
+    """
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    reregister_body = {
+        "status": "registered",
+        "name": "test-peer",
+        "registered_at": "2026-05-08T20:00:00Z",
+        "ratified": False,
+        "registered_unratified": True,
+        "peer_token": None,
+        "token_status": "existing",
+    }
+    monkeypatch.setattr(
+        onboard, "_post_json", _mock_post_factory(register_body=reregister_body)[0]
+    )
+    import swarph_shared
+
+    monkeypatch.setattr(
+        swarph_shared, "verify_subscription_setup", lambda: True, raising=False
+    )
+
+    rc = onboard.run_onboard(
+        ["test-peer", "--gateway", "http://localhost:8788",
+         "--state-dir", str(tmp_path / "state")]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "token_status=existing" in out, (
+        "a re-register must SAY it minted nothing — the fresh-mint line is a lie "
+        "about a once-only credential"
+    )
+    (Path(tempfile.gettempdir()) / "test-peer-handshake.md").unlink(missing_ok=True)
+
+
+def test_run_onboard_already_ratified_reregister_STILL_names_the_no_mint(
+    monkeypatch, tmp_path, capsys
+):
+    """>>> gpt-ops' BLOCKER ON #286. <<< token_status was checked AFTER
+    registered_unratified, so an already-RATIFIED re-register took the first
+    branch and printed only "already ratified" — the no-token-minted fact was
+    swallowed by branch order. The ratification state and the mint state are
+    TWO facts; a re-register must report the mint one regardless of which
+    ratification branch it lands in."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    ratified_reregister_body = {
+        "status": "registered",
+        "name": "test-peer",
+        "registered_at": "2026-05-08T20:00:00Z",
+        "ratified": True,
+        "registered_unratified": False,
+        "peer_token": None,
+        "token_status": "existing",
+    }
+    monkeypatch.setattr(
+        onboard, "_post_json",
+        _mock_post_factory(register_body=ratified_reregister_body)[0],
+    )
+    import swarph_shared
+
+    monkeypatch.setattr(
+        swarph_shared, "verify_subscription_setup", lambda: True, raising=False
+    )
+
+    rc = onboard.run_onboard(
+        ["test-peer", "--gateway", "http://localhost:8788",
+         "--state-dir", str(tmp_path / "state")]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "already ratified" in out
+    assert "token_status=existing" in out, (
+        "the no-mint fact must survive the already-ratified branch — branch "
+        "order must not decide which fact the operator sees"
+    )
+    (Path(tempfile.gettempdir()) / "test-peer-handshake.md").unlink(missing_ok=True)
+
+
 def test_run_onboard_resolves_alias(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     fake, captured = _mock_post_factory()
