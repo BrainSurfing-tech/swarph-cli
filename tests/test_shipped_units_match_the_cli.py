@@ -205,8 +205,26 @@ def _pinned_gateway_values(text: str) -> list:
 
 
 def _has_execstart_gateway_flag(text: str) -> bool:
+    # >>> UNCOMMENT FIRST, THEN JOIN — THE OTHER ORDER FAILS *SILENT*. <<<
+    # (drop-on-meta-edge, review of PR #283, battery re-run here before taking it.)
+    # Joining first lets a COMMENT ending in a backslash swallow the real directive
+    # beneath it: the two lines become one starting with '#', and the uncomment pass
+    # then deletes the ExecStart along with the comment.
+    #
+    #     # a note ending in a backslash \
+    #     ExecStart=/x/swarph monitor --gateway http://x    <- guard returned False
+    #
+    # Findings 1 and 2 on this file were a guard that MISSED a shape and one that
+    # FIRED on legal input. This one goes QUIET ON A REAL PIN — the only failure of
+    # the three that is invisible. Reachability is highest in THIS file, which now
+    # carries a fourteen-line comment block and a commented `# Environment=` example;
+    # a commented-out multi-line ExecStart example is the natural next addition.
+    #
+    # Uncommenting first is safe for the continuation case: a real multi-line
+    # ExecStart contains no '#' lines, and a commented-out block has '#' on every
+    # line, so removing them leaves nothing to join.
     return any("--gateway" in l
-               for l in _uncommented(_join_continuations(text)).splitlines()
+               for l in _join_continuations(_uncommented(text)).splitlines()
                if l.startswith("ExecStart="))
 
 
@@ -328,3 +346,23 @@ def test_a_quoted_REAL_pin_is_still_caught():
     """Stripping quotes must not become a hole: the quoted form of a real address is
     still a pin."""
     assert _pinned_gateway_values('Environment="MESH_GATEWAY_URL=http://lab-ovh:8788"\n')
+
+
+def test_a_comment_ending_in_a_backslash_does_not_swallow_the_next_directive():
+    """>>> THE ONLY ONE OF THE THREE #283 FINDINGS WHOSE FAILURE IS SILENT. <<<
+
+    A missed shape and a false positive both announce themselves eventually — one on
+    the next review, one on the next red run. A guard that goes QUIET on a real pin
+    announces nothing at all, and is indistinguishable from a clean file.
+    """
+    unit = ("# a note ending in a backslash \\\n"
+            "ExecStart=/x/swarph monitor --gateway http://lab-ovh:8788\n")
+    assert _has_execstart_gateway_flag(unit)
+
+
+def test_a_commented_out_multiline_execstart_is_still_ignored():
+    """The reorder must not turn commented EXAMPLES into failures — the unit carries
+    prose about --gateway on purpose, and a guard that reds on it gets deleted."""
+    unit = ("# ExecStart=/x/swarph \\\n"
+            "#   --gateway http://x\n")
+    assert not _has_execstart_gateway_flag(unit)
