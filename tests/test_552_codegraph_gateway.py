@@ -87,9 +87,10 @@ def test_503_is_index_absent_not_an_empty_result(monkeypatch):
     monkeypatch.setattr("swarph_cli.commands.mesh._resolve_token", lambda *a, **k: "tok")
     monkeypatch.setattr("swarph_cli.commands.mesh._post_json",
                         lambda url, body, token, **kw: (503, {"detail": "codegraph index not available"}))
-    rows, present = cg._query_via_gateway("http://gw:8788", "edge", 8, None)
+    rows, present, freshness = cg._query_via_gateway("http://gw:8788", "edge", 8, None)
     assert rows == []
     assert present is False, "a 503 must report index-absent, NOT an empty result set"
+    assert freshness == [], "there is no index, so there is nothing to be fresh or stale"
 
 
 def test_gateway_error_raises_rather_than_returning_empty(monkeypatch):

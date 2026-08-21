@@ -281,8 +281,25 @@ def _query_via_gateway(gateway: str, query: str, limit: int, token_file):
     bearer token and cannot be self-asserted the way `--caller-cell` can here.
     So the relayed path is strictly *less* spoofable than the local one.
 
-    Returns (rows, index_present). index_present is False when the SERVER says
-    503 -- the availability axis, kept distinct from an empty result.
+    Returns (rows, index_present, freshness).
+
+    index_present is False when the SERVER says 503 -- the availability axis, kept
+    distinct from an empty result.
+
+    >>> WE DELIBERATELY IGNORE THE BODY'S `index_present` FIELD. <<< (drop, review of
+    PR #280, measured against the live endpoint.) The endpoint hardcodes it True on
+    its only 200 path and raises 503 otherwise, so on the wire the field carries no
+    information. The 503 IS the signal. A later "improvement" that reads the body
+    field instead would be branching on a constant and would silently stop detecting
+    the very thing it appears to check.
+
+    `freshness` is a list of per-repo dicts -- repo, indexed_at, index_age_hours,
+    stale, basis. The first cut of this relay DROPPED it, which meant the automatic
+    grep hook warned about a stale index while the HAND-TYPED verb did not -- and the
+    hand-typed verb is the consumer this relay was built for, because that is how
+    droplet hit the original problem. Card #193 exists because this index has run
+    BACKWARD before, so a stale index answering confidently is an OBSERVED failure,
+    not a hypothetical.
     """
     from swarph_cli.commands.mesh import _post_json, _resolve_token  # local import: keeps
     # the local-only path free of any mesh dependency, so an offline cell still works.
@@ -292,10 +309,11 @@ def _query_via_gateway(gateway: str, query: str, limit: int, token_file):
     body = {"query": query, "limit": max(1, min(int(limit), 25))}
     status, payload = _post_json(gateway.rstrip("/") + "/codegraph", body, token)
     if status == 503:
-        return [], False
+        return [], False, []
     if status >= 400:
         raise RuntimeError(f"gateway returned {status}: {str(payload)[:160]}")
-    return (payload or {}).get("results", []), True
+    payload = payload or {}
+    return payload.get("results", []), True, (payload.get("freshness") or [])
 
 
 def run_codegraph(argv) -> int:
@@ -319,9 +337,15 @@ def run_codegraph(argv) -> int:
 
     gateway = "" if a.local else _resolve_gateway(a.gateway)
     source = "local"
+    # The LOCAL path computes no freshness -- the index file is right there and the
+    # hook that used to state its age reads the mtime itself. Only the relayed path
+    # receives it, and only the relayed path can be silently answering from a store
+    # the user cannot see.
+    freshness = []
     if gateway:
         try:
-            rows, index_present = _query_via_gateway(gateway, a.query, a.limit, a.token_file)
+            rows, index_present, freshness = _query_via_gateway(
+                gateway, a.query, a.limit, a.token_file)
             source = "gateway"
         except Exception as exc:  # noqa: BLE001
             # >>> LOUD, NEVER A SILENT FALL BACK TO LOCAL. <<< A relay failure that
@@ -336,6 +360,18 @@ def run_codegraph(argv) -> int:
         rows = structural_query(a.query, index_path=a.index,
                                 caller_cell=a.caller_cell, limit=a.limit)
         index_present = os.path.exists(os.path.expanduser(a.index))
+
+    stale = [f for f in freshness if f.get("stale")]
+    if stale:
+        # >>> A STALE INDEX ANSWERING CONFIDENTLY IS THE #193 FAILURE, AND IT LOOKS
+        # EXACTLY LIKE A GOOD ANSWER. <<< stderr, not stdout: the rows are real and a
+        # machine consumer should still get them unmodified. The user needs to know
+        # the line numbers may have moved; the parser does not.
+        for f in stale:
+            print(f"swarph codegraph: STALE INDEX for {f.get('repo', '?')} — "
+                  f"{f.get('index_age_hours', 0):.1f}h old ({f.get('basis', 'unknown basis')}); "
+                  f"verify line numbers against the file before acting on them.",
+                  file=sys.stderr)
 
     if not index_present:
         # >>> STDERR, AND --json STAYS A BARE LIST. <<< .claude/hooks/codegraph-on-grep.sh
