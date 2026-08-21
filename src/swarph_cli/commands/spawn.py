@@ -2802,8 +2802,11 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         and args.cell is None
         and discover_cell_in_cwd() is None
     ):
+        # Usage-on-empty is a REFUSAL, not a success (#319): nothing was
+        # spawned, and a 0 tells `set -e` and CI that something was. 2, the
+        # same convention init's refusals use.
         print(_USAGE, file=sys.stderr)
-        return 0
+        return 2
 
     if not args.no_banner and not args.dry_run:
         _print_banner()
