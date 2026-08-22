@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import stat
 import sys
+
+import swarph_cli
 from pathlib import Path
 
 from swarph_cli.commands import mesh
@@ -173,7 +175,9 @@ def test_mesh_register_mints_token_file_mode_600(monkeypatch, tmp_path, capsys):
     assert captured["body"] == {
         "name": "gpt-ops",
         "url": "http://gpt-ops:8787",
-        "capabilities": {"can_claim_tasks": True, "role": "codex"},
+        "capabilities": {"can_claim_tasks": True, "role": "codex",
+                         # #535: every register reports the version it runs.
+                         "swarph_cli_version": swarph_cli.__version__},
     }
     token_file = tmp_path / ".config" / "swarph" / "gpt-ops.peer_token"
     assert token_file.read_text().strip() == "minted-secret-token"

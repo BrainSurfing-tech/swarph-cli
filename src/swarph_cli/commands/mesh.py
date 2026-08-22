@@ -28,6 +28,8 @@ import sys
 import time
 import urllib.error
 import urllib.parse
+
+import swarph_cli
 import urllib.request
 from collections import deque
 from collections.abc import MutableMapping
@@ -136,7 +138,41 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow register when a local per-peer token file already exists",
     )
+    register.add_argument(
+        "--replace",
+        action="store_true",
+        help="REPLACE the advertised capability blob with exactly the "
+             "--capability keys given (sends full=true). Default is MERGE: "
+             "the peer's currently-registered keys are read first and "
+             "re-submitted, so updating one field does not destroy the rest "
+             "(#124).",
+    )
     _add_common(register)
+
+    peers = sub.add_parser(
+        "peers",
+        help="list registered peers with their reported swarph_cli_version; "
+             "--stale-than X names only peers REPORTING older than X, and "
+             "names the UNREPORTED separately (#535)",
+    )
+    peers.add_argument(
+        "--stale-than", default=None, metavar="VERSION",
+        help="list only peers whose reported swarph_cli_version is older "
+             "than VERSION; peers with no reported version are named "
+             "UNREPORTED, never counted as current",
+    )
+    peers.add_argument(
+        "--as", dest="self_name", default=None,
+        help="optional peer identity. IF OMITTED the ambient shared token "
+             "(MESH_GATEWAY_TOKEN) is used — a registry read does not require "
+             "a self identity. Pass --as to use a stored per-peer token instead.",
+    )
+    peers.add_argument(
+        "--gateway",
+        default=os.environ.get("MESH_GATEWAY_URL", _DEFAULT_GATEWAY),
+        help="mesh-gateway base URL",
+    )
+    peers.add_argument("--token-file", default=None, help="explicit bearer token file")
 
     sidecar = sub.add_parser("sidecar", help="poll inbox and wake a tmux cell")
     sidecar.add_argument("--tmux-target", default=None, help="tmux target pane")
@@ -776,11 +812,43 @@ def _run_register(args: argparse.Namespace) -> int:
     for spec in args.capability:
         key, value = _parse_capability(spec)
         caps[key] = value
+    # >>> #124, CLIENT HALF: MERGE OVER THE STORED BLOB BY DEFAULT. <<< The
+    # gateway replaces capabilities wholesale, so submitting only the keys
+    # this invocation cares about silently destroys the rest (gemini-
+    # researcher's role/agent_type, lost to a model_default update). Read
+    # the peer's currently-registered blob and re-submit it merged:
+    # submitted keys override, stored-only keys survive. --replace opts into
+    # the deliberate wholesale replace (full=true, which the gateway's #124
+    # guard accepts without its 409). A register that CANNOT READ the
+    # registry — first registration, gateway unreachable — proceeds with
+    # what it has: the read must never BLOCK the write; there is nothing to
+    # destroy on a row that does not exist yet.
+    gateway = args.gateway.rstrip("/")
+    stored_caps: dict = {}
+    found_stored_caps = False
+    if not args.replace:
+        gstatus, gpayload = _http_get_json(f"{gateway}/peers/{self_name}", token)
+        if gstatus == 200 and isinstance(gpayload.get("capabilities"), dict):
+            stored_caps = gpayload["capabilities"]
+            found_stored_caps = True
+    if args.replace:
+        merged = caps or {"can_claim_tasks": True}
+    elif found_stored_caps or caps:
+        merged = {**stored_caps, **caps}
+    else:
+        merged = {"can_claim_tasks": True}
+    # #535: report what version this cell RUNS, on every register — a
+    # SUBMITTED key, so the merge refreshes it on re-register and preserves
+    # it across partial updates. Without a stored version field, "who is
+    # stale" is unanswerable and "the fix propagates" is unfalsifiable.
+    merged["swarph_cli_version"] = swarph_cli.__version__
     body = {
         "name": self_name,
         "url": args.url or f"http://{self_name}:8787",
-        "capabilities": caps or {"can_claim_tasks": True},
+        "capabilities": merged,
     }
+    if args.replace:
+        body["full"] = True
     status, payload = _post_json(
         f"{args.gateway.rstrip('/')}/peers/register",
         body,
@@ -803,6 +871,96 @@ def _run_register(args: argparse.Namespace) -> int:
         f"registered {payload.get('name', self_name)} "
         f"token_status={token_status or 'existing'}; no new token returned"
     )
+    return 0
+
+
+def _version_tuple(text: object) -> Optional[tuple[int, ...]]:
+    """Parse "0.45.1" into (0, 45, 1). Returns None for anything that is not
+    a dotted-numeric version — an unparseable version is UNMEASURABLE, not
+    current (#535's falsifier clause)."""
+    if not isinstance(text, str):
+        return None
+    parts = text.strip().split(".")
+    if not parts or any(not p.isdigit() for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
+
+
+def _version_is_stale(reported: object, cutoff: str) -> Optional[bool]:
+    """True = reported is older than cutoff; False = current-or-newer;
+    None = unmeasurable (missing/unparseable). Numeric tuple compare, so
+    0.45.10 > 0.45.9 — lexicographic would call 0.9.0 newer than 0.10.0."""
+    have, want = _version_tuple(reported), _version_tuple(cutoff)
+    if have is None or want is None:
+        return None
+    width = max(len(have), len(want))
+    return have + (0,) * (width - len(have)) < want + (0,) * (width - len(want))
+
+
+def _run_peers(args: argparse.Namespace) -> int:
+    """#535: answer "which peers run older than X" from the STORED field —
+    never by asking each cell out of band, never by assuming.
+
+    A registry READ does not require a self identity: an operator asking
+    "who is stale" on any box with the shared token is not acting AS a
+    cell. --as still works (its peer token outranks the ambient one)."""
+    from swarph_cli.tokens import resolve_token
+    resolution = resolve_token(args.self_name, args.token_file,
+                               identity_is_explicit=bool(args.self_name))
+    if resolution is None:
+        print("swarph mesh peers: no token (set MESH_GATEWAY_TOKEN, pass "
+              "--token-file, or --as a peer with a stored token)",
+              file=sys.stderr)
+        return 2
+    token = resolution.token
+    gateway = args.gateway.rstrip("/")
+    status, payload = _http_get_json(f"{gateway}/peers", token)
+    if status < 200 or status >= 300:
+        detail = payload.get("detail", "<gateway error>") if isinstance(payload, dict) else "<gateway error>"
+        print(f"swarph mesh peers: gateway {status}: {detail}", file=sys.stderr)
+        return 1
+    peers = payload.get("peers") if isinstance(payload, dict) else None
+    if not isinstance(peers, list):
+        print("swarph mesh peers: unexpected /peers shape (no peer list)",
+              file=sys.stderr)
+        return 1
+
+    cutoff = args.stale_than
+    if cutoff is not None and _version_tuple(cutoff) is None:
+        print(f"swarph mesh peers: --stale-than {cutoff!r} is not a "
+              f"dotted-numeric version", file=sys.stderr)
+        return 2
+
+    stale, unreported, current = [], [], []
+    for p in peers:
+        if not isinstance(p, dict) or not isinstance(p.get("name"), str):
+            continue
+        caps = p.get("capabilities")
+        version = caps.get("swarph_cli_version") if isinstance(caps, dict) else None
+        version_is_valid = _version_tuple(version) is not None
+        verdict = _version_is_stale(version, cutoff) if cutoff else None
+        if cutoff and verdict is True:
+            stale.append((p["name"], version))
+        elif not version_is_valid:
+            unreported.append(p["name"])
+        else:
+            current.append((p["name"], version))
+
+    if cutoff:
+        for name, version in stale:
+            print(f"STALE       {name}  reports {version} (< {cutoff})")
+        for name in unreported:
+            # Named, never silently counted as current: absence of the field
+            # is unmeasurability, not health — the falsifier clause.
+            print(f"UNREPORTED  {name}  (no swarph_cli_version — unmeasurable, "
+                  f"NOT known-current)")
+        print(f"{len(stale)} stale, {len(unreported)} unreported, "
+              f"{len(current)} current (cutoff {cutoff})")
+    else:
+        for name, version in current:
+            print(f"{name}  {version or 'UNREPORTED'}")
+        for name in unreported:
+            print(f"{name}  UNREPORTED")
     return 0
 
 
@@ -1937,6 +2095,8 @@ def run_mesh(argv: list[str]) -> int:
             return _run_inbox(args)
         if args.command == "register":
             return _run_register(args)
+        if args.command == "peers":
+            return _run_peers(args)
         if args.command == "sidecar":
             return _run_sidecar(args)
         parser.error(f"unknown command: {args.command}")
