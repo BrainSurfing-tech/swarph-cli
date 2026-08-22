@@ -1,6 +1,29 @@
 # Changelog
 
-## 0.46.0 — 2026-08-21
+## 0.46.0 — 2026-08-22
+
+- **The close act gets its verb: `swarph board obligations close` (#562,
+  #295).** Closing an obligation is a distinct act naming outcome and
+  evidence — a `mesh reply` in the thread no longer closes anything, and the
+  mint-time guidance and reply help say so. Whitespace evidence is refused
+  client-side; the gateway's refusals propagate with their detail intact.
+
+- **Register merges capabilities by default and reports its version (#124,
+  #535, #294).** Re-registering no longer clobbers the stored blob wholesale —
+  submitted keys override, stored-only keys survive, and an intentionally
+  empty blob stays empty. Every register reports `swarph_cli_version`, and
+  `mesh peers --stale-than X` names who runs older (the unreported named
+  separately, never counted as current).
+
+- **Windows membrane fixes from the #549 validation (#296).** Hook stdin
+  parsing strips UTF-8 BOMs before `json.loads` (PowerShell 5.1 pipes prefix
+  a double BOM, and the fail-open invariant was an invisible no-op), and
+  `_cell()` prefers `SWARPH_SELF` over `SWARPH_CELL` — self-identity outranks
+  an ambient, possibly-leaked env var.
+
+- **Parser refusals exit nonzero across the board (#319, #293).** `init`,
+  `spawn`, and `onboard` all exit 2 on unknown flags, with the coverage to
+  keep it so.
 
 - **PostCompact timeline recall + memory emit-on-write (#278).** A PostCompact
   hook prints the last 7 days of the shared TIMELINE after a compaction — the
