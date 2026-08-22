@@ -161,7 +161,18 @@ def _build_parser() -> argparse.ArgumentParser:
              "than VERSION; peers with no reported version are named "
              "UNREPORTED, never counted as current",
     )
-    _add_common(peers)
+    peers.add_argument(
+        "--as", dest="self_name", default=None,
+        help="optional peer identity. IF OMITTED the ambient shared token "
+             "(MESH_GATEWAY_TOKEN) is used — a registry read does not require "
+             "a self identity. Pass --as to use a stored per-peer token instead.",
+    )
+    peers.add_argument(
+        "--gateway",
+        default=os.environ.get("MESH_GATEWAY_URL", _DEFAULT_GATEWAY),
+        help="mesh-gateway base URL",
+    )
+    peers.add_argument("--token-file", default=None, help="explicit bearer token file")
 
     sidecar = sub.add_parser("sidecar", help="poll inbox and wake a tmux cell")
     sidecar.add_argument("--tmux-target", default=None, help="tmux target pane")
