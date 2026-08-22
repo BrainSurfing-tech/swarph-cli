@@ -377,6 +377,25 @@ def _build_parser() -> argparse.ArgumentParser:
     cr = cards.add_parser("ready", help="flag a card ready-to-advance (move_ready) for the orchestrator")
     cr.add_argument("id", type=int); cr.add_argument("--clear", action="store_true", help="unset move_ready")
     cr.add_argument("--json", action="store_true"); _add_common(cr)
+
+    obl = top.add_parser(
+        "obligations",
+        help="card obligations — the close act (#562)").add_subparsers(
+        dest="command", required=True)
+    oc = obl.add_parser(
+        "close",
+        help="CLOSE an obligation: the DISTINCT ACT that records the check's "
+             "outcome plus the evidence observed. A thread reply does NOT "
+             "close an obligation (#562) — this does")
+    oc.add_argument("id", type=int, help="the obligation id")
+    oc.add_argument("--outcome", required=True,
+                    choices=("pass", "fail", "cannot_evaluate"),
+                    help="the accept check's OUTCOME")
+    oc.add_argument("--evidence", required=True,
+                    help="what you OBSERVED running the check — whitespace is "
+                         "refused: whitespace evidence is the vibe-close this "
+                         "endpoint exists to kill")
+    oc.add_argument("--json", action="store_true"); _add_common(oc)
     return p
 
 
@@ -424,6 +443,35 @@ def run_board(argv: list[str]) -> int:
         if args.command == "add":
             st, d = _post_json(f"{gw}/board/projects", _project_add_payload(self_name, args.slug, args.title, goal=args.goal), token)
             return _out(st, d, lambda x: f"created project #{x.get('id')} ({x.get('slug')})", aj)
+
+    if args.group == "obligations":
+        if args.command == "close":
+            # #562's CLI half: the explicit close act. The gateway guards the
+            # identity (holder, creator, or board orchestrator) and refuses a
+            # second close; the CLI's job is to refuse what it can see —
+            # whitespace evidence — and to propagate the gateway's refusals
+            # with their detail intact.
+            evidence = args.evidence.strip()
+            if not evidence:
+                print("swarph board obligations close: --evidence is "
+                      "whitespace-only — the close act records what you "
+                      "OBSERVED, and nothing was observed", file=sys.stderr)
+                return 2
+            st, d = _post_json(
+                f"{gw}/board/obligations/{args.id}/close",
+                {"outcome": args.outcome, "evidence": evidence}, token)
+            if st < 200 or st >= 300:
+                detail = d.get("detail", "<gateway error>") if isinstance(d, dict) else "<gateway error>"
+                print(f"swarph board obligations close: gateway {st}: {detail}",
+                      file=sys.stderr)
+                return 1
+            if aj:
+                print(json.dumps(d, indent=2))
+            else:
+                print(f"obligation #{d.get('id', args.id)} CLOSED by "
+                      f"{d.get('closed_by', self_name)} — outcome: "
+                      f"{d.get('close_outcome', args.outcome)}")
+            return 0
 
     if args.group == "cards":
         if args.command == "list":
