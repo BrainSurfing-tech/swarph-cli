@@ -82,7 +82,8 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_common(send)
 
     reply = sub.add_parser(
-        "reply", help="reply to a DM IN ITS OWN THREAD (closes a #307 obligation)")
+        "reply", help="reply to a DM IN ITS OWN THREAD (does NOT close the "
+                      "obligation — the close act is `board obligations close`, #562)")
     reply.add_argument("message_id", type=int, help="the DM being replied to")
     reply.add_argument("--kind", default="answer",
                        help="message kind (default: answer). NOT gated — a reply is "
@@ -526,12 +527,15 @@ def _find_inbox_message(gateway: str, token: str, self_name: str,
 
 
 def _run_reply(args: argparse.Namespace) -> int:
-    """Reply to a DM IN ITS THREAD, which is what lets #307 close an obligation.
+    """Reply to a DM IN ITS THREAD. Since #562 this does NOT close the
+    obligation — closing is the distinct act `board obligations close`
+    (POST /board/obligations/{id}/close); the reply path only REMINDS via
+    the open_obligations field.
 
     >>> A REPLY IS UNIVERSAL ACROSS KINDS, DELIBERATELY. <<< The spec's constraint:
     not gated by kind. Gating would mean a peer could owe you an answer on a DM whose
-    kind nobody thought to allow, and the obligation would be unclosable through the
-    product — the exact "waiting on a seat" shape #307 exists to kill.
+    kind nobody thought to allow, and the obligation would be unanswerable through
+    the product — the exact "waiting on a seat" shape #307 exists to kill.
 
     >>> AND A THREADLESS REPLY MUST NOT REPORT THE SAME LINE AS A THREADED ONE. <<<
     Most DMs carry no thread. Refusing them would make this verb useless for the
