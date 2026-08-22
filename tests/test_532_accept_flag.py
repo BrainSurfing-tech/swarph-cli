@@ -44,6 +44,12 @@ def test_format_ask_still_names_missing_timeout():
     assert "NO TIMEOUT" in out
 
 
+def test_format_ask_points_at_the_explicit_close_verb():
+    out = board._format_ask(_d(accept="PASS = a | FAIL = b"))
+    assert "swarph board obligations close 7" in out
+    assert "`mesh reply`" not in out
+
+
 # ── the marker regex: drop-on-meta-edge's seven phrases, pinned in BOTH repos ──
 
 def test_fail_marker_regex_two_sided_truth():

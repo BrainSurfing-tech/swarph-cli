@@ -284,9 +284,10 @@ def _format_ask(d) -> str:
     return (f"obligation #{d.get('id')} on card #{d.get('card_id')}: "
             f"{d.get('holder')} owes it, status={d.get('status')}, {deadline}\n"
             f"  {falsifier}\n"
-            f"  thread {d.get('thread_uuid')} — closes on the holder's "
-            f"`mesh reply` IN that thread; a plain `mesh send` cannot close it "
-            f"(#509 — the VERB is the mechanism, the thread is where it lands)")
+            f"  thread {d.get('thread_uuid')} — work lands IN that thread; CLOSE "
+            f"it with `swarph board obligations close {d.get('id')}` plus an "
+            f"outcome and evidence; a plain `mesh send` cannot close it "
+            f"(#509/#562 — the VERB is the mechanism, the thread is where it lands)")
 
 
 def _format_thread(data) -> str:
