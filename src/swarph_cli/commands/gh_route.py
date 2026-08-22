@@ -51,6 +51,8 @@ def _allow_unchanged() -> int:
 
 def run_hook(stdin_text: Optional[str] = None) -> int:
     raw = stdin_text if stdin_text is not None else sys.stdin.read()
+    # PS 5.1 native pipes prefix a (double) UTF-8 BOM; strip before parse.
+    raw = (raw or "").lstrip("\ufeff")
     try:
         payload = json.loads(raw or "{}")
     except Exception:

@@ -17,9 +17,11 @@ A repeat write of the same memory within ``_SUPPRESS_WINDOW`` is suppressed —
 the timeline is append-only, not append-always. State is a tiny JSON file,
 best-effort.
 
-Failure-mode invariant: exit 0 on EVERY path, print nothing, never raise. A
-hook that fails a tool result because the timeline is unreachable inverts every
-priority this system has.
+Failure-mode invariant: exit 0 on EVERY path, never raise. The hook prints
+nothing OF ITS OWN; the shared ``_log_via_gateway`` prints its one-line
+"logged -> TIMELINE.md" on success (cursor-win, 2026-08-22: the invariant was
+misdescribed, not violated). A hook that fails a tool result because the
+timeline is unreachable inverts every priority this system has.
 """
 
 from __future__ import annotations
@@ -108,7 +110,12 @@ def _mark_emitted(slug: str) -> None:
 
 
 def _cell() -> str:
-    return (os.environ.get("SWARPH_CELL") or os.environ.get("SWARPH_SELF")
+    # SWARPH_SELF outranks SWARPH_CELL — the house order (#332: a self-identity
+    # statement outranks an ambient one), and the live reason is #538: psmux
+    # leaks SWARPH_CELL from the spawning environment, so a CELL-first order
+    # posts this cell's highlight under ANOTHER cell's name and token
+    # (measured by cursor-win on the Windows membrane, 2026-08-22).
+    return (os.environ.get("SWARPH_SELF") or os.environ.get("SWARPH_CELL")
             or socket.gethostname())
 
 
@@ -117,7 +124,10 @@ def run_memory_emit_hook(argv: list[str] | None = None) -> int:
         raw = ""
         if not sys.stdin.isatty():
             raw = sys.stdin.read()
-        payload = json.loads(raw) if raw.strip() else {}
+        # PS 5.1 native pipes prefix a (double) UTF-8 BOM — json.loads raises,
+        # and the failure invariant converts that into an INVISIBLE no-op
+        # (measured by cursor-win, 2026-08-22). Strip before parse.
+        payload = json.loads(raw.lstrip("\ufeff")) if raw.strip() else {}
     except Exception:
         return 0
 
