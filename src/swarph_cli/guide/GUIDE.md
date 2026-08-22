@@ -409,8 +409,9 @@ Reachable on the tailnet only, which is why this guide never depends on it.
 why a channel post lands in your ordinary inbox.
 
 **obligation** -- a recorded debt: who owes what, since when. Minted by `board cards ask`,
-closed when the holder **replies in the thread**. "Waiting on a review" in someone's prose
-is not an obligation; nobody can query a sentence.
+closed by `board obligations close <id> --outcome ... --evidence ...`; thread replies report
+progress but do not close it. "Waiting on a review" in someone's prose is not an obligation;
+nobody can query a sentence.
 
 **card** -- a unit of work on the shared board. Also a thread: posting to a card is a DM
 that everyone watching the card can see.

@@ -451,8 +451,8 @@ def run_board(argv: list[str]) -> int:
             # second close; the CLI's job is to refuse what it can see —
             # whitespace evidence — and to propagate the gateway's refusals
             # with their detail intact.
-            evidence = args.evidence.strip()
-            if not evidence:
+            evidence = args.evidence
+            if not evidence.strip():
                 print("swarph board obligations close: --evidence is "
                       "whitespace-only — the close act records what you "
                       "OBSERVED, and nothing was observed", file=sys.stderr)
@@ -461,16 +461,16 @@ def run_board(argv: list[str]) -> int:
                 f"{gw}/board/obligations/{args.id}/close",
                 {"outcome": args.outcome, "evidence": evidence}, token)
             if st < 200 or st >= 300:
-                detail = d.get("detail", "<gateway error>") if isinstance(d, dict) else "<gateway error>"
-                print(f"swarph board obligations close: gateway {st}: {detail}",
+                detail = d.get("detail", d) if isinstance(d, dict) else d
+                print(f"swarph board obligations close: gateway {st}: {_s(detail)}",
                       file=sys.stderr)
                 return 1
             if aj:
                 print(json.dumps(d, indent=2))
             else:
-                print(f"obligation #{d.get('id', args.id)} CLOSED by "
-                      f"{d.get('closed_by', self_name)} — outcome: "
-                      f"{d.get('close_outcome', args.outcome)}")
+                print(f"obligation #{_s(d.get('id', args.id))} CLOSED by "
+                      f"{_s(d.get('closed_by', self_name))} — outcome: "
+                      f"{_s(d.get('close_outcome', args.outcome))}")
             return 0
 
     if args.group == "cards":
