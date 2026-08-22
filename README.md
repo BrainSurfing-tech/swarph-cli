@@ -138,6 +138,7 @@ swarph board cards thread <id> [--limit N]     # the card's conversation (a card
 swarph board cards say <id> --content "…" [--to <peer>] [--kind fyi|question|answer|status|unblock]
 swarph board cards ask <id> <holder> "<what>" [--timeout-hours N]   # MINT an obligation:
                                               # name who owes what as a ROW, not a sentence (#307)
+swarph board obligations close <id> --outcome <pass|fail|cannot_evaluate> --evidence "what you observed"
 ```
 
 `--project` accepts a numeric id **or** a slug (resolved via `projects list`). Note: card creation always starts at `proposed` (the gateway has no stage-on-create) — use `cards move` to advance.

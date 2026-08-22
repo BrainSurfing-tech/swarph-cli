@@ -22,6 +22,7 @@ swarph board cards add --project P --title TITLE [--body BODY] [--ai2] [--priori
 swarph board cards move <id> <stage> --as <me>
 swarph board cards assign <id> <assignee> --as <me>
 swarph board cards link <id> <key> <value> --as <me>
+swarph board obligations close <id> --outcome <pass|fail|cannot_evaluate> --evidence "what you observed" --as <me>
 ```
 
 Notes:
