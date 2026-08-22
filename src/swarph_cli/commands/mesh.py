@@ -814,13 +814,15 @@ def _run_register(args: argparse.Namespace) -> int:
     # destroy on a row that does not exist yet.
     gateway = args.gateway.rstrip("/")
     stored_caps: dict = {}
+    found_stored_caps = False
     if not args.replace:
         gstatus, gpayload = _http_get_json(f"{gateway}/peers/{self_name}", token)
         if gstatus == 200 and isinstance(gpayload.get("capabilities"), dict):
             stored_caps = gpayload["capabilities"]
+            found_stored_caps = True
     if args.replace:
         merged = caps or {"can_claim_tasks": True}
-    elif stored_caps or caps:
+    elif found_stored_caps or caps:
         merged = {**stored_caps, **caps}
     else:
         merged = {"can_claim_tasks": True}
@@ -899,7 +901,7 @@ def _run_peers(args: argparse.Namespace) -> int:
               "--token-file, or --as a peer with a stored token)",
               file=sys.stderr)
         return 2
-    token = resolution.token if hasattr(resolution, "token") else str(resolution)
+    token = resolution.token
     gateway = args.gateway.rstrip("/")
     status, payload = _http_get_json(f"{gateway}/peers", token)
     if status < 200 or status >= 300:
@@ -924,10 +926,11 @@ def _run_peers(args: argparse.Namespace) -> int:
             continue
         caps = p.get("capabilities")
         version = caps.get("swarph_cli_version") if isinstance(caps, dict) else None
+        version_is_valid = _version_tuple(version) is not None
         verdict = _version_is_stale(version, cutoff) if cutoff else None
         if cutoff and verdict is True:
             stale.append((p["name"], version))
-        elif version is None or verdict is None and cutoff:
+        elif not version_is_valid:
             unreported.append(p["name"])
         else:
             current.append((p["name"], version))

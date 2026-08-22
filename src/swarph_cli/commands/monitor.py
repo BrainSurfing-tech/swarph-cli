@@ -828,6 +828,7 @@ def _register_capabilities(self_name: str, gateway: str, token_file, caps: dict)
         url=None,
         capability=[f"{k}={json.dumps(v)}" for k, v in caps.items()],
         force=True,
+        replace=False,
         gateway=gateway,
         token_file=token_file,
     )
