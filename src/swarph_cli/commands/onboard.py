@@ -427,7 +427,7 @@ def _resolve_token(token_file_arg: Optional[str], *,
           "  To stand up YOUR OWN instead, no token required:\n"
           "      pip install 'swarph-cli[gateway]'\n"
           "      swarph gateway serve --port 8788 --db ~/.swarph/mesh.db\n"
-          "      swarph init <name>        # scaffold a cell\n"
+          "      swarph init <name> --provider <provider>  # scaffold a cell\n"
     )
 
 
