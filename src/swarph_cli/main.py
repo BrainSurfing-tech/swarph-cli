@@ -137,7 +137,12 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=(
             "verbs: " + ", ".join(sorted(_VERB_HANDLERS)) + "\n\n"
             "getting started:\n"
-            "  swarph init <name>        scaffold your own cell (no gateway needed)\n"
+            # #319: name the command that WORKS non-interactively — bare
+            # `swarph init <name>` prompts for --provider on a TTY but REFUSES
+            # in a script/CI pipe, and the doc must not disagree with the
+            # requirement where the disagreement is invisible to its author.
+            "  swarph init <name> --provider <provider>\n"
+            "                             scaffold your own cell (no gateway needed)\n"
             "  swarph spawn <name>       run it\n"
             "  swarph gateway serve      run your own mesh-gateway "
             "(needs: pip install 'swarph-cli[gateway]')\n"

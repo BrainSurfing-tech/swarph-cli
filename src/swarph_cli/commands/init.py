@@ -265,7 +265,13 @@ def run_init(argv: list[str]) -> int:
     # its own context); an operator running `swarph onboard` first mints the
     # token into a process that discards it, and the cell's later self-register
     # returns token_status=existing with nothing.
-    print(f"next:  from the CELL'S OWN context: `swarph mesh register --as {name}` "
+    # Scoped as CONDITIONAL (#319 d): a standalone outsider has no mesh and
+    # cannot ratify — the mesh path is named for the user who IS joining one,
+    # not presented as the next thing everyone must do. The outsider's next
+    # step is the `ready:` line above (swarph spawn), which works with zero
+    # mesh.
+    print(f"next:  if you're joining a mesh — from the CELL'S OWN context: "
+          f"`swarph mesh register --as {name}` "
           f"(mints + stores its once-only per-peer token, mode 600); then a witness "
           f"runs `swarph ratify {name}`. Status at any point: "
           f"`swarph onboard --check {name}`.")

@@ -250,7 +250,9 @@ def test_run_spawn_no_args_prints_usage(isolated_xdg, capsys, monkeypatch):
     monkeypatch.chdir(isolated_xdg)  # no ./cell.yaml here
     rc = run_spawn(argv=[])
     captured = capsys.readouterr()
-    assert rc == 0
+    # #319: usage-on-empty is a REFUSAL — nothing was spawned, and a 0 told
+    # `set -e` and CI that something was. 2, init's refusal convention.
+    assert rc == 2
     assert "swarph spawn" in captured.err.lower()
 
 
