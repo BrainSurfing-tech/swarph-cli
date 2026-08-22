@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import pytest
 
+import swarph_cli
 from swarph_cli.commands import mesh
 
 
@@ -68,8 +69,11 @@ def test_replace_flag_sends_full_true_and_only_the_submitted_caps(monkeypatch, t
                         "--replace", "--capability", "model_default=\"x\""])
     assert rc == 0
     assert captured["body"].get("full") is True
-    assert captured["body"]["capabilities"] == {"model_default": "x"}, (
-        "--replace is the deliberate wholesale replace — no merge")
+    submitted = captured["body"]["capabilities"]
+    assert submitted == {"model_default": "x",
+                         "swarph_cli_version": swarph_cli.__version__}, (
+        "--replace is the deliberate wholesale replace — no merge of STORED "
+        "keys (the version is always submitted, #535)")
 
 
 def test_unreadable_registry_proceeds_with_submitted_caps(monkeypatch, tmp_path):
@@ -80,7 +84,9 @@ def test_unreadable_registry_proceeds_with_submitted_caps(monkeypatch, tmp_path)
     rc = mesh.run_mesh(["register", "--as", "fresh-peer",
                         "--capability", "can_claim_tasks=true"])
     assert rc == 0
-    assert captured["body"]["capabilities"] == {"can_claim_tasks": True}
+    assert captured["body"]["capabilities"] == {
+        "can_claim_tasks": True,
+        "swarph_cli_version": swarph_cli.__version__}
 
 
 def test_no_capability_and_no_stored_keeps_the_bootstrap_default(monkeypatch, tmp_path):
@@ -88,9 +94,11 @@ def test_no_capability_and_no_stored_keeps_the_bootstrap_default(monkeypatch, tm
                         get_result=(404, {"detail": "unknown peer"}))
     rc = mesh.run_mesh(["register", "--as", "fresh-peer"])
     assert rc == 0
-    assert captured["body"]["capabilities"] == {"can_claim_tasks": True}, (
+    assert captured["body"]["capabilities"] == {
+        "can_claim_tasks": True,
+        "swarph_cli_version": swarph_cli.__version__}, (
         "the bootstrap default is for FIRST registrations — a peer with no "
-        "stored blob still advertises something")
+        "stored blob still advertises something (plus its version, #535)")
 
 
 def test_no_capability_with_stored_resubmits_stored_unchanged(monkeypatch, tmp_path):
@@ -100,4 +108,5 @@ def test_no_capability_with_stored_resubmits_stored_unchanged(monkeypatch, tmp_p
                         get_result=(200, {"capabilities": STORED}))
     rc = mesh.run_mesh(["register", "--as", "gemini-researcher", "--force"])
     assert rc == 0
-    assert captured["body"]["capabilities"] == STORED
+    assert captured["body"]["capabilities"] == {
+        **STORED, "swarph_cli_version": swarph_cli.__version__}

@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.46.0 — 2026-08-21
+
+- **PostCompact timeline recall + memory emit-on-write (#278).** A PostCompact
+  hook prints the last 7 days of the shared TIMELINE after a compaction — the
+  context the compaction just dropped, rehydrated from the fleet's own record
+  rather than a private summary. And a memory file write now emits a highlight
+  with its `[[pointer]]` automatically, so the timeline grows as a by-product
+  of remembering, not as a separate chore.
+
+- **`swarph hooks verify` (#462, #289).** Per-hook existence plus a swallow
+  audit: a hook that is missing, or present but unable to fire, is reported by
+  name instead of reading as armed on every dashboard while the cell goes deaf.
+
+- **Multi-membrane supervision, first slice (#544, #284).** A drain heartbeat
+  and a `heartbeat-check` verb — supervision becomes a product feature rather
+  than three membranes failing three ways with one signature.
+
+- **The onboarding journeys, walked and hardened (#286).** An end-to-end
+  walkthrough of init → register → ratify → onboard against a scratch gateway,
+  and the three client-side fixes it produced: the `/whoami` probe now reads a
+  404 as UNDETERMINED instead of prescribing a deregister for a healthy token;
+  a re-register reports `token_status=existing` on EVERY branch instead of
+  printing a fresh-mint line for a call that minted nothing; and `init`'s
+  next-steps name only verbs a fresh cell can actually reach — the phantom
+  `SWARPH_PEER_TOKEN_ADOPTION.md` pointer is gone.
+
+- **`board cards ask --accept` (#532, #272).** The falsifier mints WITH the
+  obligation, and `mesh reply` reports the close fact gated on the field's
+  presence (#525, #270) — plus the CLI surface that says when a thread post
+  closed an obligation (#285).
+
+- **Default gateway is the tailnet IP, not localhost (#546, #276)** — the
+  localhost default failed silently on every box that wasn't the gateway host.
+  Plus the encoding-class follow-ups: utf-8 on the remaining unencoded text
+  reads (#277), the fork-side SSO key read so warn-and-disable actually fires
+  (#550, #287), and `compress.py` (#287).
+
+- Fixes: the mint confirmation names the closing verb (#509, #288); unit
+  guards gained can-fail cases (#561, #283); Codex wake-hook command on
+  Windows (#275); `guide` schtasks idempotency (#274); heartbeat subprocess
+  encodings (#544).
+
+- CI: the macOS lane is deactivated pending #554 — red on main and
+  merge-blocking; the re-entry condition is written into the workflow header.
+
+## 0.45.1 — 2026-08-20
+
+- `install-wake-hook` refuses `--cell` writes to a box-global settings file
+  and asserts the write (#268, #527) — the install-time guard against six
+  cells being told to tail one inbox.
+- The muse harness documented (#269); both membranes documented (#267).
+
+## 0.45.0 — 2026-08-20
+
+- **`swarph guide` (#523, #265)** — offline, apropos-searchable, task-indexed
+  onboarding: the primer a fresh cell can reach without the mesh.
+- Fixes: the hermeticity guard no longer leaks through env or filesystem
+  (#524, #264); selfcheck compares surface literals against resolver output
+  (#133, #261); `mesh send` refuses an unregistered recipient and suggests
+  near names (#263); `gh-route doctor` enumerates cells by mesh name (#262).
+
 ## 0.44.0 — 2026-08-18
 
 - **`swarph gh-route` — a cell's GitHub actions are attributable by construction.**
