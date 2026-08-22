@@ -217,3 +217,69 @@ def test_edit_tool_also_matches(monkeypatch, tmp_path):
                    {"tool_name": "Edit", "tool_input": {"file_path": str(target)}},
                    posted, tmp_path / "state.json")
     assert rc == 0 and len(posted) == 1
+
+
+# ── Windows-membrane findings (cursor-win, 2026-08-22, #549 validation) ─────
+
+def test_bom_prefixed_stdin_still_emits(monkeypatch, tmp_path):
+    """PS 5.1 native pipes deliver hook stdin as '\\ufeff\\ufeff{...}' — a
+    double UTF-8 BOM. json.loads raises, and the failure invariant turned it
+    into an INVISIBLE no-op: no state, no stderr, exit 0. The parse must
+    tolerate the BOM or the hook is silently dead on that membrane."""
+    import io
+    memdir = tmp_path / ".claude" / "projects" / "-home-ubuntu" / "memory"
+    memdir.mkdir(parents=True)
+    target = memdir / "bom-memory.md"
+    target.write_text("# BOM\nbody\n", encoding="utf-8")
+    payload = "\ufeff\ufeff" + json.dumps(_write_payload(str(target)))
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    monkeypatch.setenv("SWARPH_EMIT_STATE", str(tmp_path / "state.json"))
+    monkeypatch.setenv("SWARPH_GATEWAY", "http://test-gateway:8788")
+    posted = []
+    monkeypatch.setattr(me, "_log_via_gateway",
+                        lambda gw, cell, text, mem, when, tf: posted.append(mem) or 0)
+    rc = me.run_memory_emit_hook([])
+    assert rc == 0
+    assert posted == ["[[bom-memory]]"], (
+        "a BOM-poisoned payload must still emit — the silent no-op was the defect")
+
+
+def test_cell_identity_prefers_SELF_over_CELL(monkeypatch):
+    """#538's psmux leak, live in the emit path: a box carrying
+    SWARPH_CELL=workstation-lc alongside SWARPH_SELF=cursor-win must emit AS
+    cursor-win — a self-identity statement outranks an ambient env var
+    (#332's order), and a self-reporting cache posting under another cell's
+    name and token is the worst form of success."""
+    monkeypatch.setenv("SWARPH_CELL", "workstation-lc")
+    monkeypatch.setenv("SWARPH_SELF", "cursor-win")
+    assert me._cell() == "cursor-win"
+
+
+def test_wake_hook_stdin_tolerates_bom(monkeypatch):
+    """Same class, same membrane: the wake hook's stdin parser must not turn
+    a BOM-prefixed payload into {} (the invisible no-op)."""
+    import io
+    from swarph_cli.commands import wake_hook_output as who
+    monkeypatch.setattr("sys.stdin", io.StringIO('\ufeff{"session_id": "s1"}'))
+    assert who._read_stdin_payload() == {"session_id": "s1"}
+
+
+def test_gh_route_stdin_tolerates_bom(monkeypatch, capsys):
+    """gh_route takes stdin_text directly. The distinguishing case: a
+    gh-targeting command from an UNMAPPED cell must DENY — the denial is a
+    JSON payload, not an exit code — but only if the payload parsed. A
+    BOM-poisoned parse falls into the fail-open except and prints NOTHING:
+    the exact invisible no-op cursor-win measured."""
+    from swarph_cli.commands import gh_route
+    from swarph_cli import gh_identity as ghid
+
+    def _unmapped(peer):
+        raise ghid.RouterRefusal("no mapping for this peer")
+    monkeypatch.setattr(ghid, "resolve", _unmapped)
+    monkeypatch.setenv("SWARPH_SELF", "unmapped-cell")
+    gh_route.run_hook(
+        stdin_text='\ufeff{"tool_input": {"command": "gh pr view 1"}}')
+    out = capsys.readouterr().out
+    assert '"deny"' in out, (
+        "the denial proves the BOM-prefixed payload actually parsed; "
+        "silence would be the poisoned-parse no-op")

@@ -53,8 +53,10 @@ def _read_stdin_payload() -> dict[str, Any]:
     try:
         if not sys.stdin.isatty():
             raw = sys.stdin.read()
+            # PS 5.1 native pipes prefix a (double) UTF-8 BOM; strip before
+            # parse or the hook is an invisible no-op on that membrane.
             if raw.strip():
-                return json.loads(raw)
+                return json.loads(raw.lstrip("\ufeff"))
     except Exception:
         pass
     return {}
