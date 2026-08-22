@@ -37,6 +37,19 @@ def test_init_name_without_provider_noninteractive_refuses_nonzero(tmp_path, mon
     assert rc != 0
 
 
+def test_init_unknown_flag_refuses_nonzero(tmp_path, monkeypatch):
+    """Parser-level refusal: an unknown flag must die in argparse (SystemExit
+    2), never fall through to a 0. gpt-ops review on #293: the parser-refusal
+    class was pinned only for onboard; init and spawn parse differently, so
+    each gets its own pin."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    try:
+        rc = init_mod.run_init(["c319x", "--bogus"])
+    except SystemExit as exc:
+        rc = int(exc.code or 0)
+    assert rc != 0
+
+
 # ── spawn ───────────────────────────────────────────────────────────────────
 
 def test_spawn_bare_with_nothing_to_spawn_refuses_nonzero(tmp_path, monkeypatch):
@@ -55,6 +68,18 @@ def test_spawn_nonexistent_cell_refuses_nonzero(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     rc = spawn_mod.run_spawn(["no-such-cell-319"])
+    assert rc != 0
+
+
+def test_spawn_unknown_flag_refuses_nonzero(tmp_path, monkeypatch):
+    """Same parser-level class as init's --bogus: spawn's argparse must raise
+    SystemExit(2) on an unknown flag, not return 0."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    try:
+        rc = spawn_mod.run_spawn(["somecell", "--bogus"])
+    except SystemExit as exc:
+        rc = int(exc.code or 0)
     assert rc != 0
 
 
