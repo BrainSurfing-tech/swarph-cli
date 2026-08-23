@@ -161,7 +161,12 @@ def _bootstrap_ratify(args: argparse.Namespace) -> int:
         )
         return 2
 
-    conn = sqlite3.connect(db_path)
+    # Match server.py _conn(): autocommit with explicit transaction control
+    # (we BEGIN IMMEDIATE ourselves) and FK enforcement ON — the audit insert
+    # into peer_ratifications references claude_peers, and without the pragma
+    # a dangling reference would write silently.
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
