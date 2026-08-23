@@ -62,6 +62,14 @@
   exists on the gateway, onboard names the `bootstrap-ratify` command
   (#565) for the human commander.
 
+- **`swarph gateway bootstrap-ratify` — the ratify ladder's first rung
+  (#565).** A fresh gateway has zero ratified peers, so `swarph ratify`
+  could never complete — the live mesh hung off a one-time grandfather
+  migration. The human commander now bootstraps the orchestrator cell with
+  one local, audited command: interactive-only (a cell's scripted context
+  is refused), self-destroying once any ratified peer exists, and recorded
+  in `peer_ratifications` with `binding_regime='bootstrap'`.
+
 ## 0.46.0 — 2026-08-22
 
 - **The close act gets its verb: `swarph board obligations close` (#562,

@@ -170,7 +170,9 @@ CREATE TABLE IF NOT EXISTS peer_ratifications (
   -- CHECK present on fresh installs only; existing DBs get the column via
   -- ALTER (no CHECK — SQLite can't add one in place) + the backfill UPDATE.
   binding_regime TEXT NOT NULL DEFAULT 'shared_token'
-    CHECK (binding_regime IN ('shared_token', 'per_peer_token', 'signed')),
+    -- 'bootstrap' (#565-B): the human commander's first-rung ratification on
+    -- a fresh gateway, written locally by `swarph gateway bootstrap-ratify`.
+    CHECK (binding_regime IN ('shared_token', 'per_peer_token', 'signed', 'bootstrap')),
   FOREIGN KEY (peer) REFERENCES claude_peers(name),
   FOREIGN KEY (witness_dm_id) REFERENCES claude_messages(id)
 );
