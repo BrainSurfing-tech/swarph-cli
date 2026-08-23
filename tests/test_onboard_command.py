@@ -321,6 +321,7 @@ def test_cell_context_mints_and_CAPTURES(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.setenv("SWARPH_SELF", "test-peer")
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() on Windows
     mint_body = {
         "status": "registered", "name": "test-peer",
         "registered_at": "2026-08-23T09:00:00Z", "ratified": False,
@@ -355,6 +356,7 @@ def test_pre_defer_gateway_mint_is_SURFACED_not_discarded(
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.setenv("SWARPH_SELF", "workstation-lc")
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() on Windows
     mint_body = {
         "status": "registered", "name": "test-peer",
         "registered_at": "2026-08-23T09:00:00Z", "ratified": False,
