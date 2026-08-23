@@ -204,11 +204,14 @@ def test_claude_install_shape(tmp_path, monkeypatch):
     rc = _run(["--harness", "claude"], monkeypatch, SWARPH_SELF="claude-cell")
     assert rc == 0
     cfg = json.loads((home / ".claude/settings.json").read_text())
+    # Windows harnesses spawn hooks via cmd and never run the shebang, so
+    # registration points at the .cmd shim there; elsewhere the .sh.
+    ext = ".cmd" if os.name == "nt" else ".sh"
     ss = cfg["hooks"]["SessionStart"]
-    assert "sessionstart-recall.sh" in ss[0]["hooks"][0]["command"]
+    assert f"sessionstart-recall{ext}" in ss[0]["hooks"][0]["command"]
     ptu = cfg["hooks"]["PostToolUse"]
     assert ptu[0]["matcher"] == "Write|Edit|MultiEdit|NotebookEdit"
-    assert "posttooluse-emit-claude.sh" in ptu[0]["hooks"][0]["command"]
+    assert f"posttooluse-emit-claude{ext}" in ptu[0]["hooks"][0]["command"]
     assert "preCompact" not in cfg["hooks"]  # claude needs no flag handshake
 
 
