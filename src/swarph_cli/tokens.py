@@ -150,7 +150,7 @@ def peer_token_path(self_name: str) -> Path:
     hunt ANOTHER CELL'S token, find nothing, and blame the credential — measured
     on 6 of 6 cells 2026-07-29.
     """
-    return Path(os.environ.get("HOME", str(Path.home()))) / ".config" / "swarph" / f"{self_name}.peer_token"
+    return Path.home() / ".config" / "swarph" / f"{self_name}.peer_token"
 
 
 def legacy_peer_token_path(self_name: str) -> Path:
