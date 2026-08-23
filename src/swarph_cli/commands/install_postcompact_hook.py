@@ -377,6 +377,14 @@ def run_install_postcompact_hook(argv: Optional[list[str]] = None) -> int:
         "(none — only the .claude auto-memory layout is recognized)"
     print(f"Identity baked: SWARPH_SELF={cell_disp}; "
           f"SWARPH_MEMORY_DIR={mem_disp}.", file=sys.stderr)
+    # cursor-win measured on the Windows membrane (DM 27104): the hook table
+    # loads at session start only — no hot reload, and a compaction keeps the
+    # pre-edit table. An install reported as landed is still inert in every
+    # ALREADY-OPEN session; say so or the operator tests in the wrong session
+    # and files the wiring as broken.
+    print("NOTE: hook tables load at session start. Already-open sessions "
+          "keep the pre-edit table — open a FRESH chat before testing.",
+          file=sys.stderr)
     return 0
 
 
