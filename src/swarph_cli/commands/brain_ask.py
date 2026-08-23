@@ -10,7 +10,8 @@ verb so any cell can search the swarm's shared memory the same way. Two modes:
 Stdlib-only. Config from the environment, mirroring ``swarph mesh``'s token model:
 
   GBRAIN_MCP_URL        gbrain MCP endpoint; falls back to SWARPH_BRAIN_MCP, else
-    / SWARPH_BRAIN_MCP   http://127.0.0.1:8792/mcp
+    / SWARPH_BRAIN_MCP   http://100.107.222.72:8792/mcp (tailnet IP — gbrain
+                          binds no loopback; measured 2026-08-23, card #548)
   GBRAIN_TOKEN          read token; falls back to SWARPH_BRAIN_TOKEN, then to the
     / SWARPH_BRAIN_TOKEN  mesh per-peer token (~/.config/swarph/<self>.peer_token).
     / peer-token file     Once gbrain accepts mesh peer tokens, the peer token IS
@@ -34,12 +35,15 @@ from swarph_cli import tokens
 from pathlib import Path
 from typing import Optional
 
-_DEFAULT_GBRAIN = "http://127.0.0.1:8792/mcp"
+# TAILNET IP, NOT loopback (card #548): measured 2026-08-23, gbrain binds
+# 100.107.222.72:8792 ONLY — 127.0.0.1:8792 refuses on the gateway box itself.
+# A loopback default is deaf everywhere, including on the box running gbrain.
+_DEFAULT_GBRAIN = "http://100.107.222.72:8792/mcp"
 _DEFAULT_TOPK = 6
 
 
 def _resolve_endpoint() -> str:
-    """Endpoint precedence: GBRAIN_MCP_URL > SWARPH_BRAIN_MCP > localhost default.
+    """Endpoint precedence: GBRAIN_MCP_URL > SWARPH_BRAIN_MCP > tailnet default.
 
     The SWARPH_BRAIN_MCP fallback keeps the verb config-compatible with the
     standalone ``swarph-brain-ask`` script (which reads SWARPH_BRAIN_*), so one
