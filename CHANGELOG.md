@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **`swarph install-postcompact-hook` ships the post-compact wiring as a
+  repo payload (#566, #549).** One command installs the recall/emit hook set
+  for Cursor (`preCompact` flag + `postToolUse` recall + emit) or Claude
+  (`SessionStart` source=compact recall + `PostToolUse` emit), with Windows
+  `.cmd` shims, owned-entry idempotency, `--uninstall`, and `--dry-run`.
+  Identity and memory dir bake in from `--cell`/`SWARPH_SELF` and
+  `--memory-dir`/`SWARPH_MEMORY_DIR`/the cursor-cell convention; `--cell`
+  with a box-global config is refused (#527's lesson). Payload scripts strip
+  UTF-8 BOMs before parsing stdin (the cursor-win double-BOM regression),
+  and every path exits 0 — a hook never blocks the session.
+
+- **`install-wake-hook` writes the canonical cursor hook schema (#567).**
+  cursor-win measured a project-scope bare `{"sessionStart": [...]}` file
+  producing zero hook executions on the cursor membrane; the documented
+  schema is `{"version": 1, "hooks": {...}}`. The verb now writes canonical,
+  migrates its own legacy bare entries away (foreign bare entries are left
+  untouched — a user-scope bare `sessionStart` HAS been observed firing),
+  and says at install time that cursor loads the hook table at session
+  start, so an already-open session never sees the edit.
+
 - **`onboard` finds the target's placed token without a flag (#564).** The
   mint-and-hand-off flow ends with the new peer's once-only token written
   to `~/.config/swarph/<target>.peer_token` on its box — but the resolver's
