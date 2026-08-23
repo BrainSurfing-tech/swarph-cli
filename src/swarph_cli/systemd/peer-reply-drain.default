@@ -4,5 +4,8 @@
 # CLI literally. These directories are service-owned, never monitor state.
 SWARPH_PEER_SPOOL_DIR=<ABSOLUTE_PATH_TO_PEER_SERVICE_SPOOL>
 SWARPH_PEER_REPLY_OUTBOX_DIR=<ABSOLUTE_PATH_TO_PEER_REPLY_OUTBOX>
-SWARPH_GATEWAY=http://lab-ovh:8788
+# Tailnet IP, not the MagicDNS name (commander 2026-08-21): the IP needs only
+# tailscale up; the name needs MagicDNS + the right search domain + no local
+# collision.
+SWARPH_GATEWAY=http://100.107.222.72:8788
 SWARPH_TOKEN_FILE=<ABSOLUTE_PATH_TO_PEER_TOKEN_FILE>

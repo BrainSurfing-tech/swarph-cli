@@ -6,5 +6,8 @@ SWARPH_OUTBOX_DIR=%h/swarph_state/%i/codex-outbox
 SWARPH_WAKER_CWD=%h/%i
 SWARPH_WAKER_TIMEOUT_S=300
 CODEX_BIN=codex
-SWARPH_GATEWAY=http://lab-ovh:8788
+# Tailnet IP, not the MagicDNS name (commander 2026-08-21): the IP needs only
+# tailscale up; the name needs MagicDNS + the right search domain + no local
+# collision.
+SWARPH_GATEWAY=http://100.107.222.72:8788
 SWARPH_TOKEN_FILE=%h/.config/swarph/%i.peer_token
