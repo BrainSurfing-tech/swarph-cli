@@ -90,6 +90,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "install-wake-hook": "swarph_cli.commands.install_wake_hook.run_install_wake_hook",
     "wake-hook-output": "swarph_cli.commands.wake_hook_output.run_wake_hook_output",
     "postcompact-hook-output": "swarph_cli.commands.postcompact_hook_output.run_postcompact_hook_output",
+    "install-postcompact-hook": "swarph_cli.commands.install_postcompact_hook.run_install_postcompact_hook",
     "memory-emit-hook": "swarph_cli.commands.memory_emit_hook.run_memory_emit_hook",
     "codegraph-hook": "swarph_cli.commands.codegraph_hook.run_codegraph_hook",
     "watchdog": "swarph_cli.commands.watchdog.run_watchdog",

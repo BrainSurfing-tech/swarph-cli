@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **`swarph install-postcompact-hook` ships the post-compact wiring as a
+  repo payload (#566, #549).** One command installs the recall/emit hook set
+  for Cursor (`preCompact` flag + `postToolUse` recall + emit) or Claude
+  (`SessionStart` source=compact recall + `PostToolUse` emit), with Windows
+  `.cmd` shims, owned-entry idempotency, `--uninstall`, and `--dry-run`.
+  Identity and memory dir bake in from `--cell`/`SWARPH_SELF` and
+  `--memory-dir`/`SWARPH_MEMORY_DIR`/the cursor-cell convention; `--cell`
+  with a box-global config is refused (#527's lesson). Payload scripts strip
+  UTF-8 BOMs before parsing stdin (the cursor-win double-BOM regression),
+  and every path exits 0 — a hook never blocks the session.
+
 ## 0.46.0 — 2026-08-22
 
 - **The close act gets its verb: `swarph board obligations close` (#562,
