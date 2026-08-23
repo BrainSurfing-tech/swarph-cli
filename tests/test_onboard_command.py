@@ -189,6 +189,198 @@ def test_run_onboard_happy_path(monkeypatch, tmp_path, capsys):
     assert "[manual]" in out
 
 
+def test_run_onboard_merges_stored_capabilities_into_reregister(
+    monkeypatch, tmp_path, capsys
+):
+    """The 2026-08-23 cursor-test-postcompact case, verbatim: the operator's
+    out-of-band mint wrote provider=cursor; the cell's own onboard then
+    re-registered with the DEFAULT blob (can_claim_tasks only) and the
+    gateway's #124 guard 409'd, stopping the ladder at rung 4. `mesh
+    register` has done the GET-first merge since #294; onboard now does
+    the same instead of letting the gateway teach the lesson."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    fake_post, captured = _mock_post_factory()
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    monkeypatch.setattr(
+        onboard, "_get_json",
+        lambda url, token: (200, {"name": "test-peer",
+                                  "capabilities": {"provider": "cursor",
+                                                   "can_claim_tasks": True}}))
+    import swarph_shared
+    monkeypatch.setattr(
+        swarph_shared, "verify_subscription_setup", lambda: True, raising=False
+    )
+    rc = onboard.run_onboard(
+        ["test-peer", "--gateway", "http://localhost:8788",
+         "--state-dir", str(tmp_path / "state")]
+    )
+    assert rc == 0
+    reg = [c for c in captured if c["url"].endswith("/peers/register")][0]
+    assert reg["body"]["capabilities"] == {
+        "provider": "cursor", "can_claim_tasks": True}
+    assert "merged stored capability keys" in capsys.readouterr().out
+
+
+def test_run_onboard_merge_submitted_keys_override_stored(
+    monkeypatch, tmp_path, capsys
+):
+    """The merge direction matters: an explicit --capability is a decision,
+    not a hint — it overrides the stored value for the SAME key while
+    stored-only keys survive."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    fake_post, captured = _mock_post_factory()
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    monkeypatch.setattr(
+        onboard, "_get_json",
+        lambda url, token: (200, {"name": "test-peer",
+                                  "capabilities": {"provider": "cursor",
+                                                   "can_claim_tasks": True}}))
+    import swarph_shared
+    monkeypatch.setattr(
+        swarph_shared, "verify_subscription_setup", lambda: True, raising=False
+    )
+    rc = onboard.run_onboard(
+        ["test-peer", "--gateway", "http://localhost:8788",
+         "--state-dir", str(tmp_path / "state"),
+         "--capability", "provider=claude"]
+    )
+    assert rc == 0
+    reg = [c for c in captured if c["url"].endswith("/peers/register")][0]
+    assert reg["body"]["capabilities"] == {
+        "provider": "claude", "can_claim_tasks": True}
+
+
+def test_run_onboard_unreadable_registry_never_blocks_the_register(
+    monkeypatch, tmp_path, capsys
+):
+    """First registration, or a GET that fails outright: nothing exists to
+    destroy, so the write proceeds with what the invocation carries. The
+    read is in service of the write, never a gate on it."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    fake_post, captured = _mock_post_factory()
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    monkeypatch.setattr(onboard, "_get_json", lambda url, token: (0, {}))
+    import swarph_shared
+    monkeypatch.setattr(
+        swarph_shared, "verify_subscription_setup", lambda: True, raising=False
+    )
+    rc = onboard.run_onboard(
+        ["test-peer", "--gateway", "http://localhost:8788",
+         "--state-dir", str(tmp_path / "state")]
+    )
+    assert rc == 0
+    reg = [c for c in captured if c["url"].endswith("/peers/register")][0]
+    assert reg["body"]["capabilities"] == {"can_claim_tasks": True}
+
+
+# ---------------------------------------------------------------------------
+# #564-C — defer_token_mint: who is this register FOR?
+# ---------------------------------------------------------------------------
+
+
+def _stub_subscription(monkeypatch):
+    import swarph_shared
+    monkeypatch.setattr(
+        swarph_shared, "verify_subscription_setup", lambda: True, raising=False
+    )
+
+
+def test_operator_context_DEFERS_the_mint(monkeypatch, tmp_path, capsys):
+    """SWARPH_SELF names a DIFFERENT cell (or nothing): the register asserts
+    operator context — defer_token_mint=True — and a 'deferred' response
+    prints the cell-side next step. The trap from the card is unreachable."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setenv("SWARPH_SELF", "workstation-lc")
+    deferred_body = {
+        "status": "registered", "name": "test-peer",
+        "registered_at": "2026-08-23T09:00:00Z", "ratified": False,
+        "registered_unratified": True,
+        "peer_token": None, "token_status": "deferred",
+    }
+    fake_post, captured = _mock_post_factory(register_body=deferred_body)
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    _stub_subscription(monkeypatch)
+    rc = onboard.run_onboard(
+        ["test-peer", "--gateway", "http://localhost:8788",
+         "--state-dir", str(tmp_path / "state")]
+    )
+    assert rc == 0
+    reg = [c for c in captured if c["url"].endswith("/peers/register")][0]
+    assert reg["body"]["defer_token_mint"] is True
+    out = capsys.readouterr().out
+    assert "mint DEFERRED" in out
+    assert "swarph onboard test-peer" in out
+    (Path(tempfile.gettempdir()) / "test-peer-handshake.md").unlink(missing_ok=True)
+
+
+def test_cell_context_mints_and_CAPTURES(monkeypatch, tmp_path, capsys):
+    """SWARPH_SELF == the target: the register is the cell's own bootstrap —
+    no defer — and a minted token is written to the target's peer-token file
+    mode 600, the same capture `mesh register` has always done. The cell-
+    first order through `onboard` no longer discards the token either."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setenv("SWARPH_SELF", "test-peer")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() on Windows
+    mint_body = {
+        "status": "registered", "name": "test-peer",
+        "registered_at": "2026-08-23T09:00:00Z", "ratified": False,
+        "registered_unratified": True,
+        "peer_token": "once-only-secret", "token_status": "minted",
+    }
+    fake_post, captured = _mock_post_factory(register_body=mint_body)
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    _stub_subscription(monkeypatch)
+    rc = onboard.run_onboard(
+        ["test-peer", "--gateway", "http://localhost:8788",
+         "--state-dir", str(tmp_path / "state")]
+    )
+    assert rc == 0
+    reg = [c for c in captured if c["url"].endswith("/peers/register")][0]
+    assert reg["body"]["defer_token_mint"] is False
+    tok = tmp_path / ".config" / "swarph" / "test-peer.peer_token"
+    assert tok.read_text().strip() == "once-only-secret"
+    if sys.platform != "win32":
+        assert oct(tok.stat().st_mode & 0o777) == "0o600"
+    assert "once-only token captured" in capsys.readouterr().out
+    (Path(tempfile.gettempdir()) / "test-peer-handshake.md").unlink(missing_ok=True)
+
+
+def test_pre_defer_gateway_mint_is_SURFACED_not_discarded(
+    monkeypatch, tmp_path, capsys
+):
+    """A gateway that pre-dates #564-C mints on ANY register — the defer
+    flag is unknown to it. An operator-context process holding the cell's
+    once-only token IS the original trap, so the token is printed once with
+    delivery instructions instead of evaporating into the exit."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setenv("SWARPH_SELF", "workstation-lc")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() on Windows
+    mint_body = {
+        "status": "registered", "name": "test-peer",
+        "registered_at": "2026-08-23T09:00:00Z", "ratified": False,
+        "registered_unratified": True,
+        "peer_token": "leaked-into-operator-process", "token_status": "minted",
+    }
+    fake_post, captured = _mock_post_factory(register_body=mint_body)
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    _stub_subscription(monkeypatch)
+    rc = onboard.run_onboard(
+        ["test-peer", "--gateway", "http://localhost:8788",
+         "--state-dir", str(tmp_path / "state")]
+    )
+    assert rc == 0
+    assert captured[0]["body"]["defer_token_mint"] is True
+    err = capsys.readouterr().err
+    assert "leaked-into-operator-process" in err
+    assert "pre-dates defer_token_mint" in err
+    assert "test-peer.peer_token" in err
+    # ...and it is NOT written anywhere by this command
+    assert not (tmp_path / ".config" / "swarph" / "test-peer.peer_token").exists()
+    (Path(tempfile.gettempdir()) / "test-peer-handshake.md").unlink(missing_ok=True)
+
+
 def test_run_onboard_reports_reregister_as_existing_not_fresh_mint(
     monkeypatch, tmp_path, capsys
 ):

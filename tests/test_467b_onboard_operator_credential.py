@@ -80,6 +80,48 @@ def test_onboarding_ANOTHER_peer_with_our_own_token_is_REFUSED(monkeypatch, tmp_
     assert "swarph onboard lab-ovh" in msg, (
         "must name the SUPPORTED use of the credential the operator already has"
     )
+    assert "~/.config/swarph/razorpeter.peer_token" in msg, (
+        "must name the placed-token remedy — the remedy the operator on "
+        "cursor-win's box had ALREADY performed when this refusal fired "
+        "(2026-08-23), and the message sent them reading source"
+    )
+
+
+def test_the_TARGETs_own_placed_token_is_found_without_a_flag(monkeypatch, tmp_path):
+    """>>> THE MINT-AND-HAND-OFF TAIL (#564), MEASURED MISSING ON CURSOR-WIN'S
+    BOX. <<< The operator mints the new peer out of band, delivers the
+    once-only token, and the operator-on-the-box writes it to
+    ~/.config/swarph/<target>.peer_token — then `swarph onboard <target>`
+    refused anyway, because rung 4 was keyed on $SWARPH_SELF and never
+    looked at the file NAMED FOR THE TARGET. A file named for the explicit
+    positional target can authenticate as that target and nothing else —
+    the one registration a per-peer token may perform (#467b) — so finding
+    it weakens nothing."""
+    monkeypatch.setenv("SWARPH_SELF", "workstation-lc")
+    _write_peer_token(tmp_path, "workstation-lc", "tok-workstation")
+    _write_peer_token(tmp_path, "cursor-test-postcompact", "tok-target")
+    assert onboard._resolve_token(
+        None, target_peer="cursor-test-postcompact") == "tok-target"
+
+
+def test_the_target_rung_outranks_an_ambient_env_token(monkeypatch, tmp_path):
+    """#332's principle one rung earlier: a credential NAMED for the explicit
+    target beats a value nobody named. The per-peer path is also the
+    ATTRIBUTABLE one — the env token resolves to root, peer=None."""
+    monkeypatch.setenv("SWARPH_SELF", "lab-ovh")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok-operator")
+    _write_peer_token(tmp_path, "razorpeter", "tok-target")
+    assert onboard._resolve_token(None, target_peer="razorpeter") == "tok-target"
+
+
+def test_the_target_rung_does_not_weaken_the_withhold(monkeypatch, tmp_path):
+    """NON-VACUITY for the rung above: when the target's file is ABSENT, this
+    cell's own token is still withheld and the refusal still fires — the new
+    rung finds the target's credential, it does not loosen anyone else's."""
+    monkeypatch.setenv("SWARPH_SELF", "workstation-lc")
+    _write_peer_token(tmp_path, "workstation-lc")
+    with pytest.raises(RuntimeError, match="refusing to onboard"):
+        onboard._resolve_token(None, target_peer="cursor-test-postcompact")
 
 
 def test_onboarding_OURSELF_with_our_own_token_still_works(monkeypatch, tmp_path):

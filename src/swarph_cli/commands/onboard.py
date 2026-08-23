@@ -149,8 +149,10 @@ def _resolve_token(token_file_arg: Optional[str], *,
     (does not auto-create per drop DM #726 #3 — privilege boundary).
 
     `target_peer` — the peer name this credential will be used to REGISTER, when
-    that is known. Only rung 4 (the cell's own per-peer token) cares: a per-peer
-    token may register ITSELF and nothing else. Default None means "not a
+    that is known. Two rungs care: the target's own placed file (found without
+    a flag — the mint-and-hand-off tail, #564) and rung 4 (this cell's own
+    per-peer token, withheld for a cross-name target): a per-peer token may
+    register ITSELF and nothing else. Default None means "not a
     registration", which is why `ratify` and `daemon` — which import this
     function and never call POST /peers/register — are unaffected.
 
@@ -235,6 +237,33 @@ def _resolve_token(token_file_arg: Optional[str], *,
                 "~/.config/swarph/<self>.peer_token\n"
                 "  Fix the path, or omit --token-file to use those fallbacks."
             ) from exc
+
+    # ── THE TARGET'S OWN FILE, WHEN THE TARGET IS EXPLICIT ────────────────
+    # `swarph onboard X` with X's minted token already placed at
+    # ~/.config/swarph/X.peer_token is the tail end of the mint-and-hand-off
+    # flow (#564): the operator minted X out of band and delivered the
+    # once-only token to X's box. A file NAMED for the explicit positional
+    # target is not a guessed identity — #243's no-guessing rule is about
+    # deriving a name from the environment, and this name came from the
+    # command line. The file can authenticate as X and nothing else, which
+    # is the one registration a per-peer token may perform (#467b). Without
+    # this rung the placed token was invisible unless SWARPH_SELF happened
+    # to point at X, and the refusal below named every remedy EXCEPT the
+    # file the operator had already written — measured live on cursor-win's
+    # box 2026-08-23 (SWARPH_SELF=workstation-lc, target's file on disk,
+    # refusal raised).
+    if target_peer:
+        from swarph_cli.tokens import read_token_file
+        target_tok_path = (Path.home() / ".config" / "swarph"
+                           / f"{target_peer}.peer_token")
+        if target_tok_path.exists():
+            try:
+                val = read_token_file(target_tok_path)
+                if val:
+                    return val
+            except RuntimeError as exc:
+                print_safe(f"swarph onboard: failed to read {target_tok_path}: "
+                           f"{exc}", file=sys.stderr)
 
     # ── THE NAMED CELL'S OWN CREDENTIAL OUTRANKS THE AMBIENT ONE ────────────
     # >>> #332's PRINCIPLE, APPLIED TO THE OTHER WAY A CALLER NAMES SOMETHING.
@@ -397,8 +426,12 @@ def _resolve_token(token_file_arg: Optional[str], *,
             f"  That credential authenticates as {self_name!r}, and the gateway binds\n"
             f"  POST /peers/register's `name` to the authenticated caller — so it can\n"
             f"  register {self_name!r} and no other peer. Presenting it would 403.\n\n"
-            f"  ONBOARDING ANOTHER CELL IS AN OPERATOR ACTION. Use an operator "
-            f"credential:\n"
+            f"  If you hold {target_peer}'s MINTED once-only token, place it at\n"
+            f"  ~/.config/swarph/{target_peer}.peer_token and re-run — a file NAMED\n"
+            f"  for the target is found without a flag. Or name it directly:\n"
+            f"      swarph onboard {target_peer} --token-file <path>\n\n"
+            f"  ONBOARDING ANOTHER CELL WITHOUT ITS TOKEN IS AN OPERATOR ACTION.\n"
+            f"  Use an operator credential:\n"
             f"      swarph onboard {target_peer} --token-file <operator-token>\n"
             f"      MESH_GATEWAY_TOKEN=<operator-token> swarph onboard {target_peer}\n\n"
             f"  To onboard THIS cell, the per-peer token IS the right credential:\n"
@@ -458,6 +491,26 @@ def _post_json(
         except Exception:
             err_body = {"detail": str(exc)}
         return exc.code, err_body
+
+
+def _get_json(url: str, token: str) -> tuple[int, dict]:
+    """GET counterpart to _post_json, same stdlib-only constraint. Best-effort:
+    any transport failure returns (0, {}) so a read in service of a write
+    never BLOCKS the write."""
+    req = urllib.request.Request(
+        url, method="GET",
+        headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            err_body = json.loads(exc.read().decode("utf-8") or "{}")
+        except Exception:
+            err_body = {"detail": str(exc)}
+        return exc.code, err_body
+    except Exception:
+        return 0, {}
 
 
 def _parse_capability(spec: str) -> tuple[str, object]:
@@ -772,9 +825,36 @@ def run_onboard(argv: list[str]) -> int:
     # ── Step 4: POST /peers/register ─────────────────────────────────
     peer_url = args.url or f"http://{canonical}:8787"
     print_safe(f"[4/6] POST {args.gateway}/peers/register")
+    # >>> #124's GUARD, MET CLIENT-SIDE — #294's PATTERN, THE MISSING HALF. <<<
+    # The gateway 409s a re-register whose payload would DROP stored
+    # capability keys — measured live 2026-08-23 when an operator minted
+    # cursor-test-postcompact with provider=cursor and the cell's own onboard
+    # re-registered with the DEFAULT blob (can_claim_tasks only). `mesh
+    # register` learned the GET-first merge in #294; onboard sent its blob
+    # raw and let the gateway teach the lesson. Same merge here: submitted
+    # keys override, stored-only keys survive. A failed read never blocks
+    # the write — the server-side guard still catches a real drop, and a
+    # row that does not exist yet has nothing to destroy.
+    gstatus, gpayload = _get_json(f"{args.gateway}/peers/{canonical}", token)
+    if gstatus == 200 and isinstance(gpayload.get("capabilities"), dict):
+        stored_caps = gpayload["capabilities"]
+        dropped = sorted(set(stored_caps) - set(capabilities))
+        if dropped:
+            capabilities = {**stored_caps, **capabilities}
+            print_safe(f"      merged stored capability keys {dropped} into "
+                       "the re-register — a partial payload replaces nothing")
+    # >>> #564-C: WHO IS THIS REGISTER FOR? <<< The same shared token serves
+    # the operator and the bootstrapping cell, so the gateway cannot tell the
+    # contexts apart from the credential — the CLIENT asserts it. Cell-context
+    # (you ARE the target: SWARPH_SELF names it) lets the register mint and
+    # captures the once-only token below; operator-context DEFERS the mint to
+    # the cell's own first register, so the token never enters a process that
+    # would discard it (the trap the card measured end-to-end).
+    cell_context = os.environ.get("SWARPH_SELF", "").strip() == canonical
     status, body = _post_json(
         f"{args.gateway}/peers/register",
-        {"name": canonical, "url": peer_url, "capabilities": capabilities},
+        {"name": canonical, "url": peer_url, "capabilities": capabilities,
+         "defer_token_mint": not cell_context},
         token,
     )
     if status != 200:
@@ -843,6 +923,75 @@ def run_onboard(argv: list[str]) -> int:
         print_safe(f"      ok (already registered{no_mint})")
     else:
         print_safe(f"      ok (registered_unratified=true)")
+
+    # >>> #564: THE MINTED TOKEN'S THREE FATES, EACH NAMED. <<<
+    # deferred  — operator-context register on a #564-C gateway: nothing was
+    #             minted; the cell mints on its own first register.
+    # captured  — cell-context register that minted: the token is written to
+    #             the target's peer-token file (mode 600) RIGHT HERE, so the
+    #             cell-first order through `onboard` captures exactly like
+    #             `mesh register` always has.
+    # surfaced  — a minted token in an OPERATOR-context process: only a
+    #             pre-#564-C gateway (the flag unknown to it) does this. That
+    #             is the original trap; the token is printed ONCE with
+    #             delivery instructions instead of evaporating.
+    if body.get("token_status") == "deferred":
+        print_safe(
+            "      mint DEFERRED (#564): an operator-context register mints "
+            "nothing.\n"
+            f"      The once-only token mints on the cell's own first register"
+            f" — on {canonical}'s box:\n"
+            f"          swarph onboard {canonical}")
+    minted_token = body.get("peer_token")
+    if minted_token and cell_context:
+        from swarph_cli.tokens import peer_token_path, write_secret_file
+        tok_path = peer_token_path(canonical)
+        try:
+            write_secret_file(tok_path, minted_token)
+        except OSError as exc:
+            print_safe(
+                f"\n      *** ONCE-ONLY TOKEN for {canonical} — capture FAILED: "
+                f"{exc} ***\n      {minted_token}\n"
+                f"      Deliver it out-of-band and place it at {tok_path} "
+                "(mode 600). This command stores it NOWHERE and will never "
+                "show it again.\n",
+                file=sys.stderr,
+            )
+            return 1
+        print_safe(f"      once-only token captured → {tok_path} (mode 600)")
+    elif minted_token:
+        print_safe(
+            f"\n      *** ONCE-ONLY TOKEN for {canonical} — this gateway "
+            f"pre-dates defer_token_mint ***\n"
+            f"      {minted_token}\n"
+            f"      Deliver it out-of-band to {canonical}'s box and place it "
+            f"at\n      ~/.config/swarph/{canonical}.peer_token (mode 600). "
+            f"This command stores it NOWHERE\n      and will never show it "
+            f"again.\n",
+            file=sys.stderr,
+        )
+
+    # >>> #565: WHEN THE LADDER HAS NO FIRST RUNG, NAME WHO HOLDS IT. <<<
+    # A fresh gateway has ZERO ratified peers, so the handshake template's
+    # "a witness ratifies you" can never happen — the closed loop the card
+    # measured. Detect it here (best-effort: an unreadable registry prints
+    # nothing) and hand the human commander their one command. The bootstrap
+    # target is the ORCHESTRATOR cell (the first cell of a mesh — the
+    # commander's framing), which is not necessarily the peer being onboarded.
+    if body.get("registered_unratified"):
+        pstatus, ppayload = _get_json(f"{args.gateway}/peers", token)
+        peers = ppayload.get("peers") if pstatus == 200 else None
+        if isinstance(peers, list) and peers and not any(
+                isinstance(p, dict) and p.get("ratified") for p in peers):
+            print_safe(
+                "      NOTE: no ratified peer exists on this gateway yet — "
+                "the witness\n"
+                "      ladder has no first rung (#565). The human commander "
+                "bootstraps\n"
+                "      the ORCHESTRATOR cell on the gateway box (one command, "
+                "local,\n"
+                "      audited):\n"
+                "          swarph gateway bootstrap-ratify <orchestrator-peer>")
 
     # ── Step 5: subscription auth check ──────────────────────────────
     print_safe("[5/6] verify_subscription_setup()")

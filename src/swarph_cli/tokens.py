@@ -13,6 +13,7 @@ The parser is unchanged. Only its address is.
 from __future__ import annotations
 
 import os
+import stat
 import sys
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -119,6 +120,27 @@ def read_token_file(path: Path) -> str:
         f"token file {path} contains no token: expected a bare token line or "
         f"one of {', '.join(TOKEN_KEYS)}=<token>"
     )
+
+
+def write_secret_file(path: Path, value: str) -> None:
+    """Mode-600 secret write — the WRITER half of this module's one-reader
+    doctrine. Born in commands/mesh.py for register's token capture; moved
+    here when onboard's #564-C capture needed it, because importing a helper
+    out of a sibling COMMAND module pulls that module into the daemon's
+    import closure (test_daemon_console_encoding walks function-body imports
+    too) — and mesh.py is not print-clean. Same neutral-home fix gpt-ops
+    named for the reader in #332."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            fp.write(value)
+            fp.write("\n")
+            fp.flush()
+            os.fsync(fp.fileno())
+    finally:
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
 
 def peer_token_path(self_name: str) -> Path:

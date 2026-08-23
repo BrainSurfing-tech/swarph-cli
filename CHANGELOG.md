@@ -22,6 +22,35 @@
   and says at install time that cursor loads the hook table at session
   start, so an already-open session never sees the edit.
 
+- **`onboard` finds the target's placed token without a flag (#564).** The
+  mint-and-hand-off flow ends with the new peer's once-only token written
+  to `~/.config/swarph/<target>.peer_token` on its box — but the resolver's
+  per-peer rung was keyed on `$SWARPH_SELF`, so on a multi-cell box the
+  placed file was invisible and the refusal named every remedy except the
+  one already performed (measured live on cursor-win's box). A file named
+  for the explicit positional target is now found first — it can
+  authenticate as that target and nothing else, so #467b's withhold is
+  not weakened — and the refusal names the placed-token remedy.
+
+- **`onboard` merges stored capabilities before re-registering (#564, the
+  #294 pattern).** A cell re-onboarding with the default blob no longer
+  409s against the gateway's #124 guard when the stored row carries keys
+  the invocation didn't name (measured live: `provider=cursor` from the
+  mint vs the default `can_claim_tasks` blob). Submitted keys override,
+  stored-only keys survive, and a failed read never blocks the write.
+
+- **`onboard` defers the mint in operator context, captures it in cell
+  context (#564-C).** The same shared token serves the operator and the
+  bootstrapping cell, so the client asserts the context: operator-context
+  registers send `defer_token_mint=true` and mint nothing (the cell mints
+  on its own first register — the mint-and-discard trap is unreachable);
+  cell-context registers capture the minted token to the target's
+  peer-token file mode 600, like `mesh register` always has. Against a
+  pre-defer gateway that mints anyway, the token is surfaced once with
+  delivery instructions instead of evaporating. And when no ratified peer
+  exists on the gateway, onboard names the `bootstrap-ratify` command
+  (#565) for the human commander.
+
 ## 0.46.0 — 2026-08-22
 
 - **The close act gets its verb: `swarph board obligations close` (#562,
