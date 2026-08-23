@@ -118,11 +118,18 @@ def test_install_is_idempotent(isolated_home):
 
 
 def test_install_preserves_foreign_entries(isolated_home):
+    """Card #567: cursor entries now land in the CANONICAL location
+    (hooks.sessionStart under version 1); a foreign BARE top-level
+    sessionStart entry is not ours to move — user-scope bare sessionStart
+    HAS been observed firing on the cursor membrane, so deleting or
+    migrating what we do not own could break a working hook."""
     foreign = {"command": "./operator-owned.sh"}
     config, changed = iwh._install({"sessionStart": [foreign]}, "cursor")
     assert changed is True
-    assert config["sessionStart"][0] == foreign
-    assert len(config["sessionStart"]) == 2
+    assert config["sessionStart"] == [foreign]
+    assert config["version"] == 1
+    ours = config["hooks"]["sessionStart"]
+    assert len(ours) == 1 and iwh._VERB in ours[0]["command"]
 
 
 def test_uninstall_removes_only_owned(isolated_home):
@@ -131,11 +138,58 @@ def test_uninstall_removes_only_owned(isolated_home):
     config, changed = iwh._uninstall(config, "cursor")
     assert changed is True
     assert config["sessionStart"] == [foreign]
+    assert config["hooks"]["sessionStart"] == []
 
 
 def test_uninstall_without_owned_entry_is_noop(isolated_home):
     config, changed = iwh._uninstall({"sessionStart": [{"command": "x"}]}, "cursor")
     assert changed is False
+
+
+def test_cursor_install_writes_canonical_schema(isolated_home):
+    """#567 accept 1: no bare top-level event key for cursor targets."""
+    config, changed = iwh._install({}, "cursor")
+    assert changed is True
+    assert config["version"] == 1
+    assert "sessionStart" not in config
+    assert iwh._VERB in config["hooks"]["sessionStart"][0]["command"]
+
+
+def test_cursor_install_migrates_owned_legacy_bare_entry(isolated_home):
+    """#567: a pre-fix install left OUR entry in the inert bare location.
+    Re-running moves it to the canonical schema and drops the dead key —
+    leaving it would read as armed-in-two-places (one of which nothing
+    loads)."""
+    legacy = {"sessionStart": [
+        {"command": "/usr/bin/python -m swarph_cli wake-hook-output "
+                    "--harness cursor"},
+    ]}
+    config, changed = iwh._install(legacy, "cursor")
+    assert changed is True
+    assert "sessionStart" not in config
+    assert config["version"] == 1
+    assert len(config["hooks"]["sessionStart"]) == 1
+
+
+def test_cursor_migration_keeps_foreign_bare_entries(isolated_home):
+    foreign = {"command": "./operator-owned.sh"}
+    legacy = {"sessionStart": [
+        foreign,
+        {"command": "python -m swarph_cli wake-hook-output --harness cursor"},
+    ]}
+    config, changed = iwh._install(legacy, "cursor")
+    assert changed is True
+    assert config["sessionStart"] == [foreign]
+    assert len(config["hooks"]["sessionStart"]) == 1
+
+
+def test_cursor_uninstall_also_clears_legacy_bare_owned(isolated_home):
+    legacy = {"sessionStart": [
+        {"command": "python -m swarph_cli wake-hook-output --harness cursor"},
+    ]}
+    config, changed = iwh._uninstall(legacy, "cursor")
+    assert changed is True
+    assert "sessionStart" not in config
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,15 @@
   UTF-8 BOMs before parsing stdin (the cursor-win double-BOM regression),
   and every path exits 0 — a hook never blocks the session.
 
+- **`install-wake-hook` writes the canonical cursor hook schema (#567).**
+  cursor-win measured a project-scope bare `{"sessionStart": [...]}` file
+  producing zero hook executions on the cursor membrane; the documented
+  schema is `{"version": 1, "hooks": {...}}`. The verb now writes canonical,
+  migrates its own legacy bare entries away (foreign bare entries are left
+  untouched — a user-scope bare `sessionStart` HAS been observed firing),
+  and says at install time that cursor loads the hook table at session
+  start, so an already-open session never sees the edit.
+
 ## 0.46.0 — 2026-08-22
 
 - **The close act gets its verb: `swarph board obligations close` (#562,

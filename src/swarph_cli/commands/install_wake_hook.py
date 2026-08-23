@@ -17,7 +17,10 @@ design), not by which harness happens to be detected:
 Hook config targets:
 * claude  → ``~/.claude/settings.json``  ``hooks.SessionStart``
 * codex   → ``~/.codex/hooks.json``      ``hooks.SessionStart``
-* cursor  → ``~/.cursor/hooks.json``     ``sessionStart``
+* cursor  → ``~/.cursor/hooks.json``     ``hooks.sessionStart`` (canonical
+  ``{"version": 1, "hooks": {...}}`` schema — a bare top-level
+  ``sessionStart`` is measured inert at project scope on the cursor
+  membrane, card #567; owned legacy bare entries are migrated away)
 
 Idempotent, ``--uninstall``, ``--dry-run`` — same operator contract as
 ``swarph install-hook``. The installed command pins the current Python
@@ -101,7 +104,13 @@ def _event_key(harness: str) -> tuple[str, ...]:
         return ("hooks", "SessionStart")
     if harness == "antigravity":
         return ("swarph-wake-hook", "PreInvocation")
-    return ("sessionStart",)
+    # cursor: the documented schema is {"version": 1, "hooks": {...}} and
+    # cursor-win measured a project-scope BARE file (events at top level)
+    # producing zero hook executions (card #567, DM 27104). Write canonical.
+    return ("hooks", "sessionStart")
+
+
+_LEGACY_CURSOR_EVENT_KEY = ("sessionStart",)
 
 
 def _is_owned_entry(entry: Any) -> bool:
@@ -155,17 +164,48 @@ def _get_list(config: dict[str, Any], harness: str) -> list[Any]:
     return entries
 
 
+def _drop_legacy_owned(config: dict[str, Any], harness: str) -> bool:
+    """Remove OUR entries from a superseded location.
+
+    cursor installs predating card #567 wrote a bare top-level
+    ``sessionStart`` list — measured inert at project scope on the cursor
+    membrane. Leaving the dead copy next to the canonical one invites a
+    future reader to conclude the wake is armed twice (or once, in the
+    place nothing reads). Foreign entries in the legacy location are not
+    ours to touch: a user-scope bare sessionStart HAS been observed firing,
+    so deleting what we do not own could break a working hook.
+    """
+    if harness != "cursor":
+        return False
+    node = config.get(_LEGACY_CURSOR_EVENT_KEY[0])
+    if not isinstance(node, list):
+        return False
+    kept = [e for e in node if not _is_owned_entry(e)]
+    if len(kept) == len(node):
+        return False
+    if kept:
+        config[_LEGACY_CURSOR_EVENT_KEY[0]] = kept
+    else:
+        del config[_LEGACY_CURSOR_EVENT_KEY[0]]
+    return True
+
+
 def _install(
     config: dict[str, Any], harness: str, cell: Optional[str] = None
 ) -> tuple[dict[str, Any], bool]:
     config = dict(config)
+    changed = _drop_legacy_owned(config, harness)
+    if harness == "cursor":
+        if config.get("version") is None:
+            config["version"] = 1
+            changed = True
     entries = _get_list(config, harness)
     owned = [i for i, e in enumerate(entries) if _is_owned_entry(e)]
     new_entry = _new_entry(harness, cell)
     if owned:
         first = owned[0]
         if entries[first] == new_entry and len(owned) == 1:
-            return config, False
+            return config, changed
         entries[first] = new_entry
         for idx in reversed(owned[1:]):
             del entries[idx]
@@ -176,18 +216,19 @@ def _install(
 
 def _uninstall(config: dict[str, Any], harness: str) -> tuple[dict[str, Any], bool]:
     config = dict(config)
+    changed = _drop_legacy_owned(config, harness)
     keys = _event_key(harness)
     node: Any = config
     for key in keys[:-1]:
         node = node.get(key)
         if not isinstance(node, dict):
-            return config, False
+            return config, changed
     entries = node.get(keys[-1])
     if not isinstance(entries, list):
-        return config, False
+        return config, changed
     owned = [i for i, e in enumerate(entries) if _is_owned_entry(e)]
     if not owned:
-        return config, False
+        return config, changed
     for idx in reversed(owned):
         del entries[idx]
     return config, True
@@ -411,4 +452,14 @@ def run_install_wake_hook(argv: Optional[list[str]] = None) -> int:
             "substitutes for the other.",
             file=sys.stderr,
         )
+        if harness == "cursor":
+            # cursor-win measured (card #567, DM 27104): the cursor hook
+            # table loads at session start only — no hot reload. An install
+            # reported as landed is still inert in every open session.
+            print(
+                "NOTE: cursor loads the hook table at session start — "
+                "already-open sessions keep the pre-edit table. Open a "
+                "FRESH chat before testing.",
+                file=sys.stderr,
+            )
     return 0
