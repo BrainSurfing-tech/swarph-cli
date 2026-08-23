@@ -217,6 +217,19 @@ def _bootstrap_ratify(args: argparse.Namespace) -> int:
             reason += f": {args.reason}"
         conn.execute("BEGIN IMMEDIATE")
         try:
+            row = conn.execute(
+                "SELECT ratified FROM claude_peers WHERE name = ?", (args.peer,)
+            ).fetchone()
+            existing = conn.execute(
+                "SELECT name FROM claude_peers WHERE ratified = 1 LIMIT 1"
+            ).fetchone()
+            if row is None or row["ratified"] or existing:
+                conn.execute("ROLLBACK")
+                sys.stderr.write(
+                    "swarph gateway bootstrap-ratify: gateway state changed while "
+                    "you confirmed; refusing to create a second first rung.\n"
+                )
+                return 2
             conn.execute(
                 "UPDATE claude_peers SET ratified=1, ratified_at=?, "
                 "ratified_by=?, ratification_reason=? WHERE name=?",
