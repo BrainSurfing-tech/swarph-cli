@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.47.0 — 2026-08-23
+
 - **`monitor --deliver cursor-print:<cell>` ships the headless DM delivery
   sink (#454).** A cursor cell's DMs now arrive as the prompt of a blocking
   `cursor-agent --print` invocation (continuity via cursor's own
