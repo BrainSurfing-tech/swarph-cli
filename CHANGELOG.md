@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **`monitor --deliver cursor-print:<cell>` ships the headless DM delivery
+  sink (#454).** A cursor cell's DMs now arrive as the prompt of a blocking
+  `cursor-agent --print` invocation (continuity via cursor's own
+  `--continue`), bypassing the whole Windows keystroke surface — no psmux
+  send-keys, no `-l` literal bug, no capture→send race, no pane-id
+  ambiguity. The transport contract is the measured one: a hard failure can
+  exit 0 with prose on stderr and NO result envelope on stdout, so delivery
+  confirms the `{"type":"result","is_error":false}` envelope, not the exit
+  code (#184's class, closed by execution probe). No `--force`/`--yolo` —
+  headless never becomes unapproved-execution.
+
 - **`swarph install-postcompact-hook` ships the post-compact wiring as a
   repo payload (#566, #549).** One command installs the recall/emit hook set
   for Cursor (`preCompact` flag + `postToolUse` recall + emit) or Claude
