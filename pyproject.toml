@@ -120,7 +120,8 @@ where = ["src"]
 # importlib.resources, so an undeclared GUIDE.md passes every test in the
 # tree and fails on every installed wheel -- the 0.39.3 bug above, again.
 swarph_cli = ["systemd/*.service", "systemd/*.timer", "systemd/*.default",
-              "scripts/*.sh", "scripts/*.ps1", "guide/*.md"]
+              "scripts/*.sh", "scripts/*.ps1", "guide/*.md",
+              "payloads/postcompact/*.sh", "payloads/postcompact/*.cmd"]
 # v0.15: ship the bundled mesh-gateway schema so `swarph gateway serve`
 # can apply it at startup via MESH_SCHEMA_PATH (defaults next to server.py).
 "swarph_cli.gateway" = ["*.sql"]
