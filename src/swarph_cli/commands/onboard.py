@@ -946,7 +946,18 @@ def run_onboard(argv: list[str]) -> int:
     if minted_token and cell_context:
         from swarph_cli.tokens import peer_token_path, write_secret_file
         tok_path = peer_token_path(canonical)
-        write_secret_file(tok_path, minted_token)
+        try:
+            write_secret_file(tok_path, minted_token)
+        except OSError as exc:
+            print_safe(
+                f"\n      *** ONCE-ONLY TOKEN for {canonical} — capture FAILED: "
+                f"{exc} ***\n      {minted_token}\n"
+                f"      Deliver it out-of-band and place it at {tok_path} "
+                "(mode 600). This command stores it NOWHERE and will never "
+                "show it again.\n",
+                file=sys.stderr,
+            )
+            return 1
         print_safe(f"      once-only token captured → {tok_path} (mode 600)")
     elif minted_token:
         print_safe(
