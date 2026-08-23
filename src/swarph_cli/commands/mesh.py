@@ -380,17 +380,11 @@ def _parse_capability(spec: str) -> tuple[str, object]:
 
 
 def _write_secret_file_mode_600(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(path, flags, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fp:
-            fp.write(value)
-            fp.write("\n")
-            fp.flush()
-            os.fsync(fp.fileno())
-    finally:
-        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    # Home moved to swarph_cli.tokens.write_secret_file (#564-C) — a helper
+    # in a COMMAND module is an import-closure trap (the daemon's AST walk
+    # reaches function-body imports). Alias kept so call sites stay put.
+    from swarph_cli.tokens import write_secret_file
+    write_secret_file(path, value)
 
 
 

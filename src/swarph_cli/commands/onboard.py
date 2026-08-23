@@ -944,10 +944,9 @@ def run_onboard(argv: list[str]) -> int:
             f"          swarph onboard {canonical}")
     minted_token = body.get("peer_token")
     if minted_token and cell_context:
-        from swarph_cli.commands.mesh import _write_secret_file_mode_600
-        from swarph_cli.tokens import peer_token_path
+        from swarph_cli.tokens import peer_token_path, write_secret_file
         tok_path = peer_token_path(canonical)
-        _write_secret_file_mode_600(tok_path, minted_token)
+        write_secret_file(tok_path, minted_token)
         print_safe(f"      once-only token captured → {tok_path} (mode 600)")
     elif minted_token:
         print_safe(
