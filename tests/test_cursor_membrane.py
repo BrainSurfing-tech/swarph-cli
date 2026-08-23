@@ -542,7 +542,9 @@ def test_print_argv_is_print_mode_and_the_tui_argv_is_not(tmp_path):
     prn = _build_cursor_print_argv(_cell(tmp_path), "check mesh")
     assert "--print" not in tui and "-p" not in tui
     assert "--print" in prn
-    assert "--output-format" in prn and "text" in prn
+    # json, not text: the result envelope is the only machine-readable
+    # success signal (a hard failure can exit 0 with prose on stderr).
+    assert "--output-format" in prn and "json" in prn
     assert prn[-1] == "check mesh"
 
 
@@ -575,7 +577,7 @@ def test_run_cursor_print_returns_the_process_exit_code_not_launch_success(tmp_p
         seen["cmd"] = cmd
         seen["cwd"] = kw.get("cwd")
         seen["timeout"] = kw.get("timeout")
-        return types.SimpleNamespace(returncode=3)
+        return types.SimpleNamespace(returncode=3, stdout="", stderr="")
 
     monkeypatch.setattr("swarph_cli.commands.spawn.subprocess.run", fake_run)
     monkeypatch.setattr("swarph_cli.commands.spawn.shutil.which", lambda n: "/bin/cursor-agent")
@@ -594,3 +596,42 @@ def test_run_cursor_print_timeout_is_124_not_zero(tmp_path, monkeypatch):
     monkeypatch.setattr("swarph_cli.commands.spawn.subprocess.run", boom)
     monkeypatch.setattr("swarph_cli.commands.spawn.shutil.which", lambda n: "/bin/cursor-agent")
     assert run_cursor_print(_cell(tmp_path), "check mesh") == 124
+
+
+_OK_ENVELOPE = '{"type":"result","subtype":"success","is_error":false,"result":"OK"}'
+_ERR_ENVELOPE = '{"type":"result","subtype":"error","is_error":true,"result":""}'
+
+
+def _fake_completed(monkeypatch, returncode, stdout):
+    monkeypatch.setattr(
+        "swarph_cli.commands.spawn.subprocess.run",
+        lambda *a, **k: types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=""),
+    )
+    monkeypatch.setattr("swarph_cli.commands.spawn.shutil.which", lambda n: "/bin/cursor-agent")
+
+
+def test_run_cursor_print_success_needs_the_envelope_not_just_exit_0(tmp_path, monkeypatch):
+    """Measured 2026-08-23: exit 0 + envelope => transport-complete."""
+    _fake_completed(monkeypatch, 0, _OK_ENVELOPE + "\n")
+    assert run_cursor_print(_cell(tmp_path), "check mesh") == 0
+
+
+def test_run_cursor_print_exit_0_without_envelope_is_transport_INCOMPLETE(tmp_path, monkeypatch):
+    """The measured bad-model case: exit 0, error prose on stderr, NO envelope.
+
+    This is #184's exact class — reporting success here would be the phantom
+    delivery the whole card exists to prevent.
+    """
+    _fake_completed(monkeypatch, 0, "")
+    assert run_cursor_print(_cell(tmp_path), "check mesh") == 1
+
+
+def test_run_cursor_print_error_envelope_is_incomplete_even_at_exit_0(tmp_path, monkeypatch):
+    _fake_completed(monkeypatch, 0, _ERR_ENVELOPE + "\n")
+    assert run_cursor_print(_cell(tmp_path), "check mesh") == 1
+
+
+def test_run_cursor_print_skips_malformed_lines_before_the_envelope(tmp_path, monkeypatch):
+    stdout = 'not json\n{"type":"assistant"}\n{broken\n' + _OK_ENVELOPE + "\n"
+    _fake_completed(monkeypatch, 0, stdout)
+    assert run_cursor_print(_cell(tmp_path), "check mesh") == 0

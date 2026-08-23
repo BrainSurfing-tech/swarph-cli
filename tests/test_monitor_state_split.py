@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from swarph_cli.commands import mesh
 
 
@@ -405,3 +407,58 @@ def test_idle_polls_do_not_churn_the_state_files(monkeypatch, tmp_path):
         mesh._monitor_iteration(state)
     assert (tmp_path / "ledgers.json").read_text() == ledgers, "idle == no rewrite"
     assert not (tmp_path / "cursor.json").exists()
+
+
+# ── #454 cursor-print sink: DM content via cursor-agent --print, no send-keys ──
+
+def test_parse_sink_cursor_print():
+    sink = mesh.parse_sink("cursor-print:cursor-win")
+    assert sink.name == "cursor-print:cursor-win"
+    assert sink.cell_name == "cursor-win" and sink.is_push
+    with pytest.raises(mesh.MonitorSinkError):
+        mesh.parse_sink("cursor-print:")
+
+
+def test_cursor_print_prompt_carries_the_FULL_body_not_the_160_char_display_line():
+    """_format_inbox_line truncates for the terminal; delivery must not."""
+    sink = mesh.parse_sink("cursor-print:cursor-win")
+    body = "x" * 400
+    prompt = sink._prompt([_dm(7, content=body)])
+    assert body in prompt and "id=7" in prompt and "from=droplet" in prompt
+
+
+def test_cursor_print_deliver_maps_confirmed_envelope_to_true(monkeypatch, tmp_path):
+    import types as _t
+    seen = {}
+    monkeypatch.setattr("swarph_cli.cell.load_cell", lambda p: _t.SimpleNamespace(name="cursor-win"))
+    monkeypatch.setattr("swarph_cli.cell.resolve_cell_path", lambda n: tmp_path / "c.yaml")
+    def fake_print(cell, prompt, *, timeout):
+        seen["prompt"], seen["timeout"] = prompt, timeout
+        return 0
+    monkeypatch.setattr("swarph_cli.commands.spawn.run_cursor_print", fake_print)
+    sink = mesh.parse_sink("cursor-print:cursor-win")
+    assert sink.deliver(None, [_dm(1), _dm(2)], 2) is True
+    assert "2 new mesh DM(s)" in seen["prompt"]
+    assert seen["timeout"] == sink.DEFAULT_TIMEOUT_S
+
+
+def test_cursor_print_deliver_failure_leaves_the_ledger(monkeypatch, tmp_path):
+    import types as _t
+    monkeypatch.setattr("swarph_cli.cell.load_cell", lambda p: _t.SimpleNamespace(name="cursor-win"))
+    monkeypatch.setattr("swarph_cli.cell.resolve_cell_path", lambda n: tmp_path / "c.yaml")
+    monkeypatch.setattr("swarph_cli.commands.spawn.run_cursor_print", lambda *a, **k: 1)
+    sink = mesh.parse_sink("cursor-print:cursor-win")
+    assert sink.deliver(None, [_dm(1)], 1) is False
+
+
+def test_cursor_print_deliver_never_claims_an_empty_recovery(monkeypatch):
+    sink = mesh.parse_sink("cursor-print:cursor-win")
+    assert sink.deliver(None, [], 9) is False
+
+
+def test_cursor_print_deliver_unloadable_cell_is_visible_failure(monkeypatch, capsys):
+    from swarph_cli.cell import CellError
+    monkeypatch.setattr("swarph_cli.cell.resolve_cell_path", lambda n: (_ for _ in ()).throw(CellError("nope")))
+    sink = mesh.parse_sink("cursor-print:cursor-win")
+    assert sink.deliver(None, [_dm(1)], 1) is False
+    assert "cannot load cell" in capsys.readouterr().err

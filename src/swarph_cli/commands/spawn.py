@@ -2229,12 +2229,20 @@ def _build_cursor_print_argv(cell: Cell, prompt: str) -> list[str]:
     without a chat id can select a session, which is a TTY prompt. ``--continue``
     is the same continuity the interactive membrane already measured.
 
+    ``--output-format json`` (not text) because the RESULT ENVELOPE is the only
+    machine-readable success signal: measured 2026-08-23 (cursor-agent
+    2026.08.11), a hard failure (unknown ``--model``) prints prose to stderr and
+    exits **0** with NO envelope on stdout. In text mode a failure and a
+    successful answer are the same shape. Success therefore = exit 0 AND a
+    ``{"type":"result","is_error":false}`` line; anything else is
+    transport-incomplete (#184's class, confirmed live).
+
     NO ``--force`` / ``--yolo`` / ``--auto-review``: headless must not quietly
     become unapproved-execution. Same posture as the TUI argv.
     """
     if not str(prompt).strip():
         raise ValueError("cursor --print delivery needs a non-empty prompt")
-    argv = ["cursor-agent", "--trust", "--print", "--output-format", "text"]
+    argv = ["cursor-agent", "--trust", "--print", "--output-format", "json"]
     if _cursor_has_prior_chat(cell):
         argv.append("--continue")
     sandbox = _cursor_sandbox(cell)
@@ -2245,9 +2253,15 @@ def _build_cursor_print_argv(cell: Cell, prompt: str) -> list[str]:
 
 
 def run_cursor_print(cell: Cell, prompt: str, *, timeout: Optional[float] = None) -> int:
-    """Block until ``cursor-agent --print`` exits. Returncode is the transport.
+    """Block until ``cursor-agent --print`` exits. The ENVELOPE is the transport.
 
-    Launching is not success (#184). Non-zero means TRANSPORT-INCOMPLETE.
+    Launching is not success (#184) — and measured 2026-08-23, neither is the
+    exit code: a hard failure can exit 0 with no result envelope on stdout
+    (the error prose goes to stderr). Success = returncode 0 AND a
+    ``{"type":"result", ..., "is_error": false}`` line in stdout. Exit 0
+    without that envelope returns 1 (transport-incomplete); a nonzero
+    returncode is passed through unchanged.
+
     This is Cursor-specific on purpose — see #454: a shared ProviderMembrane
     headless seam with Codex would be a false abstraction across two session
     models.
@@ -2283,13 +2297,45 @@ def run_cursor_print(cell: Cell, prompt: str, *, timeout: Optional[float] = None
             cwd=str(cell.cwd),
             env=env,
             timeout=timeout,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except subprocess.TimeoutExpired:
         return 124
     except OSError as exc:
         print(f"swarph: cursor --print launch failed: {exc}", file=sys.stderr)
         return 1
-    return int(completed.returncode)
+    if completed.returncode != 0:
+        return int(completed.returncode)
+    # Exit 0 is not the transport (measured: a hard failure can exit 0 with
+    # the error on stderr and NO envelope on stdout). The result envelope is.
+    if _print_result_succeeded(completed.stdout or ""):
+        return 0
+    print("swarph: cursor --print exited 0 but emitted no success envelope — "
+          "transport-incomplete", file=sys.stderr)
+    return 1
+
+
+def _print_result_succeeded(stdout: str) -> bool:
+    """True iff stdout carries a ``result`` envelope that is not an error.
+
+    stream-json/text modes emit other line shapes; only the terminal
+    ``{"type":"result"}`` object settles the transport. Malformed JSON lines
+    are skipped, not fatal — the envelope is what matters, not the chatter.
+    """
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") == "result":
+            return not bool(obj.get("is_error"))
+    return False
 
 
 class GrokMembrane(ProviderMembrane):
