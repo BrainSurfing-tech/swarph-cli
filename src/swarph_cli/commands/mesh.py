@@ -1188,6 +1188,71 @@ class StdoutSink(Sink):
         return True
 
 
+class CursorPrintSink(Sink):
+    """Deliver DM CONTENT to a cursor cell via ``cursor-agent --print`` (#454).
+
+    The Windows keystroke surface (psmux send-keys, ``-l`` literal bugs,
+    capture→send races, pane-id ambiguity) is bypassed entirely: the DMs
+    become the prompt of a headless invocation, with session continuity from
+    cursor's own ``--continue``. Delivery blocks for the agent turn and
+    returns True only on a CONFIRMED result envelope — launching is not
+    success, and measured 2026-08-23 neither is exit 0 (#184's class).
+    """
+
+    is_push = True
+
+    #: A real DM turn is minutes, not seconds. Sized generously; a timeout is
+    #: a FAILED delivery (ledger stays, next iteration retries), never a
+    #: silent drop.
+    DEFAULT_TIMEOUT_S = 900.0
+
+    def __init__(self, cell_name: str, *, timeout_s: float = DEFAULT_TIMEOUT_S):
+        super().__init__(f"cursor-print:{cell_name}")
+        self.cell_name = cell_name
+        self.timeout_s = timeout_s
+
+    def _prompt(self, dms: list) -> str:
+        # NOT _format_inbox_line: that truncates content at 160 chars for
+        # terminal display. This prompt IS the delivery — the full body must
+        # cross, or the cell answers a message it never received.
+        lines = [
+            f"You have {len(dms)} new mesh DM(s). "
+            "Read each and act per your standing instructions.",
+            "",
+        ]
+        for dm in dms:
+            lines.append(
+                f"--- id={dm.get('id')} from={dm.get('from_node')} "
+                f"kind={dm.get('kind')} ---"
+            )
+            lines.append(dm.get("content") or "")
+            lines.append("")
+        return "\n".join(lines)
+
+    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> bool:
+        if not dms:
+            # Nothing recoverable to hand over (log rotated) — do NOT claim a
+            # delivery; the ledger stays and the gap stays visible.
+            return False
+        # Lazy: mesh.py must not pay spawn.py's import cost at module load,
+        # and the sink only exists on boxes that run a cursor cell anyway.
+        from swarph_cli.cell import load_cell, resolve_cell_path
+        from swarph_cli.commands.spawn import run_cursor_print
+
+        try:
+            cell = load_cell(resolve_cell_path(self.cell_name))
+        except Exception as exc:
+            print(f"[monitor] cursor-print: cannot load cell "
+                  f"'{self.cell_name}': {exc}", file=sys.stderr, flush=True)
+            return False
+        rc = run_cursor_print(cell, self._prompt(dms), timeout=self.timeout_s)
+        return rc == 0
+
+    def pending_label(self, count: int) -> str:
+        plural = "s" if count != 1 else ""
+        return f"{count} DM{plural} not yet delivered to {self.name}"
+
+
 def parse_sink(spec: str) -> Sink:
     """`--deliver SINK` -> Sink. Unknown or held specs RAISE; nothing no-ops."""
     if spec == "pull":
@@ -1196,6 +1261,13 @@ def parse_sink(spec: str) -> Sink:
         return NoneSink()
     if spec == "stdout":
         return StdoutSink()
+    if spec.startswith("cursor-print:"):
+        target = spec[len("cursor-print:"):]
+        if not target:
+            raise MonitorSinkError(
+                "sink 'cursor-print:' needs a cell name, e.g. cursor-print:cursor-win"
+            )
+        return CursorPrintSink(target)
     if spec.startswith("tmux-notify:"):
         target = spec[len("tmux-notify:"):]
         if not target:

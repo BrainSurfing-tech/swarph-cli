@@ -147,10 +147,13 @@ def test_resolve_endpoint_falls_back_to_swarph_brain_mcp(monkeypatch):
     assert ba._resolve_endpoint() == "http://sb/mcp"
 
 
-def test_resolve_endpoint_default_is_localhost(monkeypatch):
+def test_resolve_endpoint_default_is_the_tailnet_ip(monkeypatch):
+    """#548: gbrain binds 100.107.222.72:8792 ONLY (measured 2026-08-23 —
+    loopback refuses even on the gateway box), so a loopback default was
+    deaf everywhere, including on gbrain's own host."""
     monkeypatch.delenv("GBRAIN_MCP_URL", raising=False)
     monkeypatch.delenv("SWARPH_BRAIN_MCP", raising=False)
-    assert ba._resolve_endpoint() == "http://127.0.0.1:8792/mcp"
+    assert ba._resolve_endpoint() == "http://100.107.222.72:8792/mcp"
 
 
 # --- SWARPH_BRAIN_GATEWAY client path (Task 2) ------------------------------
