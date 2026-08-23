@@ -493,6 +493,26 @@ def _post_json(
         return exc.code, err_body
 
 
+def _get_json(url: str, token: str) -> tuple[int, dict]:
+    """GET counterpart to _post_json, same stdlib-only constraint. Best-effort:
+    any transport failure returns (0, {}) so a read in service of a write
+    never BLOCKS the write."""
+    req = urllib.request.Request(
+        url, method="GET",
+        headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            err_body = json.loads(exc.read().decode("utf-8") or "{}")
+        except Exception:
+            err_body = {"detail": str(exc)}
+        return exc.code, err_body
+    except Exception:
+        return 0, {}
+
+
 def _parse_capability(spec: str) -> tuple[str, object]:
     """``KEY=VALUE`` → (key, value). VALUE parsed as JSON when possible
     (so ``can_claim_tasks=true`` lands as bool, not string)."""
@@ -805,6 +825,24 @@ def run_onboard(argv: list[str]) -> int:
     # ── Step 4: POST /peers/register ─────────────────────────────────
     peer_url = args.url or f"http://{canonical}:8787"
     print_safe(f"[4/6] POST {args.gateway}/peers/register")
+    # >>> #124's GUARD, MET CLIENT-SIDE — #294's PATTERN, THE MISSING HALF. <<<
+    # The gateway 409s a re-register whose payload would DROP stored
+    # capability keys — measured live 2026-08-23 when an operator minted
+    # cursor-test-postcompact with provider=cursor and the cell's own onboard
+    # re-registered with the DEFAULT blob (can_claim_tasks only). `mesh
+    # register` learned the GET-first merge in #294; onboard sent its blob
+    # raw and let the gateway teach the lesson. Same merge here: submitted
+    # keys override, stored-only keys survive. A failed read never blocks
+    # the write — the server-side guard still catches a real drop, and a
+    # row that does not exist yet has nothing to destroy.
+    gstatus, gpayload = _get_json(f"{args.gateway}/peers/{canonical}", token)
+    if gstatus == 200 and isinstance(gpayload.get("capabilities"), dict):
+        stored_caps = gpayload["capabilities"]
+        dropped = sorted(set(stored_caps) - set(capabilities))
+        if dropped:
+            capabilities = {**stored_caps, **capabilities}
+            print_safe(f"      merged stored capability keys {dropped} into "
+                       "the re-register — a partial payload replaces nothing")
     status, body = _post_json(
         f"{args.gateway}/peers/register",
         {"name": canonical, "url": peer_url, "capabilities": capabilities},

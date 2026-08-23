@@ -189,6 +189,90 @@ def test_run_onboard_happy_path(monkeypatch, tmp_path, capsys):
     assert "[manual]" in out
 
 
+def test_run_onboard_merges_stored_capabilities_into_reregister(
+    monkeypatch, tmp_path, capsys
+):
+    """The 2026-08-23 cursor-test-postcompact case, verbatim: the operator's
+    out-of-band mint wrote provider=cursor; the cell's own onboard then
+    re-registered with the DEFAULT blob (can_claim_tasks only) and the
+    gateway's #124 guard 409'd, stopping the ladder at rung 4. `mesh
+    register` has done the GET-first merge since #294; onboard now does
+    the same instead of letting the gateway teach the lesson."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    fake_post, captured = _mock_post_factory()
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    monkeypatch.setattr(
+        onboard, "_get_json",
+        lambda url, token: (200, {"name": "test-peer",
+                                  "capabilities": {"provider": "cursor",
+                                                   "can_claim_tasks": True}}))
+    import swarph_shared
+    monkeypatch.setattr(
+        swarph_shared, "verify_subscription_setup", lambda: True, raising=False
+    )
+    rc = onboard.run_onboard(
+        ["test-peer", "--gateway", "http://localhost:8788",
+         "--state-dir", str(tmp_path / "state")]
+    )
+    assert rc == 0
+    reg = [c for c in captured if c["url"].endswith("/peers/register")][0]
+    assert reg["body"]["capabilities"] == {
+        "provider": "cursor", "can_claim_tasks": True}
+    assert "merged stored capability keys" in capsys.readouterr().out
+
+
+def test_run_onboard_merge_submitted_keys_override_stored(
+    monkeypatch, tmp_path, capsys
+):
+    """The merge direction matters: an explicit --capability is a decision,
+    not a hint — it overrides the stored value for the SAME key while
+    stored-only keys survive."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    fake_post, captured = _mock_post_factory()
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    monkeypatch.setattr(
+        onboard, "_get_json",
+        lambda url, token: (200, {"name": "test-peer",
+                                  "capabilities": {"provider": "cursor",
+                                                   "can_claim_tasks": True}}))
+    import swarph_shared
+    monkeypatch.setattr(
+        swarph_shared, "verify_subscription_setup", lambda: True, raising=False
+    )
+    rc = onboard.run_onboard(
+        ["test-peer", "--gateway", "http://localhost:8788",
+         "--state-dir", str(tmp_path / "state"),
+         "--capability", "provider=claude"]
+    )
+    assert rc == 0
+    reg = [c for c in captured if c["url"].endswith("/peers/register")][0]
+    assert reg["body"]["capabilities"] == {
+        "provider": "claude", "can_claim_tasks": True}
+
+
+def test_run_onboard_unreadable_registry_never_blocks_the_register(
+    monkeypatch, tmp_path, capsys
+):
+    """First registration, or a GET that fails outright: nothing exists to
+    destroy, so the write proceeds with what the invocation carries. The
+    read is in service of the write, never a gate on it."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    fake_post, captured = _mock_post_factory()
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    monkeypatch.setattr(onboard, "_get_json", lambda url, token: (0, {}))
+    import swarph_shared
+    monkeypatch.setattr(
+        swarph_shared, "verify_subscription_setup", lambda: True, raising=False
+    )
+    rc = onboard.run_onboard(
+        ["test-peer", "--gateway", "http://localhost:8788",
+         "--state-dir", str(tmp_path / "state")]
+    )
+    assert rc == 0
+    reg = [c for c in captured if c["url"].endswith("/peers/register")][0]
+    assert reg["body"]["capabilities"] == {"can_claim_tasks": True}
+
+
 def test_run_onboard_reports_reregister_as_existing_not_fresh_mint(
     monkeypatch, tmp_path, capsys
 ):
