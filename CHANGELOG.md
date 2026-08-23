@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **`onboard` finds the target's placed token without a flag (#564).** The
+  mint-and-hand-off flow ends with the new peer's once-only token written
+  to `~/.config/swarph/<target>.peer_token` on its box — but the resolver's
+  per-peer rung was keyed on `$SWARPH_SELF`, so on a multi-cell box the
+  placed file was invisible and the refusal named every remedy except the
+  one already performed (measured live on cursor-win's box). A file named
+  for the explicit positional target is now found first — it can
+  authenticate as that target and nothing else, so #467b's withhold is
+  not weakened — and the refusal names the placed-token remedy.
+
 ## 0.46.0 — 2026-08-22
 
 - **The close act gets its verb: `swarph board obligations close` (#562,

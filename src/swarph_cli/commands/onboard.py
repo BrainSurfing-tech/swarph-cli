@@ -149,8 +149,10 @@ def _resolve_token(token_file_arg: Optional[str], *,
     (does not auto-create per drop DM #726 #3 — privilege boundary).
 
     `target_peer` — the peer name this credential will be used to REGISTER, when
-    that is known. Only rung 4 (the cell's own per-peer token) cares: a per-peer
-    token may register ITSELF and nothing else. Default None means "not a
+    that is known. Two rungs care: the target's own placed file (found without
+    a flag — the mint-and-hand-off tail, #564) and rung 4 (this cell's own
+    per-peer token, withheld for a cross-name target): a per-peer token may
+    register ITSELF and nothing else. Default None means "not a
     registration", which is why `ratify` and `daemon` — which import this
     function and never call POST /peers/register — are unaffected.
 
@@ -235,6 +237,33 @@ def _resolve_token(token_file_arg: Optional[str], *,
                 "~/.config/swarph/<self>.peer_token\n"
                 "  Fix the path, or omit --token-file to use those fallbacks."
             ) from exc
+
+    # ── THE TARGET'S OWN FILE, WHEN THE TARGET IS EXPLICIT ────────────────
+    # `swarph onboard X` with X's minted token already placed at
+    # ~/.config/swarph/X.peer_token is the tail end of the mint-and-hand-off
+    # flow (#564): the operator minted X out of band and delivered the
+    # once-only token to X's box. A file NAMED for the explicit positional
+    # target is not a guessed identity — #243's no-guessing rule is about
+    # deriving a name from the environment, and this name came from the
+    # command line. The file can authenticate as X and nothing else, which
+    # is the one registration a per-peer token may perform (#467b). Without
+    # this rung the placed token was invisible unless SWARPH_SELF happened
+    # to point at X, and the refusal below named every remedy EXCEPT the
+    # file the operator had already written — measured live on cursor-win's
+    # box 2026-08-23 (SWARPH_SELF=workstation-lc, target's file on disk,
+    # refusal raised).
+    if target_peer:
+        from swarph_cli.tokens import read_token_file
+        target_tok_path = (Path.home() / ".config" / "swarph"
+                           / f"{target_peer}.peer_token")
+        if target_tok_path.exists():
+            try:
+                val = read_token_file(target_tok_path)
+                if val:
+                    return val
+            except RuntimeError as exc:
+                print_safe(f"swarph onboard: failed to read {target_tok_path}: "
+                           f"{exc}", file=sys.stderr)
 
     # ── THE NAMED CELL'S OWN CREDENTIAL OUTRANKS THE AMBIENT ONE ────────────
     # >>> #332's PRINCIPLE, APPLIED TO THE OTHER WAY A CALLER NAMES SOMETHING.
@@ -397,8 +426,12 @@ def _resolve_token(token_file_arg: Optional[str], *,
             f"  That credential authenticates as {self_name!r}, and the gateway binds\n"
             f"  POST /peers/register's `name` to the authenticated caller — so it can\n"
             f"  register {self_name!r} and no other peer. Presenting it would 403.\n\n"
-            f"  ONBOARDING ANOTHER CELL IS AN OPERATOR ACTION. Use an operator "
-            f"credential:\n"
+            f"  If you hold {target_peer}'s MINTED once-only token, place it at\n"
+            f"  ~/.config/swarph/{target_peer}.peer_token and re-run — a file NAMED\n"
+            f"  for the target is found without a flag. Or name it directly:\n"
+            f"      swarph onboard {target_peer} --token-file <path>\n\n"
+            f"  ONBOARDING ANOTHER CELL WITHOUT ITS TOKEN IS AN OPERATOR ACTION.\n"
+            f"  Use an operator credential:\n"
             f"      swarph onboard {target_peer} --token-file <operator-token>\n"
             f"      MESH_GATEWAY_TOKEN=<operator-token> swarph onboard {target_peer}\n\n"
             f"  To onboard THIS cell, the per-peer token IS the right credential:\n"
