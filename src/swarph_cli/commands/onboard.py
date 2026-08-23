@@ -843,9 +843,18 @@ def run_onboard(argv: list[str]) -> int:
             capabilities = {**stored_caps, **capabilities}
             print_safe(f"      merged stored capability keys {dropped} into "
                        "the re-register — a partial payload replaces nothing")
+    # >>> #564-C: WHO IS THIS REGISTER FOR? <<< The same shared token serves
+    # the operator and the bootstrapping cell, so the gateway cannot tell the
+    # contexts apart from the credential — the CLIENT asserts it. Cell-context
+    # (you ARE the target: SWARPH_SELF names it) lets the register mint and
+    # captures the once-only token below; operator-context DEFERS the mint to
+    # the cell's own first register, so the token never enters a process that
+    # would discard it (the trap the card measured end-to-end).
+    cell_context = os.environ.get("SWARPH_SELF", "").strip() == canonical
     status, body = _post_json(
         f"{args.gateway}/peers/register",
-        {"name": canonical, "url": peer_url, "capabilities": capabilities},
+        {"name": canonical, "url": peer_url, "capabilities": capabilities,
+         "defer_token_mint": not cell_context},
         token,
     )
     if status != 200:
@@ -914,6 +923,65 @@ def run_onboard(argv: list[str]) -> int:
         print_safe(f"      ok (already registered{no_mint})")
     else:
         print_safe(f"      ok (registered_unratified=true)")
+
+    # >>> #564: THE MINTED TOKEN'S THREE FATES, EACH NAMED. <<<
+    # deferred  — operator-context register on a #564-C gateway: nothing was
+    #             minted; the cell mints on its own first register.
+    # captured  — cell-context register that minted: the token is written to
+    #             the target's peer-token file (mode 600) RIGHT HERE, so the
+    #             cell-first order through `onboard` captures exactly like
+    #             `mesh register` always has.
+    # surfaced  — a minted token in an OPERATOR-context process: only a
+    #             pre-#564-C gateway (the flag unknown to it) does this. That
+    #             is the original trap; the token is printed ONCE with
+    #             delivery instructions instead of evaporating.
+    if body.get("token_status") == "deferred":
+        print_safe(
+            "      mint DEFERRED (#564): an operator-context register mints "
+            "nothing.\n"
+            f"      The once-only token mints on the cell's own first register"
+            f" — on {canonical}'s box:\n"
+            f"          swarph onboard {canonical}")
+    minted_token = body.get("peer_token")
+    if minted_token and cell_context:
+        from swarph_cli.commands.mesh import _write_secret_file_mode_600
+        from swarph_cli.tokens import peer_token_path
+        tok_path = peer_token_path(canonical)
+        _write_secret_file_mode_600(tok_path, minted_token)
+        print_safe(f"      once-only token captured → {tok_path} (mode 600)")
+    elif minted_token:
+        print_safe(
+            f"\n      *** ONCE-ONLY TOKEN for {canonical} — this gateway "
+            f"pre-dates defer_token_mint ***\n"
+            f"      {minted_token}\n"
+            f"      Deliver it out-of-band to {canonical}'s box and place it "
+            f"at\n      ~/.config/swarph/{canonical}.peer_token (mode 600). "
+            f"This command stores it NOWHERE\n      and will never show it "
+            f"again.\n",
+            file=sys.stderr,
+        )
+
+    # >>> #565: WHEN THE LADDER HAS NO FIRST RUNG, NAME WHO HOLDS IT. <<<
+    # A fresh gateway has ZERO ratified peers, so the handshake template's
+    # "a witness ratifies you" can never happen — the closed loop the card
+    # measured. Detect it here (best-effort: an unreadable registry prints
+    # nothing) and hand the human commander their one command. The bootstrap
+    # target is the ORCHESTRATOR cell (the first cell of a mesh — the
+    # commander's framing), which is not necessarily the peer being onboarded.
+    if body.get("registered_unratified"):
+        pstatus, ppayload = _get_json(f"{args.gateway}/peers", token)
+        peers = ppayload.get("peers") if pstatus == 200 else None
+        if isinstance(peers, list) and peers and not any(
+                isinstance(p, dict) and p.get("ratified") for p in peers):
+            print_safe(
+                "      NOTE: no ratified peer exists on this gateway yet — "
+                "the witness\n"
+                "      ladder has no first rung (#565). The human commander "
+                "bootstraps\n"
+                "      the ORCHESTRATOR cell on the gateway box (one command, "
+                "local,\n"
+                "      audited):\n"
+                "          swarph gateway bootstrap-ratify <orchestrator-peer>")
 
     # ── Step 5: subscription auth check ──────────────────────────────
     print_safe("[5/6] verify_subscription_setup()")
