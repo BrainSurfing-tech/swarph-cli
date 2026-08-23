@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -84,12 +85,22 @@ def _scripts_dir(harness: str, scope: str) -> Path:
     return base / sub / "hooks" / _DIR_NAME
 
 
+def _cwd_slug() -> str:
+    """/home/ubuntu -> home-ubuntu; C:\\Users\\x -> C-Users-x.
+
+    Path.parts keeps the Windows drive ('C:\\') as a component, and a colon
+    is illegal in a Windows directory name — deriving through parts makes
+    the convention undetectable on exactly the membrane cursor-win runs on.
+    The is_dir() guard in _cursor_cell_memory_dir keeps a wrong guess from
+    baking anything."""
+    return "-".join(s for s in re.split(r"[/\\:]+", str(Path.cwd())) if s)
+
+
 def _cursor_cell_memory_dir() -> Optional[Path]:
     """The cursor-cell memory convention: ~/.cursor-cell/projects/<cwd-slug>/
     memories (cwd /home/ubuntu -> home-ubuntu). Returned only when it exists —
     baking a path nobody reads manufactures the armed-looking-but-deaf cell."""
-    slug = "-".join(p for p in Path.cwd().parts if p not in (os.sep, ""))
-    candidate = Path.home() / ".cursor-cell" / "projects" / slug / "memories"
+    candidate = Path.home() / ".cursor-cell" / "projects" / _cwd_slug() / "memories"
     return candidate if candidate.is_dir() else None
 
 

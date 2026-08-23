@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,11 @@ def _home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    if os.name == "nt":
+        # Path.home() on Windows reads USERPROFILE, not HOME — without this
+        # the verb writes to the real profile while the test reads the fake
+        # one (measured on the windows-latest lane).
+        monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     return home
 
@@ -152,14 +158,14 @@ def test_memory_dir_derivation_for_cursor(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.chdir(proj)
-    slug = "-".join(p for p in proj.parts if p not in (os.sep, ""))
+    slug = M._cwd_slug()
     mem = home / ".cursor-cell" / "projects" / slug / "memories"
     mem.mkdir(parents=True)
     rc = _run(["--harness", "cursor", "--scope", "project"], monkeypatch)
     assert rc == 0
     emit = (proj / ".cursor/hooks/swarph-postcompact/posttooluse-emit.sh"
             ).read_text()
-    assert f"SWARPH_MEMORY_DIR={mem}" in emit
+    assert f"SWARPH_MEMORY_DIR={shlex.quote(str(mem))}" in emit
 
 
 def test_memory_dir_env_beats_convention_flag_beats_env(tmp_path, monkeypatch):
@@ -170,7 +176,7 @@ def test_memory_dir_env_beats_convention_flag_beats_env(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.chdir(proj)
-    slug = "-".join(p for p in proj.parts if p not in (os.sep, ""))
+    slug = M._cwd_slug()
     (home / ".cursor-cell" / "projects" / slug / "memories").mkdir(parents=True)
     envdir = tmp_path / "envmem"
     envdir.mkdir()
@@ -179,7 +185,7 @@ def test_memory_dir_env_beats_convention_flag_beats_env(tmp_path, monkeypatch):
     assert rc == 0
     emit = (proj / ".cursor/hooks/swarph-postcompact/posttooluse-emit.sh"
             ).read_text()
-    assert f"SWARPH_MEMORY_DIR={envdir}" in emit
+    assert f"SWARPH_MEMORY_DIR={shlex.quote(str(envdir))}" in emit
     flagdir = tmp_path / "flagmem"
     flagdir.mkdir()
     rc = _run(["--harness", "cursor", "--scope", "project",
@@ -188,7 +194,7 @@ def test_memory_dir_env_beats_convention_flag_beats_env(tmp_path, monkeypatch):
     assert rc == 0
     emit = (proj / ".cursor/hooks/swarph-postcompact/posttooluse-emit.sh"
             ).read_text()
-    assert f"SWARPH_MEMORY_DIR={flagdir}" in emit
+    assert f"SWARPH_MEMORY_DIR={shlex.quote(str(flagdir))}" in emit
 
 
 # ── claude install ───────────────────────────────────────────────────────────
