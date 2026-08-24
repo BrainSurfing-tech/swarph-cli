@@ -1466,34 +1466,80 @@ def _log_dm(state: MonitorState, dm: dict) -> None:
     )
 
 
+_WAKE_PROMPT = "check mesh"
+# Submit-verify bounds (#533): the settle pause lets the -l literal LAND in
+# the composer before Enter can submit it (the blind gesture raced this), and
+# the attempt bound keeps a never-submitting pane from being Enter-spammed
+# forever — the wake stays owed instead.
+_WAKE_SETTLE_S = 0.6
+_WAKE_SUBMIT_ATTEMPTS = 4
+
+
+def _wake_still_pending(target: str) -> bool:
+    """True while the wake prompt still sits in the pane's bottom lines — i.e.
+    UNSUBMITTED, waiting in the composer. Fail-OPEN toward retrying: a capture
+    failure returns True, because a spare Enter on an empty composer is a
+    no-op while a missing Enter on a held composer is the defect itself. A
+    concatenated backlog ('check meshcheck mesh') matches the substring check
+    and is drained by the same retry Enter that submits it."""
+    try:
+        r = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-t", target],
+            capture_output=True,
+            timeout=5,
+            text=True, encoding="utf-8", errors="replace",
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    if r.returncode != 0:
+        return True
+    tail = [ln for ln in (r.stdout or "").splitlines() if ln.strip()][-3:]
+    return any(_WAKE_PROMPT in ln for ln in tail)
+
+
 def _tmux_wake(target: str) -> bool:
-    """Inject the wake prompt and submit it using Codex's double-Enter gesture."""
+    """Inject the wake prompt and confirm it SUBMITTED (#533).
+
+    Was: Codex's blind double-Enter, on the assumption that a second Enter in
+    a single-submit composer is a no-op. FALSIFIED on cursor's Linux TUI —
+    the Enters race the composer, the prompt never submits, and the next wake
+    CONCATENATES onto it: 'check meshcheck meshcheck mesh' arrived as ONE
+    prompt on cursor-lin, 2026-08-24, three times in a row.
+
+    Now: inject, settle, then Enter-and-verify in a bounded loop — re-Enter
+    only while the prompt is OBSERVED still sitting in the composer. Codex's
+    second Enter falls out naturally (it fires only when the first did not
+    submit). Returns True only on an observed-clear composer: a wake we
+    cannot confirm stays owed, because the cursor advances only inside
+    `if _tmux_wake(...)`.
+    """
     try:
         subprocess.run(
-            ["tmux", "send-keys", "-t", target, "-l", "check mesh"],
+            ["tmux", "send-keys", "-t", target, "-l", _WAKE_PROMPT],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
         )
-        subprocess.run(
-            ["tmux", "send-keys", "-t", target, "Enter"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
+        time.sleep(_WAKE_SETTLE_S)
+        for _ in range(_WAKE_SUBMIT_ATTEMPTS):
+            subprocess.run(
+                ["tmux", "send-keys", "-t", target, "Enter"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            time.sleep(_WAKE_SETTLE_S)
+            if not _wake_still_pending(target):
+                return True
+        print(
+            f"[monitor] tmux wake still unsubmitted after "
+            f"{_WAKE_SUBMIT_ATTEMPTS} Enters; wake stays owed",
+            file=sys.stderr,
+            flush=True,
         )
-        # Codex needs a second Enter to submit its multiline composer. In
-        # single-submit composers the first Enter already sends the prompt and
-        # the second reaches an empty composer, where it is a no-op.
-        subprocess.run(
-            ["tmux", "send-keys", "-t", target, "Enter"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
-        )
-        return True
+        return False
     except (OSError, subprocess.CalledProcessError) as exc:
         print(
             f"[monitor] tmux wake failed; pane may hold an unsubmitted wake: {exc}",
