@@ -215,6 +215,13 @@ def test_claude_install_shape(tmp_path, monkeypatch):
     assert "preCompact" not in cfg["hooks"]  # claude needs no flag handshake
 
 
+def test_codex_install_shape(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    assert _run(["--harness", "codex"], monkeypatch, SWARPH_SELF="codex-cell") == 0
+    cfg = json.loads((home / ".codex/hooks.json").read_text())
+    assert "postcompact-recall" in cfg["hooks"]["PostCompact"][0]["hooks"][0]["command"]
+
+
 def test_unknown_harness_refused(tmp_path, monkeypatch):
     home = _home(tmp_path, monkeypatch)
     rc = _run(["--harness", "muse"], monkeypatch)

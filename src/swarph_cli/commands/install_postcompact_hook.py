@@ -60,6 +60,7 @@ _DIR_NAME = "swarph-postcompact"
 _CURSOR_SCRIPTS = ("precompact-flag.sh", "posttooluse-recall.sh",
                    "posttooluse-emit.sh")
 _CLAUDE_SCRIPTS = ("sessionstart-recall.sh", "posttooluse-emit-claude.sh")
+_CODEX_SCRIPTS = ("postcompact-recall.sh",)
 
 
 def _is_windows() -> bool:
@@ -81,12 +82,14 @@ def _config_path(harness: str, scope: str) -> Path:
         return base / ".cursor" / "hooks.json"
     if harness == "claude":
         return base / ".claude" / "settings.json"
+    if harness == "codex":
+        return base / ".codex" / "hooks.json"
     raise ValueError(f"install-postcompact-hook: unknown harness {harness!r}")
 
 
 def _scripts_dir(harness: str, scope: str) -> Path:
     base = Path.cwd() if scope == "project" else Path.home()
-    sub = ".cursor" if harness == "cursor" else ".claude"
+    sub = {"cursor": ".cursor", "claude": ".claude", "codex": ".codex"}[harness]
     return base / sub / "hooks" / _DIR_NAME
 
 
@@ -143,6 +146,9 @@ def _registration(harness: str, scripts: Path, windows: bool) -> dict[str, Any]:
                  "matcher": "Write|Edit|StrReplace", "timeout": 10},
             ],
         }
+    if harness == "codex":
+        return {"PostCompact": [{"hooks": [{"type": "command", "timeout": 15,
+                                                "command": cmd("postcompact-recall.sh")}]}]}
     return {
         "SessionStart": [{
             "hooks": [{"type": "command", "timeout": 15,
@@ -157,8 +163,11 @@ def _registration(harness: str, scripts: Path, windows: bool) -> dict[str, Any]:
 
 
 def _event_keys(harness: str) -> tuple[str, ...]:
-    return ("preCompact", "postToolUse") if harness == "cursor" \
-        else ("SessionStart", "PostToolUse")
+    if harness == "cursor":
+        return ("preCompact", "postToolUse")
+    if harness == "codex":
+        return ("PostCompact",)
+    return ("SessionStart", "PostToolUse")
 
 
 def _is_owned_entry(entry: Any) -> bool:
@@ -218,7 +227,7 @@ def _remove_owned(config: dict[str, Any], harness: str) -> tuple[dict[str, Any],
 
 _USAGE = """\
 Usage:
-  swarph install-postcompact-hook [--harness cursor|claude]
+  swarph install-postcompact-hook [--harness cursor|claude|codex]
                                   [--scope user|project] [--cell CELL]
                                   [--memory-dir DIR] [--uninstall] [--dry-run]
 
@@ -238,7 +247,7 @@ def run_install_postcompact_hook(argv: Optional[list[str]] = None) -> int:
 
     p = argparse.ArgumentParser(prog="swarph install-postcompact-hook")
     p.add_argument("--harness", default=None,
-                   help="cursor|claude (default: detect)")
+                   help="cursor|claude|codex (default: detect)")
     p.add_argument("--cell", default=None,
                    help="cell name baked as SWARPH_SELF (default: derive from "
                    "$SWARPH_SELF/$SWARPH_CELL at install time). Valid only "
@@ -262,13 +271,13 @@ def run_install_postcompact_hook(argv: Optional[list[str]] = None) -> int:
         return int(exc.code or 0)
 
     harness = (args.harness or "").strip().lower() or _detect_harness()
-    if harness not in ("cursor", "claude"):
+    if harness not in ("cursor", "claude", "codex"):
         print(
             "swarph install-postcompact-hook: LOUD REFUSAL — "
             + (f"unsupported harness {args.harness!r}. " if args.harness
                else "could not detect a supported harness from this "
                     "environment. ")
-            + "Supported: cursor, claude. Nothing was written. A silent "
+            + "Supported: cursor, claude, codex. Nothing was written. A silent "
             "no-op here would manufacture an armed-looking-but-deaf cell — "
             "the failure this verb exists to eliminate.",
             file=sys.stderr,
@@ -337,7 +346,8 @@ def run_install_postcompact_hook(argv: Optional[list[str]] = None) -> int:
 
     env_prefix = _env_prefix(cell, memory_dir)
     windows = _is_windows()
-    names = list(_CURSOR_SCRIPTS if harness == "cursor" else _CLAUDE_SCRIPTS)
+    names = list(_CURSOR_SCRIPTS if harness == "cursor" else
+                 _CODEX_SCRIPTS if harness == "codex" else _CLAUDE_SCRIPTS)
 
     if args.dry_run:
         print("# swarph install-postcompact-hook --dry-run", file=sys.stderr)
