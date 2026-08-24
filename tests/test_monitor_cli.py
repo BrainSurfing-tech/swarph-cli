@@ -16,7 +16,17 @@ from __future__ import annotations
 import json
 import os
 
+import pytest
+
 from swarph_cli.commands import mesh, monitor
+
+
+@pytest.fixture(autouse=True)
+def _clean_composer(monkeypatch):
+    """These tests pin CLI/ledger mechanics, not the politeness gate —
+    default every composer to OBSERVED-CLEAN so the gate stays out of the
+    way. The gate's own matrix lives in test_tmux_wake_submit_verify.py."""
+    monkeypatch.setattr(mesh, "_composer_state", lambda t: "clear")
 
 
 def _env(monkeypatch):

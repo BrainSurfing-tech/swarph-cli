@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **The tmux wake no longer types into a busy composer (politeness gate).**
+  #306 made the wake *verified*, but the inject itself was still blind:
+  `send-keys -l` appended to whatever sat in the composer, so a wake
+  landing mid-keystroke merged into the human's half-typed line. The sink
+  now reads the composer BEFORE acting — inject only into an observed-clean
+  composer (bare `>`/`→`, or cursor's `→ Add a follow-up` placeholder),
+  nudge only a composer holding wake text alone. A composer holding human
+  text DEFERS the wake (new three-outcome sink contract: delivered / failed
+  / deferred — a deferral keeps the wake owed without counting a failure or
+  ringing the dead-sink alarm, because a human typing is not a dead sink).
+  An unreadable pane now fails WITHOUT a single keystroke — never type
+  blind — while keeping the failure loud.
+
 ## 0.48.0 — 2026-08-24
 
 - **The tmux wake submits by verification, not by blind double-Enter
