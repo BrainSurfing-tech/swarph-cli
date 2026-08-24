@@ -1475,13 +1475,15 @@ _WAKE_SETTLE_S = 0.6
 _WAKE_SUBMIT_ATTEMPTS = 4
 
 
-def _wake_still_pending(target: str) -> bool:
-    """True while the wake prompt still sits in the pane's bottom lines — i.e.
-    UNSUBMITTED, waiting in the composer. Fail-OPEN toward retrying: a capture
-    failure returns True, because a spare Enter on an empty composer is a
-    no-op while a missing Enter on a held composer is the defect itself. A
-    concatenated backlog ('check meshcheck mesh') matches the substring check
-    and is drained by the same retry Enter that submits it."""
+def _wake_still_pending(target: str) -> Optional[bool]:
+    """Three-way: True = the wake prompt still sits in the pane's bottom lines
+    (UNSUBMITTED, waiting in the composer — a concatenated backlog like
+    'check meshcheck mesh' matches the same substring check and is drained by
+    the retry Enter that submits it). False = observed clear. None = UNKNOWN
+    (capture failed) — and unknown must FAIL CLOSED (gpt-ops, PR #306): an
+    unverified retry Enter is not a no-op, it is a keypress into a pane whose
+    composer may hold a human's half-typed line (#403's shape). Unknown stops
+    the loop and owes the wake; it never earns another Enter."""
     try:
         r = subprocess.run(
             ["tmux", "capture-pane", "-p", "-t", target],
@@ -1490,9 +1492,9 @@ def _wake_still_pending(target: str) -> bool:
             text=True, encoding="utf-8", errors="replace",
         )
     except (OSError, subprocess.TimeoutExpired):
-        return True
+        return None
     if r.returncode != 0:
-        return True
+        return None
     tail = [ln for ln in (r.stdout or "").splitlines() if ln.strip()][-3:]
     return any(_WAKE_PROMPT in ln for ln in tail)
 
@@ -1511,7 +1513,9 @@ def _tmux_wake(target: str) -> bool:
     second Enter falls out naturally (it fires only when the first did not
     submit). Returns True only on an observed-clear composer: a wake we
     cannot confirm stays owed, because the cursor advances only inside
-    `if _tmux_wake(...)`.
+    `if _tmux_wake(...)`. An UNREADABLE pane (capture failure) fails closed
+    — no unverified retries, no claimed success; the wake stays owed and the
+    ledger retries the whole wake later.
     """
     try:
         subprocess.run(
@@ -1531,7 +1535,16 @@ def _tmux_wake(target: str) -> bool:
                 text=True, encoding="utf-8", errors="replace",
             )
             time.sleep(_WAKE_SETTLE_S)
-            if not _wake_still_pending(target):
+            pending = _wake_still_pending(target)
+            if pending is None:
+                print(
+                    "[monitor] tmux wake unverifiable (capture failed); "
+                    "failing closed — wake stays owed",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return False
+            if not pending:
                 return True
         print(
             f"[monitor] tmux wake still unsubmitted after "

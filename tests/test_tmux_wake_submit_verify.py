@@ -76,10 +76,10 @@ def test_never_submitting_pane_is_bounded_and_reports_false(tmux):
     assert enters(calls) == mesh._WAKE_SUBMIT_ATTEMPTS
 
 
-def test_capture_failure_biases_toward_retry_not_false_success(tmux, monkeypatch):
-    """Unknown composer state must not masquerade as submitted: a failing
-    capture-pane keeps the loop retrying (a spare Enter is a no-op; a missing
-    Enter is the defect)."""
+def test_capture_failure_fails_closed_no_unverified_retries(tmux, monkeypatch):
+    """gpt-ops, PR #306: an unreadable composer is UNKNOWN, and unknown must
+    not earn another Enter — an unverified keypress can land on a human's
+    half-typed line (#403's shape). The wake fails closed and stays owed."""
     calls, state = tmux
 
     def failing_capture(argv, **kw):
@@ -90,7 +90,29 @@ def test_capture_failure_biases_toward_retry_not_false_success(tmux, monkeypatch
 
     monkeypatch.setattr(mesh.subprocess, "run", failing_capture)
     assert mesh._tmux_wake("pane") is False
-    assert enters(calls) == mesh._WAKE_SUBMIT_ATTEMPTS
+    # exactly the one Enter whose outcome we tried to verify — no blind retries
+    assert enters(calls) == 1
+
+
+def test_capture_failure_mid_loop_stops_the_loop(tmux, monkeypatch):
+    """A capture that fails AFTER a successful pending read still fails closed:
+    one verified-pending retry, then unknown stops it."""
+    calls, state = tmux
+    state["captures"] = ["> check mesh|"]  # first capture: still pending
+
+    def flaky(argv, **kw):
+        if argv[1] == "capture-pane" and state["i"] > 0:
+            raise OSError("tmux socket vanished")
+        if argv[1] == "capture-pane":
+            i = min(state["i"], len(state["captures"]) - 1)
+            state["i"] += 1
+            return subprocess.CompletedProcess(argv, 0, stdout=state["captures"][i], stderr="")
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mesh.subprocess, "run", flaky)
+    assert mesh._tmux_wake("pane") is False
+    assert enters(calls) == 2  # the first attempt + the one verified retry
 
 
 def test_send_keys_failure_returns_false_not_raise(tmux, monkeypatch):
