@@ -53,7 +53,7 @@ def test_second_enter_fires_only_when_the_first_did_not_submit(tmux):
     """The Codex shape, now verified instead of blind: first Enter leaves the
     prompt in the composer, second clears it."""
     calls, state = tmux
-    state["captures"] = ["> check mesh|", "> "]
+    state["captures"] = ["> check mesh", "> "]
     assert mesh._tmux_wake("pane") is True
     assert enters(calls) == 2
 
@@ -62,7 +62,7 @@ def test_concatenated_backlog_is_detected_and_drained(tmux):
     """The observed defect shape: two wakes stacked unsubmitted. The substring
     check catches the concatenation and the retry Enter drains it."""
     calls, state = tmux
-    state["captures"] = ["> check meshcheck mesh|", "> "]
+    state["captures"] = ["> check meshcheck mesh", "> "]
     assert mesh._tmux_wake("pane") is True
     assert enters(calls) == 2
 
@@ -71,7 +71,7 @@ def test_never_submitting_pane_is_bounded_and_reports_false(tmux):
     """A pane that never clears gets exactly the bounded attempts, then False —
     the wake stays owed (cursor advances only inside `if _tmux_wake(...)`)."""
     calls, state = tmux
-    state["captures"] = ["> check mesh|"]  # never clears
+    state["captures"] = ["> check mesh"]  # never clears
     assert mesh._tmux_wake("pane") is False
     assert enters(calls) == mesh._WAKE_SUBMIT_ATTEMPTS
 
@@ -98,7 +98,7 @@ def test_capture_failure_mid_loop_stops_the_loop(tmux, monkeypatch):
     """A capture that fails AFTER a successful pending read still fails closed:
     one verified-pending retry, then unknown stops it."""
     calls, state = tmux
-    state["captures"] = ["> check mesh|"]  # first capture: still pending
+    state["captures"] = ["> check mesh"]  # first capture: still pending
 
     def flaky(argv, **kw):
         if argv[1] == "capture-pane" and state["i"] > 0:
@@ -374,6 +374,19 @@ def test_claude_history_prompt_above_composer(tmux):
     state["captures"] = ["> check mesh\nsome reply text\n> "]
     assert mesh._composer_state("pane") == "clear"
     assert mesh._wake_still_pending("pane") is False
+
+
+def test_merged_wake_and_human_text_stops_the_loop(tmux):
+    """gpt-ops, PR #312 round 4: the human types DURING the settle — the
+    composer holds 'check mesh half-typed human line'. Pending must mean
+    wake-ONLY: merged reads False, and the verify loop sends NO further
+    Enter (it would submit the human's half-typed line, #403's shape). The
+    wake is out of our hands; the busy-deferral owns it from there."""
+    calls, state = tmux
+    state["captures"] = ["> check mesh half-typed human line"]
+    assert mesh._wake_still_pending("pane") is False
+    assert mesh._tmux_wake("pane") is True  # adopted — not owed
+    assert sum(1 for c in calls if c[-1] == "Enter") == 1  # first Enter only
 
 
 def test_busy_composer_defers_the_inject(gate):

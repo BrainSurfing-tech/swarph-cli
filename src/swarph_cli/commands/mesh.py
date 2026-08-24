@@ -1598,30 +1598,26 @@ def _composer_line(lines: list[str]) -> Optional[str]:
 
 
 def _wake_still_pending(target: str) -> Optional[bool]:
-    """Three-way: True = the wake prompt still sits in the pane's bottom lines
-    (UNSUBMITTED, waiting in the composer — a concatenated backlog like
-    'check meshcheck mesh' matches the same substring check and is drained by
-    the retry Enter that submits it). False = observed clear. None = UNKNOWN
-    (capture failed) — and unknown must FAIL CLOSED (gpt-ops, PR #306): an
-    unverified retry Enter is not a no-op, it is a keypress into a pane whose
-    composer may hold a human's half-typed line (#403's shape). Unknown stops
-    the loop and owes the wake; it never earns another Enter."""
-    lines = _capture_pane_lines(target)
-    if lines is None:
+    """Projection of the four-way composer state (gpt-ops, PR #312 round 4):
+
+    True = the composer holds ONLY wake text (one unsubmitted wake, or the
+    pre-fix stacked concatenation 'check meshcheck mesh' — both are drained
+    by the retry Enter). False = anything else OBSERVED: a clear composer
+    (the wake submitted) OR human text in the line — including wake text
+    MERGED with human text ('> check mesh half-typed', typed during the
+    settle). Merged must stop the loop WITHOUT another Enter: that Enter
+    would submit the human's half-typed line (#403's shape). The wake is
+    then out of our hands — the human owns the line, and the busy-deferral
+    in TmuxSink.deliver keeps the wake owed until they send it. None =
+    UNKNOWN (unreadable / no composer line recognized) — and unknown must
+    FAIL CLOSED (gpt-ops, PR #306): an unverified retry Enter is not a
+    no-op, it is a keypress into a pane whose composer may hold a human's
+    half-typed line. Unknown stops the loop and owes the wake; it never
+    earns another Enter."""
+    state = _composer_state(target)
+    if state is None:
         return None
-    composer = _composer_line(lines)
-    if composer is None:
-        # "Clear" must be an OBSERVATION, not an absence (gpt-ops, PR #306
-        # round 2): a successful-but-empty or unrecognizable capture proves
-        # nothing about the composer → unknown → fail closed.
-        return None
-    # Read the COMPOSER LINE, never a window of lines: cursor's history echoes
-    # a submitted wake as '│ ○ check mesh │' (no marker), so a substring check
-    # over a tail window false-positives as pending forever once a wake has
-    # submitted. Only the live composer carries a marker.
-    if _WAKE_PROMPT in composer:
-        return True
-    return False
+    return state == "wake"
 
 
 #: cursor's EMPTY composer is not bare: it renders the marker plus a dimmed
@@ -1695,11 +1691,14 @@ def _tmux_wake(target: str) -> bool:
     Now: inject, settle, then Enter-and-verify in a bounded loop — re-Enter
     only while the prompt is OBSERVED still sitting in the composer. Codex's
     second Enter falls out naturally (it fires only when the first did not
-    submit). Returns True only on an observed-clear composer: a wake we
-    cannot confirm stays owed, because the cursor advances only inside
-    `if _tmux_wake(...)`. An UNREADABLE pane (capture failure) fails closed
-    — no unverified retries, no claimed success; the wake stays owed and the
-    ledger retries the whole wake later.
+    submit). Returns True when the wake is no longer ours to drive: an
+    observed-clear composer (submitted), or a composer the human has ADOPTED
+    (wake text merged with their typing mid-settle — another Enter would
+    submit their line, so the loop stops and the busy-deferral owns the wake
+    from there). A wake we cannot confirm stays owed, because the cursor
+    advances only inside `if _tmux_wake(...)`. An UNREADABLE pane (capture
+    failure) fails closed — no unverified retries, no claimed success; the
+    wake stays owed and the ledger retries the whole wake later.
     """
     try:
         subprocess.run(

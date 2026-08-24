@@ -49,12 +49,19 @@ def test_tmux_wake_sends_literal_prompt_then_submits_and_verifies(monkeypatch):
         lambda command, **kwargs: calls.append((command, kwargs)) or Result(),
     )
     monkeypatch.setattr(mesh.time, "sleep", lambda _s: None)
+    # The verifier is now a projection of the four-way composer state; the
+    # autouse fixture stubs that state. Record the consultation instead of
+    # expecting a raw capture-pane call in the sequence.
+    seen = []
+    monkeypatch.setattr(
+        mesh, "_composer_state",
+        lambda t: seen.append(t) or "clear")
 
     assert mesh._tmux_wake("gpt-lc:0.0") is True
+    assert seen == ["gpt-lc:0.0"]  # verified through the composer gate
     assert [command for command, _ in calls] == [
         ["tmux", "send-keys", "-t", "gpt-lc:0.0", "-l", "check mesh"],
         ["tmux", "send-keys", "-t", "gpt-lc:0.0", "Enter"],
-        ["tmux", "capture-pane", "-p", "-t", "gpt-lc:0.0"],
     ]
 
 
