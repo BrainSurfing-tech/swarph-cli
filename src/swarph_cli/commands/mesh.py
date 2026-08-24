@@ -1125,7 +1125,16 @@ class NoneSink(Sink):
 
 
 class TmuxSink(Sink):
-    """Poke a tmux pane — the behaviour `mesh sidecar` has always had."""
+    """Poke a tmux pane — the behaviour `mesh sidecar` has always had.
+
+    WAKE IS EDGE-TRIGGERED ON THE DRAIN, NOT PER DM BATCH (commander,
+    2026-08-24): a wake stands until the inbox is observed DRAINED (gateway
+    unread == 0). While one stands, further DM batches do NOT re-inject —
+    the old level-trigger stacked one wake per batch into the composer
+    ('check meshcheck mesh…' ×7 observed live on cursor-lin). If the pane
+    observably still HOLDS an unsubmitted wake, the gate sends a single
+    verified Enter nudge instead of new text — the anti-stack retry.
+    """
 
     is_push = True
 
@@ -1134,9 +1143,39 @@ class TmuxSink(Sink):
         self.target = target
 
     def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> bool:
+        led = state.ledger(self.name)
+        if led.get("wake_outstanding"):
+            # Lazy: watchdog imports mesh module-level, so the reverse must
+            # not. None (gateway error) reads as NOT-drained — re-arming on an
+            # unreadable drain signal would re-open the stack.
+            from swarph_cli.commands.watchdog import _gateway_unread_count
+            unread = _gateway_unread_count(state.gateway, state.self_name,
+                                           state.token)
+            if unread == 0:
+                led["wake_outstanding"] = False  # drained since — re-arm
+            else:
+                pending = _wake_still_pending(self.target)
+                if pending is True:
+                    _tmux_enter(self.target)  # one verified nudge, no new text
+                    return True
+                if pending is False:
+                    # Wake submitted; the cell simply hasn't drained yet. The
+                    # wake did its job — re-injecting would only stack.
+                    return True
+                return False  # pane unreadable: keep the failure loud
         # Module-global lookup on purpose: the sidecar regression suites patch
         # `mesh._tmux_wake`, and a `from`-import here would silently bypass them.
-        return _tmux_wake(self.target)
+        ok = _tmux_wake(self.target)
+        if ok:
+            led["wake_outstanding"] = True
+            return True
+        # False splits by what the pane actually holds: text observably STUCK
+        # in the composer -> mark outstanding so the next poll nudges instead
+        # of stacking; nothing there / unreadable -> leave the flag clear so
+        # the next poll retries the inject (and the failure stays loud).
+        if _wake_still_pending(self.target) is True:
+            led["wake_outstanding"] = True
+        return False
 
     def pending_label(self, count: int) -> str:
         plural = "s" if count != 1 else ""
@@ -1510,6 +1549,22 @@ def _wake_still_pending(target: str) -> Optional[bool]:
     if any(ln.strip().startswith((">", "→")) for ln in tail):
         return False
     return None
+
+
+def _tmux_enter(target: str) -> bool:
+    """One bare Enter — the drain-edge gate's nudge for a wake that is
+    OBSERVED still sitting in the composer. Never text, never blind."""
+    try:
+        subprocess.run(
+            ["tmux", "send-keys", "-t", target, "Enter"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
 
 
 def _tmux_wake(target: str) -> bool:
