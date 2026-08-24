@@ -322,6 +322,60 @@ def test_composer_state_capture_failure_is_unknown(tmux, monkeypatch):
     assert mesh._composer_state("pane") is None
 
 
+# Cursor's REAL layout, measured live on cursor-lin 2026-08-24: the composer
+# sits ~4 non-empty lines ABOVE the bottom, with chrome below it (task count,
+# model/status bar, '~'). A fixed tail-3 window lands entirely in that chrome
+# and reads every cursor pane as unknown — the systematic "capture failed"
+# the monitor logged on every real wake. The composer must be found
+# STRUCTURALLY (last marker line), never by position.
+_CURSOR_LIVE_CLEAR = (
+    "│ ○ check mesh                                                               │\n"
+    "└────────────────────────────────────────────────────────────────────────────\n"
+    "  ⠘ Running  6.5k tokens\n"
+    "  → Add a follow-up\n"
+    "  1 task\n"
+    "  Kimi K3 Max · 83.6% · 9 files edited\n"
+    "~"
+)
+
+_CURSOR_LIVE_HOLDING_WAKE = _CURSOR_LIVE_CLEAR.replace(
+    "→ Add a follow-up", "→ check mesh")
+
+
+def test_cursor_chrome_below_composer_reads_clear(tmux):
+    """The composer is 4 lines from the bottom; the tail-3 window this
+    replaces read only chrome and failed closed on every real cursor wake."""
+    calls, state = tmux
+    state["captures"] = [_CURSOR_LIVE_CLEAR]
+    assert mesh._composer_state("pane") == "clear"
+    assert mesh._wake_still_pending("pane") is False
+
+
+def test_cursor_chrome_below_composer_holding_wake(tmux):
+    calls, state = tmux
+    state["captures"] = [_CURSOR_LIVE_HOLDING_WAKE]
+    assert mesh._composer_state("pane") == "wake"
+    assert mesh._wake_still_pending("pane") is True
+
+
+def test_submitted_wake_echo_in_history_is_not_pending(tmux):
+    """Cursor echoes a SUBMITTED wake as '│ ○ check mesh │' — no marker. A
+    substring check over a tail window reads that as pending forever; reading
+    only the composer line does not."""
+    calls, state = tmux
+    state["captures"] = [_CURSOR_LIVE_CLEAR]  # the ○ echo is in the fixture
+    assert mesh._wake_still_pending("pane") is False
+
+
+def test_claude_history_prompt_above_composer(tmux):
+    """Claude echoes submitted prompts as '> text' in history. The LAST
+    marker line is still the composer."""
+    calls, state = tmux
+    state["captures"] = ["> check mesh\nsome reply text\n> "]
+    assert mesh._composer_state("pane") == "clear"
+    assert mesh._wake_still_pending("pane") is False
+
+
 def test_busy_composer_defers_the_inject(gate):
     """THE commander's case: mid-write, a wake arrives. No text lands, the
     wake stays owed, and NOTHING is counted as failed."""

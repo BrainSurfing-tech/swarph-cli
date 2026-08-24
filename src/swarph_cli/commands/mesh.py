@@ -1552,10 +1552,17 @@ _WAKE_SETTLE_S = 0.6
 _WAKE_SUBMIT_ATTEMPTS = 4
 
 
-def _capture_pane_tail(target: str) -> Optional[list[str]]:
-    """The pane's bottom non-empty lines, or None when the pane is UNREADABLE
+def _capture_pane_lines(target: str) -> Optional[list[str]]:
+    """The pane's non-empty lines, or None when the pane is UNREADABLE
     (capture error / non-zero rc). Shared by the wake verifier and the
-    politeness gate — None must always fail closed, never "probably fine"."""
+    politeness gate — None must always fail closed, never "probably fine".
+
+    NOT a fixed tail window: cursor's TUI renders chrome BELOW the composer
+    (task count, model/status bar, '~' — measured live on cursor-lin
+    2026-08-24: the composer sits 4 non-empty lines from the bottom), so a
+    tail-3 lands entirely in the chrome and reads every cursor pane as
+    unknown. The composer is identified structurally instead — see
+    _composer_line."""
     try:
         r = subprocess.run(
             ["tmux", "capture-pane", "-p", "-t", target],
@@ -1567,8 +1574,27 @@ def _capture_pane_tail(target: str) -> Optional[list[str]]:
         return None
     if r.returncode != 0:
         return None
-    lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
-    return lines[-3:]
+    return [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
+
+
+_COMPOSER_MARKERS = (">", "›", "→")
+
+
+def _composer_line(lines: list[str]) -> Optional[str]:
+    """The LAST non-empty line starting with a composer marker — by TUI
+    layout the composer is always the bottom-most prompt line; everything
+    below it is chrome (status bars never start with a marker), and
+    everything above is history. Cursor echoes submitted prompts as
+    '│ ○ text │' and claude/codex as '> text' ABOVE the composer, so the
+    last-marker rule is what keeps history out of the reading. Markers:
+    '>' claude, '›' codex (gpt-ops live capture), '→' cursor (measured live
+    on cursor-lin 2026-08-24: the composer renders '→ Add a follow-up')."""
+    composer = None
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith(_COMPOSER_MARKERS):
+            composer = s
+    return composer
 
 
 def _wake_still_pending(target: str) -> Optional[bool]:
@@ -1580,22 +1606,22 @@ def _wake_still_pending(target: str) -> Optional[bool]:
     unverified retry Enter is not a no-op, it is a keypress into a pane whose
     composer may hold a human's half-typed line (#403's shape). Unknown stops
     the loop and owes the wake; it never earns another Enter."""
-    tail = _capture_pane_tail(target)
-    if tail is None:
+    lines = _capture_pane_lines(target)
+    if lines is None:
         return None
-    if any(_WAKE_PROMPT in ln for ln in tail):
+    composer = _composer_line(lines)
+    if composer is None:
+        # "Clear" must be an OBSERVATION, not an absence (gpt-ops, PR #306
+        # round 2): a successful-but-empty or unrecognizable capture proves
+        # nothing about the composer → unknown → fail closed.
+        return None
+    # Read the COMPOSER LINE, never a window of lines: cursor's history echoes
+    # a submitted wake as '│ ○ check mesh │' (no marker), so a substring check
+    # over a tail window false-positives as pending forever once a wake has
+    # submitted. Only the live composer carries a marker.
+    if _WAKE_PROMPT in composer:
         return True
-    # "Clear" must be an OBSERVATION, not an absence (gpt-ops, PR #306 round
-    # 2): a successful-but-empty or unrecognizable capture proves nothing
-    # about the composer. Only a pane whose bottom shows a composer prompt
-    # line with no wake text in it counts as submitted. The marker is
-    # per-TUI: '>' for Claude, '›' for Codex, '→' for Cursor's Linux TUI
-    # (measured live on cursor-lin 2026-08-24: the composer renders
-    # '→ Add a follow-up', never '>'). A pane showing NEITHER marker is
-    # unrecognizable → unknown → fail closed.
-    if any(ln.strip().startswith((">", "›", "→")) for ln in tail):
-        return False
-    return None
+    return False
 
 
 #: cursor's EMPTY composer is not bare: it renders the marker plus a dimmed
@@ -1620,18 +1646,14 @@ def _composer_state(target: str) -> Optional[str]:
       None    — pane unreadable or no composer line recognized. UNKNOWN,
                 and unknown fails closed: we never type blind into a pane.
 
-    The composer line is the LAST tail line starting with a marker ('>' for
-    Claude, '›' for Codex, '→' for Cursor) — status lines render below it.
+    The composer line comes from _composer_line (last marker line in the
+    capture — cursor renders chrome BELOW the composer, so no fixed tail
+    window can find it).
     """
-    tail = _capture_pane_tail(target)
-    if tail is None:
+    lines = _capture_pane_lines(target)
+    if lines is None:
         return None
-    composer = None
-    for ln in reversed(tail):
-        s = ln.strip()
-        if s.startswith((">", "›", "→")):
-            composer = s
-            break
+    composer = _composer_line(lines)
     if composer is None:
         return None
     content = composer[1:].strip()
