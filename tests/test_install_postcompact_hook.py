@@ -51,7 +51,9 @@ def test_payloads_are_package_data():
     for name in ("precompact-flag.sh", "posttooluse-recall.sh",
                  "posttooluse-emit.sh", "sessionstart-recall.sh",
                  "posttooluse-emit-claude.sh", "postcompact-recall-grok.sh",
-                 "posttooluse-emit-grok.sh", "_shim.cmd"):
+                 "posttooluse-emit-grok.sh",
+                 "preinvocation-recall-antigravity.sh",
+                 "posttooluse-emit-antigravity.sh", "_shim.cmd"):
         text = M._payload_text(name)
         assert text.strip(), f"{name} is empty or missing from the package"
 
@@ -62,7 +64,9 @@ def test_payloads_carry_the_failure_mode_invariant():
     for name in ("precompact-flag.sh", "posttooluse-recall.sh",
                  "posttooluse-emit.sh", "sessionstart-recall.sh",
                  "posttooluse-emit-claude.sh", "postcompact-recall-grok.sh",
-                 "posttooluse-emit-grok.sh"):
+                 "posttooluse-emit-grok.sh",
+                 "preinvocation-recall-antigravity.sh",
+                 "posttooluse-emit-antigravity.sh"):
         assert M._payload_text(name).rstrip().endswith("exit 0"), name
 
 
@@ -215,6 +219,37 @@ def test_claude_install_shape(tmp_path, monkeypatch):
     assert ptu[0]["matcher"] == "Write|Edit|MultiEdit|NotebookEdit"
     assert f"posttooluse-emit-claude{ext}" in ptu[0]["hooks"][0]["command"]
     assert "preCompact" not in cfg["hooks"]  # claude needs no flag handshake
+
+
+def test_antigravity_install_shape(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    rc = _run(["--harness", "antigravity"], monkeypatch,
+              SWARPH_SELF="antigravity-cell")
+    assert rc == 0
+    cfg = json.loads((home / ".gemini/config/hooks.json").read_text())
+    ext = ".cmd" if os.name == "nt" else ".sh"
+    recall = cfg["swarph-postcompact-recall"]["PreInvocation"]
+    assert f"preinvocation-recall-antigravity{ext}" in recall[0]["command"]
+    emit = cfg["swarph-postcompact-emit"]["PostToolUse"]
+    assert emit[0]["matcher"] == "replace_file_content|write_to_file|Write|Edit"
+    assert f"posttooluse-emit-antigravity{ext}" in emit[0]["hooks"][0]["command"]
+
+
+def test_antigravity_project_install_and_uninstall(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    assert _run(["--harness", "antigravity", "--scope", "project"],
+                monkeypatch) == 0
+    config = project / ".agents/hooks.json"
+    scripts = project / ".agents/hooks/swarph-postcompact"
+    assert config.exists()
+    assert (scripts / "preinvocation-recall-antigravity.sh").exists()
+    assert _run(["--harness", "antigravity", "--scope", "project",
+                 "--uninstall"], monkeypatch) == 0
+    assert "swarph-postcompact-recall" not in json.loads(config.read_text())
+    assert not scripts.exists()
 
 
 def test_codex_install_shape(tmp_path, monkeypatch):
