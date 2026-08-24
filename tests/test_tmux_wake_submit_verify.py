@@ -510,3 +510,28 @@ def test_engine_counts_deferral_as_neither_success_nor_failure(tmp_path, capsys)
     out = capsys.readouterr()
     assert "DEFERRED" in out.out
     assert "DELIVERY FAILED" not in out.err
+
+
+def test_engine_defers_on_adopted_mid_settle_with_real_tmux_sink(tmp_path, tmux, capsys):
+    """gpt-ops, #312 round 6: the deliver-level merged test's cursor
+    assertions pass TRIVIALLY — deliver() never writes last_delivered_id,
+    the ENGINE does. This pins the real path end-to-end: a REAL TmuxSink,
+    scripted clear→merged captures, through _monitor_deliver. The DM stays
+    owed (cursor held at 0), no failure counted, no delivery recorded, no
+    ledger written."""
+    calls, capstate = tmux
+    capstate["captures"] = [
+        "> ",                              # gate: observed clean
+        "> check mesh half-typed human",   # verify: adopted mid-settle
+    ]
+    state = _EngineState(tmp_path)
+    state.sinks = [mesh.TmuxSink("pane")]
+    mesh._monitor_deliver(state)
+    led = state.ledgers["tmux:pane"]
+    assert led["last_delivered_id"] == 0  # id 5 still owed
+    assert led["consecutive_failures"] == 0
+    assert state.deliveries == {}
+    assert not state.ledgers_path.exists()
+    out = capsys.readouterr()
+    assert "DEFERRED" in out.out
+    assert "DELIVERY FAILED" not in out.err
