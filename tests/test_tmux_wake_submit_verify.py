@@ -377,16 +377,37 @@ def test_claude_history_prompt_above_composer(tmux):
 
 
 def test_merged_wake_and_human_text_stops_the_loop(tmux):
-    """gpt-ops, PR #312 round 4: the human types DURING the settle — the
+    """gpt-ops, PR #312 rounds 4-5: the human types DURING the settle — the
     composer holds 'check mesh half-typed human line'. Pending must mean
     wake-ONLY: merged reads False, and the verify loop sends NO further
-    Enter (it would submit the human's half-typed line, #403's shape). The
-    wake is out of our hands; the busy-deferral owns it from there."""
+    Enter (it would submit the human's half-typed line, #403's shape). And
+    the wake must NOT be acknowledged: _tmux_wake returns None so the sink
+    DEFERS and the cursor stays back — otherwise the wake is silently lost
+    when the human never sends their line."""
     calls, state = tmux
     state["captures"] = ["> check mesh half-typed human line"]
     assert mesh._wake_still_pending("pane") is False
-    assert mesh._tmux_wake("pane") is True  # adopted — not owed
+    assert mesh._tmux_wake("pane") is None  # adopted — DEFER, not delivered
     assert sum(1 for c in calls if c[-1] == "Enter") == 1  # first Enter only
+
+
+def test_merged_mid_settle_defers_and_holds_the_cursor(tmux):
+    """Deliver-level round 5: the gate reads clear, the inject lands, and
+    the human merges into the wake during the settle. deliver() must DEFER
+    (None): last_delivered_id does NOT advance, no failure is counted, and
+    wake_outstanding is NOT set (nothing of ours is driving)."""
+    calls, capstate = tmux
+    capstate["captures"] = [
+        "> ",                              # gate: observed clean
+        "> check mesh half-typed human",   # verify: adopted mid-settle
+    ]
+    state = _State()
+    sink = mesh.TmuxSink("pane")
+    assert sink.deliver(state, [], 7) is None
+    led = state.ledger("tmux:pane")
+    assert led.get("last_delivered_id", 0) == 0   # cursor held
+    assert led.get("consecutive_failures", 0) == 0
+    assert led.get("wake_outstanding") is not True
 
 
 def test_busy_composer_defers_the_inject(gate):

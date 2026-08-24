@@ -1204,6 +1204,12 @@ class TmuxSink(Sink):
         # Module-global lookup on purpose: the sidecar regression suites patch
         # `mesh._tmux_wake`, and a `from`-import here would silently bypass them.
         ok = _tmux_wake(self.target)
+        if ok is None:
+            # The human ADOPTED the composer mid-settle (gpt-ops, #312 round
+            # 5): the wake text never submitted as ours. DEFER — the cursor
+            # must NOT advance, or the wake is silently lost when the human
+            # never sends their line.
+            return None
         if ok:
             led["wake_outstanding"] = True
             return True
@@ -1653,7 +1659,12 @@ def _composer_state(target: str) -> Optional[str]:
     if composer is None:
         return None
     content = composer[1:].strip()
-    if not content or content == _CURSOR_COMPOSER_PLACEHOLDER:
+    # cursor right-aligns run-state hints ('ctrl+c to stop') on the composer
+    # ROW, so the placeholder is a PREFIX of the line while the agent runs,
+    # not the whole line. A human message beginning with the exact placeholder
+    # text is the accepted false positive — the only failure it can produce
+    # is an inject alongside contrived text, never a silent deferral.
+    if not content or content.startswith(_CURSOR_COMPOSER_PLACEHOLDER):
         return "clear"
     # A human who types exactly 'check mesh' by hand is indistinguishable
     # from our own unsubmitted wake — and submitting it runs the same
@@ -1679,7 +1690,7 @@ def _tmux_enter(target: str) -> bool:
         return False
 
 
-def _tmux_wake(target: str) -> bool:
+def _tmux_wake(target: str) -> Optional[bool]:
     """Inject the wake prompt and confirm it SUBMITTED (#533).
 
     Was: Codex's blind double-Enter, on the assumption that a second Enter in
@@ -1689,14 +1700,14 @@ def _tmux_wake(target: str) -> bool:
     prompt on cursor-lin, 2026-08-24, three times in a row.
 
     Now: inject, settle, then Enter-and-verify in a bounded loop — re-Enter
-    only while the prompt is OBSERVED still sitting in the composer. Codex's
+    only while the composer is OBSERVED holding wake text alone. Codex's
     second Enter falls out naturally (it fires only when the first did not
-    submit). Returns True when the wake is no longer ours to drive: an
-    observed-clear composer (submitted), or a composer the human has ADOPTED
-    (wake text merged with their typing mid-settle — another Enter would
-    submit their line, so the loop stops and the busy-deferral owns the wake
-    from there). A wake we cannot confirm stays owed, because the cursor
-    advances only inside `if _tmux_wake(...)`. An UNREADABLE pane (capture
+    submit). Three outcomes: True on an observed-clear composer (submitted);
+    None when the human ADOPTED the composer mid-settle (wake text merged
+    with their typing — another Enter would submit their line, so the loop
+    stops, and the sink DEFERS: the cursor must not advance on a wake that
+    never submitted as ours — gpt-ops, #312 round 5); False when the pane
+    could not be verified (the wake stays owed). An UNREADABLE pane (capture
     failure) fails closed — no unverified retries, no claimed success; the
     wake stays owed and the ledger retries the whole wake later.
     """
@@ -1718,8 +1729,8 @@ def _tmux_wake(target: str) -> bool:
                 text=True, encoding="utf-8", errors="replace",
             )
             time.sleep(_WAKE_SETTLE_S)
-            pending = _wake_still_pending(target)
-            if pending is None:
+            state = _composer_state(target)
+            if state is None:
                 print(
                     "[monitor] tmux wake unverifiable (capture failed); "
                     "failing closed — wake stays owed",
@@ -1727,8 +1738,16 @@ def _tmux_wake(target: str) -> bool:
                     flush=True,
                 )
                 return False
-            if not pending:
+            if state == "clear":
                 return True
+            if state == "busy":
+                # The human typed into the wake mid-settle (gpt-ops, #312
+                # round 5): the wake text never submitted as ours, so this
+                # must NOT acknowledge delivery — return None and let the
+                # sink DEFER, keeping the cursor back so a later poll
+                # retries the wake when the composer clears.
+                return None
+            # "wake": still sitting unsubmitted — loop another Enter.
         print(
             f"[monitor] tmux wake still unsubmitted after "
             f"{_WAKE_SUBMIT_ATTEMPTS} Enters; wake stays owed",
