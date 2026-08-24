@@ -1580,11 +1580,11 @@ def _wake_still_pending(target: str) -> Optional[bool]:
     # 2): a successful-but-empty or unrecognizable capture proves nothing
     # about the composer. Only a pane whose bottom shows a composer prompt
     # line with no wake text in it counts as submitted. The marker is
-    # per-TUI: '>' for claude/codex composers, '→' for cursor's Linux TUI
+    # per-TUI: '>' for Claude, '›' for Codex, '→' for Cursor's Linux TUI
     # (measured live on cursor-lin 2026-08-24: the composer renders
     # '→ Add a follow-up', never '>'). A pane showing NEITHER marker is
     # unrecognizable → unknown → fail closed.
-    if any(ln.strip().startswith((">", "→")) for ln in tail):
+    if any(ln.strip().startswith((">", "›", "→")) for ln in tail):
         return False
     return None
 
@@ -1612,7 +1612,7 @@ def _composer_state(target: str) -> Optional[str]:
                 and unknown fails closed: we never type blind into a pane.
 
     The composer line is the LAST tail line starting with a marker ('>' for
-    claude/codex, '→' for cursor) — status lines render below it.
+    Claude, '›' for Codex, '→' for Cursor) — status lines render below it.
     """
     tail = _capture_pane_tail(target)
     if tail is None:
@@ -1620,7 +1620,7 @@ def _composer_state(target: str) -> Optional[str]:
     composer = None
     for ln in reversed(tail):
         s = ln.strip()
-        if s.startswith((">", "→")):
+        if s.startswith((">", "›", "→")):
             composer = s
             break
     if composer is None:

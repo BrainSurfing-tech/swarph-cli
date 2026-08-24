@@ -151,6 +151,14 @@ def test_cursor_composer_marker_counts_as_recognizable(tmux):
     assert enters(calls) == 1
 
 
+def test_codex_composer_marker_counts_as_recognizable(tmux):
+    """Codex renders the composer as `›`, not `>` (gpt-ops live capture)."""
+    calls, state = tmux
+    state["captures"] = ["› "]
+    assert mesh._tmux_wake("pane") is True
+    assert enters(calls) == 1
+
+
 def test_cursor_composer_holding_the_wake_is_pending(tmux):
     calls, state = tmux
     state["captures"] = ["→ check mesh", "→ Add a follow-up"]
