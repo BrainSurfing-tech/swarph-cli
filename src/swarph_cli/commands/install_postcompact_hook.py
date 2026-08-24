@@ -62,6 +62,11 @@ _CURSOR_SCRIPTS = ("precompact-flag.sh", "posttooluse-recall.sh",
 _CLAUDE_SCRIPTS = ("sessionstart-recall.sh", "posttooluse-emit-claude.sh")
 
 
+def _is_windows() -> bool:
+    """Seam for tests: patching os.name itself re-flavours pathlib mid-test."""
+    return os.name == "nt"
+
+
 def _payload_text(name: str) -> str:
     """Read a payload script FROM THE PACKAGE — never from a source-tree
     path, so tests exercise the same importlib.resources lookup an installed
@@ -331,7 +336,7 @@ def run_install_postcompact_hook(argv: Optional[list[str]] = None) -> int:
         return 0
 
     env_prefix = _env_prefix(cell, memory_dir)
-    windows = os.name == "nt"
+    windows = _is_windows()
     names = list(_CURSOR_SCRIPTS if harness == "cursor" else _CLAUDE_SCRIPTS)
 
     if args.dry_run:
@@ -344,6 +349,23 @@ def run_install_postcompact_hook(argv: Optional[list[str]] = None) -> int:
         print(f"#   windows:    {windows}", file=sys.stderr)
         return 0
 
+    if windows:
+        # Fail closed on the write (hooks.py's rule): a shim bound to a bare
+        # "bash" resolves to the System32 WSL launcher on WSL boxes and the
+        # hook SILENTLY no-ops — cursor-win's accept run, 2026-08-24. Resolve
+        # an absolute Git-bash at install time or refuse the install.
+        from swarph_cli.commands.hooks import _find_windows_bash
+        win_bash = _find_windows_bash()
+        if win_bash is None:
+            print(
+                "swarph install-postcompact-hook: no usable bash found on this "
+                "Windows box — the .cmd shims would resolve bare 'bash' to the "
+                "System32 WSL launcher and silently no-op. Install Git for "
+                "Windows (Git-bash) and re-run. Nothing was written.",
+                file=sys.stderr,
+            )
+            return 2
+
     scripts.mkdir(parents=True, exist_ok=True)
     for name in names:
         dest = scripts / name
@@ -351,7 +373,9 @@ def run_install_postcompact_hook(argv: Optional[list[str]] = None) -> int:
         dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
                    | stat.S_IXOTH)
         if windows:
-            shim = _payload_text("_shim.cmd").replace("@SCRIPT@", name)
+            shim = (_payload_text("_shim.cmd")
+                    .replace("@SCRIPT@", name)
+                    .replace("@BASH@", win_bash))
             (scripts / name.replace(".sh", ".cmd")).write_text(
                 shim, encoding="utf-8")
 
