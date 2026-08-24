@@ -1502,9 +1502,12 @@ def _wake_still_pending(target: str) -> Optional[bool]:
     # "Clear" must be an OBSERVATION, not an absence (gpt-ops, PR #306 round
     # 2): a successful-but-empty or unrecognizable capture proves nothing
     # about the composer. Only a pane whose bottom shows a composer prompt
-    # line ('>' — the same marker session_bridge treats as the idle signal)
-    # with no wake text in it counts as submitted.
-    if any(ln.strip().startswith(">") for ln in tail):
+    # line with no wake text in it counts as submitted. The marker is
+    # per-TUI: '>' for claude/codex composers, '→' for cursor's Linux TUI
+    # (measured live on cursor-lin 2026-08-24: the composer renders
+    # '→ Add a follow-up', never '>'). A pane showing NEITHER marker is
+    # unrecognizable → unknown → fail closed.
+    if any(ln.strip().startswith((">", "→")) for ln in tail):
         return False
     return None
 

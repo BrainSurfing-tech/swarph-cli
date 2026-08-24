@@ -139,3 +139,20 @@ def test_unrecognizable_capture_is_unknown_not_clear(tmux):
     state["captures"] = ["rendering…", "⠋ working"]
     assert mesh._tmux_wake("pane") is False
     assert enters(calls) == 1
+
+
+def test_cursor_composer_marker_counts_as_recognizable(tmux):
+    """Cursor's Linux TUI renders the composer as '→ Add a follow-up', never
+    '>' (measured live on cursor-lin). Without the '→' marker every cursor
+    capture would be unrecognizable — fail-closed but permanently deaf."""
+    calls, state = tmux
+    state["captures"] = ["→ Add a follow-up                      ctrl+c to stop"]
+    assert mesh._tmux_wake("pane") is True
+    assert enters(calls) == 1
+
+
+def test_cursor_composer_holding_the_wake_is_pending(tmux):
+    calls, state = tmux
+    state["captures"] = ["→ check mesh", "→ Add a follow-up"]
+    assert mesh._tmux_wake("pane") is True
+    assert enters(calls) == 2
