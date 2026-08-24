@@ -50,7 +50,8 @@ def _run(argv, monkeypatch, **env):
 def test_payloads_are_package_data():
     for name in ("precompact-flag.sh", "posttooluse-recall.sh",
                  "posttooluse-emit.sh", "sessionstart-recall.sh",
-                 "posttooluse-emit-claude.sh", "_shim.cmd"):
+                 "posttooluse-emit-claude.sh", "postcompact-recall-grok.sh",
+                 "posttooluse-emit-grok.sh", "_shim.cmd"):
         text = M._payload_text(name)
         assert text.strip(), f"{name} is empty or missing from the package"
 
@@ -60,7 +61,8 @@ def test_payloads_carry_the_failure_mode_invariant():
     result because the timeline is unreachable inverts every priority."""
     for name in ("precompact-flag.sh", "posttooluse-recall.sh",
                  "posttooluse-emit.sh", "sessionstart-recall.sh",
-                 "posttooluse-emit-claude.sh"):
+                 "posttooluse-emit-claude.sh", "postcompact-recall-grok.sh",
+                 "posttooluse-emit-grok.sh"):
         assert M._payload_text(name).rstrip().endswith("exit 0"), name
 
 
@@ -226,7 +228,44 @@ def test_unknown_harness_refused(tmp_path, monkeypatch):
     home = _home(tmp_path, monkeypatch)
     rc = _run(["--harness", "muse"], monkeypatch)
     assert rc == 2
-    assert not (home / ".cursor").exists() and not (home / ".claude").exists()
+    assert not (home / ".cursor").exists()
+    assert not (home / ".claude").exists()
+    assert not (home / ".grok").exists()
+
+
+def test_grok_install_shape(tmp_path, monkeypatch):
+    """Native PostCompact + grok tool names, dedicated hooks JSON — not
+    ~/.claude/settings.json (compat scan is the *may* path, not the product)."""
+    home = _home(tmp_path, monkeypatch)
+    rc = _run(["--harness", "grok"], monkeypatch, SWARPH_SELF="grok-cell")
+    assert rc == 0
+    cfg_path = home / ".grok" / "hooks" / "swarph-postcompact.json"
+    cfg = json.loads(cfg_path.read_text())
+    ext = ".cmd" if os.name == "nt" else ".sh"
+    pc = cfg["hooks"]["PostCompact"]
+    assert f"postcompact-recall-grok{ext}" in pc[0]["hooks"][0]["command"]
+    ptu = cfg["hooks"]["PostToolUse"]
+    assert "search_replace" in ptu[0]["matcher"]
+    assert "write" in ptu[0]["matcher"]
+    assert f"posttooluse-emit-grok{ext}" in ptu[0]["hooks"][0]["command"]
+    assert "SessionStart" not in cfg["hooks"]
+    assert "preCompact" not in cfg["hooks"]
+    emit = (home / ".grok/hooks/swarph-postcompact/posttooluse-emit-grok.sh"
+            ).read_text()
+    assert "SWARPH_SELF=grok-cell" in emit
+    assert "toolInput" in emit
+
+
+def test_detects_grok_from_GROK_AGENT(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    for k in ("CURSOR_DATA_DIR", "CURSOR_SESSION_ID",
+              "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
+        monkeypatch.delenv(k, raising=False)
+    rc = _run(["--scope", "user"], monkeypatch, GROK_AGENT="1")
+    assert rc == 0
+    assert (home / ".grok/hooks/swarph-postcompact.json").exists()
+    assert not (home / ".claude").exists()
+    assert not (home / ".cursor").exists()
 
 
 # ── the scripts actually work (bash required) ────────────────────────────────
@@ -385,3 +424,74 @@ def test_windows_install_refuses_when_no_usable_bash(tmp_path, monkeypatch, caps
     assert "no usable bash" in capsys.readouterr().err
     assert not (home / ".cursor" / "hooks.json").exists()
     assert not (home / ".cursor" / "hooks" / "swarph-postcompact").exists()
+
+@pytest.mark.skipif(os.name == "nt", reason="payload scripts are bash")
+def test_grok_recall_keeps_postcompact_event_name(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    _run(["--harness", "grok"], monkeypatch)
+    script = home / ".grok/hooks/swarph-postcompact/postcompact-recall-grok.sh"
+    r = subprocess.run(
+        ["bash", str(script)],
+        input=json.dumps({"hookEventName": "post_compact", "trigger": "auto"}),
+        capture_output=True, text=True)
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert set(out) <= {"hookSpecificOutput"}
+    if out:
+        assert out["hookSpecificOutput"]["hookEventName"] == "PostCompact"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="payload scripts are bash")
+def test_grok_emit_reads_camelcase_toolInput(tmp_path, monkeypatch):
+    """Grok PostToolUse stdin is camelCase toolInput.file_path (docs: grok
+    uses camelCase where Claude uses snake_case). A snake_case-only adapter
+    would silently no-op — same class as the cursor-win BOM miss."""
+    import http.server
+    import threading
+
+    received = []
+
+    class Stub(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            received.append((self.path, json.loads(body)))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Stub)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    home = _home(tmp_path, monkeypatch)
+    mem = tmp_path / "memories"
+    mem.mkdir()
+    (mem / "foo.md").write_text("# foo\na grok memory\n")
+    monkeypatch.chdir(tmp_path)
+    rc = _run(["--harness", "grok", "--scope", "project"], monkeypatch,
+              SWARPH_SELF="emit-grok")
+    assert rc == 0
+    script = tmp_path / ".grok/hooks/swarph-postcompact/posttooluse-emit-grok.sh"
+    tokdir = home / ".config" / "swarph"
+    tokdir.mkdir(parents=True)
+    (tokdir / "emit-grok.peer_token").write_text("test-token")
+
+    env = dict(os.environ,
+               SWARPH_SELF="emit-grok",
+               SWARPH_MEMORY_DIR=str(mem),
+               SWARPH_GATEWAY=f"http://127.0.0.1:{srv.server_port}",
+               SWARPH_EMIT_STATE=str(tmp_path / "emit-state.json"),
+               HOME=str(home))
+    envelope = json.dumps({"toolInput": {"file_path": str(mem / "foo.md")}})
+    r = subprocess.run(["bash", str(script)], input=envelope,
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0
+    assert json.loads(r.stdout) == {}
+    srv.shutdown()
+    assert received, "camelCase toolInput never reached the gateway"
+    assert received[0][0] == "/highlights"
+    assert received[0][1]["memory"] == "[[foo]]"
+    assert received[0][1]["cell"] == "emit-grok"

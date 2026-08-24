@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **`install-postcompact-hook --harness grok`.** Claude's SessionStart
+  `source=compact` wiring only *may* load on grok (`[compat.claude] hooks`
+  scanning `~/.claude/settings.json`) and grok does not document `compact`
+  as a SessionStart source. The grok product is a native `PostCompact` hook
+  in `~/.grok/hooks/swarph-postcompact.json` plus a `PostToolUse` emit that
+  reads camelCase `toolInput` (matcher includes `search_replace|write`).
+  Detection: `$GROK_AGENT` / `$GROK_SESSION_ID`. `--cell` with `--scope user`
+  is still refused (#527).
+
 ## 0.47.0 — 2026-08-23
 
 - **`monitor --deliver cursor-print:<cell>` ships the headless DM delivery

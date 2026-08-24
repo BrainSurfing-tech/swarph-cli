@@ -18,6 +18,14 @@ Per-harness wiring (the envelope translation is the harness difference):
   rewrites the verb's ``hookEventName`` to ``SessionStart``. ``PostToolUse``
   (matcher ``Write|Edit|MultiEdit|NotebookEdit``) runs emit-on-write; the
   claude envelope is already the shape ``memory-emit-hook`` reads.
+* ``grok`` — native ``PostCompact`` (not Claude's ``SessionStart``
+  ``source=="compact"``, which grok docs do not list). Registration is a
+  dedicated ``~/.grok/hooks/swarph-postcompact.json`` so it does not edit
+  ``config.toml``. ``PostToolUse`` matcher includes grok tool names
+  (``search_replace|write``) plus the Claude aliases grok maps. Emit
+  adapts camelCase ``toolInput`` to the claude-shaped ``tool_input``.
+  ``--harness claude --scope user`` only *may* load on grok, via
+  ``[compat.claude] hooks = true`` scanning ``~/.claude/settings.json``.
 
 Identity and memory dir are baked at INSTALL time (the hook fires in the
 harness's environment, which carries neither ``SWARPH_SELF`` nor
@@ -61,11 +69,25 @@ _CURSOR_SCRIPTS = ("precompact-flag.sh", "posttooluse-recall.sh",
                    "posttooluse-emit.sh")
 _CLAUDE_SCRIPTS = ("sessionstart-recall.sh", "posttooluse-emit-claude.sh")
 _CODEX_SCRIPTS = ("postcompact-recall.sh",)
+_GROK_SCRIPTS = ("postcompact-recall-grok.sh", "posttooluse-emit-grok.sh")
+_KNOWN_HARNESSES = ("cursor", "claude", "codex", "grok")
 
 
 def _is_windows() -> bool:
     """Seam for tests: patching os.name itself re-flavours pathlib mid-test."""
     return os.name == "nt"
+def _detect_install_harness():
+    """Prefer grok when this process is a grok agent/hook child, else the
+    shared wake-hook detector (cursor/claude/codex/muse/antigravity).
+
+    Kept here — not added to install-wake-hook's detector — so a grok
+    session does not start *detecting* as grok for the wake verb, which
+    still has no grok product (and a STOP-ORDER against running it on
+    this box)."""
+    env = os.environ
+    if env.get("GROK_AGENT") or env.get("GROK_SESSION_ID"):
+        return "grok"
+    return _detect_harness()
 
 
 def _payload_text(name: str) -> str:
@@ -84,12 +106,18 @@ def _config_path(harness: str, scope: str) -> Path:
         return base / ".claude" / "settings.json"
     if harness == "codex":
         return base / ".codex" / "hooks.json"
+    if harness == "grok":
+        # Dedicated JSON file under the grok hooks glob (~/.grok/hooks/*.json).
+        # Do NOT rewrite config.toml — that file is TOML and already holds
+        # other SessionStart hooks (mesh-wake verify, etc.).
+        return base / ".grok" / "hooks" / "swarph-postcompact.json"
     raise ValueError(f"install-postcompact-hook: unknown harness {harness!r}")
 
 
 def _scripts_dir(harness: str, scope: str) -> Path:
     base = Path.cwd() if scope == "project" else Path.home()
-    sub = {"cursor": ".cursor", "claude": ".claude", "codex": ".codex"}[harness]
+    sub = {"cursor": ".cursor", "claude": ".claude", "codex": ".codex",
+           "grok": ".grok"}[harness]
     return base / sub / "hooks" / _DIR_NAME
 
 
@@ -149,6 +177,18 @@ def _registration(harness: str, scripts: Path, windows: bool) -> dict[str, Any]:
     if harness == "codex":
         return {"PostCompact": [{"hooks": [{"type": "command", "timeout": 15,
                                                 "command": cmd("postcompact-recall.sh")}]}]}
+    if harness == "grok":
+        return {
+            "PostCompact": [{
+                "hooks": [{"type": "command", "timeout": 15,
+                           "command": cmd("postcompact-recall-grok.sh")}],
+            }],
+            "PostToolUse": [{
+                "matcher": "search_replace|write|Write|Edit|MultiEdit|NotebookEdit",
+                "hooks": [{"type": "command", "timeout": 10,
+                           "command": cmd("posttooluse-emit-grok.sh")}],
+            }],
+        }
     return {
         "SessionStart": [{
             "hooks": [{"type": "command", "timeout": 15,
@@ -167,6 +207,8 @@ def _event_keys(harness: str) -> tuple[str, ...]:
         return ("preCompact", "postToolUse")
     if harness == "codex":
         return ("PostCompact",)
+    if harness == "grok":
+        return ("PostCompact", "PostToolUse")
     return ("SessionStart", "PostToolUse")
 
 
@@ -227,13 +269,14 @@ def _remove_owned(config: dict[str, Any], harness: str) -> tuple[dict[str, Any],
 
 _USAGE = """\
 Usage:
-  swarph install-postcompact-hook [--harness cursor|claude|codex]
+  swarph install-postcompact-hook [--harness cursor|claude|codex|grok]
                                   [--scope user|project] [--cell CELL]
                                   [--memory-dir DIR] [--uninstall] [--dry-run]
 
 Installs the card #549 post-compact wiring (recall + emit-on-write) from the
 repo payload (card #566). cursor gets the preCompact flag + postToolUse
-recall handshake; claude gets SessionStart source=="compact" recall. Both get
+recall handshake; claude gets SessionStart source=="compact" recall; grok
+gets native PostCompact recall (not claude's compact SessionStart). All get
 emit-on-write. --cell bakes SWARPH_SELF and is refused with --scope user
 (card #527's shape): a baked name in a box-global file arms one cell's
 identity for every session on the box. Omit --cell and the install derives
@@ -247,7 +290,7 @@ def run_install_postcompact_hook(argv: Optional[list[str]] = None) -> int:
 
     p = argparse.ArgumentParser(prog="swarph install-postcompact-hook")
     p.add_argument("--harness", default=None,
-                   help="cursor|claude|codex (default: detect)")
+                   help="cursor|claude|codex|grok (default: detect)")
     p.add_argument("--cell", default=None,
                    help="cell name baked as SWARPH_SELF (default: derive from "
                    "$SWARPH_SELF/$SWARPH_CELL at install time). Valid only "
@@ -270,14 +313,14 @@ def run_install_postcompact_hook(argv: Optional[list[str]] = None) -> int:
     except SystemExit as exc:
         return int(exc.code or 0)
 
-    harness = (args.harness or "").strip().lower() or _detect_harness()
-    if harness not in ("cursor", "claude", "codex"):
+    harness = (args.harness or "").strip().lower() or _detect_install_harness()
+    if harness not in _KNOWN_HARNESSES:
         print(
             "swarph install-postcompact-hook: LOUD REFUSAL — "
             + (f"unsupported harness {args.harness!r}. " if args.harness
                else "could not detect a supported harness from this "
                     "environment. ")
-            + "Supported: cursor, claude, codex. Nothing was written. A silent "
+            + "Supported: cursor, claude, codex, grok. Nothing was written. A silent "
             "no-op here would manufacture an armed-looking-but-deaf cell — "
             "the failure this verb exists to eliminate.",
             file=sys.stderr,
@@ -346,8 +389,14 @@ def run_install_postcompact_hook(argv: Optional[list[str]] = None) -> int:
 
     env_prefix = _env_prefix(cell, memory_dir)
     windows = _is_windows()
-    names = list(_CURSOR_SCRIPTS if harness == "cursor" else
-                 _CODEX_SCRIPTS if harness == "codex" else _CLAUDE_SCRIPTS)
+    if harness == "cursor":
+        names = list(_CURSOR_SCRIPTS)
+    elif harness == "codex":
+        names = list(_CODEX_SCRIPTS)
+    elif harness == "grok":
+        names = list(_GROK_SCRIPTS)
+    else:
+        names = list(_CLAUDE_SCRIPTS)
 
     if args.dry_run:
         print("# swarph install-postcompact-hook --dry-run", file=sys.stderr)
