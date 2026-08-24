@@ -1125,7 +1125,16 @@ class NoneSink(Sink):
 
 
 class TmuxSink(Sink):
-    """Poke a tmux pane — the behaviour `mesh sidecar` has always had."""
+    """Poke a tmux pane — the behaviour `mesh sidecar` has always had.
+
+    WAKE IS EDGE-TRIGGERED ON THE DRAIN, NOT PER DM BATCH (commander,
+    2026-08-24): a wake stands until the inbox is observed DRAINED (gateway
+    unread == 0). While one stands, further DM batches do NOT re-inject —
+    the old level-trigger stacked one wake per batch into the composer
+    ('check meshcheck mesh…' ×7 observed live on cursor-lin). If the pane
+    observably still HOLDS an unsubmitted wake, the gate sends a single
+    verified Enter nudge instead of new text — the anti-stack retry.
+    """
 
     is_push = True
 
@@ -1134,9 +1143,39 @@ class TmuxSink(Sink):
         self.target = target
 
     def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> bool:
+        led = state.ledger(self.name)
+        if led.get("wake_outstanding"):
+            # Lazy: watchdog imports mesh module-level, so the reverse must
+            # not. None (gateway error) reads as NOT-drained — re-arming on an
+            # unreadable drain signal would re-open the stack.
+            from swarph_cli.commands.watchdog import _gateway_unread_count
+            unread = _gateway_unread_count(state.gateway, state.self_name,
+                                           state.token)
+            if unread == 0:
+                led["wake_outstanding"] = False  # drained since — re-arm
+            else:
+                pending = _wake_still_pending(self.target)
+                if pending is True:
+                    _tmux_enter(self.target)  # one verified nudge, no new text
+                    return True
+                if pending is False:
+                    # Wake submitted; the cell simply hasn't drained yet. The
+                    # wake did its job — re-injecting would only stack.
+                    return True
+                return False  # pane unreadable: keep the failure loud
         # Module-global lookup on purpose: the sidecar regression suites patch
         # `mesh._tmux_wake`, and a `from`-import here would silently bypass them.
-        return _tmux_wake(self.target)
+        ok = _tmux_wake(self.target)
+        if ok:
+            led["wake_outstanding"] = True
+            return True
+        # False splits by what the pane actually holds: text observably STUCK
+        # in the composer -> mark outstanding so the next poll nudges instead
+        # of stacking; nothing there / unreadable -> leave the flag clear so
+        # the next poll retries the inject (and the failure stays loud).
+        if _wake_still_pending(self.target) is True:
+            led["wake_outstanding"] = True
+        return False
 
     def pending_label(self, count: int) -> str:
         plural = "s" if count != 1 else ""
@@ -1466,26 +1505,56 @@ def _log_dm(state: MonitorState, dm: dict) -> None:
     )
 
 
-def _tmux_wake(target: str) -> bool:
-    """Inject the wake prompt and submit it using Codex's double-Enter gesture."""
+_WAKE_PROMPT = "check mesh"
+# Submit-verify bounds (#533): the settle pause lets the -l literal LAND in
+# the composer before Enter can submit it (the blind gesture raced this), and
+# the attempt bound keeps a never-submitting pane from being Enter-spammed
+# forever — the wake stays owed instead.
+_WAKE_SETTLE_S = 0.6
+_WAKE_SUBMIT_ATTEMPTS = 4
+
+
+def _wake_still_pending(target: str) -> Optional[bool]:
+    """Three-way: True = the wake prompt still sits in the pane's bottom lines
+    (UNSUBMITTED, waiting in the composer — a concatenated backlog like
+    'check meshcheck mesh' matches the same substring check and is drained by
+    the retry Enter that submits it). False = observed clear. None = UNKNOWN
+    (capture failed) — and unknown must FAIL CLOSED (gpt-ops, PR #306): an
+    unverified retry Enter is not a no-op, it is a keypress into a pane whose
+    composer may hold a human's half-typed line (#403's shape). Unknown stops
+    the loop and owes the wake; it never earns another Enter."""
     try:
-        subprocess.run(
-            ["tmux", "send-keys", "-t", target, "-l", "check mesh"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+        r = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-t", target],
+            capture_output=True,
+            timeout=5,
             text=True, encoding="utf-8", errors="replace",
         )
-        subprocess.run(
-            ["tmux", "send-keys", "-t", target, "Enter"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
-        )
-        # Codex needs a second Enter to submit its multiline composer. In
-        # single-submit composers the first Enter already sends the prompt and
-        # the second reaches an empty composer, where it is a no-op.
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
+    tail = lines[-3:]
+    if any(_WAKE_PROMPT in ln for ln in tail):
+        return True
+    # "Clear" must be an OBSERVATION, not an absence (gpt-ops, PR #306 round
+    # 2): a successful-but-empty or unrecognizable capture proves nothing
+    # about the composer. Only a pane whose bottom shows a composer prompt
+    # line with no wake text in it counts as submitted. The marker is
+    # per-TUI: '>' for claude/codex composers, '→' for cursor's Linux TUI
+    # (measured live on cursor-lin 2026-08-24: the composer renders
+    # '→ Add a follow-up', never '>'). A pane showing NEITHER marker is
+    # unrecognizable → unknown → fail closed.
+    if any(ln.strip().startswith((">", "→")) for ln in tail):
+        return False
+    return None
+
+
+def _tmux_enter(target: str) -> bool:
+    """One bare Enter — the drain-edge gate's nudge for a wake that is
+    OBSERVED still sitting in the composer. Never text, never blind."""
+    try:
         subprocess.run(
             ["tmux", "send-keys", "-t", target, "Enter"],
             check=True,
@@ -1494,6 +1563,64 @@ def _tmux_wake(target: str) -> bool:
             text=True, encoding="utf-8", errors="replace",
         )
         return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
+def _tmux_wake(target: str) -> bool:
+    """Inject the wake prompt and confirm it SUBMITTED (#533).
+
+    Was: Codex's blind double-Enter, on the assumption that a second Enter in
+    a single-submit composer is a no-op. FALSIFIED on cursor's Linux TUI —
+    the Enters race the composer, the prompt never submits, and the next wake
+    CONCATENATES onto it: 'check meshcheck meshcheck mesh' arrived as ONE
+    prompt on cursor-lin, 2026-08-24, three times in a row.
+
+    Now: inject, settle, then Enter-and-verify in a bounded loop — re-Enter
+    only while the prompt is OBSERVED still sitting in the composer. Codex's
+    second Enter falls out naturally (it fires only when the first did not
+    submit). Returns True only on an observed-clear composer: a wake we
+    cannot confirm stays owed, because the cursor advances only inside
+    `if _tmux_wake(...)`. An UNREADABLE pane (capture failure) fails closed
+    — no unverified retries, no claimed success; the wake stays owed and the
+    ledger retries the whole wake later.
+    """
+    try:
+        subprocess.run(
+            ["tmux", "send-keys", "-t", target, "-l", _WAKE_PROMPT],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        time.sleep(_WAKE_SETTLE_S)
+        for _ in range(_WAKE_SUBMIT_ATTEMPTS):
+            subprocess.run(
+                ["tmux", "send-keys", "-t", target, "Enter"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            time.sleep(_WAKE_SETTLE_S)
+            pending = _wake_still_pending(target)
+            if pending is None:
+                print(
+                    "[monitor] tmux wake unverifiable (capture failed); "
+                    "failing closed — wake stays owed",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return False
+            if not pending:
+                return True
+        print(
+            f"[monitor] tmux wake still unsubmitted after "
+            f"{_WAKE_SUBMIT_ATTEMPTS} Enters; wake stays owed",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
     except (OSError, subprocess.CalledProcessError) as exc:
         print(
             f"[monitor] tmux wake failed; pane may hold an unsubmitted wake: {exc}",

@@ -21,23 +21,30 @@ def _state(tmp_path: Path) -> mesh.MeshSidecarState:
     )
 
 
-def test_tmux_wake_sends_literal_prompt_then_submits_with_double_enter(monkeypatch):
+def test_tmux_wake_sends_literal_prompt_then_submits_and_verifies(monkeypatch):
+    """#533: inject, settle, Enter, then VERIFY via capture-pane — the blind
+    double-Enter this used to pin raced cursor's Linux TUI and stacked
+    unsubmitted wakes. The verify capture shows a clear composer, so exactly
+    one Enter fires. The submit-verify matrix lives in
+    test_tmux_wake_submit_verify.py."""
     calls = []
 
     class Result:
         returncode = 0
+        stdout = "> "  # capture-pane: composer clear after the Enter
 
     monkeypatch.setattr(
         mesh.subprocess,
         "run",
         lambda command, **kwargs: calls.append((command, kwargs)) or Result(),
     )
+    monkeypatch.setattr(mesh.time, "sleep", lambda _s: None)
 
     assert mesh._tmux_wake("gpt-lc:0.0") is True
     assert [command for command, _ in calls] == [
         ["tmux", "send-keys", "-t", "gpt-lc:0.0", "-l", "check mesh"],
         ["tmux", "send-keys", "-t", "gpt-lc:0.0", "Enter"],
-        ["tmux", "send-keys", "-t", "gpt-lc:0.0", "Enter"],
+        ["tmux", "capture-pane", "-p", "-t", "gpt-lc:0.0"],
     ]
 
 
