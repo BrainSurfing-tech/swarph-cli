@@ -121,3 +121,21 @@ def test_send_keys_failure_returns_false_not_raise(tmux, monkeypatch):
 
     monkeypatch.setattr(mesh.subprocess, "run", boom)
     assert mesh._tmux_wake("pane") is False
+
+
+def test_empty_capture_is_unknown_not_clear(tmux):
+    """gpt-ops round 2: a successful-but-empty capture proves NOTHING about
+    the composer — it must not be read as 'clear'. Unknown fails closed."""
+    calls, state = tmux
+    state["captures"] = [""]
+    assert mesh._tmux_wake("pane") is False
+    assert enters(calls) == 1
+
+
+def test_unrecognizable_capture_is_unknown_not_clear(tmux):
+    """A capture with no composer prompt line and no wake text is
+    UNRECOGNIZABLE, not submitted — fail closed, no blind retries."""
+    calls, state = tmux
+    state["captures"] = ["rendering…", "⠋ working"]
+    assert mesh._tmux_wake("pane") is False
+    assert enters(calls) == 1
