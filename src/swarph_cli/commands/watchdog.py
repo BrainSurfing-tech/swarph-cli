@@ -127,7 +127,14 @@ _DEFAULT_STABLE_MODEL = "claude-opus-4-8"
 # the --stable-model CONFIG value must look like a model id before it reaches
 # the TUI. A malformed override falls back to the known-good default — a
 # config typo must not block recovery, and must not inject an arbitrary string.
-_STABLE_MODEL_RE = re.compile(r"claude-[a-z0-9][a-z0-9.-]*")
+#
+# PROVIDER-NEUTRAL since #53: the safety property is the CHARSET (no
+# whitespace, no shell/terminal metacharacters — the value is interpolated
+# into a `/model <id>` tmux payload), not claude-ness. The claude-only shape
+# rejected every legitimate non-claude id (gpt-*, grok-*, gemini-*,
+# composer-*, kimi-*) and silently fell back to a claude model — a recovery
+# rung that fired the WRONG provider's model into a non-claude TUI.
+_STABLE_MODEL_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]*")
 # Cross-WINDOW circuit breakers (drop seat-A C1/C3, PR #58 follow-up). The
 # per-window marker bounds one swap per stale window, but a FLAPPING cursor
 # (turn-ends without real progress) restarts the ladder each window — A1.5
