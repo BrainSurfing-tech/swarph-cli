@@ -289,7 +289,8 @@ def test_failed_wake_with_nothing_landed_retries_next_poll(gate):
 # A verified wake still INJECTED blind: '-l' appends to whatever sits in the
 # composer, so a wake landing mid-keystroke merged into the human's line.
 # The gate reads the composer BEFORE acting: inject only into "clear", nudge
-# only "wake"-only, defer (None) on "busy" or unreadable — owed, not failed.
+# only "wake"-only, defer (None) on "busy" — owed, not failed. Unreadable
+# FAILS loud with zero keystrokes (a dead pane must keep ringing the alarm).
 
 
 @pytest.mark.parametrize("captured,expected", [
@@ -352,6 +353,18 @@ def test_busy_composer_defers_the_nudge(gate):
     assert sink.deliver(state, [], 2) is None
     assert calls["enter"] == 0
     assert calls["wake"] == 1
+
+
+def test_fresh_path_nudges_a_wake_only_composer(gate):
+    """gpt-ops REVISE on 7b009eb: a monitor restart loses wake_outstanding,
+    but the wake TEXT still sits alone in the composer. The fresh path must
+    NUDGE it (one Enter, flag re-armed) — not stack a second copy, and not
+    fail loud against a pane that holds exactly what we would have typed."""
+    sink, state, calls, box = gate
+    box["composer"] = "wake"  # flag lost, text present — the restart shape
+    assert sink.deliver(state, [], 1) is True
+    assert calls == {"wake": 0, "enter": 1}  # nudged, never injected
+    assert state.ledger("x")["wake_outstanding"] is True
 
 
 def test_deferral_does_not_rearm_and_recovers(gate):

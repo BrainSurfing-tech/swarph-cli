@@ -1182,12 +1182,21 @@ class TmuxSink(Sink):
                     # wake) — an Enter here submits THEIR line (#403's shape).
                     return None
                 return False  # pane unreadable: keep the failure loud
-        # Fresh inject only into an OBSERVED-clean composer. "busy" DEFERS
-        # (None — a human mid-write is not a dead sink). Unreadable FAILS
-        # (False) without a single keystroke: we never type blind into a
-        # pane, and a dead pane must stay loud — deferring it would silently
-        # freeze the dead-sink alarm the ledger exists to ring.
+        # Fresh path, gated on the OBSERVED composer (gpt-ops REVISE, #312):
+        # "wake" — wake text already sits ALONE in the composer (a monitor
+        # restart loses wake_outstanding; the ledger flag is gone but the
+        # keystrokes landed). Nudge it with one Enter — injecting here would
+        # stack a second copy, the exact defect the gate exists to prevent.
+        # "busy" DEFERS (None — a human mid-write is not a dead sink).
+        # Unreadable FAILS (False) without a single keystroke: we never type
+        # blind into a pane, and a dead pane must stay loud — deferring it
+        # would silently freeze the dead-sink alarm the ledger exists to ring.
         composer = _composer_state(self.target)
+        if composer == "wake":
+            if _tmux_enter(self.target):
+                led["wake_outstanding"] = True
+                return True
+            return False
         if composer == "busy":
             return None
         if composer != "clear":
@@ -1897,7 +1906,7 @@ def _monitor_deliver(state: MonitorState) -> None:
                 # a failure: no count, no alarm, no ledger write. Retried on
                 # the next poll like any owed delivery.
                 print(f"{state.log_prefix} delivery DEFERRED for {sink.name} "
-                      f"(composer busy or pane unreadable); wake stays owed, "
+                      f"(composer holds human text); wake stays owed, "
                       f"no failure counted",
                       flush=True)
                 continue
