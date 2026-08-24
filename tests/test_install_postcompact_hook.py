@@ -339,3 +339,42 @@ def test_claude_recall_fires_only_on_compact_source(tmp_path, monkeypatch):
                     "SessionStart"
         else:
             assert out == {}
+
+
+# ── Windows shim bash resolution (cursor-win accept run, 2026-08-24) ───────
+
+def test_windows_shim_bakes_the_resolved_git_bash(tmp_path, monkeypatch):
+    """The shim must invoke the ABSOLUTE Git-bash resolved at install time.
+    Bare 'bash' resolves to the System32 WSL launcher on WSL boxes and the
+    hook silently no-ops — cursor-win's accept evidence, DM 27816."""
+    home = _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(M, "_is_windows", lambda: True)
+    monkeypatch.setattr(
+        "swarph_cli.commands.hooks._find_windows_bash",
+        lambda: "C:/Program Files/Git/bin/bash.exe",
+    )
+    rc = _run(["--harness", "cursor"], monkeypatch, SWARPH_SELF="test-cell")
+    assert rc == 0
+
+    scripts = home / ".cursor" / "hooks" / "swarph-postcompact"
+    shim = (scripts / "precompact-flag.cmd").read_text()
+    assert '"C:/Program Files/Git/bin/bash.exe"' in shim
+    assert "@BASH@" not in shim
+    # the registered command points at the shim, not the .sh
+    cfg = json.loads((home / ".cursor" / "hooks.json").read_text())
+    assert cfg["hooks"]["preCompact"][0]["command"].endswith("precompact-flag.cmd")
+
+
+def test_windows_install_refuses_when_no_usable_bash(tmp_path, monkeypatch, capsys):
+    """Fail closed on the write (hooks.py's rule): an unresolvable bash means
+    every hook would silently no-op, so the install refuses BEFORE writing."""
+    home = _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(M, "_is_windows", lambda: True)
+    monkeypatch.setattr(
+        "swarph_cli.commands.hooks._find_windows_bash", lambda: None
+    )
+    rc = _run(["--harness", "cursor"], monkeypatch, SWARPH_SELF="test-cell")
+    assert rc == 2
+    assert "no usable bash" in capsys.readouterr().err
+    assert not (home / ".cursor" / "hooks.json").exists()
+    assert not (home / ".cursor" / "hooks" / "swarph-postcompact").exists()
