@@ -2,14 +2,47 @@
 
 ## Unreleased
 
-- **`install-postcompact-hook --harness grok`.** Claude's SessionStart
-  `source=compact` wiring only *may* load on grok (`[compat.claude] hooks`
-  scanning `~/.claude/settings.json`) and grok does not document `compact`
-  as a SessionStart source. The grok product is a native `PostCompact` hook
-  in `~/.grok/hooks/swarph-postcompact.json` plus a `PostToolUse` emit that
-  reads camelCase `toolInput` (matcher includes `search_replace|write`).
-  Detection: `$GROK_AGENT` / `$GROK_SESSION_ID`. `--cell` with `--scope user`
-  is still refused (#527).
+## 0.48.0 — 2026-08-24
+
+- **The tmux wake submits by verification, not by blind double-Enter
+  (#533, #306).** The old gesture raced cursor's Linux TUI: the prompt
+  never submitted and the next wake concatenated onto it —
+  `check meshcheck meshcheck mesh` arrived as ONE prompt on cursor-lin,
+  observed live. Now: inject, settle, then Enter-and-verify via
+  `capture-pane` in a bounded loop, re-Entering only while the wake is
+  OBSERVED still in the composer. An unreadable or unrecognizable pane
+  fails closed — no unverified keypresses into a composer that may hold a
+  human's half-typed line (#403's shape). The composer marker is per-TUI
+  (`>` for claude/codex, `→` for cursor). The wake is also edge-triggered
+  on the drain now: one wake stands until the inbox is observed drained
+  (gateway unread == 0); further DM batches nudge a stuck wake with a
+  single verified Enter instead of stacking new text.
+
+- **Windows `.cmd` shims resolve Git-bash absolute at install time
+  (#307).** A bare `bash` in the shim resolves to the System32 WSL
+  launcher on WSL boxes and the hook silently no-ops — cursor-win's
+  accept evidence. The installer bakes in the `_find_windows_bash()`
+  absolute path and refuses the install (rc=2, nothing written) when no
+  usable bash exists.
+
+- **`install-postcompact-hook` gains three harnesses: `--harness grok`
+  (#308), `--harness antigravity` (#309), `--harness codex` (#310).**
+  Grok gets a native `PostCompact` hook in
+  `~/.grok/hooks/swarph-postcompact.json` plus a `PostToolUse` emit
+  reading camelCase `toolInput` (detection: `$GROK_AGENT` /
+  `$GROK_SESSION_ID`); Claude's SessionStart `source=compact` wiring only
+  *may* load there. Codex and Antigravity get their own hook products
+  from the same payload. `--cell` with `--scope user` is still refused
+  (#527).
+
+- **The watchdog's `--stable-model` allowlist guards the charset, not
+  claude-ness (#53, #305).** The claude-only shape rejected every
+  legitimate non-claude id (`gpt-*`, `grok-*`, `gemini-*`, `composer-*`,
+  `kimi-*`) and silently fell back to a claude model — a recovery rung
+  that fired the WRONG provider's model into a non-claude TUI. The safety
+  property is the charset (no whitespace, no shell/terminal
+  metacharacters — the value is interpolated into a `/model <id>` tmux
+  payload), and the full-match allowlist preserves it.
 
 ## 0.47.0 — 2026-08-23
 
