@@ -2,18 +2,35 @@
 
 ## Unreleased
 
-- **The tmux wake no longer types into a busy composer (politeness gate).**
-  #306 made the wake *verified*, but the inject itself was still blind:
-  `send-keys -l` appended to whatever sat in the composer, so a wake
+## 0.48.1 — 2026-08-24
+
+- **The tmux wake no longer types into a busy composer (politeness gate,
+  #312).** #306 made the wake *verified*, but the inject itself was still
+  blind: `send-keys -l` appended to whatever sat in the composer, so a wake
   landing mid-keystroke merged into the human's half-typed line. The sink
   now reads the composer BEFORE acting — inject only into an observed-clean
-  composer (bare `>`/`→`, or cursor's `→ Add a follow-up` placeholder),
+  composer (bare `>`/`›`/`→`, or cursor's `→ Add a follow-up` placeholder),
   nudge only a composer holding wake text alone. A composer holding human
   text DEFERS the wake (new three-outcome sink contract: delivered / failed
   / deferred — a deferral keeps the wake owed without counting a failure or
   ringing the dead-sink alarm, because a human typing is not a dead sink).
   An unreadable pane now fails WITHOUT a single keystroke — never type
   blind — while keeping the failure loud.
+- **The composer is found structurally, not by position.** Cursor's TUI
+  renders chrome BELOW the composer (task count, status bar, `~`), so a
+  fixed tail window read every cursor pane as unknown and failed closed on
+  every real wake; and cursor echoes a submitted wake as `│ ○ check mesh │`
+  (no marker), which a substring-over-tail check would read as pending
+  forever. The composer is now the LAST marker-starting line in the
+  capture; the Codex `›` marker is recognized alongside `>` and `→`.
+- **The verifier's "pending" means wake-ONLY.** A composer holding
+  `check mesh half-typed human line` (human typing during the settle) no
+  longer earns a retry Enter — the loop stops, the human keeps their line,
+  and the busy-deferral keeps the wake owed.
+- **A wake-only composer on the fresh path is nudged, not failed.** A
+  monitor restart loses `wake_outstanding` while the wake text still sits
+  in the composer; the fresh path now submits it with one Enter instead of
+  loud-failing against a pane holding exactly what we would have typed.
 
 ## 0.48.0 — 2026-08-24
 
