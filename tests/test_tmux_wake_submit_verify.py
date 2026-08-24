@@ -293,8 +293,11 @@ def test_failed_wake_with_nothing_landed_retries_next_poll(gate):
 
 
 @pytest.mark.parametrize("captured,expected", [
-    ("> ", "clear"),                          # bare claude/codex composer
+    ("> ", "clear"),                          # bare claude composer
+    ("› ", "clear"),                          # bare codex composer (gpt-ops live capture)
     ("→ ", "clear"),                          # bare cursor composer
+    ("› half-typed human line", "busy"),
+    ("› check mesh", "wake"),
     ("→ Add a follow-up", "clear"),           # cursor's EMPTY placeholder
     ("> half-typed human line", "busy"),
     ("→ half-typed human line", "busy"),
