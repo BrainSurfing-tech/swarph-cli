@@ -311,6 +311,28 @@ def test_stable_model_flag_overrides_default(isolated_state, stale_cursor):
     assert model_calls[0][0][1] == "/model claude-haiku-4-6"
 
 
+def test_stable_model_accepts_a_non_claude_id(isolated_state, stale_cursor):
+    """#53: the allowlist guards the CHARSET (injection safety), not
+    claude-ness. A codex/grok cell's --stable-model must reach the TUI as
+    given — before, it was rejected and silently replaced with a claude
+    model, firing the wrong provider's id into a non-claude TUI."""
+    log_path = isolated_state / "wd.log"
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=3), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True), \
+         patch("swarph_cli.commands.watchdog._pane_activity_age_sec", return_value=99999), \
+         patch("swarph_cli.commands.watchdog._tmux_send_keys", return_value=True) as send_mock:
+        for _ in range(2):
+            run_watchdog(argv=[
+                "--check", "--cell", "lab", "--cursor", str(stale_cursor),
+                "--threshold", "60", "--stable-model", "gpt-5.6-sol-high",
+                "--log", str(log_path), "--model-rung",
+            ])
+    model_calls = [c for c in send_mock.call_args_list if c[0][1].startswith("/model")]
+    assert len(model_calls) == 1
+    assert model_calls[0][0][1] == "/model gpt-5.6-sol-high"
+
+
 def test_no_model_rung_falls_straight_a1_to_a2(isolated_state, stale_cursor):
     """``--no-model-rung`` disables the rung: A1 → (A1 exhausted) → A2 directly,
     with no ``/model`` injection in between. This is the pre-A1.5 behavior."""
