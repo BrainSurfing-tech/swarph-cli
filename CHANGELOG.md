@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.48.2 — 2026-08-24
+
+- **A wake adopted mid-settle now DEFERS instead of acknowledging (#315).**
+  0.48.1's gate never *typed* into a busy composer, but when the human
+  typed into the wake during the settle, `_tmux_wake` still acknowledged
+  delivery and the cursor advanced — so if the human never sent their
+  line, the wake was silently lost. `_tmux_wake` now has three outcomes
+  (submitted / unverifiable / adopted), and an adopted wake defers: cursor
+  held, no failure counted, wake stays owed. Also fixes a live false-busy:
+  cursor right-aligns run-state hints (`ctrl+c to stop`) on the composer
+  row, so the empty composer during a run is
+  `→ Add a follow-up   ctrl+c to stop` — the placeholder is now
+  prefix-matched.
+
 ## 0.48.1 — 2026-08-24
 
 - **The tmux wake no longer types into a busy composer (politeness gate,
