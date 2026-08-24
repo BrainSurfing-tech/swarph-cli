@@ -1045,8 +1045,13 @@ class Sink:
     def __init__(self, name: str):
         self.name = name
 
-    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> bool:
-        """Push `dms` (may be a bounded/empty replay). True == delivered."""
+    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
+        """Push `dms` (may be a bounded/empty replay). Three outcomes:
+        True == delivered (cursor advances); False == FAILED (loud, counted —
+        the sink is probably gone); None == DEFERRED (still owed, but neither
+        delivered nor failed — e.g. TmuxSink's politeness gate finding a
+        human mid-write. A deferral never increments consecutive_failures:
+        a busy composer is not a dead sink)."""
         raise NotImplementedError
 
     def observe(self, state: "MonitorState", ledger: dict, window: list) -> bool:
@@ -1134,6 +1139,16 @@ class TmuxSink(Sink):
     ('check meshcheck mesh…' ×7 observed live on cursor-lin). If the pane
     observably still HOLDS an unsubmitted wake, the gate sends a single
     verified Enter nudge instead of new text — the anti-stack retry.
+
+    POLITENESS GATE (commander, 2026-08-24, same day): even a verified wake
+    INJECTS BLIND — '-l' appends to whatever sits in the composer, so a wake
+    landing mid-keystroke merges into the human's half-typed line. The gate:
+    no inject and no nudge unless the composer is OBSERVED in a compatible
+    state ("clear" to inject, "wake"-only to nudge). A BUSY composer DEFERS
+    (deliver returns None): the wake stays owed, the cursor does not advance,
+    and no failure is counted — a human typing is not a dead sink. An
+    UNREADABLE composer FAILS without a keystroke: never type blind, and a
+    dead pane must keep the failure loud.
     """
 
     is_push = True
@@ -1142,7 +1157,7 @@ class TmuxSink(Sink):
         super().__init__(f"tmux:{target}")
         self.target = target
 
-    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> bool:
+    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
         led = state.ledger(self.name)
         if led.get("wake_outstanding"):
             # Lazy: watchdog imports mesh module-level, so the reverse must
@@ -1154,15 +1169,29 @@ class TmuxSink(Sink):
             if unread == 0:
                 led["wake_outstanding"] = False  # drained since — re-arm
             else:
-                pending = _wake_still_pending(self.target)
-                if pending is True:
+                composer = _composer_state(self.target)
+                if composer == "wake":
                     _tmux_enter(self.target)  # one verified nudge, no new text
                     return True
-                if pending is False:
+                if composer == "clear":
                     # Wake submitted; the cell simply hasn't drained yet. The
                     # wake did its job — re-injecting would only stack.
                     return True
+                if composer == "busy":
+                    # Human text shares the composer (possibly merged into our
+                    # wake) — an Enter here submits THEIR line (#403's shape).
+                    return None
                 return False  # pane unreadable: keep the failure loud
+        # Fresh inject only into an OBSERVED-clean composer. "busy" DEFERS
+        # (None — a human mid-write is not a dead sink). Unreadable FAILS
+        # (False) without a single keystroke: we never type blind into a
+        # pane, and a dead pane must stay loud — deferring it would silently
+        # freeze the dead-sink alarm the ledger exists to ring.
+        composer = _composer_state(self.target)
+        if composer == "busy":
+            return None
+        if composer != "clear":
+            return False
         # Module-global lookup on purpose: the sidecar regression suites patch
         # `mesh._tmux_wake`, and a `from`-import here would silently bypass them.
         ok = _tmux_wake(self.target)
@@ -1514,15 +1543,10 @@ _WAKE_SETTLE_S = 0.6
 _WAKE_SUBMIT_ATTEMPTS = 4
 
 
-def _wake_still_pending(target: str) -> Optional[bool]:
-    """Three-way: True = the wake prompt still sits in the pane's bottom lines
-    (UNSUBMITTED, waiting in the composer — a concatenated backlog like
-    'check meshcheck mesh' matches the same substring check and is drained by
-    the retry Enter that submits it). False = observed clear. None = UNKNOWN
-    (capture failed) — and unknown must FAIL CLOSED (gpt-ops, PR #306): an
-    unverified retry Enter is not a no-op, it is a keypress into a pane whose
-    composer may hold a human's half-typed line (#403's shape). Unknown stops
-    the loop and owes the wake; it never earns another Enter."""
+def _capture_pane_tail(target: str) -> Optional[list[str]]:
+    """The pane's bottom non-empty lines, or None when the pane is UNREADABLE
+    (capture error / non-zero rc). Shared by the wake verifier and the
+    politeness gate — None must always fail closed, never "probably fine"."""
     try:
         r = subprocess.run(
             ["tmux", "capture-pane", "-p", "-t", target],
@@ -1535,7 +1559,21 @@ def _wake_still_pending(target: str) -> Optional[bool]:
     if r.returncode != 0:
         return None
     lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
-    tail = lines[-3:]
+    return lines[-3:]
+
+
+def _wake_still_pending(target: str) -> Optional[bool]:
+    """Three-way: True = the wake prompt still sits in the pane's bottom lines
+    (UNSUBMITTED, waiting in the composer — a concatenated backlog like
+    'check meshcheck mesh' matches the same substring check and is drained by
+    the retry Enter that submits it). False = observed clear. None = UNKNOWN
+    (capture failed) — and unknown must FAIL CLOSED (gpt-ops, PR #306): an
+    unverified retry Enter is not a no-op, it is a keypress into a pane whose
+    composer may hold a human's half-typed line (#403's shape). Unknown stops
+    the loop and owes the wake; it never earns another Enter."""
+    tail = _capture_pane_tail(target)
+    if tail is None:
+        return None
     if any(_WAKE_PROMPT in ln for ln in tail):
         return True
     # "Clear" must be an OBSERVATION, not an absence (gpt-ops, PR #306 round
@@ -1549,6 +1587,53 @@ def _wake_still_pending(target: str) -> Optional[bool]:
     if any(ln.strip().startswith((">", "→")) for ln in tail):
         return False
     return None
+
+
+#: cursor's EMPTY composer is not bare: it renders the marker plus a dimmed
+#: placeholder ('→ Add a follow-up', measured live on cursor-lin 2026-08-24).
+#: Treating any text-after-marker as busy would defer every wake forever on
+#: cursor; treating the placeholder as human text is the only false positive
+#: it can produce, and the failure direction there is a wake never sent —
+#: visible in the log, never a keystroke into someone's line.
+_CURSOR_COMPOSER_PLACEHOLDER = "Add a follow-up"
+
+
+def _composer_state(target: str) -> Optional[str]:
+    """What the pane's composer LINE holds, four-way (the politeness gate):
+
+      "clear" — a composer prompt observed EMPTY (bare marker, or cursor's
+                placeholder). Safe to inject.
+      "wake"  — the composer holds ONLY wake text (one wake, or the pre-fix
+                stacked concatenation 'check meshcheck mesh'). Safe to
+                nudge with ONE Enter; injecting more text would stack.
+      "busy"  — the composer holds anything else: a human mid-write, or
+                human text merged into our wake. Neither inject nor Enter.
+      None    — pane unreadable or no composer line recognized. UNKNOWN,
+                and unknown fails closed: we never type blind into a pane.
+
+    The composer line is the LAST tail line starting with a marker ('>' for
+    claude/codex, '→' for cursor) — status lines render below it.
+    """
+    tail = _capture_pane_tail(target)
+    if tail is None:
+        return None
+    composer = None
+    for ln in reversed(tail):
+        s = ln.strip()
+        if s.startswith((">", "→")):
+            composer = s
+            break
+    if composer is None:
+        return None
+    content = composer[1:].strip()
+    if not content or content == _CURSOR_COMPOSER_PLACEHOLDER:
+        return "clear"
+    # A human who types exactly 'check mesh' by hand is indistinguishable
+    # from our own unsubmitted wake — and submitting it runs the same
+    # command, so the collision is harmless in that direction only.
+    if content.replace(_WAKE_PROMPT, "").strip() == "":
+        return "wake"
+    return "busy"
 
 
 def _tmux_enter(target: str) -> bool:
@@ -1805,7 +1890,18 @@ def _monitor_deliver(state: MonitorState) -> None:
                       f"delivering the newest {len(dms)} (limit "
                       f"{state.replay_limit}) -- see {state.inbox_log_path}",
                       file=sys.stderr, flush=True)
-            if sink.deliver(state, dms, observed):
+            outcome = sink.deliver(state, dms, observed)
+            if outcome is None:
+                # DEFERRED (e.g. TmuxSink's politeness gate): the wake stays
+                # owed — the cursor does NOT advance — but a deferral is not
+                # a failure: no count, no alarm, no ledger write. Retried on
+                # the next poll like any owed delivery.
+                print(f"{state.log_prefix} delivery DEFERRED for {sink.name} "
+                      f"(composer busy or pane unreadable); wake stays owed, "
+                      f"no failure counted",
+                      flush=True)
+                continue
+            if outcome:
                 led["last_delivered_id"] = observed
                 led["last_delivery_at"] = now
                 led["consecutive_failures"] = 0

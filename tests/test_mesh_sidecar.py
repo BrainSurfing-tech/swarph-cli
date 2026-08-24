@@ -6,7 +6,17 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from swarph_cli.commands import mesh
+
+
+@pytest.fixture(autouse=True)
+def _clean_composer(monkeypatch):
+    """These tests pin ledger/cursor mechanics, not the politeness gate —
+    default every composer to OBSERVED-CLEAN so the gate stays out of the
+    way. The gate's own matrix lives in test_tmux_wake_submit_verify.py."""
+    monkeypatch.setattr(mesh, "_composer_state", lambda t: "clear")
 
 
 def _state(tmp_path: Path) -> mesh.MeshSidecarState:

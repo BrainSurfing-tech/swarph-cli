@@ -182,12 +182,15 @@ def gate(monkeypatch):
     calls = {"wake": 0, "enter": 0}
     state = _State()
     sink = mesh.TmuxSink("pane")
-    box = {"unread": 1, "pending": False, "wake_ok": True}
+    # composer: the politeness gate's four-way ("clear"/"wake"/"busy"/None);
+    # pending: _wake_still_pending's three-way, still used by the False-split.
+    box = {"unread": 1, "pending": False, "wake_ok": True, "composer": "clear"}
     monkeypatch.setattr(mesh, "_tmux_wake",
                         lambda t: calls.__setitem__("wake", calls["wake"] + 1) or box["wake_ok"])
     monkeypatch.setattr(mesh, "_tmux_enter",
                         lambda t: calls.__setitem__("enter", calls["enter"] + 1) or True)
     monkeypatch.setattr(mesh, "_wake_still_pending", lambda t: box["pending"])
+    monkeypatch.setattr(mesh, "_composer_state", lambda t: box["composer"])
     import swarph_cli.commands.watchdog as wd
     monkeypatch.setattr(wd, "_gateway_unread_count",
                         lambda g, p, t: box["unread"])
@@ -214,9 +217,9 @@ def test_outstanding_wake_is_not_stacked_while_undrained(gate):
 
 def test_outstanding_unsubmitted_wake_gets_a_nudge_not_new_text(gate):
     sink, state, calls, box = gate
-    box["pending"] = True  # composer observably holds the wake
     sink.deliver(state, [], 1)  # wake "succeeds"... but say it didn't:
     state.ledger("x")["wake_outstanding"] = True
+    box["composer"] = "wake"  # composer observably holds ONLY the wake
     assert sink.deliver(state, [], 2) is True
     assert calls["enter"] == 1
     assert calls["wake"] == 1
@@ -243,7 +246,7 @@ def test_unreadable_drain_signal_does_not_rearm(gate):
 def test_unreadable_pane_keeps_the_failure_loud(gate):
     sink, state, calls, box = gate
     sink.deliver(state, [], 1)
-    box["pending"] = None  # capture failing
+    box["composer"] = None  # capture failing
     assert sink.deliver(state, [], 2) is False
 
 
@@ -255,6 +258,7 @@ def test_failed_wake_with_text_stuck_marks_outstanding_without_stacking(gate):
     box["pending"] = True
     assert sink.deliver(state, [], 1) is False
     assert state.ledger("x")["wake_outstanding"] is True
+    box["composer"] = "wake"  # the stuck text, observed on the composer line
     assert sink.deliver(state, [], 1) is True  # gate nudges, no re-inject
     assert calls["wake"] == 1
     assert calls["enter"] == 1
@@ -270,3 +274,127 @@ def test_failed_wake_with_nothing_landed_retries_next_poll(gate):
     assert "wake_outstanding" not in state.ledger("x")
     assert sink.deliver(state, [], 1) is False
     assert calls["wake"] == 2
+
+
+# ── Politeness gate (commander, 2026-08-24): never type into a busy composer ─
+#
+# A verified wake still INJECTED blind: '-l' appends to whatever sits in the
+# composer, so a wake landing mid-keystroke merged into the human's line.
+# The gate reads the composer BEFORE acting: inject only into "clear", nudge
+# only "wake"-only, defer (None) on "busy" or unreadable — owed, not failed.
+
+
+@pytest.mark.parametrize("captured,expected", [
+    ("> ", "clear"),                          # bare claude/codex composer
+    ("→ ", "clear"),                          # bare cursor composer
+    ("→ Add a follow-up", "clear"),           # cursor's EMPTY placeholder
+    ("> half-typed human line", "busy"),
+    ("→ half-typed human line", "busy"),
+    ("→ check mesh", "wake"),                 # our wake, unsubmitted
+    ("→ check meshcheck mesh", "wake"),       # pre-fix stack, still drainable
+    ("→ check meshwait no", "busy"),          # human text MERGED into our wake
+    ("→ waitcheck mesh", "busy"),             # wake text not alone = human's line
+    ("some output\nno composer here", None),  # unrecognizable → unknown
+    ("", None),                               # empty capture → unknown
+])
+def test_composer_state_matrix(tmux, captured, expected):
+    calls, state = tmux
+    state["captures"] = [captured]
+    assert mesh._composer_state("pane") == expected
+
+
+def test_composer_state_capture_failure_is_unknown(tmux, monkeypatch):
+    def boom(argv, **kw):
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="no pane")
+    monkeypatch.setattr(mesh.subprocess, "run", boom)
+    assert mesh._composer_state("pane") is None
+
+
+def test_busy_composer_defers_the_inject(gate):
+    """THE commander's case: mid-write, a wake arrives. No text lands, the
+    wake stays owed, and NOTHING is counted as failed."""
+    sink, state, calls, box = gate
+    box["composer"] = "busy"
+    assert sink.deliver(state, [], 1) is None
+    assert calls == {"wake": 0, "enter": 0}
+    assert "wake_outstanding" not in state.ledger("x")
+
+
+def test_unreadable_composer_fails_without_typing(gate):
+    """Unknown fails closed BEFORE typing: pre-gate, an unreadable pane got
+    the blind inject (then one Enter). Now: zero keystrokes — but a LOUD
+    failure, not a deferral, because a dead pane must keep ringing the
+    dead-sink alarm (deferring it would silently freeze the ledger)."""
+    sink, state, calls, box = gate
+    box["composer"] = None
+    assert sink.deliver(state, [], 1) is False
+    assert calls == {"wake": 0, "enter": 0}
+    assert "wake_outstanding" not in state.ledger("x")
+
+
+def test_busy_composer_defers_the_nudge(gate):
+    """Wake text sits in the composer but human text merged into it: an Enter
+    would submit THEIR line (#403's shape). Defer, don't nudge."""
+    sink, state, calls, box = gate
+    sink.deliver(state, [], 1)  # fresh wake, composer clear
+    box["composer"] = "busy"    # human started typing into the wake's line
+    assert sink.deliver(state, [], 2) is None
+    assert calls["enter"] == 0
+    assert calls["wake"] == 1
+
+
+def test_deferral_does_not_rearm_and_recovers(gate):
+    """A deferral leaves the gate exactly as armed: next poll with a clean
+    composer delivers the owed wake normally."""
+    sink, state, calls, box = gate
+    box["composer"] = "busy"
+    assert sink.deliver(state, [], 1) is None
+    box["composer"] = "clear"
+    assert sink.deliver(state, [], 1) is True
+    assert calls["wake"] == 1
+    assert state.ledger("x")["wake_outstanding"] is True
+
+
+class _DeferSink(mesh.Sink):
+    is_push = True
+
+    def __init__(self):
+        super().__init__("defer-stub")
+
+    def deliver(self, state, dms, up_to_id):
+        return None
+
+
+class _EngineState:
+    """The slices of MonitorState that _monitor_deliver touches."""
+
+    def __init__(self, tmp_path):
+        self.observed = {"last_msg_id": 5}
+        self.min_interval_s = 0.0
+        self.replay_limit = 50
+        self.inbox_log_path = tmp_path / "inbox.log"
+        self.inbox_log_path.write_text("", encoding="utf-8")
+        self.log_prefix = "[test]"
+        self.deliveries = {}
+        self.ledgers = {}
+        self.ledgers_path = tmp_path / "ledgers.json"
+        self.sinks = [_DeferSink()]
+
+    def ledger(self, name):
+        return self.ledgers.setdefault(name, mesh._new_ledger())
+
+
+def test_engine_counts_deferral_as_neither_success_nor_failure(tmp_path, capsys):
+    """The engine contract for None: cursor NOT advanced (wake stays owed),
+    consecutive_failures NOT incremented (a busy composer is not a dead
+    sink), no DELIVERY FAILED alarm, no ledger write."""
+    state = _EngineState(tmp_path)
+    mesh._monitor_deliver(state)
+    led = state.ledgers["defer-stub"]
+    assert led["last_delivered_id"] == 0
+    assert led["consecutive_failures"] == 0
+    assert state.deliveries == {}
+    assert not state.ledgers_path.exists()  # nothing changed, nothing written
+    out = capsys.readouterr()
+    assert "DEFERRED" in out.out
+    assert "DELIVERY FAILED" not in out.err
