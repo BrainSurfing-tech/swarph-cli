@@ -531,6 +531,8 @@ def _gateway_recent_recovery_event(
     What was missing was the wake-up mechanism — this function plus the
     fall-through in run_check is the watchdog half of the loop.
     """
+    if not _gateway_configured(gateway):
+        return None
     since_dt = datetime.now(timezone.utc) - timedelta(seconds=window_sec)
     since_iso = since_dt.isoformat()
     query = urllib.parse.urlencode(

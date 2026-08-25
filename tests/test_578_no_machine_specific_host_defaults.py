@@ -375,7 +375,13 @@ def test_watchdog_helpers_degrade_on_an_unconfigured_gateway() -> None:
     EnvironmentFile=-/etc/default/swarph-watchdog, and that file does not exist."""
     from swarph_cli.commands import watchdog
 
+    # ALL THREE own-urllib sites, not one. Seat-A's re-review at bbcfd5e found
+    # _gateway_recent_recovery_event still unguarded while this test was green —
+    # a guard test that covers 1 of 3 sites reports the same PASS as one that
+    # covers 3 of 3, which is the defect this PR is about, inside its own test.
     assert watchdog._gateway_unread_count("", "lab-ovh", "tok") is None
+    assert watchdog._fetch_peers("", "tok") is None
+    assert watchdog._gateway_recent_recovery_event("", "x", 60, "tok") is None
 
 
 def test_the_request_time_refusal_survives_a_deleted_CALL_not_just_a_neutered_body(
