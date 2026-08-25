@@ -290,6 +290,7 @@ def test_drain_iteration_clears_disconnect_on_recovery(tmp_path, monkeypatch):
 
 
 def test_run_daemon_once_returns_zero(tmp_path, monkeypatch):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     fake, _ = _http_factory([(200, {"messages": []})])
     monkeypatch.setattr(daemon_cmd, "_http_get", fake)
@@ -306,6 +307,7 @@ def test_run_daemon_once_returns_zero(tmp_path, monkeypatch):
 
 
 def test_run_daemon_resolves_self_from_state_dir_basename(tmp_path, monkeypatch):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.delenv("SWARPH_SELF", raising=False)
     captured = []

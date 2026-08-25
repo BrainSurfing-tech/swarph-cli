@@ -22,8 +22,9 @@ import yaml
 
 from swarph_shared.cell import PEER_NAME_RE, parse_cell_dict
 from swarph_cli.cell import CLI_ENABLED_PROVIDERS, CellError, cells_dir
+from swarph_cli.gateway_default import env_gateway
 
-_DEFAULT_GATEWAY = os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788")
+_DEFAULT_GATEWAY = env_gateway()
 _CODEX_SANDBOX_DEFAULT = "workspace-write"
 _CODEX_SANDBOX_VALUES = ("workspace-write", "read-only")
 

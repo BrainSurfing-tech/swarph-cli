@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional
+from swarph_cli.gateway_default import env_gateway, require_gateway
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -57,7 +58,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--gateway",
-        default=os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788"),
+        default=env_gateway(),
         help="mesh-gateway base URL.",
     )
     p.add_argument(
@@ -167,6 +168,9 @@ def run_ratify(argv: list[str]) -> int:
         return 1
 
     # ── Step 2: caller-side gate (witness must itself be ratified) ───
+    # #578: the gateway is needed only for the REQUEST. Arg validation above runs
+    # first, so a bad name reports the bad name, not a missing env var.
+    args.gateway = require_gateway(getattr(args, "gateway", ""))
     print(f"[2/6] verify witness {witness!r} is ratified")
     status, witness_body = _http_json(
         f"{args.gateway}/peers/{witness}", token=token

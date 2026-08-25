@@ -7,6 +7,8 @@ retrieval-only handler path.
 
 from __future__ import annotations
 
+import pytest
+
 import json
 from unittest.mock import patch
 
@@ -89,6 +91,7 @@ def test_resolve_token_falls_back_to_swarph_brain_token(monkeypatch):
 # --- the handler (retrieval-only path, HTTP mocked) ------------------------
 
 def test_run_retrieval_only_prints_chunks(capsys, monkeypatch):
+    monkeypatch.setenv("SWARPH_BRAIN_MCP", "http://gbrain.test:8792/mcp")  # #578: no host default
     chunks = [{"slug": "deferred", "chunk_text":
                "governor order Claude->Gemini->GPT->Grok", "score": 0.88}]
     inner = json.dumps({"result": {"content": [{"text": json.dumps(chunks)}]}})
@@ -101,6 +104,7 @@ def test_run_retrieval_only_prints_chunks(capsys, monkeypatch):
 
 
 def test_run_no_token_errors_cleanly(capsys, monkeypatch):
+    monkeypatch.setenv("SWARPH_BRAIN_MCP", "http://gbrain.test:8792/mcp")  # #578: no host default
     monkeypatch.delenv("GBRAIN_TOKEN", raising=False)
     monkeypatch.delenv("SWARPH_BRAIN_TOKEN", raising=False)
     monkeypatch.setattr(ba, "_peer_token_path", lambda self_name: __import__("pathlib").Path("/nonexistent"))
@@ -120,6 +124,7 @@ def test_synthesize_returns_facade_text():
 
 
 def test_run_synth_path_prints_answer(capsys, monkeypatch):
+    monkeypatch.setenv("SWARPH_BRAIN_MCP", "http://gbrain.test:8792/mcp")  # #578: no host default
     chunks = [{"slug": "p_x", "chunk_text": "X is foo", "score": 0.9}]
     query_resp = "data: " + json.dumps(
         {"result": {"content": [{"text": json.dumps(chunks)}]}})
@@ -147,13 +152,25 @@ def test_resolve_endpoint_falls_back_to_swarph_brain_mcp(monkeypatch):
     assert ba._resolve_endpoint() == "http://sb/mcp"
 
 
-def test_resolve_endpoint_default_is_the_tailnet_ip(monkeypatch):
-    """#548: gbrain binds 100.107.222.72:8792 ONLY (measured 2026-08-23 —
-    loopback refuses even on the gateway box), so a loopback default was
-    deaf everywhere, including on gbrain's own host."""
+def test_resolve_endpoint_refuses_rather_than_guessing_a_host(monkeypatch):
+    """#578 supersedes #548's tailnet default.
+
+    #548 baked gbrain's tailnet IP in because loopback refused even on gbrain's
+    own host — correct then. That box was retired 2026-08-25 and the default
+    became an address that answers nothing. A published package cannot know any
+    host, so it now REFUSES with an actionable message instead of dialling one.
+    """
     monkeypatch.delenv("GBRAIN_MCP_URL", raising=False)
     monkeypatch.delenv("SWARPH_BRAIN_MCP", raising=False)
-    assert ba._resolve_endpoint() == "http://100.107.222.72:8792/mcp"
+    with pytest.raises(SystemExit) as exc:
+        ba._resolve_endpoint()
+    assert "SWARPH_BRAIN_MCP" in str(exc.value)
+
+
+def test_resolve_endpoint_uses_the_env_when_set(monkeypatch):
+    monkeypatch.delenv("GBRAIN_MCP_URL", raising=False)
+    monkeypatch.setenv("SWARPH_BRAIN_MCP", "http://gbrain.example:8792/mcp")
+    assert ba._resolve_endpoint() == "http://gbrain.example:8792/mcp"
 
 
 # --- SWARPH_BRAIN_GATEWAY client path (Task 2) ------------------------------
@@ -174,6 +191,7 @@ def test_gateway_query_posts_brain_query_with_peer_token(monkeypatch, tmp_path):
 
 
 def test_run_brain_ask_uses_gateway_when_env_set(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("SWARPH_BRAIN_MCP", "http://gbrain.test:8792/mcp")  # #578: no host default
     from swarph_cli.commands import brain_ask
     # peer token on disk for _self_name()
     cfg = tmp_path / ".config" / "swarph"
@@ -194,6 +212,7 @@ def test_run_brain_ask_uses_gateway_when_env_set(monkeypatch, tmp_path, capsys):
 
 
 def test_run_brain_ask_direct_path_unchanged_when_gateway_unset(monkeypatch, capsys):
+    monkeypatch.setenv("SWARPH_BRAIN_MCP", "http://gbrain.test:8792/mcp")  # #578: no host default
     from swarph_cli.commands import brain_ask
     monkeypatch.delenv("SWARPH_BRAIN_GATEWAY", raising=False)
     monkeypatch.setenv("GBRAIN_TOKEN", "gbrain_direct")

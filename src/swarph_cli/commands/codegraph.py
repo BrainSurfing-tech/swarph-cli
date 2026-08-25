@@ -245,8 +245,8 @@ def _resolve_gateway(arg) -> str:
 
         SWARPH_CODEGRAPH_GATEWAY   <unset>
         SWARPH_GATEWAY             <unset>
-        SWARPH_BRAIN_GATEWAY       http://100.107.222.72:8788   <- brain-NAMED, MESH value
-        MESH_GATEWAY_URL           http://100.107.222.72:8788   <- correct, and NOT consulted
+        SWARPH_BRAIN_GATEWAY       http://<host>:8788   <- brain-NAMED, MESH value
+        MESH_GATEWAY_URL           http://<host>:8788   <- correct, and NOT consulted
 
     The relay worked ONLY because a brain-named variable was mis-set to the mesh
     gateway's address. Every link that resolved was unset or wrong-by-name, and the

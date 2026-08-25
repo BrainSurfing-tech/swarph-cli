@@ -36,8 +36,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional
+from swarph_cli.gateway_default import env_gateway
 
-DEFAULT_GATEWAY = os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788")
+DEFAULT_GATEWAY = env_gateway()
 TIMEOUT_S = 6
 MAX_ROWS = 6
 

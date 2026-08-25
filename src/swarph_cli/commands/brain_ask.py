@@ -10,7 +10,7 @@ verb so any cell can search the swarm's shared memory the same way. Two modes:
 Stdlib-only. Config from the environment, mirroring ``swarph mesh``'s token model:
 
   GBRAIN_MCP_URL        gbrain MCP endpoint; falls back to SWARPH_BRAIN_MCP, else
-    / SWARPH_BRAIN_MCP   http://100.107.222.72:8792/mcp (tailnet IP — gbrain
+    / SWARPH_BRAIN_MCP   http://<gbrain-host>:8792/mcp (no default — gbrain
                           binds no loopback; measured 2026-08-23, card #548)
   GBRAIN_TOKEN          read token; falls back to SWARPH_BRAIN_TOKEN, then to the
     / SWARPH_BRAIN_TOKEN  mesh per-peer token (~/.config/swarph/<self>.peer_token).
@@ -36,22 +36,28 @@ from pathlib import Path
 from typing import Optional
 
 # TAILNET IP, NOT loopback (card #548): measured 2026-08-23, gbrain binds
-# 100.107.222.72:8792 ONLY — 127.0.0.1:8792 refuses on the gateway box itself.
+# gbrain binds its tailnet IP ONLY — 127.0.0.1:8792 refuses even on the gateway box,
+# so SWARPH_BRAIN_MCP must be set explicitly; no host is shipped as a default.
 # A loopback default is deaf everywhere, including on the box running gbrain.
-_DEFAULT_GBRAIN = "http://100.107.222.72:8792/mcp"
+# No baked-in host: see swarph_cli.gateway_default / card #578.
+_DEFAULT_GBRAIN = (os.environ.get("SWARPH_BRAIN_MCP") or "").strip()
 _DEFAULT_TOPK = 6
 
 
 def _resolve_endpoint() -> str:
-    """Endpoint precedence: GBRAIN_MCP_URL > SWARPH_BRAIN_MCP > tailnet default.
+    """Endpoint precedence: GBRAIN_MCP_URL > SWARPH_BRAIN_MCP. No host default (#578).
 
     The SWARPH_BRAIN_MCP fallback keeps the verb config-compatible with the
     standalone ``swarph-brain-ask`` script (which reads SWARPH_BRAIN_*), so one
     env config works with both.
     """
-    return (os.environ.get("GBRAIN_MCP_URL")
-            or os.environ.get("SWARPH_BRAIN_MCP")
-            or _DEFAULT_GBRAIN)
+    from swarph_cli.gateway_default import require_gateway
+
+    return require_gateway(
+        os.environ.get("GBRAIN_MCP_URL") or os.environ.get("SWARPH_BRAIN_MCP") or _DEFAULT_GBRAIN,
+        env="SWARPH_BRAIN_MCP",
+        what="gbrain MCP",
+    )
 
 
 def _build_query_request(question: str, limit: int = _DEFAULT_TOPK) -> dict:

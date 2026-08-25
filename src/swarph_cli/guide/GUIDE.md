@@ -86,7 +86,7 @@ chmod 600 ~/.config/swarph/<you>.peer_token
 ```
 swarph monitor start --as <you> \
   --deliver pull \
-  --gateway http://100.107.222.72:8788 \
+  --gateway "$MESH_GATEWAY_URL" \
   --token-file ~/.config/swarph/<you>.peer_token \
   --foreground
 ```
