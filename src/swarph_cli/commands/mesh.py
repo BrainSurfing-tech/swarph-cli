@@ -314,9 +314,26 @@ def _resolve_token(
     )
     if res is not None:
         return res.token
+    # #579: the old message named the very file `register` exists to MINT, which
+    # reads as a chicken-and-egg to anyone bootstrapping a NEW peer (droplet hit
+    # exactly this onboarding friendly-coder, 2026-08-25). `swarph onboard`
+    # already explains the operator path; this now says the same thing.
     raise RuntimeError(
-        "cannot resolve mesh token; set MESH_GATEWAY_TOKEN or create "
-        f"{_peer_token_path(self_name)}"
+        f"cannot resolve a mesh credential for {self_name!r}.\n"
+        f"\n"
+        f"  looked for:  ${{MESH_GATEWAY_TOKEN}}\n"
+        f"               {_peer_token_path(self_name)}\n"
+        f"\n"
+        f"  If {self_name!r} ALREADY EXISTS, its per-peer token is the right\n"
+        f"  credential — place it at the path above (mode 600) and re-run.\n"
+        f"\n"
+        f"  If you are BOOTSTRAPPING {self_name!r}, that token does not exist yet:\n"
+        f"  minting it is what this command does, so it cannot also be the way in.\n"
+        f"  Registering a peer that is not yourself is an OPERATOR action, and the\n"
+        f"  gateway binds POST /peers/register's name to the authenticated caller —\n"
+        f"  another cell's per-peer token will 403, not succeed.\n"
+        f"      swarph mesh register --as {self_name} --token-file <operator-token>\n"
+        f"      MESH_GATEWAY_TOKEN=<operator-token> swarph mesh register --as {self_name}"
     )
 
 
