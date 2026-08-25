@@ -308,7 +308,7 @@ The load-bearing piece is **billing-scrub**: the subprocess env has every known 
 
 ### `swarph channel` / `swarph schedule` / `swarph lane`
 
-The gateway's **automation control plane** — channels (pub/sub), scheduled events, and the $0-lane orchestration — as first-class client verbs. They share `mesh`'s auth: identity is `--as` / `SWARPH_SELF`, the bearer is `--token-file` / `MESH_GATEWAY_TOKEN` / the peer-token file, and `--gateway` (default `http://localhost:8788`) points at the hub.
+The gateway's **automation control plane** — channels (pub/sub), scheduled events, and the $0-lane orchestration — as first-class client verbs. They share `mesh`'s auth: identity is `--as` / `SWARPH_SELF`, the bearer is `--token-file` / `MESH_GATEWAY_TOKEN` / the peer-token file, and `--gateway` / `MESH_GATEWAY_URL` points at the hub. **There is no default host** — swarph ships none, and an unconfigured call refuses with an actionable message rather than dialling somewhere (#578).
 
 ```bash
 # channels — converge work into pub/sub rooms
