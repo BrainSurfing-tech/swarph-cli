@@ -337,6 +337,26 @@ def _resolve_token(
     )
 
 
+
+def _require_absolute_gateway_url(url: str) -> None:
+    """#578: no gateway host ships as a default.
+
+    Guarding here rather than at the dispatcher is deliberate: the gateway is
+    needed only when a REQUEST is made. A dispatcher-level check also fired for
+    paths that never touch the network (sidecar target validation, --json shape
+    tests) and turned 10 failures into 26. The observable that means
+    "unconfigured" is a url that is not absolute — `/peers` instead of
+    `http://host:8788/peers` — so key on that.
+    """
+    if not str(url).startswith(("http://", "https://")):
+        raise RuntimeError(
+            "MESH_GATEWAY_URL is not set, and swarph ships no default gateway host.\n"
+            "  A baked-in address expires the day that box is retired "
+            "(card #578; it happened on 2026-08-25).\n"
+            "  Set MESH_GATEWAY_URL=http://<host>:<port>, or pass --gateway.\n"
+            f"  (tried to request {url!r})"
+        )
+
 def _post_json(
     url: str,
     body: dict,
@@ -344,6 +364,7 @@ def _post_json(
     *,
     timeout: float = 10.0,
 ) -> tuple[int, dict]:
+    _require_absolute_gateway_url(url)
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -373,6 +394,7 @@ def _http_get_json(
     *,
     timeout: float = 10.0,
 ) -> tuple[int, dict]:
+    _require_absolute_gateway_url(url)
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

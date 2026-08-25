@@ -112,3 +112,24 @@ def test_the_premise_still_holds() -> None:
     body = helper.read_text(encoding="utf-8")
     assert "MESH_GATEWAY_URL" in body
     assert "require_gateway" in body, "the fail-loud resolver is the point of #578"
+
+
+def test_the_suite_does_not_depend_on_the_developer_s_own_gateway(monkeypatch) -> None:
+    """PIN THE PREMISE for the whole PR.
+
+    This change was first measured GREEN locally and RED in CI, because the
+    developer's shell had MESH_GATEWAY_URL set and CI's did not — the identical
+    trap #546 hit ("drop's own probe reported clean because HIS shell had
+    MESH_GATEWAY_URL set"). 10 tests silently depended on the ambient value.
+
+    This asserts the resolver itself returns "" in a clean environment, so a
+    future contributor whose shell happens to export it cannot re-introduce that
+    dependency without a red test rather than a red CI run an hour later.
+    """
+    from swarph_cli.gateway_default import env_gateway
+
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    assert env_gateway() == "", (
+        "env_gateway() must be empty in a clean environment — if this passes only "
+        "because your shell exports MESH_GATEWAY_URL, CI will disagree"
+    )
