@@ -672,19 +672,79 @@ BUILTIN_SKILLS: dict = {
 }
 
 
+#: Skills shipped as PACKAGE DATA rather than as a Python string constant.
+#:
+#: `swarph-intro` is a ~10-line str literal and that is fine. A 176-line skill
+#: embedded in source is not: it cannot be diffed against its upstream, and the
+#: two copies drift silently — which is the same failure `i-have-adhd`'s own
+#: upstream guards against with a CI check that the `.cursor/` mirror matches.
+#:
+#: Maps skill name -> (description, files-under-src/swarph_cli/skills/<name>/).
+_PACKAGED_SKILLS: dict = {
+    "i-have-adhd": (
+        "Shape output for a reader with ADHD: lead with the next action, number "
+        "multi-step work, restate state across turns, suppress tangents, make "
+        "wins visible. Vendored from ayghri/i-have-adhd (MIT) with swarph's "
+        "rule 0 (act, do not announce). Invoke with /i-have-adhd.",
+        ("SKILL.md", "LICENSE"),
+    ),
+}
+
+#: Where packaged skill files live inside the installed package.
+_PACKAGED_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
+
+
+def _resolve_packaged_skill(name: str) -> SkillBundle:
+    """Build a :class:`SkillBundle` by READING the packaged files.
+
+    >>> READ AT RESOLVE TIME, NOT AT IMPORT. <<< A module-level constant is
+    evaluated when the package is imported, so a missing or unreadable data file
+    would make `swarph --help` fail rather than `swarph add` fail. #578 is the
+    same lesson from the other direction: nothing that can fail belongs at import.
+
+    Raises :class:`FileNotFoundError` naming the absent file — which is the
+    honest error for a wheel that did not ship its own package data, a failure
+    this repo has had before (see the release checklist: a new module silently
+    does not ship).
+    """
+    description, filenames = _PACKAGED_SKILLS[name]
+    files = []
+    for relpath in filenames:
+        src = _PACKAGED_SKILLS_DIR / name / relpath
+        if not src.is_file():
+            raise FileNotFoundError(
+                f"packaged skill {name!r} is missing {relpath!r} at {src} — the "
+                f"wheel did not ship its package data; this is a packaging bug, "
+                f"not a user error"
+            )
+        files.append((relpath, src.read_text(encoding="utf-8")))
+    return SkillBundle(
+        name=name,
+        description=description,
+        publisher=_BUILTIN_PUBLISHER,
+        trust="builtin",
+        files=tuple(files),
+    )
+
+
 def resolve_builtin_skill(name: str) -> SkillBundle:
     """Return the bundled :class:`SkillBundle` named ``name``.
+
+    Two sources, one namespace: :data:`BUILTIN_SKILLS` (string constants) and
+    :data:`_PACKAGED_SKILLS` (files shipped as package data). A caller cannot
+    tell them apart and should not need to.
 
     Raises :class:`ValueError` (listing the available names) for an unknown
     name — propagated to the CLI layer, which surfaces it; nothing installed.
     """
-    try:
+    if name in BUILTIN_SKILLS:
         return BUILTIN_SKILLS[name]
-    except KeyError:
-        available = ", ".join(sorted(BUILTIN_SKILLS))
-        raise ValueError(
-            f"unknown builtin skill {name!r}; available: {available}"
-        ) from None
+    if name in _PACKAGED_SKILLS:
+        return _resolve_packaged_skill(name)
+    available = ", ".join(sorted({*BUILTIN_SKILLS, *_PACKAGED_SKILLS}))
+    raise ValueError(
+        f"unknown builtin skill {name!r}; available: {available}"
+    ) from None
 
 
 def _install_skill_files(skills_home, name: str, files) -> None:
