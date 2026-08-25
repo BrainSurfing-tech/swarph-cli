@@ -228,8 +228,23 @@ def _has_execstart_gateway_flag(text: str) -> bool:
                if l.startswith("ExecStart="))
 
 
-def _absence_is_explained(text: str) -> bool:
-    return "MESH_GATEWAY_URL" in text and "#276" in text
+def _gateway_line_is_live(text: str) -> bool:
+    """#578: a LIVE `Environment=MESH_GATEWAY_URL=` line, plus the reason.
+
+    This predicate used to be `_absence_is_explained` — the unit shipped with NO
+    gateway line and a comment (#560) saying the absence was deliberate because
+    swarph-cli carried a code default. #578 deleted that default: the host named
+    one machine and the machine was retired. So the absence stopped being a choice
+    and became a monitor that refuses on every poll, while the unit's own comment
+    still told the operator it was fine. `_uncommented` is load-bearing here —
+    "Environment=MESH_GATEWAY_URL=<GATEWAY>" is a SUBSTRING of the commented form,
+    so a bare `in` check would have passed against the exact file this replaced.
+    """
+    live = any(
+        l.strip().startswith("Environment=") and "MESH_GATEWAY_URL=" in l
+        for l in _uncommented(text).splitlines()
+    )
+    return live and "#578" in text
 
 
 # --- against the REAL shipped unit -------------------------------------------
@@ -243,8 +258,9 @@ def test_shipped_unit_pins_no_gateway_address():
     )
 
 
-def test_the_gateway_absence_is_documented_as_a_choice():
-    assert _absence_is_explained(_monitor_unit())
+def test_the_gateway_is_set_by_the_unit_not_left_to_a_code_default():
+    """The unit must SET the gateway now — there is no code default to inherit."""
+    assert _gateway_line_is_live(_monitor_unit())
 
 
 def test_the_escape_hatch_is_environment_not_an_execstart_flag():
@@ -257,7 +273,7 @@ def test_the_escape_hatch_is_environment_not_an_execstart_flag():
     Environment= for this, so the shipped file is catching up to deployment rather
     than proposing a design."""
     u = _monitor_unit()
-    assert "# Environment=MESH_GATEWAY_URL=<GATEWAY>" in u
+    assert "Environment=MESH_GATEWAY_URL=<GATEWAY>" in _uncommented(u)
     assert not _has_execstart_gateway_flag(u)
 
 
@@ -289,10 +305,26 @@ def test_the_pin_guard_accepts_the_placeholder():
     assert _pinned_gateway_values("# Environment=MESH_GATEWAY_URL=<GATEWAY>\n") == []
 
 
-def test_the_documentation_guard_fires_on_a_bare_unit():
-    """A unit with no gateway line and no explanation — the exact state before #560."""
-    assert not _absence_is_explained(
+def test_the_live_gateway_guard_fires_on_a_bare_unit():
+    """A unit with no gateway line at all — before #560, and again after #578."""
+    assert not _gateway_line_is_live(
         "[Service]\nEnvironment=SWARPH_SELF=<PEER>\nExecStart=/x/swarph monitor\n")
+
+
+def test_the_live_gateway_guard_fires_on_the_COMMENTED_line():
+    """>>> THE VARIANT THE OLD PREDICATE COULD NOT SEE. <<< This is the shipped file
+    exactly as #560 left it: the line present, commented, with prose explaining that
+    the code default covers it. `"Environment=MESH_GATEWAY_URL=<GATEWAY>" in text` is
+    True for this string — which is why the guard reads the UNCOMMENTED text."""
+    assert not _gateway_line_is_live(
+        "[Service]\n# see #578\n# Environment=MESH_GATEWAY_URL=<GATEWAY>\n"
+        "ExecStart=/x/swarph monitor\n")
+
+
+def test_the_live_gateway_guard_fires_when_the_reason_is_missing():
+    """A live line with no recorded reason is the state the next editor deletes."""
+    assert not _gateway_line_is_live(
+        "[Service]\nEnvironment=MESH_GATEWAY_URL=<GATEWAY>\nExecStart=/x/swarph monitor\n")
 
 
 def test_the_execstart_guard_fires_on_a_flag_in_execstart():

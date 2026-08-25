@@ -43,6 +43,8 @@ import sys
 import time
 from pathlib import Path
 
+from swarph_cli.gateway_default import env_gateway
+
 from . import mesh
 
 
@@ -122,7 +124,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--state-dir", default=None, help="state directory")
     p.add_argument(
         "--gateway",
-        default=os.environ.get("MESH_GATEWAY_URL", mesh._DEFAULT_GATEWAY),
+        default=env_gateway(),
         help="mesh-gateway base URL",
     )
     p.add_argument("--token-file", default=None, help="explicit bearer token file")

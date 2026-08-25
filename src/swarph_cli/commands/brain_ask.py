@@ -35,12 +35,15 @@ from swarph_cli import tokens
 from pathlib import Path
 from typing import Optional
 
-# TAILNET IP, NOT loopback (card #548): measured 2026-08-23, gbrain binds
-# gbrain binds its tailnet IP ONLY — 127.0.0.1:8792 refuses even on the gateway box,
-# so SWARPH_BRAIN_MCP must be set explicitly; no host is shipped as a default.
-# A loopback default is deaf everywhere, including on the box running gbrain.
-# No baked-in host: see swarph_cli.gateway_default / card #578.
-_DEFAULT_GBRAIN = (os.environ.get("SWARPH_BRAIN_MCP") or "").strip()
+# NO MODULE-LEVEL ENDPOINT CONSTANT, ON PURPOSE. gbrain binds its tailnet IP
+# only (127.0.0.1:8792 refuses even on gbrain's own box), so SWARPH_BRAIN_MCP must
+# be set explicitly and no host ships as a default (#548 -> #578).
+# `_DEFAULT_GBRAIN = os.environ.get("SWARPH_BRAIN_MCP")` used to live here and was
+# read at IMPORT time, which froze the developer's shell into the module:
+# MEASURED in seat-A review of PR #318 — with SWARPH_BRAIN_MCP exported,
+# test_resolve_endpoint_refuses_rather_than_guessing_a_host FAILED, because the
+# test can delenv the two call-time operands but not a value already captured.
+# The env is read at CALL time in _resolve_endpoint below, and nowhere else.
 _DEFAULT_TOPK = 6
 
 
@@ -56,8 +59,7 @@ def _resolve_endpoint(explicit: str | None = None) -> str:
     return require_gateway(
         explicit
         or os.environ.get("GBRAIN_MCP_URL")
-        or os.environ.get("SWARPH_BRAIN_MCP")
-        or _DEFAULT_GBRAIN,
+        or os.environ.get("SWARPH_BRAIN_MCP"),
         env="SWARPH_BRAIN_MCP",
         what="gbrain MCP",
     )

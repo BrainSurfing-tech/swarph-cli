@@ -37,7 +37,13 @@ _MACHINE_SPECIFIC = re.compile(
     re.VERBOSE,
 )
 
-_TEXT_SUFFIXES = {".py", ".md", ".default", ".service", ".timer", ".sh", ".toml", ".json"}
+# ".ps1"/".cmd"/".sql" added after seat-A review of PR #318: pyproject's
+# package-data ships scripts/*.ps1, payloads/postcompact/*.cmd and gateway/*.sql, and
+# none of them was ever opened. scripts/install_codex_waker_windows.ps1 is the Windows
+# twin of the systemd/*.default template that actually carried the retired IP — a
+# `$Gateway = "http://100.x..."` default there would have shipped unseen.
+_TEXT_SUFFIXES = {".py", ".md", ".default", ".service", ".timer", ".sh", ".toml",
+                  ".json", ".ps1", ".cmd", ".sql"}
 
 
 def _sweep(root: Path) -> list[str]:
@@ -54,10 +60,13 @@ def _sweep(root: Path) -> list[str]:
             continue
         if "__pycache__" in path.parts:
             continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue
+        # errors="replace", NOT `except UnicodeDecodeError: continue`. The old form
+        # dropped the ENTIRE file on one bad byte: MEASURED in seat-A review of PR
+        # #318 with a cp1252 `codex-waker.default` holding the retired IP — missed.
+        # The pattern is pure ASCII, so a replacement char can never hide a match,
+        # and the sibling sweeps in this repo (test_546:136, test_548:34) already
+        # read this way.
+        text = path.read_text(encoding="utf-8", errors="replace")
         for lineno, line in enumerate(text.splitlines(), 1):
             found = _MACHINE_SPECIFIC.search(line)
             if found:
@@ -142,38 +151,162 @@ def test_the_suite_does_not_depend_on_the_developer_s_own_gateway(monkeypatch) -
 # hostname in an argparse default all reach the same observable.
 # ---------------------------------------------------------------------------
 
-def _shipped(expr: str, module: str) -> str:
-    """Value of `expr` as the package actually ships it, env-free."""
+def _run_probe(program: str, env_extra: dict | None = None) -> str:
+    """Run `program` against the SOURCE TREE with the gateway env scrubbed."""
     import os as _os
     import subprocess
     import sys
 
     env = {k: v for k, v in _os.environ.items()
-           if k not in ("MESH_GATEWAY_URL", "SWARPH_GATEWAY", "SWARPH_BRAIN_MCP")}
+           if k not in ("MESH_GATEWAY_URL", "SWARPH_GATEWAY", "SWARPH_BRAIN_MCP",
+                        "GBRAIN_MCP_URL")}
     env["PYTHONPATH"] = str(SRC.parent)
-    out = subprocess.run(
-        [sys.executable, "-c", f"import {module} as m; print(repr({expr}))"],
-        capture_output=True, text=True, env=env,
-    )
-    assert out.returncode == 0, f"probe failed: {out.stderr[-400:]}"
+    env.update(env_extra or {})
+    out = subprocess.run([sys.executable, "-c", program],
+                         capture_output=True, text=True, env=env)
+    assert out.returncode == 0, f"probe failed: {out.stderr[-600:]}"
     return out.stdout.strip()
 
 
-def test_C5_codegraph_hook_default_ships_no_host() -> None:
+def _walk_gateway_defaults(parser) -> list:
+    """Every `--gateway` default in a parser AND its subparsers.
+
+    Recursion is the point: `swarph mesh` declares --gateway on six subcommands,
+    and a guard that read only the top-level parser would see none of them.
+    """
+    import argparse
+
+    out = []
+    for action in parser._actions:
+        if "--gateway" in action.option_strings:
+            out.append(action.default)
+        choices = getattr(action, "choices", None)
+        if isinstance(choices, dict):
+            for sub in choices.values():
+                if isinstance(sub, argparse.ArgumentParser):
+                    out.extend(_walk_gateway_defaults(sub))
+    return out
+
+
+_DEFAULTS_PROBE = r"""
+import argparse, json, os, sys
+sys.path.insert(0, {tests!r})
+from test_578_no_machine_specific_host_defaults import _walk_gateway_defaults as walk
+
+# IMPORT FIRST, while MESH_GATEWAY_URL is still set (when it is), then remove it.
+# A module constant evaluated at import keeps the value; a parser default built per
+# invocation does not. That difference is the whole measurement.
+from swarph_cli.commands import (mesh, monitor, watchdog, ratify, daemon, onboard,
+                                 init, cell_selfcheck)
+if os.environ.get("SWARPH_PROBE_DROP_ENV"):
+    os.environ.pop("MESH_GATEWAY_URL", None)
+
+vals = {{}}
+for name, mod in (("mesh", mesh), ("watchdog", watchdog), ("ratify", ratify),
+                  ("daemon", daemon), ("onboard", onboard), ("init", init)):
+    for i, v in enumerate(walk(mod._build_parser())):
+        vals["%s --gateway[%d]" % (name, i)] = v
+_p = argparse.ArgumentParser()
+monitor._add_common(_p)
+for i, v in enumerate(walk(_p)):
+    vals["monitor --gateway[%d]" % i] = v
+# NOT a parser: reads the env dict it is HANDED. Its inline os.environ.get is
+# deliberately not env_gateway() (cell_selfcheck is stdlib-only), which is what
+# gives the agreement test in test_546 its resolving power — poison the shared
+# resolver and this one site keeps telling the truth, so they disagree.
+vals["cell_selfcheck.resolver_gateway"] = cell_selfcheck.resolver_gateway(os.environ)
+print(json.dumps(vals))
+"""
+
+
+def effective_gateway_defaults(env_value: str | None = None,
+                               drop_after_import: bool = False) -> dict:
+    """What each site would use for `--gateway` when the operator passes nothing.
+
+    Deliberately STRONGER than reading a module constant. Two failures reach the
+    same observable here: a host baked into a default (C3's `lab-ovh-1`, which the
+    IP sweep cannot see) and a value FROZEN at import from the packaging shell.
+    `drop_after_import=True` sets the env, imports, then clears it — so the answer
+    does not depend on the developer's own shell in either direction.
+    """
+    import json
+
+    extra = {}
+    if env_value is not None:
+        extra["MESH_GATEWAY_URL"] = env_value
+    if drop_after_import:
+        extra["SWARPH_PROBE_DROP_ENV"] = "1"
+    program = _DEFAULTS_PROBE.format(tests=str(Path(__file__).resolve().parent))
+    return json.loads(_run_probe(program, extra))
+
+
+def test_C3_no_gateway_host_is_baked_into_any_parser_default() -> None:
+    """C3: a HOSTNAME in the argparse default stayed GREEN through review — the IP
+    sweep is blind to `lab-ovh-1`, which is the #546 shape with the IP swapped out.
+
+    Also closes the contamination channel C3 rode in on: the probe sets the env,
+    imports, then deletes it, so a constant captured at import shows up as the
+    sentinel rather than as "".
+    """
+    vals = effective_gateway_defaults("http://frozen-at-import.invalid:1",
+                                      drop_after_import=True)
+    assert len(vals) >= 8, f"the probe found almost no sites — it is broken: {vals}"
+    bad = {k: v for k, v in vals.items() if v != ""}
+    assert not bad, (
+        "a gateway host survives with the environment unset (#578). A non-empty value "
+        "here is either a baked-in default or one frozen at import from the shell that "
+        f"packaged the release:\n  {bad}"
+    )
+
+
+def test_the_default_probe_can_see_a_baked_host() -> None:
+    """CAN-FAIL for the walker: a synthetic parser carrying exactly C3's shape.
+
+    Without this the assertion above could pass by finding nothing — the failure
+    mode that made C3 green in the first place.
+    """
+    import argparse
+
+    p = argparse.ArgumentParser()
+    sub = p.add_subparsers()
+    send = sub.add_parser("send")
+    send.add_argument("--gateway", default="http://lab-ovh-1:8788")
+    assert _walk_gateway_defaults(p) == ["http://lab-ovh-1:8788"]
+
+
+def test_C5_the_hook_names_UNCONFIGURED_rather_than_dialling_a_host(
+        monkeypatch, tmp_path, capsys) -> None:
     """C5: `DEFAULT_GATEWAY = env_gateway() or "http://lab-ovh-1:8788"` was GREEN.
 
-    A source regex reads one expression; an or-append hides after it. The
-    subprocess reads the resolved value, so the shape does not matter.
+    codegraph_hook has no argparse parser, so the probe above cannot reach it. This
+    runs the hook end to end instead and pins the UNCONFIGURED wording, which is the
+    only thing that distinguishes the three states the hook must not collapse:
+    unconfigured / unreachable / a real negative. With an or-append the hook DIALS
+    that host and reports a transport error instead — same exit code, different
+    sentence, and this test is what notices.
     """
-    v = _shipped("m.DEFAULT_GATEWAY", "swarph_cli.commands.codegraph_hook")
-    assert v in ("''", '""'), f"codegraph_hook ships a gateway host default: {v} (#578)"
+    import json as _json
 
+    from swarph_cli.commands import codegraph_hook as ch
 
-def test_C3_mesh_argparse_gateway_default_ships_no_host() -> None:
-    """C3: a HOSTNAME in the argparse default was GREEN — the IP sweep is blind
-    to `lab-ovh-1`, which is the #546 shape with the IP swapped out."""
-    v = _shipped("m._DEFAULT_GATEWAY", "swarph_cli.commands.mesh")
-    assert v in ("''", '""'), f"mesh ships a gateway host default: {v} (#578)"
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    (tmp_path / ".config" / "swarph").mkdir(parents=True)
+    (tmp_path / ".config" / "swarph" / "probe-cell.peer_token").write_text("tok\n")
+    monkeypatch.setenv("SWARPH_SELF", "probe-cell")
+
+    class _Stdin:
+        def read(self):
+            return _json.dumps({"tool_input": {"command": "grep -n 'def foo' src/x.py"}})
+
+    monkeypatch.setattr("sys.stdin", _Stdin())
+    assert ch.run_codegraph_hook([]) == 0, "the hook must never fail a turn"
+    out = capsys.readouterr().out
+    assert "MESH_GATEWAY_URL is not set" in out, (
+        "the hook did not name the UNCONFIGURED gateway — if it dialled a host "
+        f"instead, that host is a #578 default:\n{out[:400]}"
+    )
+    assert "never asked" in out
 
 
 def test_C6_the_relative_url_refusal_is_wired() -> None:
@@ -236,3 +369,77 @@ def test_watchdog_helpers_degrade_on_an_unconfigured_gateway() -> None:
     from swarph_cli.commands import watchdog
 
     assert watchdog._gateway_unread_count("", "lab-ovh", "tok") is None
+
+
+def test_the_request_time_refusal_survives_a_deleted_CALL_not_just_a_neutered_body(
+        monkeypatch) -> None:
+    """C6, one level up: the guard must be WIRED, not merely present.
+
+    `test_C6_the_relative_url_refusal_is_wired` calls the helper directly, so it goes
+    red when the helper's BODY is neutered — but stays green if someone deletes the
+    `_require_absolute_gateway_url(url)` line from `_post_json`, which is the same
+    defect with the same consequence (`ValueError: unknown url type: '/messages'`).
+    This exercises the real request path, so the call site is what is under test.
+    """
+    import pytest as _pytest
+
+    from swarph_cli.commands import mesh
+
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    with _pytest.raises(RuntimeError, match="MESH_GATEWAY_URL is not set"):
+        mesh._post_json("/messages", {}, "tok")
+    with _pytest.raises(RuntimeError, match="MESH_GATEWAY_URL is not set"):
+        mesh._http_get_json("/peers", "tok")
+
+
+def test_no_endpoint_is_frozen_at_import_from_the_packaging_shell() -> None:
+    """The contamination channel itself, for BOTH env vars.
+
+    Five module constants used to evaluate `env_gateway()` / `os.environ.get(...)` at
+    IMPORT time. Nothing asserted on them, so a clean run and a contaminated run
+    printed the same number — but they were the one path by which a test could depend
+    on a developer's shell, and one of them DID: with SWARPH_BRAIN_MCP exported,
+    `test_resolve_endpoint_refuses_rather_than_guessing_a_host` failed, because a test
+    can delenv the call-time operands and not a value already captured. Measured in
+    seat-A review of PR #318; the gateway half is covered by test_C3 above.
+    """
+    program = (
+        "import os\n"
+        "from swarph_cli.commands import brain_ask\n"
+        "os.environ.pop('SWARPH_BRAIN_MCP', None)\n"
+        "os.environ.pop('GBRAIN_MCP_URL', None)\n"
+        "from swarph_cli.gateway_default import GatewayNotConfigured\n"
+        "try:\n"
+        "    print('RESOLVED:' + brain_ask._resolve_endpoint())\n"
+        "except GatewayNotConfigured:\n"
+        "    print('REFUSED')\n"
+    )
+    got = _run_probe(program, {"SWARPH_BRAIN_MCP": "http://frozen-at-import.invalid:1"})
+    assert got == "REFUSED", (
+        "brain_ask resolved a gbrain endpoint after the environment was cleared — it "
+        f"is holding a value captured at import: {got}"
+    )
+
+
+def test_the_sweep_reads_a_non_utf8_file_instead_of_skipping_it(tmp_path: Path) -> None:
+    """CAN-FAIL for the encoding fix. `except UnicodeDecodeError: continue` dropped the
+    WHOLE file, so one accented byte anywhere hid every address in it — and the
+    Windows/systemd templates that carried the retired IP are exactly the files most
+    likely to be written in a legacy codepage."""
+    bad = (tmp_path / "codex-waker.default")
+    bad.write_bytes(("# café gateway\nSWARPH_GATEWAY=http://100.107."
+                     "222.72:8788\n").encode("cp1252"))
+    assert _sweep(tmp_path), "a cp1252 file hid a machine-specific address"
+
+
+def test_the_sweep_opens_every_shipped_text_type(tmp_path: Path) -> None:
+    """CAN-FAIL for the suffix list, one file per type pyproject ships as package-data.
+
+    `scripts/install_codex_waker_windows.ps1` is the Windows twin of the systemd
+    `*.default` template that actually carried the retired IP.
+    """
+    for name in ("install.ps1", "shim.cmd", "schema.sql"):
+        (tmp_path / name).write_text('GW = "http://100.107.' + '222.72:8788"\n')
+    found = " ".join(_sweep(tmp_path))
+    for name in ("install.ps1", "shim.cmd", "schema.sql"):
+        assert name in found, f"the sweep never opened {name}"

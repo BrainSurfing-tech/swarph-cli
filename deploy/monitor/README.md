@@ -10,18 +10,19 @@ a renamed target or a tmux restart, and the cell went silently deaf.
 
 ```sh
 sed -e "s#<PEER>#$(whoami)-cell#g" -e "s#<HOME>#$HOME#g" -e "s#<USER>#$(id -un)#g" \
+    -e "s#<GATEWAY>#http://your-gateway:8788#g" \
     swarph-monitor.service | sudo tee /etc/systemd/system/swarph-monitor.service
 sudo systemctl daemon-reload && sudo systemctl enable --now swarph-monitor
 ```
 
 ### Gateway
 
-The unit ships with **no gateway line**. It relies on swarph-cli's code default, which is
-this mesh's tailnet address (`#276` — it was `localhost:8788` before, which pointed every
-off-box cell at itself).
+`<GATEWAY>` is a **required substitution**, exactly like `<PEER>` and `<HOME>`.
 
-**Installing somewhere that is not on this tailnet?** Uncomment the last `Environment=`
-line in the unit and set it:
+This README used to say the unit ships with no gateway line and relies on swarph-cli's
+code default (`#276`/`#546`, this mesh's tailnet address). That default was removed in
+`#578` — it named one machine, and that machine was retired on 2026-08-25 — so a unit
+installed with no gateway line now refuses on every poll instead of quietly working.
 
 ```sh
 sudo systemctl edit swarph-monitor      # or edit the unit directly

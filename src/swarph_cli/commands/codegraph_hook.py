@@ -38,7 +38,6 @@ from pathlib import Path
 from typing import Optional
 from swarph_cli.gateway_default import env_gateway
 
-DEFAULT_GATEWAY = env_gateway()
 TIMEOUT_S = 6
 MAX_ROWS = 6
 
@@ -237,7 +236,7 @@ def run_codegraph_hook(argv: Optional[list] = None) -> int:
     """PostToolUse(Bash) entry point. ALWAYS exits 0 — it must never fail a turn."""
     argv = list(argv or [])
     self_name = os.environ.get("SWARPH_SELF", "").strip()
-    gateway = DEFAULT_GATEWAY
+    gateway = env_gateway()
     for i, a in enumerate(argv):
         if a == "--as" and i + 1 < len(argv):
             self_name = argv[i + 1]

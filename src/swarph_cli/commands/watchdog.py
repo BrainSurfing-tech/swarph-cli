@@ -85,17 +85,13 @@ from swarph_cli.commands.mesh import _post_json
 _DEFAULT_THRESHOLD_SEC = 1800  # 30 minutes
 _DEFAULT_A1_RETRIES = 3
 _DEFAULT_A1_BACKOFF_SEC = 60
-# TAILNET IP, NOT localhost and NOT a MagicDNS name (commander, 2026-08-21).
-# The mesh-gateway binds a tailnet IP ONLY — localhost has never been bound, so this
-# default failed as a bare "Connection refused" with no cause named. It cost 792 silent
-# card-export failures over 8 days, and it turned a WORKING hand-started monitor into a
-# DEAF SUPERVISED one the moment it was moved to a systemd unit (the unit passes no
-# --gateway, so it fell through to this constant).
-# An IP over MagicDNS on purpose: a name needs MagicDNS enabled, the right search domain,
-# and no local collision; the IP needs only that tailscale is up, which is the real
-# precondition anyway. MESH_GATEWAY_URL overrides it — that env var is the escape hatch
-# for anyone outside this mesh, and optional inside it.
-_DEFAULT_GATEWAY_URL = env_gateway()
+# NO MODULE-LEVEL GATEWAY CONSTANT (#578). #546 put the gateway's tailnet IP here,
+# correctly at the time; that box was retired 2026-08-25 and the literal expired.
+# The constant is gone rather than emptied: read at IMPORT time it captured whatever
+# the packaging/importing shell exported, and MEASURED in seat-A review of PR #318 it
+# still returned that value after the environment was cleared — the one channel by
+# which a test could depend on a developer's shell. env_gateway() is called at
+# parser-BUILD time instead (parsers are built per invocation).
 # F3 — tmux pane_activity gate threshold. If pane has activity within this
 # many seconds, suppress A1 (session is working, not stalled). 600s (10min)
 # is comfortably above legitimate-pause noise + comfortably below the
@@ -1737,7 +1733,7 @@ def _execstart_flags(args: argparse.Namespace) -> str:
         ("--peer", "peer", None),
         ("--liveness-cmd", "liveness_cmd", None),
         ("--notify-peer", "notify_peer", None),
-        ("--gateway", "gateway", _DEFAULT_GATEWAY_URL),
+        ("--gateway", "gateway", env_gateway()),
         ("--threshold", "threshold", _DEFAULT_THRESHOLD_SEC),
         ("--pane-activity-threshold", "pane_activity_threshold",
          _DEFAULT_PANE_ACTIVITY_THRESHOLD_SEC),
@@ -1941,7 +1937,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--gateway",
-        default=os.environ.get("MESH_GATEWAY_URL", _DEFAULT_GATEWAY_URL),
+        default=env_gateway(),
     )
     p.add_argument("--tmux-session", default=None)
     p.add_argument("--peer", default=None)
