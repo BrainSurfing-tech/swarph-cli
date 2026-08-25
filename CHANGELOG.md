@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+## 0.49.1 — 2026-08-25
+
+- **`mcp` extra pinned below 2.0 (#317).** mcp 2.0.0 removed
+  `mcp.server.fastmcp`, which `swarph mcp-server` imports. The extra declared
+  `mcp>=1.0` with no upper bound, so a fresh resolve pulled 2.0.0 and the
+  swarph MCP server failed to start — observed live on lab-ovh, where the
+  broken import was reported as *"SDK is not installed"* because a broad
+  `except ImportError` swallowed the real `ModuleNotFoundError`. Now
+  `mcp<2,>=1.0`, which also excludes 2.0 pre-releases. **The root cause was
+  ours, not upstream's:** an unbounded dependency on a package that had never
+  yet made a breaking major release. Verified by measurement — mcp 2.0.0 in a
+  clean venv has no `mcp.server.fastmcp` — and not by the changelog, because
+  no CI job installs the `[mcp]` extra.
+
+- **README no longer advertises a `--gateway` default that does not exist
+  (#320, #578).** 0.49.0 removed the baked-in gateway host, but its README
+  still documented one, and **PyPI metadata is frozen per published version**
+  — the 0.49.0 project page carries the false claim permanently. Correcting a
+  published page requires publishing another version, which is the whole
+  reason this patch release exists. Guarded by a test that fires on the
+  shipped sentence *and* on a phrasing the guard's own docstring records as
+  previously missed.
+
+- **`i-have-adhd` ships as a packaged builtin skill (#321).** Resolved at call
+  time rather than at import, so the registry has no import-time cost, and
+  pinned `disable-model-invocation: true` — nothing installs or invokes it
+  unasked. Two tests exist specifically to keep that true.
+
+  Release note on how this was checked: **the wheel was audited as an
+  artifact, not as a source tree.** Tests import from `src/`, so a packaged
+  data file can silently fail to ship while every test passes. `SKILL.md` was
+  confirmed present inside the built wheel before upload.
+
+
 ## 0.49.0 — 2026-08-25
 
 - **swarph ships NO gateway host default; an unconfigured cell refuses
