@@ -438,6 +438,28 @@ def _save_dm_wake_state(path: Path, state: dict) -> None:
         pass
 
 
+
+def _gateway_configured(gateway: str) -> bool:
+    """False when no gateway is configured — degrade, do not crash.
+
+    #578 removed the baked-in host, so `gateway` can now be "". Every caller here
+    builds `urllib.request.Request(f"{gateway}/...")` OUTSIDE its try, and
+    Request() rejects a relative URL at CONSTRUCTION with ValueError, before any
+    I/O — so nothing catches it.
+
+    That matters most where it is least visible: `_run_local_check` asks for the
+    unread count BEFORE the A2 "process dead -> respawn regardless of unread"
+    decision, so an uncaught raise kills the tick before it can rescue anything.
+    On sys3 today both `swarph-watchdog.timer` and `swarph-watchdog-science.timer`
+    run every 5 minutes with `EnvironmentFile=-/etc/default/swarph-watchdog`, and
+    THAT FILE DOES NOT EXIST — no MESH_GATEWAY_URL in the unit env at all.
+
+    An unreachable gateway has always degraded to None here. An UNCONFIGURED one
+    now does the same, rather than becoming a new crash class.
+    Found by drop-on-meta-edge, seat-A review of PR #318.
+    """
+    return bool((gateway or "").strip())
+
 def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Optional[int]:
     """Query gateway for unread DM count addressed to peer.
 
@@ -454,6 +476,8 @@ def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Opti
     caused a real reader to conclude a gateway/token outage makes A1 MORE
     eager, when it makes A1 permanently inert for that cell instead.
     """
+    if not _gateway_configured(gateway):
+        return None
     query = urllib.parse.urlencode({"to_node": peer, "unread_only": "true", "limit": 1})
     url = f"{gateway.rstrip('/')}/messages?{query}"
     req = urllib.request.Request(url)
@@ -590,6 +614,8 @@ def _stale_peers(
 def _fetch_peers(gateway: str, token: str) -> list[dict]:
     """GET {gateway}/peers (Bearer token). Returns the peer list, or [] on any error
     (never raises). The response may be a bare list OR {"peers": [...]} — handle both."""
+    if not _gateway_configured(gateway):
+        return None
     url = f"{gateway.rstrip('/')}/peers"
     req = urllib.request.Request(url)
     if token:

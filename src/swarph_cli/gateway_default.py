@@ -22,6 +22,22 @@ ENV_GATEWAY = "MESH_GATEWAY_URL"
 ENV_BRAIN_MCP = "SWARPH_BRAIN_MCP"
 
 
+class GatewayNotConfigured(RuntimeError):
+    """No gateway host is configured and none ships as a default.
+
+    A plain ``Exception`` ON PURPOSE. The first version of this module raised
+    ``SystemExit``, which is a ``BaseException`` and therefore passes straight
+    through every ``except Exception`` fail-safe in the package — including
+    ``mcp_server._memory_navigate`` (docstring: "never raises") and
+    ``memory.py`` ("fail-safe: never traceback at the CLI"). In the MCP server
+    that meant the process ending mid-tool-call for the client that spawned it.
+    Caught by drop-on-meta-edge in seat-A review of PR #318.
+
+    A resolver reachable from LIBRARY code must raise an Exception. CLI entry
+    points convert it to SystemExit at the top level, where SystemExit belongs.
+    """ 
+
+
 def env_gateway(env: str = ENV_GATEWAY) -> str:
     """The configured gateway URL, or "" when unset.
 
@@ -45,7 +61,7 @@ def require_gateway(
     """
     resolved = (value or os.environ.get(env) or "").strip()
     if not resolved:
-        raise SystemExit(
+        raise GatewayNotConfigured(
             f"{env} is not set, and swarph ships no default {what} host.\n"
             f"  A baked-in address expires the day that box is retired "
             f"(card #578; it happened on 2026-08-25).\n"

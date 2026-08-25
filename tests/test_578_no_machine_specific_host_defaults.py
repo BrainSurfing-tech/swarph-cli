@@ -133,3 +133,106 @@ def test_the_suite_does_not_depend_on_the_developer_s_own_gateway(monkeypatch) -
         "env_gateway() must be empty in a clean environment — if this passes only "
         "because your shell exports MESH_GATEWAY_URL, CI will disagree"
     )
+
+
+# ---------------------------------------------------------------------------
+# Closing drop-on-meta-edge's C3 / C5 / C6 — variants that stayed GREEN in
+# seat-A review of PR #318. Each observes the SHIPPED value in a subprocess with
+# the env removed, which is blind to syntax: or-append, second assignment, or a
+# hostname in an argparse default all reach the same observable.
+# ---------------------------------------------------------------------------
+
+def _shipped(expr: str, module: str) -> str:
+    """Value of `expr` as the package actually ships it, env-free."""
+    import os as _os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in _os.environ.items()
+           if k not in ("MESH_GATEWAY_URL", "SWARPH_GATEWAY", "SWARPH_BRAIN_MCP")}
+    env["PYTHONPATH"] = str(SRC.parent)
+    out = subprocess.run(
+        [sys.executable, "-c", f"import {module} as m; print(repr({expr}))"],
+        capture_output=True, text=True, env=env,
+    )
+    assert out.returncode == 0, f"probe failed: {out.stderr[-400:]}"
+    return out.stdout.strip()
+
+
+def test_C5_codegraph_hook_default_ships_no_host() -> None:
+    """C5: `DEFAULT_GATEWAY = env_gateway() or "http://lab-ovh-1:8788"` was GREEN.
+
+    A source regex reads one expression; an or-append hides after it. The
+    subprocess reads the resolved value, so the shape does not matter.
+    """
+    v = _shipped("m.DEFAULT_GATEWAY", "swarph_cli.commands.codegraph_hook")
+    assert v in ("''", '""'), f"codegraph_hook ships a gateway host default: {v} (#578)"
+
+
+def test_C3_mesh_argparse_gateway_default_ships_no_host() -> None:
+    """C3: a HOSTNAME in the argparse default was GREEN — the IP sweep is blind
+    to `lab-ovh-1`, which is the #546 shape with the IP swapped out."""
+    v = _shipped("m._DEFAULT_GATEWAY", "swarph_cli.commands.mesh")
+    assert v in ("''", '""'), f"mesh ships a gateway host default: {v} (#578)"
+
+
+def test_C6_the_relative_url_refusal_is_wired() -> None:
+    """C6: neutering `_require_absolute_gateway_url` left 2625 GREEN.
+
+    A guard nothing exercises is decoration. This calls it directly, so
+    disabling it fails here rather than silently.
+    """
+    import pytest as _pytest
+
+    from swarph_cli.commands import mesh
+
+    with _pytest.raises(RuntimeError, match="MESH_GATEWAY_URL is not set"):
+        mesh._require_absolute_gateway_url("/peers")
+    mesh._require_absolute_gateway_url("http://gw.test:8788/peers")  # must not raise
+
+
+def test_resolver_raises_a_catchable_Exception_not_SystemExit() -> None:
+    """BLOCKING-3: SystemExit is a BaseException and escapes `except Exception`.
+
+    `mcp_server._memory_navigate` promises "never raises" and `memory.py` is a
+    documented CLI fail-safe; both call this resolver indirectly. A SystemExit
+    there ends the MCP process mid-tool-call.
+    """
+    import pytest as _pytest
+
+    from swarph_cli.gateway_default import GatewayNotConfigured, require_gateway
+
+    assert issubclass(GatewayNotConfigured, Exception)
+    assert not issubclass(GatewayNotConfigured, SystemExit)
+    with _pytest.raises(Exception) as exc:   # noqa: B017 — the point IS Exception
+        require_gateway("", env="SWARPH_BRAIN_MCP", what="gbrain MCP")
+    assert not isinstance(exc.value, SystemExit)
+
+
+def test_brain_ask_help_survives_an_unset_env() -> None:
+    """BLOCKING-2: the argparse default resolved at parser BUILD time, so --help
+    died and the --gateway it told you to pass was never parsed."""
+    import os as _os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in _os.environ.items()
+           if k not in ("SWARPH_BRAIN_MCP", "GBRAIN_MCP_URL")}
+    env["PYTHONPATH"] = str(SRC.parent)
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from swarph_cli.commands.brain_ask import run_brain_ask; run_brain_ask(['--help'])"],
+        capture_output=True, text=True, env=env,
+    )
+    assert out.returncode == 0, f"--help exited {out.returncode}: {out.stderr[-300:]}"
+    assert "usage" in (out.stdout + out.stderr).lower()
+
+
+def test_watchdog_helpers_degrade_on_an_unconfigured_gateway() -> None:
+    """BLOCKING-1: these build Request() OUTSIDE their try, so an empty gateway
+    raised ValueError before any I/O — killing the tick before the A2
+    process-dead respawn decision. On sys3 both watchdog timers run with
+    EnvironmentFile=-/etc/default/swarph-watchdog, and that file does not exist."""
+    from swarph_cli.commands import watchdog
+
+    assert watchdog._gateway_unread_count("", "lab-ovh", "tok") is None

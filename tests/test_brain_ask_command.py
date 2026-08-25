@@ -162,9 +162,15 @@ def test_resolve_endpoint_refuses_rather_than_guessing_a_host(monkeypatch):
     """
     monkeypatch.delenv("GBRAIN_MCP_URL", raising=False)
     monkeypatch.delenv("SWARPH_BRAIN_MCP", raising=False)
-    with pytest.raises(SystemExit) as exc:
+    # GatewayNotConfigured, NOT SystemExit: SystemExit is a BaseException and
+    # escapes every `except Exception` fail-safe — including mcp_server's
+    # _memory_navigate ("never raises"). drop-on-meta-edge, PR #318 seat-A.
+    from swarph_cli.gateway_default import GatewayNotConfigured
+
+    with pytest.raises(GatewayNotConfigured) as exc:
         ba._resolve_endpoint()
     assert "SWARPH_BRAIN_MCP" in str(exc.value)
+    assert not isinstance(exc.value, SystemExit)
 
 
 def test_resolve_endpoint_uses_the_env_when_set(monkeypatch):

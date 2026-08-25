@@ -44,7 +44,7 @@ _DEFAULT_GBRAIN = (os.environ.get("SWARPH_BRAIN_MCP") or "").strip()
 _DEFAULT_TOPK = 6
 
 
-def _resolve_endpoint() -> str:
+def _resolve_endpoint(explicit: str | None = None) -> str:
     """Endpoint precedence: GBRAIN_MCP_URL > SWARPH_BRAIN_MCP. No host default (#578).
 
     The SWARPH_BRAIN_MCP fallback keeps the verb config-compatible with the
@@ -54,7 +54,10 @@ def _resolve_endpoint() -> str:
     from swarph_cli.gateway_default import require_gateway
 
     return require_gateway(
-        os.environ.get("GBRAIN_MCP_URL") or os.environ.get("SWARPH_BRAIN_MCP") or _DEFAULT_GBRAIN,
+        explicit
+        or os.environ.get("GBRAIN_MCP_URL")
+        or os.environ.get("SWARPH_BRAIN_MCP")
+        or _DEFAULT_GBRAIN,
         env="SWARPH_BRAIN_MCP",
         what="gbrain MCP",
     )
@@ -243,10 +246,15 @@ def run_brain_ask(argv: list) -> int:
                         help="top-k chunks to retrieve (default 6)")
     parser.add_argument("--no-synth", action="store_true",
                         help="retrieval only — print raw chunks, skip prose synthesis")
-    parser.add_argument("--gateway", default=_resolve_endpoint(),
+    parser.add_argument("--gateway", default=None,
                         help="gbrain MCP endpoint (env: GBRAIN_MCP_URL or SWARPH_BRAIN_MCP)")
     parser.add_argument("--token-file", default=None, help="explicit read-token file")
     args = parser.parse_args(argv)
+    # #578/#318-review: resolve the endpoint HERE, not as an argparse default.
+    # Evaluating it at parser-BUILD time made `--help` die and made the
+    # `--gateway` the error message tells you to pass unreachable, because the
+    # parser never got as far as parsing it. Same pattern as ratify:173.
+    args.gateway = _resolve_endpoint(args.gateway)
     question = " ".join(args.question)
 
     gw = os.environ.get("SWARPH_BRAIN_GATEWAY")
