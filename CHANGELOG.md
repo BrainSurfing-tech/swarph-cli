@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+## 0.49.0 — 2026-08-25
+
+- **swarph ships NO gateway host default; an unconfigured cell refuses
+  loudly instead of dialling a dead box (#578, #579).** The retired V3 VPS
+  (`100.107.222.72`, stopped 2026-08-25 01:53Z) was the hardcoded default
+  in **21 places** in this package, including `GUIDE.md`'s onboarding
+  command and two shipped systemd templates — so every `pip install
+  swarph-cli` defaulted to it. New `swarph_cli.gateway_default`:
+  `env_gateway()` returns `""` when unset (module constants evaluate at
+  *import*, and a package that cannot be imported without a configured
+  mesh cannot print `--help`), and `require_gateway()` refuses at the point
+  of **use** with an actionable message.
+
+  **This is a behaviour change, hence the minor bump.** A cell with no
+  `MESH_GATEWAY_URL` now gets a clear refusal where it previously dialled a
+  host and timed out. All 12 on-box cells were verified to have it set.
+
+  **Why no default rather than the new address.** Card #548 put the old IP
+  there deliberately on 2026-08-21 and the reasoning was right — the
+  gateway never bound loopback, and a raw IP needs only `tailscale up`
+  where a MagicDNS name needs three things to line up. The literal was not
+  wrong; it *expired*, four days later. `localhost` assumes co-location and
+  an IP assumes a machine stays alive: both bake an environmental
+  assumption into the artifact, and neither carries an expiry, so neither
+  can be audited. Swapping in the new address would have been a one-line
+  change that re-armed the same trap with a fresh fuse.
+
+- **The guard is written against the PROPERTY, not the syntax.** #546's
+  finder was `grep 'GATEWAY[A-Z_]* *= *"http'` — and its own fix moved the
+  literal into a fallback argument, so the query went permanently blind.
+  `test_578_no_machine_specific_host_defaults.py` instead sweeps shipped
+  source for any CGNAT/RFC1918 literal, the property that makes any such
+  default wrong whatever syntax it wears, and keeps matching after this fix
+  lands. Backed by a can-fail case, a loopback-allowed case, a
+  public-URL-not-flagged case, and a premise test that dies together with
+  its reason.
+
+- **Degradation, not crashes, at every own-`urllib` site.** An empty
+  gateway made `Request()` raise `ValueError` at *construction*, outside
+  every `try` — which would have killed `swarph codegraph-hook` (contract:
+  "ALWAYS exits 0, must never fail a turn") and the watchdog tick before
+  its process-dead respawn decision. All three watchdog helpers now degrade
+  to `None`, and the hook reports `CODEGRAPH UNAVAILABLE … the graph was
+  never asked` rather than an empty result. `brain-ask` resolves its
+  endpoint inside the command instead of at parser-build time, so `--help`
+  and an explicit `--gateway` both work with the env unset.
+
 ## 0.48.2 — 2026-08-24
 
 - **A wake adopted mid-settle now DEFERS instead of acknowledging (#315).**
