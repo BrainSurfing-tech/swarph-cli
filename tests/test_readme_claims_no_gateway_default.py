@@ -22,15 +22,33 @@ asserts the POSITIVE property instead.
 import pathlib
 import re
 
+import pytest
+
 _README = pathlib.Path(__file__).resolve().parent.parent / "README.md"
 
-# >>> WRITTEN AGAINST THE PROPERTY, NOT THE STRING. <<< Matching `localhost:8788`
-# would go blind the moment someone writes `127.0.0.1:8788` or the next retired IP —
-# which is exactly how #546's finder disarmed itself (its own fix moved the literal
-# into a fallback argument and the grep never matched again). The property is
-# "a --gateway default is claimed AT ALL", whatever host it names.
+# >>> HOST-INDEPENDENT, AND ONLY PARTLY PHRASING-INDEPENDENT. SAY SO. <<<
+#
+# Matching `localhost:8788` would go blind the moment someone writes `127.0.0.1:8788`
+# or the next retired IP — exactly how #546's finder disarmed itself (its own fix moved
+# the literal into a fallback argument and the grep never matched again). This matches
+# ANY host, so that class is genuinely avoided; science-claude verified it catches the
+# next retired IP and the current fleet IP.
+#
+# But the first version of this comment claimed "written against the property, not the
+# string", and that OVERCLAIMED. It required the literal word `default`, so the property
+# it enforced was "a default is named using the word DEFAULT" — a different string, not
+# a property. Three ordinary rewordings walked past it, and a README rewrite is exactly
+# when someone reaches for "falls back to". (science-claude, review of PR #320.)
+#
+# So, honestly: THIS CATCHES THE PHRASINGS WE THOUGHT OF, AND THE CAN-FAIL TESTS NAME
+# WHICH ONES THOSE ARE. A cue list is a denylist in better clothes. The one thing that
+# makes it acceptable is the direction it fails: a phrasing we missed leaves the README
+# unguarded, it never flags a true line — so nobody is ever taught to mute this test.
+_DEFAULT_CUES = r"defaults?|falls?\s+back|if\s+unset|assumes|when\s+omitted|otherwise\s+uses"
+
 _CLAIMS_A_DEFAULT = re.compile(
-    r"--gateway[^\n]{0,80}?\bdefaults?\b[^\n]{0,40}?(https?://[^\s`)]+|\b\d{1,3}(?:\.\d{1,3}){3}\b)",
+    rf"--gateway[^\n]{{0,80}}?(?:{_DEFAULT_CUES})[^\n]{{0,40}}?"
+    r"(https?://[^\s`)]+|\b\d{1,3}(?:\.\d{1,3}){3}\b)",
     re.IGNORECASE,
 )
 
@@ -90,6 +108,46 @@ def test_it_fires_on_a_DIFFERENT_host_too(tmp_path) -> None:
 
     assert _lines_claiming_a_gateway_default(bad), (
         "the guard is fitted to 'localhost' and would miss the next baked-in address")
+
+
+def test_it_fires_on_phrasings_that_never_say_DEFAULT(tmp_path) -> None:
+    """>>> THE BLIND SPOT, AS A TEST RATHER THAN A REVIEW COMMENT. <<<
+
+    The first version required the literal word `default`, so it enforced "a default is
+    named using the word DEFAULT" — not "a fallback host is promised". science-claude ran
+    it against seven cases and these two walked straight past. A README rewrite is
+    precisely when someone reaches for "falls back to", so the miss was not exotic.
+
+    Seeded here so the gap has a test instead of living in a DM. Anyone narrowing
+    `_DEFAULT_CUES` back down turns this red.
+    """
+    for line in (
+        "`--gateway` — if unset, uses http://localhost:8788\n",
+        "`--gateway` assumes http://localhost:8788 when not given\n",
+    ):
+        bad = tmp_path / "README.md"
+        bad.write_text(line, encoding="utf-8")
+        assert _lines_claiming_a_gateway_default(bad), f"walked past: {line!r}"
+
+
+@pytest.mark.xfail(reason="KNOWN GAP, recorded deliberately: the scan is LINE-scoped, so "
+                          "a claim whose `--gateway` mention sits on a previous line is "
+                          "invisible to it. Documented rather than hidden — if someone "
+                          "makes the scan paragraph-aware this XPASSes and says so.",
+                   strict=False)
+def test_a_claim_split_across_lines_is_a_KNOWN_MISS(tmp_path) -> None:
+    """The honest limit. `_lines_claiming_a_gateway_default` iterates lines, so a README
+    that mentions `--gateway` in one sentence and promises the fallback in the next is
+    unguarded. science-claude's case 4 — "if unset it falls back to http://localhost:8788"
+    with no `--gateway` on that line — is real README prose, not a contrived string.
+
+    An xfail rather than a fix because widening the anchor across lines is where false
+    positives start, and a guard that flags true lines is a guard someone deletes."""
+    bad = tmp_path / "README.md"
+    bad.write_text("The `--gateway` flag points at the hub.\n"
+                   "If unset it falls back to http://localhost:8788\n", encoding="utf-8")
+
+    assert _lines_claiming_a_gateway_default(bad), "line-scoped scan cannot see this"
 
 
 def test_legitimate_gateway_mentions_are_not_flagged(tmp_path) -> None:
