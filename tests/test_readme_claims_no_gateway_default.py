@@ -1,23 +1,63 @@
 """The README must not advertise a `--gateway` default the code does not have.
 
-WHY (2026-08-25, found by science-claude in the PUBLISHED 0.49.0 wheel). The release
-that removed the baked-in gateway host shipped a README line still claiming one:
+WHY (2026-08-25, found by science-claude in the PUBLISHED 0.49.0 wheel). The release that
+removed the baked-in gateway host shipped a README line still claiming one:
 
     "...and `--gateway` (default `http://localhost:8788`) points at the hub."
 
 That default does not exist. With `MESH_GATEWAY_URL` unset and no `--gateway`, 0.49.0
 raises `GatewayNotConfigured`. It does not dial localhost.
 
->>> THIS IS THE SAME DEFECT #578 EXISTS TO FIX, IN THE RELEASE THAT FIXED IT, ON THE
-PAGE A NEW USER READS FIRST. <<< README.md becomes the PyPI project page, so the wrong
-claim is the most-read sentence swarph publishes. The operational cost is the shape
-hedge-fund's #259 already paid for: someone reads "default localhost", assumes the CLI
-works unconfigured, and meets an exception they were told not to expect.
+>>> THE SAME DEFECT #578 EXISTS TO FIX, IN THE RELEASE THAT FIXED IT, ON THE PAGE A NEW
+USER READS FIRST. <<< README.md becomes the PyPI project page, so the wrong claim is the
+most-read sentence swarph publishes.
 
-The count that found the missing IP could not have found this. "The wrong host is
-absent" is not "no host is claimed" — a doc can still promise a fallback the code
-dropped. Absence-by-design and absence-by-accident produce the same grep, so this
-asserts the POSITIVE property instead.
+The wheel audit could not have caught it. That audit counted files containing the retired
+IP (13 in 0.48.2, 0 in 0.49.0) — both numbers correct, and neither can see a document
+PROMISING a fallback the code dropped. "The wrong host is absent" is not "no host is
+promised".
+
+## Two failed designs before this one. The failures are the lesson, so they stay.
+
+**v1 matched the literal `localhost:8788`.** Rejected before shipping: it goes blind the
+moment someone writes `127.0.0.1` or the next retired IP — exactly how #546's finder
+disarmed itself, its own fix having moved the literal into a fallback argument so the
+grep never matched again.
+
+**v2 matched a CUE LIST** (`default`, `falls back`, `if unset`, `assumes`, ...) near
+`--gateway`. Its comment claimed "written against the property, not the string"; it was
+written against a DIFFERENT string. science-claude then ran five phrasings he had NOT
+previously reported:
+
+    MISSED  In the absence of `--gateway`, swarph uses `http://localhost:8788`.
+    MISSED  `--gateway` is optional; `http://localhost:8788` is used.
+    MISSED  Without `--gateway`, requests go to `http://localhost:8788`.
+    MISSED  `--gateway` - omit it and swarph talks to `http://localhost:8788`.
+    MISSED  The hub is `http://localhost:8788` unless `--gateway` says otherwise.
+
+    novel phrasings caught: 0/5
+
+>>> THE CUE LIST HAD GROWN BY EXACTLY THE PHRASINGS HE REPORTED AND NOTHING ELSE. That is
+a denylist fitted to complaints — the shape he flagged on hedge-fund #259 five hours
+earlier — reproduced inside the guard built from his own report. It stays invisible until
+someone supplies cases from OUTSIDE the report, which is why a guard cannot be validated
+by the person who wrote it. <<<
+
+Two limits no cue list reaches: WORD ORDER (*"The hub is X unless `--gateway` says
+otherwise"* states the claim first) and CUE-FREE CLAIMS (*"`--gateway` is optional; X is
+used"* has no cue word to add).
+
+## v3, this one: INVERT THE PROPERTY (science-claude's design)
+
+Stop enumerating ways to promise a default. Assert what is true instead:
+
+    A line is a CLAIM if it mentions `--gateway` AND contains a host,
+    UNLESS that host is the flag's own argument (`--gateway http://...`).
+
+Word order stops mattering, because presence is not ordered. Cue words stop mattering,
+because none are consulted. The property is small enough to state in one sentence and to
+check exactly — and it still fails in the safe direction: a shape it misses leaves the
+README unguarded, it never flags a true line, so nobody is ever taught to mute it.
 """
 import pathlib
 import re
@@ -26,123 +66,122 @@ import pytest
 
 _README = pathlib.Path(__file__).resolve().parent.parent / "README.md"
 
-# >>> HOST-INDEPENDENT, AND ONLY PARTLY PHRASING-INDEPENDENT. SAY SO. <<<
-#
-# Matching `localhost:8788` would go blind the moment someone writes `127.0.0.1:8788`
-# or the next retired IP — exactly how #546's finder disarmed itself (its own fix moved
-# the literal into a fallback argument and the grep never matched again). This matches
-# ANY host, so that class is genuinely avoided; science-claude verified it catches the
-# next retired IP and the current fleet IP.
-#
-# But the first version of this comment claimed "written against the property, not the
-# string", and that OVERCLAIMED. It required the literal word `default`, so the property
-# it enforced was "a default is named using the word DEFAULT" — a different string, not
-# a property. Three ordinary rewordings walked past it, and a README rewrite is exactly
-# when someone reaches for "falls back to". (science-claude, review of PR #320.)
-#
-# So, honestly: THIS CATCHES THE PHRASINGS WE THOUGHT OF, AND THE CAN-FAIL TESTS NAME
-# WHICH ONES THOSE ARE. A cue list is a denylist in better clothes. The one thing that
-# makes it acceptable is the direction it fails: a phrasing we missed leaves the README
-# unguarded, it never flags a true line — so nobody is ever taught to mute this test.
-_DEFAULT_CUES = r"defaults?|falls?\s+back|if\s+unset|assumes|when\s+omitted|otherwise\s+uses"
-
-_CLAIMS_A_DEFAULT = re.compile(
-    rf"--gateway[^\n]{{0,80}}?(?:{_DEFAULT_CUES})[^\n]{{0,40}}?"
-    r"(https?://[^\s`)]+|\b\d{1,3}(?:\.\d{1,3}){3}\b)",
-    re.IGNORECASE,
+_GATEWAY_FLAG = re.compile(r"--gateway\b")
+_A_HOST = re.compile(r"https?://[^\s`)\]]+|\b\d{1,3}(?:\.\d{1,3}){3}:\d+")
+#: The host is the flag's ARGUMENT — `--gateway http://x`, `--gateway=http://x`,
+#: `--gateway "$MESH_GATEWAY_URL"`. Those are usage examples, not promises.
+_HOST_IS_THE_FLAGS_ARGUMENT = re.compile(
+    r"--gateway[=\s]+[\"'`$]*(?:https?://|\d{1,3}(?:\.\d{1,3}){3})"
 )
 
 
 def _lines_claiming_a_gateway_default(path: pathlib.Path) -> list[str]:
-    """THE SCANNER. The guard and its can-fail control both call THIS.
+    """THE SCANNER. The guard and every can-fail control call THIS.
 
-    They must share one implementation or the control controls nothing — see
-    hedge-fund-mcp `test_queue_ceiling_doc_matches_code.py`, where a can-fail test that
-    re-implemented its scanner inline proved that *a* regex worked and never that *the*
-    regex did.
+    >>> THEY MUST SHARE ONE IMPLEMENTATION OR THE CONTROL CONTROLS NOTHING. <<<
+    See hedge-fund-mcp `test_queue_ceiling_doc_matches_code.py`, where a can-fail test
+    that re-implemented its scanner inline proved *a* regex worked and never that *the*
+    regex did — neutering the real scanner left that control green.
     """
     out = []
     for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        m = _CLAIMS_A_DEFAULT.search(line)
-        if m:
-            out.append(f"{i}: claims a --gateway default of {m.group(1)!r} — {line.strip()[:88]}")
+        if not _GATEWAY_FLAG.search(line):
+            continue
+        host = _A_HOST.search(line)
+        if not host:
+            continue
+        if _HOST_IS_THE_FLAGS_ARGUMENT.search(line):
+            continue                       # a usage example, not a promise
+        out.append(f"{i}: pairs --gateway with {host.group(0)!r} without passing it — "
+                   f"{line.strip()[:80]}")
     return out
 
 
 def test_readme_does_not_advertise_a_gateway_default() -> None:
     bad = _lines_claiming_a_gateway_default(_README)
     assert not bad, (
-        "README.md promises a --gateway default; swarph ships none and an unconfigured "
-        "call raises GatewayNotConfigured (#578). README.md is the PyPI project page, so "
-        "this is the most-read sentence swarph publishes:\n  " + "\n  ".join(bad)
-    )
+        "README.md pairs --gateway with a host it does not pass; swarph ships no default "
+        "and an unconfigured call raises GatewayNotConfigured (#578). README.md is the "
+        "PyPI project page, so this is the most-read sentence swarph publishes:\n  "
+        + "\n  ".join(bad))
 
 
-def test_the_guard_can_fail(tmp_path) -> None:
-    """>>> PROVE IT FIRES — through the shipped scanner, not a lookalike. <<<
+def test_the_readme_states_the_positive_fact() -> None:
+    """The other half of the inversion: absence of a false claim is not presence of the
+    true one. A README that simply never mentions the subject passes the scan above and
+    still leaves a reader guessing what happens with nothing configured."""
+    body = _README.read_text(encoding="utf-8").lower()
+    assert "no default host" in body, (
+        "README.md never states that swarph ships NO default gateway host. Removing the "
+        "false claim is not the same as making the true one — say it explicitly.")
 
-    A detector that has only seen clean input is indistinguishable from one that matches
-    nothing. Neutering `_CLAIMS_A_DEFAULT` turns THIS red too, which is the whole point
-    of routing both tests through `_lines_claiming_a_gateway_default`.
+
+@pytest.mark.parametrize("line", [
+    # the original, as published in the 0.49.0 wheel
+    "`--gateway` (default `http://localhost:8788`) points at the hub.",
+    # v2's blind spots, REPORTED by science-claude
+    "`--gateway` - if unset, uses http://localhost:8788",
+    "`--gateway` assumes http://localhost:8788 when not given",
+    # v2's blind spots, NOT reported — supplied from outside the report. These are the
+    # ones that matter: a guard validated only against reported cases is fitted to them.
+    "In the absence of `--gateway`, swarph uses `http://localhost:8788`.",
+    "`--gateway` is optional; `http://localhost:8788` is used.",
+    "Without `--gateway`, requests go to `http://localhost:8788`.",
+    "`--gateway` - omit it and swarph talks to `http://localhost:8788`.",
+    # WORD ORDER REVERSED — unreachable by any cue list requiring flag-before-cue
+    "The hub is `http://localhost:8788` unless `--gateway` says otherwise.",
+    # host-independence: the next retired IP, and the current fleet IP
+    "`--gateway` (default http://100.107.222.72:8788)",
+    "`--gateway` defaults to http://100.64.189.91:8788 for the fleet",
+])
+def test_the_guard_fires(tmp_path, line) -> None:
+    """>>> PROVE IT FIRES — THROUGH THE SHIPPED SCANNER, NOT A LOOKALIKE. <<<
+
+    Ten phrasings, three sources: the real defect, the two science-claude reported, and
+    five he supplied without reporting first. Neutering `_A_HOST` or `_GATEWAY_FLAG`
+    turns all of these red, which is the point of routing every case through
+    `_lines_claiming_a_gateway_default`.
     """
     bad = tmp_path / "README.md"
-    bad.write_text(
-        "the bearer is `--token-file`, and `--gateway` (default `http://localhost:8788`)\n",
-        encoding="utf-8")
+    bad.write_text(line + "\n", encoding="utf-8")
 
-    hits = _lines_claiming_a_gateway_default(bad)
-
-    assert hits, "the claim pattern is not detectable — the real guard is vacuous"
-    assert "localhost:8788" in hits[0]
+    assert _lines_claiming_a_gateway_default(bad), f"walked past: {line!r}"
 
 
-def test_it_fires_on_a_DIFFERENT_host_too(tmp_path) -> None:
-    """The property is 'a default is claimed', not 'localhost is claimed'.
+@pytest.mark.parametrize("line", [
+    "swarph watchdog --check --peer researcher --gateway http://localhost:8788 --dm-wake",
+    'swarph monitor start --as x --gateway "$MESH_GATEWAY_URL" --token-file f',
+    "swarph onboard researcher --gateway=http://100.64.189.91:8788",
+    "[swarph-daemon] starting: self=researcher gateway=http://localhost:8788 poll=30s",
+    "$ swarph gateway serve                      # binds 127.0.0.1:8788",
+    "`--gateway` / `MESH_GATEWAY_URL` points at the hub. There is no default host.",
+])
+def test_legitimate_gateway_mentions_are_not_flagged(tmp_path, line) -> None:
+    """The other half of can-fail: a detector that fires on EVERYTHING is as useless as
+    one that never fires — and worse, because a noisy guard is one someone deletes.
 
-    #546's finder matched one syntax and its own fix moved the literal out of reach, so
-    it found the bug once and went permanently blind. A guard that only knows the host
-    it was written against would pass the next retired IP straight through."""
-    bad = tmp_path / "README.md"
-    bad.write_text("`--gateway` defaults to http://100.64.189.91:8788 for the fleet\n",
-                   encoding="utf-8")
+    science-claude found four `localhost:8788` strings in the published METADATA and only
+    ONE was false. The other three are here verbatim, so a future tightening that starts
+    flagging them fails loudly instead of training someone to mute the test."""
+    ok = tmp_path / "README.md"
+    ok.write_text(line + "\n", encoding="utf-8")
 
-    assert _lines_claiming_a_gateway_default(bad), (
-        "the guard is fitted to 'localhost' and would miss the next baked-in address")
-
-
-def test_it_fires_on_phrasings_that_never_say_DEFAULT(tmp_path) -> None:
-    """>>> THE BLIND SPOT, AS A TEST RATHER THAN A REVIEW COMMENT. <<<
-
-    The first version required the literal word `default`, so it enforced "a default is
-    named using the word DEFAULT" — not "a fallback host is promised". science-claude ran
-    it against seven cases and these two walked straight past. A README rewrite is
-    precisely when someone reaches for "falls back to", so the miss was not exotic.
-
-    Seeded here so the gap has a test instead of living in a DM. Anyone narrowing
-    `_DEFAULT_CUES` back down turns this red.
-    """
-    for line in (
-        "`--gateway` — if unset, uses http://localhost:8788\n",
-        "`--gateway` assumes http://localhost:8788 when not given\n",
-    ):
-        bad = tmp_path / "README.md"
-        bad.write_text(line, encoding="utf-8")
-        assert _lines_claiming_a_gateway_default(bad), f"walked past: {line!r}"
+    assert _lines_claiming_a_gateway_default(ok) == [], f"false positive on: {line!r}"
 
 
 @pytest.mark.xfail(reason="KNOWN GAP, recorded deliberately: the scan is LINE-scoped, so "
                           "a claim whose `--gateway` mention sits on a previous line is "
-                          "invisible to it. Documented rather than hidden — if someone "
-                          "makes the scan paragraph-aware this XPASSes and says so.",
+                          "invisible. Documented rather than hidden — if someone makes "
+                          "the scan paragraph-aware this XPASSes and says so.",
                    strict=False)
 def test_a_claim_split_across_lines_is_a_KNOWN_MISS(tmp_path) -> None:
-    """The honest limit. `_lines_claiming_a_gateway_default` iterates lines, so a README
-    that mentions `--gateway` in one sentence and promises the fallback in the next is
-    unguarded. science-claude's case 4 — "if unset it falls back to http://localhost:8788"
-    with no `--gateway` on that line — is real README prose, not a contrived string.
+    """The honest limit, and the reason it is not fixed.
 
-    An xfail rather than a fix because widening the anchor across lines is where false
-    positives start, and a guard that flags true lines is a guard someone deletes."""
+    science-claude's case 4 — "if unset it falls back to http://localhost:8788" with no
+    `--gateway` on that line — is real README prose, not a contrived string. Widening the
+    anchor across lines is where false positives start, and per the test above, a guard
+    that flags true lines is a guard someone deletes. So: an xfail naming the gap, rather
+    than a fix trading a known miss for an unknown noise rate."""
     bad = tmp_path / "README.md"
     bad.write_text("The `--gateway` flag points at the hub.\n"
                    "If unset it falls back to http://localhost:8788\n", encoding="utf-8")
@@ -150,32 +189,14 @@ def test_a_claim_split_across_lines_is_a_KNOWN_MISS(tmp_path) -> None:
     assert _lines_claiming_a_gateway_default(bad), "line-scoped scan cannot see this"
 
 
-def test_legitimate_gateway_mentions_are_not_flagged(tmp_path) -> None:
-    """The other half of can-fail: a detector that fires on everything is as useless as
-    one that never fires — and a muted guard is worse than no guard.
-
-    These three shapes are all CORRECT and all mention a host next to `--gateway`.
-    science-claude found four `localhost:8788` strings in the published METADATA and
-    only ONE was false; the other three are seeded here so a future tightening that
-    starts flagging them fails loudly instead of teaching someone to delete the test."""
-    ok = tmp_path / "README.md"
-    ok.write_text(
-        "$ swarph gateway serve                      # binds 127.0.0.1:8788\n"
-        "[swarph-daemon] starting: self=researcher gateway=http://localhost:8788 poll=30s\n"
-        "swarph watchdog --check --peer researcher --gateway http://localhost:8788\n",
-        encoding="utf-8")
-
-    assert _lines_claiming_a_gateway_default(ok) == []
-
-
 def test_the_premise_still_holds() -> None:
     """>>> PREMISE-GONE IS THE ONLY FAILURE THAT STAYS GREEN. <<<
 
-    If swarph ever ships a default host again, this guard becomes wrong rather than
+    If swarph ever ships a default host again, this guard becomes WRONG rather than
     unnecessary, and a wrong guard that passes is machinery nobody can explain. Pin the
     reason so the test dies together with it."""
     src = (pathlib.Path(__file__).resolve().parent.parent
            / "src" / "swarph_cli" / "gateway_default.py")
     assert src.exists(), (
-        "gateway_default.py is gone — swarph may ship a default host again, in which "
-        "case this guard is WRONG, not merely redundant. Delete it deliberately.")
+        "gateway_default.py is gone — swarph may ship a default host again, in which case "
+        "this guard is WRONG, not merely redundant. Delete it deliberately.")
