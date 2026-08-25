@@ -65,7 +65,9 @@ dev = ["pytest>=7.0"]
 # toolbelt (swarph_search/add/describe) to any MCP host. The SDK is an extra
 # so the core one-shot/mesh paths don't pull it in; `swarph mcp-server`
 # prints a `pip install swarph-cli[mcp]` hint when it's absent.
-mcp = ["mcp>=1.0"]
+# mcp 2.0 removed mcp.server.fastmcp (FastMCP left the SDK package); the
+# mcp-server command is written against the 1.x API — pin below 2.
+mcp = ["mcp>=1.0,<2"]
 # `swarph bench run` (metered backend) calls the google-genai Developer API
 # directly. The dependency is an extra so `bench`'s pack loader/validate/
 # distance-engine paths (and every other swarph-cli verb) stay usable without
