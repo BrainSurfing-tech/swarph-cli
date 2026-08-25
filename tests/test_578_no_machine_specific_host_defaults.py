@@ -134,6 +134,13 @@ def test_the_suite_does_not_depend_on_the_developer_s_own_gateway(monkeypatch) -
     This asserts the resolver itself returns "" in a clean environment, so a
     future contributor whose shell happens to export it cannot re-introduce that
     dependency without a red test rather than a red CI run an hour later.
+
+    SCOPE, corrected after seat-A review of PR #318: this pins the RESOLVER, not
+    "the whole PR". After delenv, `env_gateway() == ""` is true by construction —
+    it tests os.environ.get, and it was blind to the real channel, five constants
+    that captured the env at IMPORT and kept it. That channel is covered by
+    test_C3_no_gateway_host_is_baked_into_any_parser_default, which imports WITH
+    the variable set and reads the defaults after removing it.
     """
     from swarph_cli.gateway_default import env_gateway
 
