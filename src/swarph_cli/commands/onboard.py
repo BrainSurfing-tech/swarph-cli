@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 from swarph_cli import tokens
 from swarph_cli.console_safe import print_safe
+from swarph_cli.gateway_default import env_gateway, require_gateway
 
 
 _HANDSHAKE_TEMPLATE = """\
@@ -111,8 +112,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--gateway",
-        default=os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788"),
-        help="mesh-gateway base URL (default: $MESH_GATEWAY_URL or http://100.107.222.72:8788)",
+        default=env_gateway(),
+        help="mesh-gateway base URL (default: $MESH_GATEWAY_URL; no host is shipped)",
     )
     p.add_argument(
         "--token-file",
@@ -824,6 +825,9 @@ def run_onboard(argv: list[str]) -> int:
 
     # ── Step 4: POST /peers/register ─────────────────────────────────
     peer_url = args.url or f"http://{canonical}:8787"
+    # #578: the gateway is needed only for the REQUEST. Validate args first so a
+    # typo'd name reports the typo, not a missing env var.
+    args.gateway = require_gateway(getattr(args, "gateway", ""))
     print_safe(f"[4/6] POST {args.gateway}/peers/register")
     # >>> #124's GUARD, MET CLIENT-SIDE — #294's PATTERN, THE MISSING HALF. <<<
     # The gateway 409s a re-register whose payload would DROP stored

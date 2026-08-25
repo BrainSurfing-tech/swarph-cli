@@ -290,14 +290,20 @@ def unit_is_relevant(name: str, text: str) -> bool:
 # cost of the circularity break, stated here rather than discovered.
 
 # TAILNET IP, NOT localhost and NOT a MagicDNS name (commander, 2026-08-21).
-# The mesh-gateway binds HOST=100.107.222.72 ONLY; localhost has never been bound.
+# The mesh-gateway binds a tailnet IP ONLY; localhost has never been bound.
 # MESH_GATEWAY_URL overrides — the escape hatch for anyone outside this mesh.
-_RESOLVER_DEFAULT_GATEWAY = os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788")
+# Inlined, NOT imported from swarph_cli.gateway_default: this module is
+# deliberately stdlib-only so it can run as a bare file in isolated mode
+# (test_module_imports_are_stdlib_only). Same policy as #578, no import.
+# NO import-time capture of os.environ here either: `_RESOLVER_DEFAULT_GATEWAY =
+# os.environ.get("MESH_GATEWAY_URL")` used to back this resolver, which made the
+# answer depend on the shell that IMPORTED the module rather than the env passed
+# in. The env is the ARGUMENT — see #578's "model the environment as data".
 
 
 def resolver_gateway(env: dict) -> str:
-    """What the CLI would use: $MESH_GATEWAY_URL, else the localhost default."""
-    return (env.get("MESH_GATEWAY_URL") or "").strip() or _RESOLVER_DEFAULT_GATEWAY
+    """What the CLI would use: $MESH_GATEWAY_URL, else "" — no host ships (#578)."""
+    return (env.get("MESH_GATEWAY_URL") or "").strip()
 
 
 def resolver_token(self_name: str, env: dict, home: Path) -> tuple[Optional[str], str]:

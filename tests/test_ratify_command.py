@@ -122,6 +122,7 @@ def test_run_ratify_requires_witness(monkeypatch, capsys):
 
 
 def test_run_ratify_witness_not_registered_404(monkeypatch, capsys):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.setenv("SWARPH_WITNESS", "ghost-witness")
 
@@ -135,6 +136,7 @@ def test_run_ratify_witness_not_registered_404(monkeypatch, capsys):
 
 
 def test_run_ratify_witness_not_ratified(monkeypatch, capsys):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.setenv("SWARPH_WITNESS", "unratified-w")
 
@@ -150,6 +152,7 @@ def test_run_ratify_witness_not_ratified(monkeypatch, capsys):
 
 
 def test_run_ratify_target_not_found(monkeypatch, capsys):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.setenv("SWARPH_WITNESS", "lab-ovh")
 
@@ -167,6 +170,7 @@ def test_run_ratify_target_not_found(monkeypatch, capsys):
 
 
 def test_run_ratify_target_already_ratified(monkeypatch, capsys):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.setenv("SWARPH_WITNESS", "lab-ovh")
 
@@ -185,6 +189,7 @@ def test_run_ratify_target_already_ratified(monkeypatch, capsys):
 
 
 def test_run_ratify_passes_witness_dm_id(monkeypatch):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.setenv("SWARPH_WITNESS", "lab-ovh")
 

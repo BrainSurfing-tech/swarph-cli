@@ -469,6 +469,7 @@ def test_run_onboard_already_ratified_reregister_STILL_names_the_no_mint(
 
 
 def test_run_onboard_resolves_alias(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     fake, captured = _mock_post_factory()
     monkeypatch.setattr(onboard, "_post_json", fake)
@@ -500,6 +501,7 @@ def test_run_onboard_rejects_bad_name(monkeypatch, capsys):
 
 
 def test_run_onboard_gateway_error_returns_2(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.setattr(
         onboard,
@@ -519,6 +521,7 @@ def test_run_onboard_gateway_error_returns_2(monkeypatch, tmp_path, capsys):
 def test_run_onboard_subscription_check_failure_is_warning_not_fatal(
     monkeypatch, tmp_path, capsys
 ):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default
     """§15.6 #10 deferred non-Claude runtimes — subscription check
     failure shouldn't block onboard."""
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
@@ -542,6 +545,7 @@ def test_run_onboard_subscription_check_failure_is_warning_not_fatal(
 
 
 def test_run_onboard_capability_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     fake, captured = _mock_post_factory()
     monkeypatch.setattr(onboard, "_post_json", fake)

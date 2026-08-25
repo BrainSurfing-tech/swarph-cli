@@ -36,8 +36,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional
+from swarph_cli.gateway_default import env_gateway
 
-DEFAULT_GATEWAY = os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788")
 TIMEOUT_S = 6
 MAX_ROWS = 6
 
@@ -131,6 +131,14 @@ def query_gateway(term: str, gateway: str, token: str, limit: int = MAX_ROWS) ->
     >>> AN UNREACHABLE OR REFUSING BACKEND IS AN ERROR, NOT AN EMPTY RESULT. <<<
     Collapsing them is the defect this hook exists to avoid teaching.
     """
+    # #578: with no baked-in host, `gateway` can be "". Request() rejects a
+    # relative URL at CONSTRUCTION (below, outside the try), so an unconfigured
+    # backend would raise ValueError and take the whole turn down — against this
+    # entry point's "ALWAYS exits 0, must never fail a turn" contract.
+    # UNCONFIGURED is the same class as UNREACHABLE: an error, not empty.
+    if not (gateway or "").strip():
+        return {"error": "MESH_GATEWAY_URL is not set and swarph ships no default "
+                         "gateway host (#578) — the graph was never asked"}
     req = urllib.request.Request(
         f"{gateway.rstrip('/')}/codegraph",
         data=json.dumps({"query": term, "limit": limit}).encode(),
@@ -228,7 +236,7 @@ def run_codegraph_hook(argv: Optional[list] = None) -> int:
     """PostToolUse(Bash) entry point. ALWAYS exits 0 — it must never fail a turn."""
     argv = list(argv or [])
     self_name = os.environ.get("SWARPH_SELF", "").strip()
-    gateway = DEFAULT_GATEWAY
+    gateway = env_gateway()
     for i, a in enumerate(argv):
         if a == "--as" and i + 1 < len(argv):
             self_name = argv[i + 1]

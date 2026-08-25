@@ -29,6 +29,9 @@ def _identity(monkeypatch):
 @pytest.fixture()
 def sent(monkeypatch):
     """Capture the body mesh send would POST."""
+    # #578: no gateway host ships as a default, so every send needs one
+    # configured. Set once here rather than in each test that uses the fixture.
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")
     cap = {}
 
     def fake(url, body, token, **k):
@@ -49,6 +52,7 @@ def test_content_file_round_trips_byte_identical(tmp_path, sent):
 
 
 def test_content_dash_reads_stdin_byte_identical(monkeypatch, sent):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default ships
     import io
     monkeypatch.setattr("sys.stdin", io.StringIO(HOSTILE))
     assert mesh.run_mesh(["send", "c2", "--kind", "fyi", "--content", "-"]) == 0

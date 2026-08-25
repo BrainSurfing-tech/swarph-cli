@@ -67,9 +67,12 @@ def _post_channel(
     """
     name = resolve_self_name(self_name)
     token = resolve_token(name, token_file)
-    from .mesh import _DEFAULT_GATEWAY
+    from swarph_cli.gateway_default import env_gateway
 
-    base = (gateway or _DEFAULT_GATEWAY).rstrip("/")
+    # "" when unconfigured — post_json IS mesh._post_json, whose
+    # _require_absolute_gateway_url then refuses by name rather than raising
+    # `ValueError: unknown url type` from Request(). Checked in review of #318.
+    base = (gateway or env_gateway()).rstrip("/")
     ev: dict = {"event": event, "payload": payload}
     if chain_token is not None:  # carry an explicit "" through; only omit when unset
         ev["chain_token"] = chain_token

@@ -77,6 +77,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from swarph_cli.gateway_default import env_gateway
 
 from swarph_cli.commands.mesh import _post_json
 
@@ -84,17 +85,13 @@ from swarph_cli.commands.mesh import _post_json
 _DEFAULT_THRESHOLD_SEC = 1800  # 30 minutes
 _DEFAULT_A1_RETRIES = 3
 _DEFAULT_A1_BACKOFF_SEC = 60
-# TAILNET IP, NOT localhost and NOT a MagicDNS name (commander, 2026-08-21).
-# The mesh-gateway binds HOST=100.107.222.72 ONLY — localhost has never been bound, so this
-# default failed as a bare "Connection refused" with no cause named. It cost 792 silent
-# card-export failures over 8 days, and it turned a WORKING hand-started monitor into a
-# DEAF SUPERVISED one the moment it was moved to a systemd unit (the unit passes no
-# --gateway, so it fell through to this constant).
-# An IP over MagicDNS on purpose: a name needs MagicDNS enabled, the right search domain,
-# and no local collision; the IP needs only that tailscale is up, which is the real
-# precondition anyway. MESH_GATEWAY_URL overrides it — that env var is the escape hatch
-# for anyone outside this mesh, and optional inside it.
-_DEFAULT_GATEWAY_URL = os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788")
+# NO MODULE-LEVEL GATEWAY CONSTANT (#578). #546 put the gateway's tailnet IP here,
+# correctly at the time; that box was retired 2026-08-25 and the literal expired.
+# The constant is gone rather than emptied: read at IMPORT time it captured whatever
+# the packaging/importing shell exported, and MEASURED in seat-A review of PR #318 it
+# still returned that value after the environment was cleared — the one channel by
+# which a test could depend on a developer's shell. env_gateway() is called at
+# parser-BUILD time instead (parsers are built per invocation).
 # F3 — tmux pane_activity gate threshold. If pane has activity within this
 # many seconds, suppress A1 (session is working, not stalled). 600s (10min)
 # is comfortably above legitimate-pause noise + comfortably below the
@@ -197,7 +194,7 @@ Flags:
   --cursor PATH        cursor JSON path; default $TMPDIR/<role>-cursor.json
                        fallback /tmp/lab-claude-cursor.json
   --threshold SEC      darkness threshold; default 1800 (30 min)
-  --gateway URL        mesh-gateway URL for unread-DM check; default 100.107.222.72:8788
+  --gateway URL        mesh-gateway URL for unread-DM check; default $MESH_GATEWAY_URL
   --tmux-session NAME  tmux session name; default = cell role
   --peer NAME          mesh peer name for unread-DM query; default = cell name
   --no-respawn         A1 only; don't escalate to A2 (dry-run mode)
@@ -437,6 +434,28 @@ def _save_dm_wake_state(path: Path, state: dict) -> None:
         pass
 
 
+
+def _gateway_configured(gateway: str) -> bool:
+    """False when no gateway is configured — degrade, do not crash.
+
+    #578 removed the baked-in host, so `gateway` can now be "". Every caller here
+    builds `urllib.request.Request(f"{gateway}/...")` OUTSIDE its try, and
+    Request() rejects a relative URL at CONSTRUCTION with ValueError, before any
+    I/O — so nothing catches it.
+
+    That matters most where it is least visible: `_run_local_check` asks for the
+    unread count BEFORE the A2 "process dead -> respawn regardless of unread"
+    decision, so an uncaught raise kills the tick before it can rescue anything.
+    On sys3 today both `swarph-watchdog.timer` and `swarph-watchdog-science.timer`
+    run every 5 minutes with `EnvironmentFile=-/etc/default/swarph-watchdog`, and
+    THAT FILE DOES NOT EXIST — no MESH_GATEWAY_URL in the unit env at all.
+
+    An unreachable gateway has always degraded to None here. An UNCONFIGURED one
+    now does the same, rather than becoming a new crash class.
+    Found by drop-on-meta-edge, seat-A review of PR #318.
+    """
+    return bool((gateway or "").strip())
+
 def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Optional[int]:
     """Query gateway for unread DM count addressed to peer.
 
@@ -453,6 +472,8 @@ def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Opti
     caused a real reader to conclude a gateway/token outage makes A1 MORE
     eager, when it makes A1 permanently inert for that cell instead.
     """
+    if not _gateway_configured(gateway):
+        return None
     query = urllib.parse.urlencode({"to_node": peer, "unread_only": "true", "limit": 1})
     url = f"{gateway.rstrip('/')}/messages?{query}"
     req = urllib.request.Request(url)
@@ -510,6 +531,8 @@ def _gateway_recent_recovery_event(
     What was missing was the wake-up mechanism — this function plus the
     fall-through in run_check is the watchdog half of the loop.
     """
+    if not _gateway_configured(gateway):
+        return None
     since_dt = datetime.now(timezone.utc) - timedelta(seconds=window_sec)
     since_iso = since_dt.isoformat()
     query = urllib.parse.urlencode(
@@ -589,6 +612,8 @@ def _stale_peers(
 def _fetch_peers(gateway: str, token: str) -> list[dict]:
     """GET {gateway}/peers (Bearer token). Returns the peer list, or [] on any error
     (never raises). The response may be a bare list OR {"peers": [...]} — handle both."""
+    if not _gateway_configured(gateway):
+        return None
     url = f"{gateway.rstrip('/')}/peers"
     req = urllib.request.Request(url)
     if token:
@@ -1710,7 +1735,7 @@ def _execstart_flags(args: argparse.Namespace) -> str:
         ("--peer", "peer", None),
         ("--liveness-cmd", "liveness_cmd", None),
         ("--notify-peer", "notify_peer", None),
-        ("--gateway", "gateway", _DEFAULT_GATEWAY_URL),
+        ("--gateway", "gateway", env_gateway()),
         ("--threshold", "threshold", _DEFAULT_THRESHOLD_SEC),
         ("--pane-activity-threshold", "pane_activity_threshold",
          _DEFAULT_PANE_ACTIVITY_THRESHOLD_SEC),
@@ -1914,7 +1939,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--gateway",
-        default=os.environ.get("MESH_GATEWAY_URL", _DEFAULT_GATEWAY_URL),
+        default=env_gateway(),
     )
     p.add_argument("--tmux-session", default=None)
     p.add_argument("--peer", default=None)

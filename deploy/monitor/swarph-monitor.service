@@ -30,12 +30,20 @@ Type=simple
 User=<USER>
 Environment=SWARPH_SELF=<PEER>
 Environment=HOME=<HOME>
-# GATEWAY: deliberately UNSET, and this comment is the reason (#560).
+# GATEWAY: REQUIRED. Substitute <GATEWAY> at install time, like <PEER>/<HOME>/<USER>.
 #
-# The monitor reaches the gateway via swarph-cli's code default, which #276 changed
-# from `http://localhost:8788` to the mesh's tailnet address. Before that change a
-# unit with no gateway line pointed every off-box cell at ITSELF -- present and
-# resolvable and wrong, which is the worst shape a default can have.
+# >>> THIS LINE USED TO BE COMMENTED OUT, AND THE COMMENT SAID THAT WAS FINE. <<<
+# (#560: "deliberately UNSET ... the monitor reaches the gateway via swarph-cli's code
+# default".) True until 2026-08-25: #546 had put the mesh's tailnet IP in the code as
+# the default, that box was retired, and #578 removed the baked-in host entirely
+# because a default that names one machine expires with it. There is no code default
+# left to fall through to, so a unit installed from this template with no gateway line
+# now REFUSES on every poll (monitor -> _verify_self_is_registered -> _http_get_json
+# -> "MESH_GATEWAY_URL is not set"). Measured in seat-A review of PR #318, where the
+# stale comment was still telling the operator the absence was a choice.
+#
+# Leaving the placeholder unsubstituted is not silent either: the CLI sees a
+# non-absolute "<GATEWAY>" and refuses by name rather than building a broken URL.
 #
 # >>> Environment=, NOT A FLAG ON ExecStart. <<< (science-claude, measured on lab-ovh
 # 2026-08-21.) Every drop-in on that box overrides ExecStart -- `ExecStart=` to clear,
@@ -44,11 +52,7 @@ Environment=HOME=<HOME>
 # needed no protection. Environment= survives an ExecStart override. An explicit
 # --gateway flag still wins over it (argparse: explicit beats env-derived default), so
 # a cell that sets one keeps it.
-#
-# OFF-MESH INSTALL: uncomment and set. The code default is a TAILNET address and is
-# correct only for cells on this mesh; anywhere else it is a wrong-by-name pointer of
-# the same class #276 removed.
-# Environment=MESH_GATEWAY_URL=<GATEWAY>
+Environment=MESH_GATEWAY_URL=<GATEWAY>
 ExecStart=<HOME>/.local/bin/swarph monitor start --as <PEER> --deliver pull --foreground
 Restart=always
 RestartSec=10

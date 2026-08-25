@@ -22,8 +22,8 @@ import yaml
 
 from swarph_shared.cell import PEER_NAME_RE, parse_cell_dict
 from swarph_cli.cell import CLI_ENABLED_PROVIDERS, CellError, cells_dir
+from swarph_cli.gateway_default import env_gateway
 
-_DEFAULT_GATEWAY = os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788")
 _CODEX_SANDBOX_DEFAULT = "workspace-write"
 _CODEX_SANDBOX_VALUES = ("workspace-write", "read-only")
 
@@ -128,7 +128,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tmux", default=None)
     p.add_argument("--cursor", default=None)
     p.add_argument("--sandbox", default=None)
-    p.add_argument("--gateway", default=_DEFAULT_GATEWAY)
+    p.add_argument("--gateway", default=env_gateway())
     p.add_argument("--assisted-memory", dest="assisted_memory", default=None, metavar="REPO",
                    help="enable git-backed memory at REPO (SSH→HTTPS normalized)")
     p.add_argument("--starter", default=None)
@@ -197,8 +197,11 @@ def run_init(argv: list[str]) -> int:
         "cwd": str(cwd),
         "tmux_session": tmux,
         "cursor_path": cursor,
-        "mesh": {"gateway": args.gateway},
     }
+    # Only when one was actually chosen: with the env unset args.gateway is ""
+    # (#578 ships no host), and writing that records a decision nobody made.
+    if args.gateway:
+        cell["mesh"] = {"gateway": args.gateway}
     if sandbox is not None:
         cell["sandbox"] = sandbox
     if args.starter:

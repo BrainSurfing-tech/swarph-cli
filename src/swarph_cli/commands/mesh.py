@@ -39,6 +39,7 @@ from typing import Optional
 from .. import tokens
 from ._content import ContentError, add_content_args, resolve_content
 from ._display import sanitize_terminal
+from swarph_cli.gateway_default import GatewayNotConfigured, env_gateway
 
 
 def _format_inbox_line(dm: dict) -> str:
@@ -51,17 +52,13 @@ def _format_inbox_line(dm: dict) -> str:
     return f"id={dm.get('id')} {read} from={who} kind={kind} {content}"
 
 
-# TAILNET IP, NOT localhost and NOT a MagicDNS name (commander, 2026-08-21).
-# The mesh-gateway binds HOST=100.107.222.72 ONLY — localhost has never been bound, so this
-# default failed as a bare "Connection refused" with no cause named. It cost 792 silent
-# card-export failures over 8 days, and it turned a WORKING hand-started monitor into a
-# DEAF SUPERVISED one the moment it was moved to a systemd unit (the unit passes no
-# --gateway, so it fell through to this constant).
-# An IP over MagicDNS on purpose: a name needs MagicDNS enabled, the right search domain,
-# and no local collision; the IP needs only that tailscale is up, which is the real
-# precondition anyway. MESH_GATEWAY_URL overrides it — that env var is the escape hatch
-# for anyone outside this mesh, and optional inside it.
-_DEFAULT_GATEWAY = os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788")
+# NO MODULE-LEVEL GATEWAY CONSTANT (#578). #546 put the gateway's tailnet IP here,
+# correctly at the time; that box was retired 2026-08-25 and the literal expired.
+# The constant is gone rather than emptied: read at IMPORT time it captured whatever
+# the packaging/importing shell exported, and MEASURED in seat-A review of PR #318 it
+# still returned that value after the environment was cleared — the one channel by
+# which a test could depend on a developer's shell. env_gateway() is called at
+# parser-BUILD time instead (parsers are built per invocation).
 _DEFAULT_POLL_S = 30
 _BACKOFF_EMPTY_THRESHOLD = 5
 _BACKOFF_EMPTY_SECONDS = 60
@@ -170,7 +167,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     peers.add_argument(
         "--gateway",
-        default=os.environ.get("MESH_GATEWAY_URL", _DEFAULT_GATEWAY),
+        default=env_gateway(),
         help="mesh-gateway base URL",
     )
     peers.add_argument("--token-file", default=None, help="explicit bearer token file")
@@ -200,7 +197,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--gateway",
-        default=os.environ.get("MESH_GATEWAY_URL", _DEFAULT_GATEWAY),
+        default=env_gateway(),
         help="mesh-gateway base URL",
     )
     p.add_argument("--token-file", default=None, help="explicit bearer token file")
@@ -313,11 +310,68 @@ def _resolve_token(
     )
     if res is not None:
         return res.token
+    # #579: the old message named the very file `register` exists to MINT, which
+    # reads as a chicken-and-egg to anyone bootstrapping a NEW peer (droplet hit
+    # exactly this onboarding friendly-coder, 2026-08-25). `swarph onboard`
+    # already explains the operator path; this now says the same thing.
+    #
+    # >>> THE BOOTSTRAP PARAGRAPH BELONGS TO `register` ALONE. <<< It first shipped
+    # unconditionally, so `mesh send`/`reply`/`inbox`/`sidecar` — which all reach here
+    # with the default allow_peer_token=True — told a user with a missing token that
+    # "minting it is what this command does", which is FALSE for send. Measured in
+    # seat-A review of PR #318. allow_peer_token=False is exactly the register path
+    # (:848 is its only caller), so it is the condition, not a new flag.
+    bootstrap = (
+        f"\n"
+        f"  If you are BOOTSTRAPPING {self_name!r}, that token does not exist yet:\n"
+        f"  minting it is what this command does, so it cannot also be the way in.\n"
+        f"  Registering a peer that is not yourself is an OPERATOR action. Where the\n"
+        f"  gateway enforces caller binding (MESH_CALLER_BINDING_ENFORCE=1, as this\n"
+        f"  mesh's does) another cell's per-peer token 403s; where it does not, it is\n"
+        f"  simply the wrong credential. `swarph gateway serve` does NOT enforce it by\n"
+        f"  default — do not read the 403 as a guarantee.\n"
+        f"      swarph mesh register --as {self_name} --token-file <operator-token>\n"
+        f"      MESH_GATEWAY_TOKEN=<operator-token> swarph mesh register --as {self_name}"
+    ) if not allow_peer_token else (
+        f"\n"
+        f"  If it does not exist yet, {self_name!r} has no credential on this mesh —\n"
+        f"  `swarph mesh register` (an OPERATOR action) is what mints one."
+    )
     raise RuntimeError(
-        "cannot resolve mesh token; set MESH_GATEWAY_TOKEN or create "
-        f"{_peer_token_path(self_name)}"
+        f"cannot resolve a mesh credential for {self_name!r}.\n"
+        f"\n"
+        f"  looked for:  ${{MESH_GATEWAY_TOKEN}}\n"
+        f"               {_peer_token_path(self_name)}\n"
+        f"\n"
+        f"  If {self_name!r} ALREADY EXISTS, its per-peer token is the right\n"
+        f"  credential — place it at the path above (mode 600) and re-run.\n"
+        + bootstrap
     )
 
+
+
+def _require_absolute_gateway_url(url: str) -> None:
+    """#578: no gateway host ships as a default.
+
+    Guarding here rather than at the dispatcher is deliberate: the gateway is
+    needed only when a REQUEST is made. A dispatcher-level check also fired for
+    paths that never touch the network (sidecar target validation, --json shape
+    tests) and turned 10 failures into 26. The observable that means
+    "unconfigured" is a url that is not absolute — `/peers` instead of
+    `http://host:8788/peers` — so key on that.
+    """
+    if not str(url).startswith(("http://", "https://")):
+        # GatewayNotConfigured (a RuntimeError) rather than a bare RuntimeError:
+        # cli used to carry TWO refusal shapes for one variable and one remedy —
+        # require_gateway at dispatch and this one at request time — so the package
+        # disagreed with itself about what "no gateway" raises. One family now.
+        raise GatewayNotConfigured(
+            "MESH_GATEWAY_URL is not set, and swarph ships no default gateway host.\n"
+            "  A baked-in address expires the day that box is retired "
+            "(card #578; it happened on 2026-08-25).\n"
+            "  Set MESH_GATEWAY_URL=http://<host>:<port>, or pass --gateway.\n"
+            f"  (tried to request {url!r})"
+        )
 
 def _post_json(
     url: str,
@@ -326,6 +380,7 @@ def _post_json(
     *,
     timeout: float = 10.0,
 ) -> tuple[int, dict]:
+    _require_absolute_gateway_url(url)
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -355,6 +410,7 @@ def _http_get_json(
     *,
     timeout: float = 10.0,
 ) -> tuple[int, dict]:
+    _require_absolute_gateway_url(url)
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

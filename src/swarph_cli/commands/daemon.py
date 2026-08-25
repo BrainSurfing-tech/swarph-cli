@@ -52,6 +52,7 @@ from typing import Optional
 from swarph_cli import session_bridge, stall_alert
 from swarph_cli.console_safe import print_safe
 from swarph_cli.delivery_queue import DeliveryQueue
+from swarph_cli.gateway_default import env_gateway, require_gateway
 
 
 _DEFAULT_POLL_S = 30
@@ -85,7 +86,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--gateway",
-        default=os.environ.get("MESH_GATEWAY_URL", "http://100.107.222.72:8788"),
+        default=env_gateway(),
         help="mesh-gateway base URL.",
     )
     p.add_argument(
@@ -564,6 +565,10 @@ def run_daemon(argv: list[str]) -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
     # Announce ownership of this state dir BEFORE any cursor work, so a
     # concurrently-starting `swarph monitor` sees it and refuses (PR #139).
+    # #578: identity is resolved above first, so a missing --self reports THAT,
+    # not a missing env var. The gateway is only needed for the requests below.
+    args.gateway = require_gateway(getattr(args, "gateway", ""))
+
     _write_daemon_pidfile(state_dir)
     token = _resolve_token(args.token_file)
     if not token:

@@ -1098,16 +1098,20 @@ def test_gateway_default_reads_mesh_gateway_url(monkeypatch):
     this one used the bare constant directly. Found 2026-08-12 while auditing every
     localhost:8788 fallback in swarph-cli after a live gateway rebind broke it."""
     from swarph_cli.commands import watchdog
-    monkeypatch.setenv("MESH_GATEWAY_URL", "http://100.107.222.72:8788")
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.example:8788")
     ns = watchdog._build_parser().parse_args(["--check"])
-    assert ns.gateway == "http://100.107.222.72:8788"
+    assert ns.gateway == "http://gw.example:8788"
 
 
-def test_gateway_default_falls_back_to_localhost_when_unset(monkeypatch):
+def test_gateway_default_is_EMPTY_when_unset(monkeypatch):
+    """#578: no host ships, so an unset env yields "" and the request-time guard
+    refuses by name. The old name said "falls_back_to_localhost" and asserted
+    `== watchdog._DEFAULT_GATEWAY_URL`, which was true for ANY value the constant
+    held — including the retired IP the card exists to remove."""
     from swarph_cli.commands import watchdog
     monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
     ns = watchdog._build_parser().parse_args(["--check"])
-    assert ns.gateway == watchdog._DEFAULT_GATEWAY_URL
+    assert ns.gateway == ""
 
 
 def test_cell_default_falls_back_to_sentinel_not_lab(monkeypatch):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import json
 import stat
 import sys
@@ -13,6 +15,7 @@ from swarph_cli.commands import mesh
 
 
 def test_mesh_send_posts_message_shape(monkeypatch, capsys):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default ships
     monkeypatch.setenv("SWARPH_SELF", "gpt-ops")
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     captured = {}
@@ -42,7 +45,7 @@ def test_mesh_send_posts_message_shape(monkeypatch, capsys):
     assert rc == 0
     # Default is the TAILNET IP since 2026-08-21 (#546). Assert against the CONSTANT, not a
     # literal: pinning 'localhost' here is what let the defect survive a test suite.
-    assert captured["url"] == f"{mesh._DEFAULT_GATEWAY}/messages"
+    assert captured["url"] == f"{os.environ['MESH_GATEWAY_URL']}/messages"
     assert captured["token"] == "tok"
     assert captured["body"] == {
         "from_node": "gpt-ops",
@@ -56,6 +59,7 @@ def test_mesh_send_posts_message_shape(monkeypatch, capsys):
 
 
 def test_mesh_send_gateway_error_is_nonsecret(monkeypatch, capsys):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default ships
     monkeypatch.setenv("SWARPH_SELF", "gpt-ops")
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "secret-token")
     monkeypatch.setattr(
@@ -74,6 +78,7 @@ def test_mesh_send_gateway_error_is_nonsecret(monkeypatch, capsys):
 
 
 def test_mesh_gateway_error_without_detail_does_not_echo_payload(monkeypatch, capsys):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default ships
     monkeypatch.setenv("SWARPH_SELF", "gpt-ops")
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "secret-token")
     monkeypatch.setattr(
@@ -142,6 +147,7 @@ def test_mesh_inbox_json_output(monkeypatch, capsys):
 
 
 def test_mesh_register_mints_token_file_mode_600(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default ships
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "shared-auth")
     captured = {}
@@ -170,7 +176,7 @@ def test_mesh_register_mints_token_file_mode_600(monkeypatch, tmp_path, capsys):
         ]
     )
     assert rc == 0
-    assert captured["url"] == f"{mesh._DEFAULT_GATEWAY}/peers/register"
+    assert captured["url"] == f"{os.environ['MESH_GATEWAY_URL']}/peers/register"
     assert captured["token"] == "shared-auth"
     assert captured["body"] == {
         "name": "gpt-ops",
@@ -214,6 +220,7 @@ def test_mesh_register_existing_token_hard_stops_without_force(
 def test_mesh_register_force_allows_existing_without_echoing_token(
     monkeypatch, tmp_path, capsys
 ):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default ships
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "shared-auth")
     token_file = tmp_path / ".config" / "swarph" / "gpt-ops.peer_token"

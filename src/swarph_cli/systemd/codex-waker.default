@@ -8,6 +8,10 @@ SWARPH_WAKER_TIMEOUT_S=300
 CODEX_BIN=codex
 # Tailnet IP, not the MagicDNS name (commander 2026-08-21): the IP needs only
 # tailscale up; the name needs MagicDNS + the right search domain + no local
-# collision.
-SWARPH_GATEWAY=http://100.107.222.72:8788
+# collision. NOTE (2026-08-25): that reasoning still holds for choosing WHICH
+# address to set — but no address is SHIPPED any more, because the box this
+# template named was retired and every install inherited a dead default.
+# REQUIRED — no host is shipped. A baked-in address expires when that box is
+# retired (card #578: this template shipped a machine that no longer exists).
+# SWARPH_GATEWAY=http://<your-gateway-host>:8788
 SWARPH_TOKEN_FILE=%h/.config/swarph/%i.peer_token

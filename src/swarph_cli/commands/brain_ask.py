@@ -10,7 +10,7 @@ verb so any cell can search the swarm's shared memory the same way. Two modes:
 Stdlib-only. Config from the environment, mirroring ``swarph mesh``'s token model:
 
   GBRAIN_MCP_URL        gbrain MCP endpoint; falls back to SWARPH_BRAIN_MCP, else
-    / SWARPH_BRAIN_MCP   http://100.107.222.72:8792/mcp (tailnet IP — gbrain
+    / SWARPH_BRAIN_MCP   http://<gbrain-host>:8792/mcp (no default — gbrain
                           binds no loopback; measured 2026-08-23, card #548)
   GBRAIN_TOKEN          read token; falls back to SWARPH_BRAIN_TOKEN, then to the
     / SWARPH_BRAIN_TOKEN  mesh per-peer token (~/.config/swarph/<self>.peer_token).
@@ -35,23 +35,34 @@ from swarph_cli import tokens
 from pathlib import Path
 from typing import Optional
 
-# TAILNET IP, NOT loopback (card #548): measured 2026-08-23, gbrain binds
-# 100.107.222.72:8792 ONLY — 127.0.0.1:8792 refuses on the gateway box itself.
-# A loopback default is deaf everywhere, including on the box running gbrain.
-_DEFAULT_GBRAIN = "http://100.107.222.72:8792/mcp"
+# NO MODULE-LEVEL ENDPOINT CONSTANT, ON PURPOSE. gbrain binds its tailnet IP
+# only (127.0.0.1:8792 refuses even on gbrain's own box), so SWARPH_BRAIN_MCP must
+# be set explicitly and no host ships as a default (#548 -> #578).
+# `_DEFAULT_GBRAIN = os.environ.get("SWARPH_BRAIN_MCP")` used to live here and was
+# read at IMPORT time, which froze the developer's shell into the module:
+# MEASURED in seat-A review of PR #318 — with SWARPH_BRAIN_MCP exported,
+# test_resolve_endpoint_refuses_rather_than_guessing_a_host FAILED, because the
+# test can delenv the two call-time operands but not a value already captured.
+# The env is read at CALL time in _resolve_endpoint below, and nowhere else.
 _DEFAULT_TOPK = 6
 
 
-def _resolve_endpoint() -> str:
-    """Endpoint precedence: GBRAIN_MCP_URL > SWARPH_BRAIN_MCP > tailnet default.
+def _resolve_endpoint(explicit: str | None = None) -> str:
+    """Endpoint precedence: GBRAIN_MCP_URL > SWARPH_BRAIN_MCP. No host default (#578).
 
     The SWARPH_BRAIN_MCP fallback keeps the verb config-compatible with the
     standalone ``swarph-brain-ask`` script (which reads SWARPH_BRAIN_*), so one
     env config works with both.
     """
-    return (os.environ.get("GBRAIN_MCP_URL")
-            or os.environ.get("SWARPH_BRAIN_MCP")
-            or _DEFAULT_GBRAIN)
+    from swarph_cli.gateway_default import require_gateway
+
+    return require_gateway(
+        explicit
+        or os.environ.get("GBRAIN_MCP_URL")
+        or os.environ.get("SWARPH_BRAIN_MCP"),
+        env="SWARPH_BRAIN_MCP",
+        what="gbrain MCP",
+    )
 
 
 def _build_query_request(question: str, limit: int = _DEFAULT_TOPK) -> dict:
@@ -237,10 +248,15 @@ def run_brain_ask(argv: list) -> int:
                         help="top-k chunks to retrieve (default 6)")
     parser.add_argument("--no-synth", action="store_true",
                         help="retrieval only — print raw chunks, skip prose synthesis")
-    parser.add_argument("--gateway", default=_resolve_endpoint(),
+    parser.add_argument("--gateway", default=None,
                         help="gbrain MCP endpoint (env: GBRAIN_MCP_URL or SWARPH_BRAIN_MCP)")
     parser.add_argument("--token-file", default=None, help="explicit read-token file")
     args = parser.parse_args(argv)
+    # #578/#318-review: resolve the endpoint HERE, not as an argparse default.
+    # Evaluating it at parser-BUILD time made `--help` die and made the
+    # `--gateway` the error message tells you to pass unreachable, because the
+    # parser never got as far as parsing it. Same pattern as ratify:173.
+    args.gateway = _resolve_endpoint(args.gateway)
     question = " ".join(args.question)
 
     gw = os.environ.get("SWARPH_BRAIN_GATEWAY")

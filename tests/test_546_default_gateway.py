@@ -1,4 +1,4 @@
-"""Every default-gateway constant must agree, and none may be localhost.
+"""Every default gateway must agree, and none may be localhost.
 
 WHY THIS TEST EXISTS (2026-08-21): the mesh-gateway binds HOST=100.107.222.72 only.
 localhost has never been bound. Four separate constants defaulted to
@@ -17,44 +17,34 @@ bit:
 Fixing one and missing three is precisely how this shape survives, so the guard asserts
 AGREEMENT, not correctness of any single value.
 """
-import json
 import pytest
-import os
-import subprocess
-import sys
 
-# (module path, attribute name) for every default-gateway constant in this package.
-# ADD A ROW HERE when a new one appears — that is the whole point of this test.
-SITES = [
-    ("swarph_cli.commands.mesh", "_DEFAULT_GATEWAY"),
-    ("swarph_cli.commands.cell_selfcheck", "_RESOLVER_DEFAULT_GATEWAY"),
-    ("swarph_cli.commands.watchdog", "_DEFAULT_GATEWAY_URL"),
-    ("swarph_cli.commands.init", "_DEFAULT_GATEWAY"),
-]
-
-
+# >>> THE SITES ARE NO LONGER MODULE CONSTANTS. <<< This test used to getattr four
+# names — mesh._DEFAULT_GATEWAY, cell_selfcheck._RESOLVER_DEFAULT_GATEWAY,
+# watchdog._DEFAULT_GATEWAY_URL, init._DEFAULT_GATEWAY. All four were deleted by #578
+# (seat-A review of PR #318): each evaluated the environment at IMPORT and kept the
+# value afterwards, which is the one channel by which a test could inherit the
+# developer's shell. The defaults are now built per invocation, so the honest
+# observable is what a site WOULD USE — the argparse default, walked out of every
+# parser and subparser, plus cell_selfcheck's env-dict resolver.
+#
+# The agreement property survives the move intact, and so does its resolving power:
+# cell_selfcheck deliberately does NOT go through env_gateway() (it is stdlib-only by
+# policy), so poisoning the shared resolver moves the parser defaults and leaves that
+# one site telling the truth — they disagree, and this file reds. Verified by
+# re-running drop-on-meta-edge's C1 variant against the repointed test.
 def _read(env_value):
-    """Read every site in a CLEAN SUBPROCESS.
+    """Every effective gateway default, read in a CLEAN SUBPROCESS.
 
     NOT importlib.reload: reloading these modules re-runs module-level setup and
     explodes on partially-initialised globals (_RESOLVER). A subprocess is the only
-    way to observe the constant under a controlled environment without importing
-    the package twice into one interpreter.
+    way to observe them under a controlled environment without importing the package
+    twice into one interpreter. The walker lives next door in the #578 guard so there
+    is ONE implementation, not two that can drift.
     """
-    env = dict(os.environ)
-    env.pop("MESH_GATEWAY_URL", None)
-    if env_value is not None:
-        env["MESH_GATEWAY_URL"] = env_value
-    prog = (
-        "import importlib, json; "
-        "print(json.dumps({f'{m}.{a}': getattr(importlib.import_module(m), a) "
-        "for m, a in " + repr(SITES) + "}))"
-    )
-    out = subprocess.run(
-        [sys.executable, "-c", prog], env=env, capture_output=True, text=True, timeout=60
-    )
-    assert out.returncode == 0, f"probe failed: {out.stderr[-800:]}"
-    return json.loads(out.stdout)
+    from test_578_no_machine_specific_host_defaults import effective_gateway_defaults
+
+    return effective_gateway_defaults(env_value)
 
 
 def test_no_default_gateway_is_localhost():
