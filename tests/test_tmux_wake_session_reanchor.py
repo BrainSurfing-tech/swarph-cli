@@ -18,6 +18,7 @@ the session is NEWER than the last injection, and only then.
 
 from __future__ import annotations
 
+import re
 import time
 
 import swarph_cli.commands.mesh as mesh
@@ -144,3 +145,47 @@ def test_fresh_path_anchors_the_injection_timestamp(monkeypatch):
     led = state.ledger("tmux:cursor-lin")
     assert led["wake_outstanding"] is True
     assert led["last_wake_injected_at"] > now - 5
+
+
+def test_standing_wake_delivery_report_is_logged(monkeypatch, capsys):
+    """The silent-True branch was the ONLY delivery report with zero log
+    lines — a swallowed wake left no trace (cursor-win, 2026-08-26, a
+    40-minute investigation that one log read would have collapsed). The
+    report now names itself and the standing wake's age."""
+    now = time.time()
+    calls = _rig(monkeypatch, session_created=now - 3600)
+    state = _owed_state(injected_at=now - 60)
+    sink = mesh.TmuxSink("cursor-lin")
+
+    assert sink.deliver(state, [], 29101) is True
+    assert calls["wake"] == 0
+    out = capsys.readouterr().out
+    assert "STANDING wake" in out
+    assert "no keystroke this poll" in out
+    assert re.search(r"injected \d+s ago", out), out
+
+
+def test_standing_wake_without_anchor_says_so(monkeypatch, capsys):
+    """Unknown session age + a pre-anchor ledger: the standing report must
+    not print a nonsense epoch-sized age — it names the missing anchor."""
+    _rig(monkeypatch, session_created=None)
+    state = _owed_state()  # no last_wake_injected_at key at all
+    sink = mesh.TmuxSink("cursor-lin")
+
+    assert sink.deliver(state, [], 29101) is True
+    out = capsys.readouterr().out
+    assert "STANDING wake" in out
+    assert "predates the ledger anchor" in out
+
+
+def test_reinject_path_does_not_claim_a_standing_wake(monkeypatch, capsys):
+    """A re-injection IS fresh evidence — it must not wear the standing-wake
+    wording, or the log line loses its meaning."""
+    now = time.time()
+    calls = _rig(monkeypatch, session_created=now - 60)
+    state = _owed_state(injected_at=now - 3600)
+    sink = mesh.TmuxSink("cursor-lin")
+
+    assert sink.deliver(state, [], 29101) is True
+    assert calls["wake"] == 1
+    assert "STANDING wake" not in capsys.readouterr().out

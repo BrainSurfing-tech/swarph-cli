@@ -1252,7 +1252,19 @@ class TmuxSink(Sink):
                             return None  # human adopted mid-settle: defer
                         return False     # unreadable: loud failure
                     # Wake submitted into THIS session; the cell simply hasn't
-                    # drained yet. Re-injecting would only stack.
+                    # drained yet. Re-injecting would only stack. This return
+                    # is the ONLY delivery report backed by no fresh keystroke
+                    # — every other outcome (delivered, failed, deferred)
+                    # announces itself, and this branch's 57 lines had zero
+                    # print() calls. Silence correlated with the lie (#611,
+                    # cursor-win's swallowed wake): say what we are claiming
+                    # and how old the evidence is.
+                    if injected_at:
+                        stood = f"injected {time.time() - injected_at:.0f}s ago"
+                    else:
+                        stood = "injection predates the ledger anchor"
+                    print(f"[monitor] {self.name}: delivery reported on a STANDING wake "
+                          f"({stood}, no keystroke this poll)")
                     return True
                 if composer == "busy":
                     # Human text shares the composer (possibly merged into our
