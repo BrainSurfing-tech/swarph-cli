@@ -189,6 +189,16 @@ Recovery escalation (beta #1019 two-stage):
 
 Flags:
   --check              one-shot check (cron-callable; exits with status code)
+
+Exit status (--check):
+  0  healthy, or verified nothing-to-do
+  1  A1 wake sent
+  2  A2 respawn fired (or --no-respawn dry-run)
+  3  input error (cursor/activity unreadable — check could not run)
+  4  recovery action attempted and failed
+  5  A1.5 model-swap fired
+  6  A2 circuit open (respawn churn refused — operator attention required)
+  7  couldn't-verify (#401): state unknown, no action taken — NOT success
   --cell ROLE          cell-yaml role; defaults to $SWARPH_SELF, then $SWARPH_CELL, then
                        'unidentified-cell' (never a real peer's name)
   --cursor PATH        cursor JSON path; default $TMPDIR/<role>-cursor.json
@@ -1457,7 +1467,12 @@ def _run_local_check(args: argparse.Namespace) -> int:
     if unread is None:
         diag["decision"] = "noop_unread_unknown"
         _log_event(log_path, "noop", diag, verbose)
-        return 0
+        # rc 7 = couldn't-verify (#401): distinct from healthy (0), action
+        # taken (1/2/5), input error (3), action failed (4), circuit open
+        # (6). Declining to act on unknown state is right; reporting SUCCESS
+        # on the one channel a cron line reads is not — an exit-0 here hid a
+        # fleet-wide watchdog-coverage gap for 13 days.
+        return 7
 
     if unread == 0:
         diag["decision"] = "noop_no_unread"
