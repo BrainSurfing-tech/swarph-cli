@@ -590,3 +590,43 @@ def test_main_dispatches_onboard_verb(monkeypatch):
     rc = main_mod.main(["onboard", "test-peer", "--gateway", "http://x"])
     assert rc == 0
     assert captured["argv"] == ["test-peer", "--gateway", "http://x"]
+
+
+# ── onboard --check exit-code honesty (#401's sibling, #319's reopened finding) ──
+# Measured by science-claude on installed 0.49.1: a ValueError row, the prose
+# "every rung below is unknowable", and EXIT 0. The checklist computed the
+# verdict and then contradicted it in the only channel a supervisor reads.
+
+def _check_rc(monkeypatch, rows):
+    monkeypatch.setattr(onboard, "_probe_onboarding", lambda peer, gw: rows)
+    return onboard._print_checklist("crespo3", "http://gw:8788")
+
+
+def test_check_all_ok_exits_0(monkeypatch, capsys):
+    rc = _check_rc(monkeypatch, [("ok", "gateway reachable", "200")])
+    assert rc == 0
+    assert "fully onboarded" in capsys.readouterr().out
+
+
+def test_check_verified_gaps_exit_1(monkeypatch, capsys):
+    rc = _check_rc(monkeypatch, [("ok", "gateway reachable", "200"),
+                                 ("MISSING", "peer registered", "no row")])
+    assert rc == 1
+    assert "gap" in capsys.readouterr().out
+
+
+def test_check_unknown_exits_7_not_0(monkeypatch, capsys):
+    """The measured defect: 'unknowable' in prose must be rc 7 (the
+    couldn't-verify code the fleet learned from #401), never 0."""
+    rc = _check_rc(monkeypatch, [("?", "gateway reachable",
+                                  "ValueError — every rung below is unknowable")])
+    assert rc == 7
+    assert "UNDETERMINED" in capsys.readouterr().out
+
+
+def test_check_unknown_dominates_gaps(monkeypatch):
+    """Both present -> 7: rc 1 promises the gap list is COMPLETE, and an
+    unknown rung breaks that promise."""
+    rc = _check_rc(monkeypatch, [("MISSING", "peer registered", "no row"),
+                                 ("?", "gateway reachable", "ValueError")])
+    assert rc == 7
