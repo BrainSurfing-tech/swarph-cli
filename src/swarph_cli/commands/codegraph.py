@@ -34,6 +34,8 @@ import re
 import sqlite3
 import sys
 
+from swarph_cli.commands.codegraph_hook import _match_quality
+
 DEFAULT_INDEX = os.path.expanduser("~/.swarph/codegraph/index.db")
 # NOTE: named DEFAULT_CALLER_CELL, not "*_CALLER" — this is an A8 caller-CELL
 # identity (sensitivity-gate scoping), not a SwarphCall `role.subrole.specific`
@@ -231,6 +233,25 @@ def format_human(rows, term) -> str:
             first = doc.splitlines()[0][:100]
             if first:
                 lines.append(f"     {first}")
+    # >>> #312: THE NON-EMPTY ANSWER GETS THE SAME HONESTY THE EMPTY ONE DID. <<<
+    # The index's query sanitiser OR-joins tokens, so `command_beta_executor`
+    # matches anything containing "command" — and this verb served those rows
+    # as "Structural matches (8)", plausible structure from the wrong repo,
+    # caller counts making it read authoritative. The HOOK has labelled that
+    # since 2026-08-01; the label lives in _match_quality one directory over,
+    # and is imported, not reimplemented — a second copy is how the verb ended
+    # up without the check in the first place. dict(r) normalises the two row
+    # producers (local dicts, relayed seven-key dicts, historical sqlite3.Row)
+    # without touching _match_quality to suit this caller.
+    key, hits = _match_quality(term, [dict(r) for r in rows])
+    if key and hits == 0:
+        repos = sorted({str(r["repo"]) for r in rows})
+        lines.append(
+            f">>> FUZZY MATCH — NOT AN ANSWER TO YOUR QUERY. No returned symbol's "
+            f"name contains {key!r}. These matched a COMMON TOKEN only"
+            + (f", and all are from: {', '.join(repos)}" if repos else "")
+            + f". Treat them as unrelated: the symbol you asked for is NOT in "
+            f"what this index can see. <<<")
     return "\n".join(lines)
 
 
