@@ -199,6 +199,10 @@ def gate(monkeypatch):
                         lambda t: calls.__setitem__("enter", calls["enter"] + 1) or True)
     monkeypatch.setattr(mesh, "_wake_still_pending", lambda t: box["pending"])
     monkeypatch.setattr(mesh, "_composer_state", lambda t: box["composer"])
+    # #619 strict: pin the run-state seam — unpatched it reads the LIVE
+    # pane (mid-turn whenever the suite runs on a real cell), and the
+    # strict guard defers on anything but False.
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: False)
     import swarph_cli.commands.watchdog as wd
     monkeypatch.setattr(wd, "_gateway_unread_count",
                         lambda g, p, t: box["unread"])

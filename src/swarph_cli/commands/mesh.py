@@ -1245,7 +1245,7 @@ class TmuxSink(Sink):
                     # instead of submitting it, and the queue is input-gated
                     # — the nudge would convert a submittable draft into a
                     # wake that never fires. Defer to the first idle poll.
-                    if _agent_running(self.target):
+                    if _agent_running(self.target) is not False:
                         return None
                     _tmux_enter(self.target)  # one verified nudge, no new text
                     return True
@@ -1266,7 +1266,7 @@ class TmuxSink(Sink):
                     if created is not None and created > injected_at:
                         # #619: never re-inject mid-turn — the queue is
                         # input-gated; defer to the first idle poll.
-                        if _agent_running(self.target):
+                        if _agent_running(self.target) is not False:
                             return None
                         ok = _tmux_wake(self.target)
                         if ok:
@@ -1295,7 +1295,7 @@ class TmuxSink(Sink):
                         # #619: a stale re-inject into a RUNNING TUI lands in
                         # the input-gated queue — lost again, just later.
                         # Defer; the first idle poll re-injects for real.
-                        if _agent_running(self.target):
+                        if _agent_running(self.target) is not False:
                             return None
                         ok = _tmux_wake(self.target)
                         if ok:
@@ -1337,7 +1337,7 @@ class TmuxSink(Sink):
         if composer == "wake":
             # #619: nudging while the agent runs queues the text instead of
             # submitting it — and the queue is input-gated. Defer to idle.
-            if _agent_running(self.target):
+            if _agent_running(self.target) is not False:
                 return None
             if _tmux_enter(self.target):
                 led["wake_outstanding"] = True
@@ -1358,7 +1358,18 @@ class TmuxSink(Sink):
         # the wake stays owed, no failure is counted, and the first poll
         # after the turn ends injects into an IDLE composer, where Enter
         # submits immediately. Cost: <= one poll interval of delay.
-        if _agent_running(self.target):
+        #
+        # `is not False` (lab-ovh, #336 review): None — pane momentarily
+        # UNREADABLE between two captures — defers too. A truthy check would
+        # let None render as "not running", which is the day's shape one
+        # more time: absent rendering as good (the standing flag, the
+        # silent-True, checks=0 as CLEAN). An unchecked pane is not an idle
+        # pane. The residual this accepts: one poll interval of delay on a
+        # transient hiccup. The residual it refuses: a queued wake that
+        # never fires. (The window is small because _composer_state already
+        # captured the pane moments ago, and _tmux_wake re-verifies before
+        # typing — both stay on the record as the reason the flip is cheap.)
+        if _agent_running(self.target) is not False:
             return None
         # Module-global lookup on purpose: the sidecar regression suites patch
         # `mesh._tmux_wake`, and a `from`-import here would silently bypass them.

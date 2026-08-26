@@ -168,6 +168,50 @@ def test_agent_running_unreadable_is_none(monkeypatch):
     assert mesh._agent_running("cursor-lin") is None
 
 
+# ── the strict flip (lab-ovh, #336 review): None is not "not running" ────
+
+def test_fresh_inject_defers_on_unknown_runstate(monkeypatch):
+    """An unchecked pane is not an idle pane: a transient capture hiccup
+    between the composer read and the run-state read must DEFER (one poll
+    of delay), never fall through to a mid-turn inject that queues and
+    never fires. Absent must not render as good."""
+    calls = _rig(monkeypatch, composer="clear", running=False)
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: None)
+    state = _StubState()
+    sink = mesh.TmuxSink("cursor-lin")
+
+    assert sink.deliver(state, [{"id": 9}], 9) is None
+    assert calls["wake"] == 0
+    assert not state.ledger("tmux:cursor-lin").get("wake_outstanding")
+
+
+def test_stale_reinject_defers_on_unknown_runstate(monkeypatch):
+    now = time.time()
+    calls = _rig(monkeypatch, composer="clear", session_created=now - 7200,
+                 running=False)
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: None)
+    state = _owed_state(injected_at=now - mesh._WAKE_STALE_S - 60)
+    sink = mesh.TmuxSink("cursor-lin")
+
+    assert sink.deliver(state, [{"id": 9}], 9) is None
+    assert calls["wake"] == 0
+
+
+def test_unknown_runstate_still_never_clears_the_flag(monkeypatch):
+    """The asymmetry is deliberate: None DEFERS keystrokes (strict) but
+    never CLEARS the flag (only a positively-observed turn proves the cell
+    awake). Unknown is neither 'running' nor 'awake' — it is unknown."""
+    now = time.time()
+    _rig(monkeypatch, composer="clear", session_created=now - 7200,
+         running=False)
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: None)
+    state = _owed_state(injected_at=now - 60)  # fresh anchor
+    sink = mesh.TmuxSink("cursor-lin")
+
+    sink.deliver(state, [{"id": 9}], 9)
+    assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is True
+
+
 # ── #620: the flag must clear when the wake is OBSERVED to have fired ────
 
 def test_running_observation_clears_the_zombie_flag(monkeypatch):
