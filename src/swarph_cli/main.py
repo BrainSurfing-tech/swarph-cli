@@ -79,6 +79,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "import": "swarph_cli.commands.import_session.run_import",
     "chat": "swarph_cli.commands.chat.run_chat",
     "onboard": "swarph_cli.commands.onboard.run_onboard",
+    "version": "swarph_cli.commands.version.run_version",
     "ratify": "swarph_cli.commands.ratify.run_ratify",
     "daemon": "swarph_cli.commands.daemon.run_daemon",
     "codex-waker": "swarph_cli.commands.codex_waker.run_codex_waker",
