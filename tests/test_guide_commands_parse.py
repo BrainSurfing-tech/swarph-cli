@@ -54,6 +54,20 @@ PLACEHOLDER = {
 # covered. None exist today.
 MIN_TOKENS = 3
 
+# Verbs that MUTATE LOCAL STATE. The unreachable-gateway guard below stops a command from
+# reaching the mesh; it does NOTHING for a verb that never makes a network call. Measured
+# the hard way: an earlier draft of this test ran the guide's own
+# `install-wake-hook --cell <you>` line and WROTE a real .claude/settings.json into the
+# working tree, which was then swept into a commit by `git add -A`. A test that installs a
+# wake hook as a side effect of checking documentation is a worse defect than the one it
+# was written to catch.
+#
+# These are documented-but-unexecuted here. That is a real coverage hole, named rather than
+# hidden: a broken flag on one of these verbs would not turn this test red.
+LOCAL_MUTATORS = ("install-wake-hook", "install-hook", "hooks ", "monitor start",
+                  "channel create", "channel post", "channel join", "channel leave",
+                  "spawn", "register")
+
 
 def _extract() -> list[str]:
     text = GUIDE.read_text(encoding="utf-8")
@@ -79,6 +93,8 @@ def _extract() -> list[str]:
             continue
         if "$" in c:                        # shell expansion, not a literal command
             continue
+        if any(m in c for m in LOCAL_MUTATORS) and "--dry-run" not in c:
+            continue
         seen.add(c)
         out.append(c)
     return out
@@ -102,6 +118,10 @@ def test_extraction_premise_still_holds():
     joined = " ".join(COMMANDS)
     for verb in ("mesh send", "mesh inbox", "board cards", "channel"):
         assert verb in joined, f"{verb!r} vanished from extraction -- guide or regex changed"
+    assert not any(
+        m in c for c in COMMANDS for m in LOCAL_MUTATORS if "--dry-run" not in c), (
+        "a local-mutating verb slipped into the executed set -- running it would modify "
+        "this checkout; see LOCAL_MUTATORS")
     assert "cards ask" in joined, (
         "`board cards ask` is one of the two defects this test was written for; if it stops "
         "being extracted the test passes vacuously on its own founding specimen")
@@ -109,7 +129,7 @@ def test_extraction_premise_still_holds():
 
 @pytest.mark.skipif(SWARPH is None, reason="swarph not on PATH")
 @pytest.mark.parametrize("cmd", COMMANDS, ids=lambda c: c[:52])
-def test_documented_command_parses(cmd: str) -> None:
+def test_documented_command_parses(cmd: str, tmp_path) -> None:
     # shlex, not .split() -- `board cards ask <id> <peer> "<what is owed>"` carries a quoted
     # argument, and a naive split would either mangle it or force skipping the command. The
     # first draft skipped every quoted line, which silently excluded `cards ask` -- one of the
@@ -123,8 +143,13 @@ def test_documented_command_parses(cmd: str) -> None:
     env = {k: v for k, v in os.environ.items()
            if k not in ("MESH_GATEWAY_URL", "SWARPH_BRAIN_GATEWAY")}
     def _run(extra: list[str]):
+        # cwd=tmp_path, ALWAYS. Some swarph verbs touch the working directory (at least one
+        # creates ./.claude/ under a scrubbed environment), and a documentation test that
+        # writes into the checkout is a worse defect than the one it catches -- an earlier
+        # draft did exactly that and the file was then swept into a commit by `git add -A`.
+        # Isolating cwd fixes the CLASS rather than the one verb that was identified.
         r = subprocess.run([SWARPH, *argv, *extra], capture_output=True,
-                           text=True, timeout=60, env=env)
+                           text=True, timeout=60, env=env, cwd=tmp_path)
         return r, (r.stderr + r.stdout).lower()
 
     # Prefer an unreachable gateway so nothing can reach the mesh. Not every subcommand
