@@ -2143,6 +2143,22 @@ def _monitor_deliver(state: MonitorState) -> None:
             continue
         led = state.ledger(sink.name)
         if sink.is_push:
+            # #620: observe the drain WHEN IT HAPPENS, not on the next owed
+            # delivery. The in-deliver() re-arm only runs when a new DM
+            # exists — and by then the inbox has re-filled, so unread == 0
+            # is never seen and the fired wake's flag stands as a zombie
+            # (measured live 2026-08-26 10:18-10:26Z: wake fired 10:18,
+            # inbox drained 10:18:30, DM 29193 arrived 10:22 to unread >= 1
+            # -> standing-wake path -> delivered with ZERO keystrokes).
+            # Per-poll, the drain is caught within one interval and the next
+            # DM earns a wake of its own. unread == None (gateway error)
+            # reads as NOT-drained — never re-arm on an unreadable signal.
+            if led.get("wake_outstanding"):
+                from swarph_cli.commands.watchdog import _gateway_unread_count
+                if _gateway_unread_count(state.gateway, state.self_name,
+                                         state.token) == 0:
+                    led["wake_outstanding"] = False
+                    changed = True
             delivered = int(led["last_delivered_id"])
             if delivered >= observed:
                 continue          # this sink owes nothing

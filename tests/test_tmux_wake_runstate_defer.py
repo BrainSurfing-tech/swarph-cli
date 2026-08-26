@@ -231,3 +231,78 @@ def test_full_zombie_cycle_fires_the_next_wake(monkeypatch):
     assert sink.deliver(state, [{"id": 9}], 9) is True   # idle: real injection
     assert calls["wake"] == 1
     assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is True
+
+
+# ── #620 (per-poll re-arm): the drain must be observed WHEN it happens ────
+# The in-deliver() re-arm only runs when a new DM is owed — and by then the
+# inbox has re-filled, so unread == 0 is never seen and the fired wake's
+# flag stands as a zombie (the measured 10:18-10:26Z silence). The re-arm
+# now runs per poll, before the owes-nothing skip.
+
+
+class _MonitorStubState(_StubState):
+    def __init__(self, observed_id, delivered_id):
+        super().__init__()
+        self.sinks = [mesh.TmuxSink("cursor-lin")]
+        self.ledgers = self._ledgers
+        self.observed = {"last_msg_id": observed_id}
+        self.min_interval_s = 60
+        self.deliveries: dict = {}
+        self.ledgers_path = "/dev/null"
+        self.log_prefix = "[test]"
+        led = self.ledger("tmux:cursor-lin")
+        led["last_delivered_id"] = delivered_id
+        led["last_delivery_at"] = time.time() - 3600
+        led["wake_outstanding"] = True
+
+
+def _poll(monkeypatch, state, unread):
+    monkeypatch.setattr(watchdog, "_gateway_unread_count",
+                        lambda *a, **k: unread)
+    writes = []
+    monkeypatch.setattr(mesh, "_write_ledgers_atomic",
+                        lambda p, d: writes.append(dict(d)))
+    mesh._monitor_deliver(state)
+    return writes
+
+
+def test_drain_observed_between_deliveries_clears_the_flag(monkeypatch):
+    """THE measured hole: wake fired and the inbox drained BETWEEN owed
+    deliveries (delivered == observed — the sink owes nothing, so deliver()
+    never ran and never saw unread == 0). The per-poll re-arm catches it."""
+    state = _MonitorStubState(observed_id=9, delivered_id=9)  # owes nothing
+    writes = _poll(monkeypatch, state, unread=0)
+
+    assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is False
+    assert writes  # the cleared flag is persisted, not just in-memory
+
+
+def test_undrained_poll_keeps_the_flag(monkeypatch):
+    """The #312 contract survives: a wake whose inbox never drained still
+    stands — one wake covers everything until the cell actually reads."""
+    state = _MonitorStubState(observed_id=9, delivered_id=9)
+    writes = _poll(monkeypatch, state, unread=3)
+
+    assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is True
+    assert not writes
+
+
+def test_unreadable_drain_signal_never_rearms_per_poll(monkeypatch):
+    state = _MonitorStubState(observed_id=9, delivered_id=9)
+    _poll(monkeypatch, state, unread=None)
+
+    assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is True
+
+
+def test_next_dm_after_the_drain_earns_a_fresh_wake(monkeypatch):
+    """The full measured sequence, repaired: wake fires -> drain observed
+    per-poll (flag cleared) -> new DM arrives -> fresh path injects."""
+    now = time.time()
+    calls = _rig(monkeypatch, composer="clear", session_created=now - 7200,
+                 running=False)
+    state = _MonitorStubState(observed_id=9, delivered_id=9)
+    _poll(monkeypatch, state, unread=0)  # the drain is seen, flag clears
+
+    sink = state.sinks[0]
+    assert sink.deliver(state, [{"id": 10}], 10) is True
+    assert calls["wake"] == 1  # a REAL wake for the new DM
