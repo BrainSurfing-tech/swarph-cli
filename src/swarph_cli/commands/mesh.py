@@ -1230,8 +1230,29 @@ class TmuxSink(Sink):
                     _tmux_enter(self.target)  # one verified nudge, no new text
                     return True
                 if composer == "clear":
-                    # Wake submitted; the cell simply hasn't drained yet. The
-                    # wake did its job — re-injecting would only stack.
+                    # #611: a clear composer proves the wake SUBMITTED only if
+                    # the pane it was injected into is still the pane we are
+                    # reading. The ledger flag survives a respawn; the wake
+                    # text does not. Compare the session's birth against the
+                    # last ACTUAL INJECTION (last_wake_injected_at — NOT
+                    # last_delivery_at, which the silent-True path re-anchors
+                    # every poll and which would mask the respawn on the very
+                    # next iteration). A session newer than the last injection
+                    # means the standing wake is unverifiable: re-inject once,
+                    # still politeness-gated, and re-anchor. Unknown session
+                    # age keeps the old behaviour — no blind keystrokes.
+                    created = _tmux_session_created(self.target)
+                    injected_at = float(led.get("last_wake_injected_at", 0))
+                    if created is not None and created > injected_at:
+                        ok = _tmux_wake(self.target)
+                        if ok:
+                            led["last_wake_injected_at"] = time.time()
+                            return True
+                        if ok is None:
+                            return None  # human adopted mid-settle: defer
+                        return False     # unreadable: loud failure
+                    # Wake submitted into THIS session; the cell simply hasn't
+                    # drained yet. Re-injecting would only stack.
                     return True
                 if composer == "busy":
                     # Human text shares the composer (possibly merged into our
@@ -1251,6 +1272,10 @@ class TmuxSink(Sink):
         if composer == "wake":
             if _tmux_enter(self.target):
                 led["wake_outstanding"] = True
+                # The wake text was OBSERVED already sitting in this pane, so
+                # the injection anchor stays valid for this session — nudging
+                # it does not re-anchor (the text predates us).
+                led.setdefault("last_wake_injected_at", time.time())
                 return True
             return False
         if composer == "busy":
@@ -1268,6 +1293,7 @@ class TmuxSink(Sink):
             return None
         if ok:
             led["wake_outstanding"] = True
+            led["last_wake_injected_at"] = time.time()
             return True
         # False splits by what the pane actually holds: text observably STUCK
         # in the composer -> mark outstanding so the next poll nudges instead
@@ -1728,6 +1754,36 @@ def _composer_state(target: str) -> Optional[str]:
     if content.replace(_WAKE_PROMPT, "").strip() == "":
         return "wake"
     return "busy"
+
+
+def _tmux_session_created(target: str) -> Optional[float]:
+    """Epoch seconds the target's tmux SESSION was created, or None.
+
+    The re-anchor anchor (#611): `wake_outstanding` persists in the ledger,
+    but the wake it describes lives in a PANE. A respawned session inherits
+    the flag and presents a clear composer that reads exactly like "wake
+    submitted, awaiting drain" — so the flag must be re-anchored to the
+    session it was injected into before it can suppress a re-injection.
+    None = unknown, and unknown keeps the current behaviour (no re-inject):
+    the composer was observed clear, so the only risk of re-injecting blind
+    here is a stacked wake, but a tmux that cannot answer display-message
+    while answering capture-pane is a state we decline to act on, not one
+    we improvise around.
+    """
+    try:
+        r = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", target, "#{session_created}"],
+            capture_output=True, timeout=5,
+            text=True, encoding="utf-8", errors="replace",
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return float((r.stdout or "").strip())
+    except ValueError:
+        return None
 
 
 def _tmux_enter(target: str) -> bool:
