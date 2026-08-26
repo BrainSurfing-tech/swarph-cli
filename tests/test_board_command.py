@@ -155,3 +155,60 @@ def test_edit_dispatch_surfaces_the_gateway_refusal(monkeypatch, capsys):
                                           "with an execute grant, ..."}))
     assert rc == 1
     assert "execute grant" in capsys.readouterr().err
+
+
+# ── #590: obligations list — the read half of the ledger ────────────────────
+
+def test_obligations_list_url_filters():
+    u = board._obligations_list_url("http://gw:8788", status="open",
+                                    holder="ws-lc", card_id=307, overdue=True)
+    assert u.startswith("http://gw:8788/board/obligations?")
+    for part in ("status=open", "holder=ws-lc", "card_id=307", "overdue=true"):
+        assert part in u
+
+
+def test_obligations_list_url_bare_when_unfiltered():
+    assert board._obligations_list_url("http://gw:8788") == \
+        "http://gw:8788/board/obligations"
+    assert "overdue" not in board._obligations_list_url(
+        "http://gw:8788", overdue=False)
+
+
+def test_format_obligations_marks_overdue_unclosable_and_close_outcome():
+    out = board._format_obligations({"as_of": "2026-08-26T07:00:00Z", "obligations": [
+        {"id": 25, "card_id": 532, "holder": "lab-ovh", "status": "open",
+         "kind": "action", "overdue": True, "accept_state": "missing",
+         "unclosable_reason": None},
+        {"id": 26, "card_id": 307, "holder": "ghost", "status": "open",
+         "kind": "action", "overdue": False, "accept_state": "fail-branch-detected",
+         "unclosable_reason": "holder-not-a-known-peer"},
+        {"id": 27, "card_id": 510, "holder": "ws-lc", "status": "closed",
+         "kind": "action", "overdue": False, "accept_state": "fail-branch-detected",
+         "unclosable_reason": None, "close_outcome": "pass"},
+    ]})
+    assert "#25" in out and "OVERDUE" in out and "accept:missing" in out
+    assert "UNCLOSABLE:holder-not-a-known-peer" in out
+    assert "#27" in out and "outcome:pass" in out
+    assert "as_of 2026-08-26T07:00:00Z" in out
+
+
+def test_format_obligations_empty_state_names_the_causes():
+    out = board._format_obligations({"obligations": [], "as_of": "2026-08-26T07:00:00Z"})
+    assert "none exist" in out and "filter" in out and "read" in out
+    assert "2026-08-26T07:00:00Z" in out, "an empty readout without its instant "
+    "claims more than it measured"
+
+
+def test_obligations_list_dispatch(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(board, "_resolve_self_name", lambda *_a, **_k: "cursor-lin")
+    monkeypatch.setattr(board, "_resolve_token", lambda *_a, **_k: "tok")
+    def fake_get(url, tok, **k):
+        sent["url"] = url
+        return 200, {"obligations": [], "as_of": "2026-08-26T07:00:00Z"}
+    monkeypatch.setattr(board, "_http_get_json", fake_get)
+    rc = board.run_board(["obligations", "list", "--status", "open",
+                          "--holder", "ws-lc", "--overdue"])
+    assert rc == 0
+    assert "status=open" in sent["url"] and "holder=ws-lc" in sent["url"]
+    assert "overdue=true" in sent["url"]
