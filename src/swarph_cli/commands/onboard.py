@@ -108,7 +108,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--check",
         action="store_true",
         help="PROBE ONLY. Print where this peer actually stands on the onboarding "
-             "ladder and what the next action is for each gap. Changes nothing.",
+             "ladder and what the next action is for each gap. Changes nothing. "
+             "Exit: 0 = fully onboarded, 1 = verified gaps (complete list), "
+             "7 = couldn't-verify (a rung is unknowable; the gap list may be "
+             "incomplete — watchdog's #401 code for the same shape).",
     )
     p.add_argument(
         "--gateway",
@@ -755,7 +758,16 @@ def _print_checklist(peer: str, gateway: str) -> int:
                    f"-- undetermined is NOT ok; it means the probe could not see.")
     if not gaps and not unknown:
         print_safe("  fully onboarded.")
-    return 0
+        return 0
+    # Exit-code honesty (#401's sibling, found by science-claude on installed
+    # 0.49.1): the prose already says "undetermined is NOT ok" — the exit code
+    # must not contradict it. 1 = verified gaps, the list is COMPLETE and
+    # actionable. 7 = couldn't-verify (watchdog's code for the same shape): an
+    # unknown rung means the gap list may be incomplete, so 7 dominates 1 —
+    # a supervisor reading 1 must be able to trust that the list is whole.
+    if unknown:
+        return 7
+    return 1
 
 
 def run_onboard(argv: list[str]) -> int:
