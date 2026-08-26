@@ -82,6 +82,49 @@ def _card_add_payload(actor, project_id, title, *, body=None, ai2=False, priorit
     return p
 
 
+def _obligations_list_url(gateway: str, *, status=None, holder=None,
+                          card_id=None, overdue=False) -> str:
+    q = {k: v for k, v in (("status", status), ("holder", holder),
+                           ("card_id", card_id)) if v is not None}
+    if overdue:
+        q["overdue"] = "true"
+    base = f"{gateway.rstrip('/')}/board/obligations"
+    return f"{base}?{urllib.parse.urlencode(q)}" if q else base
+
+
+def _format_obligations(data: dict) -> str:
+    """#590's readout. The empty state must say WHY it might be empty — on the
+    endpoint whose purpose is auditable absence, a bare "(none)" cannot be
+    distinguished from a filter that named nothing or a grant that hid rows.
+    `as_of` always prints: a relative readout without its instant claims more
+    than it measured (#145).
+    """
+    rows = data.get("obligations", [])
+    as_of = data.get("as_of", "?")
+    if not rows:
+        return (f"(no obligations visible — none exist, none match the filter, "
+                f"or none in projects you can read; as_of {as_of})")
+    lines = []
+    for o in rows:
+        oid = _s(o.get("id")); card = _s(o.get("card_id"))
+        holder = _s(o.get("holder")); status = _s(o.get("status"))
+        marks = []
+        if o.get("overdue"):
+            marks.append("OVERDUE")
+        if o.get("unclosable_reason"):
+            marks.append(f"UNCLOSABLE:{_s(o['unclosable_reason'])}")
+        state = _s(o.get("accept_state"))
+        marks.append(f"accept:{state}" if state else "accept:missing")
+        if o.get("status") != "open":
+            # a NULL outcome on a closed row is a pre-#562 legacy close — name
+            # the absence rather than print a blank that reads as recorded
+            marks.append(f"outcome:{_s(o.get('close_outcome')) or 'none-recorded'}")
+        lines.append(f"  #{oid} card={card} holder={holder} status={status} "
+                     f"kind={_s(o.get('kind'))}  {' '.join(marks)}")
+    lines.append(f"({len(rows)} obligation(s), as_of {as_of})")
+    return "\n".join(lines)
+
+
 def _card_edit_payload(actor, title, body) -> dict:
     """#191: the edit patch — title and/or body, the two fields that made a
     card's text write-once until the gateway grew them (BoardCardPatch).
@@ -425,6 +468,17 @@ def _build_parser() -> argparse.ArgumentParser:
                          "refused: whitespace evidence is the vibe-close this "
                          "endpoint exists to kill")
     oc.add_argument("--json", action="store_true"); _add_common(oc)
+
+    ol = obl.add_parser(
+        "list", help="list obligations — the READ half (#590): an obligation "
+                     "that can be minted and closed but never read makes the "
+                     "holder the only auditor")
+    ol.add_argument("--status", choices=["open", "closed", "fallback_fired"])
+    ol.add_argument("--holder", help="only obligations this peer owes")
+    ol.add_argument("--card", type=int, dest="card_id", help="only this card")
+    ol.add_argument("--overdue", action="store_true",
+                    help="only open obligations past their timeout")
+    ol.add_argument("--json", action="store_true"); _add_common(ol)
     return p
 
 
@@ -501,6 +555,12 @@ def run_board(argv: list[str]) -> int:
                       f"{_s(d.get('closed_by', self_name))} — outcome: "
                       f"{_s(d.get('close_outcome', args.outcome))}")
             return 0
+        if args.command == "list":
+            st, d = _http_get_json(
+                _obligations_list_url(gw, status=args.status, holder=args.holder,
+                                      card_id=args.card_id, overdue=args.overdue),
+                token)
+            return _out(st, d, _format_obligations, aj)
 
     if args.group == "cards":
         if args.command == "list":
