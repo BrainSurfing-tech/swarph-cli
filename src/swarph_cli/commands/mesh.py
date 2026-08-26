@@ -1227,6 +1227,12 @@ class TmuxSink(Sink):
             else:
                 composer = _composer_state(self.target)
                 if composer == "wake":
+                    # #619: an Enter into a RUNNING TUI queues the text
+                    # instead of submitting it, and the queue is input-gated
+                    # — the nudge would convert a submittable draft into a
+                    # wake that never fires. Defer to the first idle poll.
+                    if _agent_running(self.target):
+                        return None
                     _tmux_enter(self.target)  # one verified nudge, no new text
                     return True
                 if composer == "clear":
@@ -1244,6 +1250,10 @@ class TmuxSink(Sink):
                     created = _tmux_session_created(self.target)
                     injected_at = float(led.get("last_wake_injected_at", 0))
                     if created is not None and created > injected_at:
+                        # #619: never re-inject mid-turn — the queue is
+                        # input-gated; defer to the first idle poll.
+                        if _agent_running(self.target):
+                            return None
                         ok = _tmux_wake(self.target)
                         if ok:
                             led["last_wake_injected_at"] = time.time()
@@ -1268,6 +1278,11 @@ class TmuxSink(Sink):
                     # keystroke this poll" immediately followed by a keystroke
                     # is the lie both PRs exist to stop.
                     if time.time() - injected_at > _WAKE_STALE_S:
+                        # #619: a stale re-inject into a RUNNING TUI lands in
+                        # the input-gated queue — lost again, just later.
+                        # Defer; the first idle poll re-injects for real.
+                        if _agent_running(self.target):
+                            return None
                         ok = _tmux_wake(self.target)
                         if ok:
                             led["last_wake_injected_at"] = time.time()
@@ -1306,6 +1321,10 @@ class TmuxSink(Sink):
         # would silently freeze the dead-sink alarm the ledger exists to ring.
         composer = _composer_state(self.target)
         if composer == "wake":
+            # #619: nudging while the agent runs queues the text instead of
+            # submitting it — and the queue is input-gated. Defer to idle.
+            if _agent_running(self.target):
+                return None
             if _tmux_enter(self.target):
                 led["wake_outstanding"] = True
                 # The wake text was OBSERVED already sitting in this pane, so
@@ -1318,6 +1337,15 @@ class TmuxSink(Sink):
             return None
         if composer != "clear":
             return False
+        # #619: never inject mid-turn. A wake into a RUNNING TUI lands in
+        # cursor's follow-up queue, which is input-gated (measured live
+        # 2026-08-26, twice: queued wakes fired only when the human next
+        # typed). On an unattended cell a queued wake never fires. Defer —
+        # the wake stays owed, no failure is counted, and the first poll
+        # after the turn ends injects into an IDLE composer, where Enter
+        # submits immediately. Cost: <= one poll interval of delay.
+        if _agent_running(self.target):
+            return None
         # Module-global lookup on purpose: the sidecar regression suites patch
         # `mesh._tmux_wake`, and a `from`-import here would silently bypass them.
         ok = _tmux_wake(self.target)
@@ -1756,6 +1784,33 @@ def _wake_still_pending(target: str) -> Optional[bool]:
 #: it can produce, and the failure direction there is a wake never sent —
 #: visible in the log, never a keystroke into someone's line.
 _CURSOR_COMPOSER_PLACEHOLDER = "Add a follow-up"
+
+#: cursor's composer row carries a right-aligned run-state hint while a turn
+#: runs ('ctrl+c to stop', measured live on cursor-lin 2026-08-24). Read on
+#: the COMPOSER LINE only: scrollback can quote the string (it has appeared
+#: in cursor-lin's own history), and a whole-pane search would read a
+#: running agent into an idle one forever.
+_CURSOR_RUN_HINT = "ctrl+c to stop"
+
+
+def _agent_running(target: str) -> Optional[bool]:
+    """True if the pane's composer row carries cursor's run-state hint.
+
+    The #619 deferral signal: a keystroke into a RUNNING TUI lands in the
+    follow-up queue, and the queue is input-gated (measured live 2026-08-26,
+    twice: queued wakes fired only when the human next typed — 10:00 and
+    10:09Z). On an unattended cell a queued wake never fires, so no wake
+    keystroke may be sent while this returns True. None = pane or composer
+    unreadable; callers treat unknown as NOT-running (the composer state was
+    already established by then — this guard only vets the timing).
+    """
+    lines = _capture_pane_lines(target)
+    if lines is None:
+        return None
+    composer = _composer_line(lines)
+    if composer is None:
+        return None
+    return _CURSOR_RUN_HINT in composer
 
 
 def _composer_state(target: str) -> Optional[str]:
