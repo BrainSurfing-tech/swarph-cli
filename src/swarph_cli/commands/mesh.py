@@ -1251,20 +1251,44 @@ class TmuxSink(Sink):
                         if ok is None:
                             return None  # human adopted mid-settle: defer
                         return False     # unreadable: loud failure
-                    # Wake submitted into THIS session; the cell simply hasn't
-                    # drained yet. Re-injecting would only stack. This return
+                    # #616: a wake that has not drained the inbox within
+                    # _WAKE_STALE_S of injection is LOST, not pending — the
+                    # follow-up it queued never fired (injected mid-turn and
+                    # raced a human's own line, or the TUI dropped it), and
+                    # the re-arm above (unread == 0) is unreachable for a
+                    # sleeping cell: this deliver() is only entered when a NEW
+                    # DM exists, which makes unread >= 1 by construction.
+                    # Measured live 2026-08-26: one wake lost at 08:49Z to a
+                    # mid-turn injection, every DM after it "delivered" in
+                    # silence. Trust a wake for one bound, then verify by
+                    # retry; re-anchoring on success rate-limits the retry to
+                    # one per bound, and the politeness gate still applies.
+                    # This check must precede the STANDING-wake log below
+                    # (lab-ovh's rebase ruling): a line that says "no
+                    # keystroke this poll" immediately followed by a keystroke
+                    # is the lie both PRs exist to stop.
+                    if time.time() - injected_at > _WAKE_STALE_S:
+                        ok = _tmux_wake(self.target)
+                        if ok:
+                            led["last_wake_injected_at"] = time.time()
+                            return True
+                        if ok is None:
+                            return None  # human adopted mid-settle: defer
+                        return False     # unreadable: loud failure
+                    # Wake submitted into THIS session and still inside its
+                    # trust window; re-injecting would only stack. This return
                     # is the ONLY delivery report backed by no fresh keystroke
                     # — every other outcome (delivered, failed, deferred)
                     # announces itself, and this branch's 57 lines had zero
                     # print() calls. Silence correlated with the lie (#611,
                     # cursor-win's swallowed wake): say what we are claiming
-                    # and how old the evidence is.
-                    if injected_at:
-                        stood = f"injected {time.time() - injected_at:.0f}s ago"
-                    else:
-                        stood = "injection predates the ledger anchor"
+                    # and how old the evidence is. (#616 makes #332's
+                    # "injection predates the ledger anchor" arm unreachable
+                    # on this path — an undated wake is always stale — so the
+                    # arm is removed rather than kept as readable-dead code.)
                     print(f"[monitor] {self.name}: delivery reported on a STANDING wake "
-                          f"({stood}, no keystroke this poll)")
+                          f"(injected {time.time() - injected_at:.0f}s ago, "
+                          f"no keystroke this poll)")
                     return True
                 if composer == "busy":
                     # Human text shares the composer (possibly merged into our
@@ -1650,6 +1674,11 @@ _WAKE_PROMPT = "check mesh"
 # forever — the wake stays owed instead.
 _WAKE_SETTLE_S = 0.6
 _WAKE_SUBMIT_ATTEMPTS = 4
+# How long a wake_outstanding flag is trusted without a drain (#616). Long
+# enough that a legitimately queued follow-up survives a marathon agent turn;
+# short enough that a lost wake costs minutes of silence, not hours. The
+# retry self-rate-limits: a successful re-injection re-anchors the clock.
+_WAKE_STALE_S = 600.0
 
 
 def _capture_pane_lines(target: str) -> Optional[list[str]]:
