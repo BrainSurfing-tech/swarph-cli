@@ -98,10 +98,13 @@ def test_same_session_clear_composer_does_not_stack(monkeypatch):
 
 def test_unknown_session_age_keeps_the_old_behaviour(monkeypatch):
     """session_created unreadable while capture-pane answered is a state we
-    decline to act on — no blind keystrokes, no spurious re-inject."""
+    decline to act on FOR THE RESPAWN CHECK — no blind keystrokes. (#616
+    narrows this: the TIME bound needs only the clock, so a stale wake still
+    re-injects with age unknown; this test pins a wake INSIDE the trust
+    window, where unknown age alone must not trigger anything.)"""
     now = time.time()
     calls = _rig(monkeypatch, session_created=None)
-    state = _owed_state(injected_at=now - 3600)
+    state = _owed_state(injected_at=now - 60)
     sink = mesh.TmuxSink("cursor-lin")
 
     assert sink.deliver(state, [], 29101) is True
