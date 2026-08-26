@@ -46,6 +46,9 @@ def _rig(monkeypatch, *, composer="clear", unread=3, session_created=None,
     calls = {"wake": 0, "enter": 0}
     monkeypatch.setattr(mesh, "_composer_state", lambda t: composer)
     monkeypatch.setattr(mesh, "_tmux_session_created", lambda t: session_created)
+    # #619: pin the run-state seam too — unpatched it reads the LIVE pane,
+    # which is mid-turn (running) whenever the suite runs on a real cell.
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: False)
     monkeypatch.setattr(watchdog, "_gateway_unread_count",
                         lambda *a, **k: unread)
 
