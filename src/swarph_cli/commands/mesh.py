@@ -1215,6 +1215,20 @@ class TmuxSink(Sink):
 
     def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
         led = state.ledger(self.name)
+        # #620: a wake's job is done the moment a TURN is observed running —
+        # the cell is awake, whoever woke it (our injected wake fired, or
+        # the human typed). Both older clearing paths miss the zombie
+        # window: re-arm needs deliver() entered with unread == 0 (deliver()
+        # is only entered when a NEW DM exists), and the #616 stale bound
+        # waits ten minutes. Measured live 2026-08-26 10:18-10:26Z: the
+        # 10:18 wake fired, the flag stood, and the 10:22 DM read
+        # anchor-fresh + composer-clear -> 'standing wake' -> marked
+        # delivered with ZERO keystrokes while the cell slept; three DMs
+        # piled up before the commander nudged. Clear on the running
+        # observation and let the fresh path take over — it defers while
+        # running (#619) and injects at the first idle poll.
+        if led.get("wake_outstanding") and _agent_running(self.target):
+            led["wake_outstanding"] = False
         if led.get("wake_outstanding"):
             # Lazy: watchdog imports mesh module-level, so the reverse must
             # not. None (gateway error) reads as NOT-drained — re-arming on an

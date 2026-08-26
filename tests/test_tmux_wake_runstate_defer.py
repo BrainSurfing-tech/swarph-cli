@@ -166,3 +166,68 @@ def test_agent_running_ignores_scrollback_quoting_the_hint(monkeypatch):
 def test_agent_running_unreadable_is_none(monkeypatch):
     monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
     assert mesh._agent_running("cursor-lin") is None
+
+
+# ── #620: the flag must clear when the wake is OBSERVED to have fired ────
+
+def test_running_observation_clears_the_zombie_flag(monkeypatch):
+    """The measured 10:22Z defect: wake fired at 10:18, turn is RUNNING,
+    flag still stands with a fresh anchor. The running observation must
+    clear it — the cell is awake, the wake's job is done — and the fresh
+    path then defers (#619) instead of claiming a standing wake."""
+    now = time.time()
+    calls = _rig(monkeypatch, composer="clear", session_created=now - 7200,
+                 running=True)
+    state = _owed_state(injected_at=now - 60)  # fresh anchor, inside window
+    sink = mesh.TmuxSink("cursor-lin")
+
+    assert sink.deliver(state, [{"id": 9}], 9) is None  # deferred, not "standing"
+    led = state.ledger("tmux:cursor-lin")
+    assert led["wake_outstanding"] is False  # zombie cleared
+    assert calls["wake"] == 0 and calls["enter"] == 0
+
+
+def test_flag_stays_when_no_turn_is_observed(monkeypatch):
+    """Idle + fresh anchor + no running observation: the wake is plausibly
+    still pending — the standing path must NOT be disturbed."""
+    now = time.time()
+    calls = _rig(monkeypatch, composer="clear", session_created=now - 7200,
+                 running=False)
+    state = _owed_state(injected_at=now - 60)
+    sink = mesh.TmuxSink("cursor-lin")
+
+    assert sink.deliver(state, [{"id": 9}], 9) is True  # standing wake
+    assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is True
+    assert calls["wake"] == 0
+
+
+def test_unknown_runstate_does_not_clear(monkeypatch):
+    """None (pane momentarily unreadable) is not a firing observation —
+    only a positively-observed turn clears the flag."""
+    now = time.time()
+    calls = _rig(monkeypatch, composer="clear", session_created=now - 7200,
+                 running=False)
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: None)
+    state = _owed_state(injected_at=now - 60)
+    sink = mesh.TmuxSink("cursor-lin")
+
+    assert sink.deliver(state, [{"id": 9}], 9) is True  # standing, undisturbed
+    assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is True
+    assert calls["wake"] == 0
+
+
+def test_full_zombie_cycle_fires_the_next_wake(monkeypatch):
+    """The end-to-end contract: wake fires -> turn runs (flag clears,
+    delivery defers) -> turn ends -> next poll injects for real."""
+    now = time.time()
+    running = {"v": True}
+    calls = _rig(monkeypatch, composer="clear", session_created=now - 7200)
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: running["v"])
+    state = _owed_state(injected_at=now - 60)
+    sink = mesh.TmuxSink("cursor-lin")
+
+    assert sink.deliver(state, [{"id": 9}], 9) is None   # mid-turn: cleared+deferred
+    running["v"] = False                                  # turn ends
+    assert sink.deliver(state, [{"id": 9}], 9) is True   # idle: real injection
+    assert calls["wake"] == 1
+    assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is True
