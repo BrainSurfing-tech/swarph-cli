@@ -311,6 +311,11 @@ def test_gateway_unread_unknown_returns_noop(
     13 times across 65min. New contract: 'respect peer-time when uncertain' —
     trade false-negative (occasional missed wake on real strands) for
     elimination of the false-positive spam class.
+
+    #401: the fail-closed verdict must NOT report success. rc 7 is the
+    distinct couldn't-verify code — a cron line / Task Scheduler entry can
+    tell it apart from healthy (0), action taken (1/2/5), input error (3),
+    action failed (4), and circuit open (6).
     """
     with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
          patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=None), \
@@ -321,8 +326,44 @@ def test_gateway_unread_unknown_returns_noop(
             "--cursor", str(stale_cursor),
             "--threshold", "60",
         ])
-    assert rc == 0
+    assert rc == 7
     send_mock.assert_not_called()
+
+
+def test_rc_contract_three_way_distinction(
+    isolated_state, fresh_cursor, stale_cursor, monkeypatch
+):
+    """#401 — the supervisor above --check (cron line, Task Scheduler entry)
+    must be able to tell three outcomes apart by exit code alone:
+
+      healthy / verified-idle  → 0
+      couldn't-verify          → 7 (non-zero, and distinct from every
+                                  action/error code 1-6)
+      action taken             → non-zero (1/2/5)
+
+    The pre-#401 shape computed 'degraded' for couldn't-verify and then
+    returned 0 — the worst family: a false positive that leaves no artefact
+    to grep for. Pin both ends of the distinction in one test so a future
+    refactor can't silently re-merge them.
+    """
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=0):
+        rc_healthy = run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(fresh_cursor),
+            "--threshold", "60",
+        ])
+    with patch("swarph_cli.commands.watchdog._process_alive", return_value=True), \
+         patch("swarph_cli.commands.watchdog._gateway_unread_count", return_value=None), \
+         patch("swarph_cli.commands.watchdog._tmux_session_exists", return_value=True):
+        rc_unknown = run_watchdog(argv=[
+            "--check", "--cell", "lab",
+            "--cursor", str(stale_cursor),
+            "--threshold", "60",
+        ])
+    assert rc_healthy == 0
+    assert rc_unknown == 7
+    assert rc_unknown not in (0, 1, 2, 3, 4, 5, 6)
 
 
 # ---------------------------------------------------------------------------
