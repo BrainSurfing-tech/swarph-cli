@@ -82,6 +82,26 @@ def _card_add_payload(actor, project_id, title, *, body=None, ai2=False, priorit
     return p
 
 
+def _card_edit_payload(actor, title, body) -> dict:
+    """#191: the edit patch — title and/or body, the two fields that made a
+    card's text write-once until the gateway grew them (BoardCardPatch).
+
+    REFUSES THE EMPTY PATCH. A PATCH carrying only `actor` returns 200 and
+    changes nothing — #256's class (accepted, silently unchanged), and for an
+    editor it reads as "your correction landed" when nothing did. None means
+    "not mentioned"; an empty string is a real value (it clears), so the
+    distinction is `is not None`, never truthiness.
+    """
+    patch = {"actor": actor}
+    if title is not None:
+        patch["title"] = title
+    if body is not None:
+        patch["body"] = body
+    if len(patch) == 1:
+        raise ValueError("nothing to edit — pass --title and/or --body")
+    return patch
+
+
 def _apply_label(current: list, action: str, label: str) -> list:
     """Compute the NEW label set. Pure, so the read-modify-write is testable
     without a gateway.
@@ -379,6 +399,14 @@ def _build_parser() -> argparse.ArgumentParser:
     cr.add_argument("id", type=int); cr.add_argument("--clear", action="store_true", help="unset move_ready")
     cr.add_argument("--json", action="store_true"); _add_common(cr)
 
+    ce = cards.add_parser(
+        "edit", help="edit a card's title and/or body (#191: a correction "
+                     "belongs ON the card, not only in its thread)")
+    ce.add_argument("id", type=int)
+    ce.add_argument("--title", default=None, help="new title")
+    add_content_args(ce, "--body", required=False)
+    ce.add_argument("--json", action="store_true"); _add_common(ce)
+
     obl = top.add_parser(
         "obligations",
         help="card obligations — the close act (#562)").add_subparsers(
@@ -523,6 +551,23 @@ def run_board(argv: list[str]) -> int:
         if args.command == "assign":
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "assignee": args.assignee}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} assignee -> {x.get('assignee')}", aj)
+        if args.command == "edit":
+            try:
+                body_text = resolve_content(args.body, getattr(args, "body_file", None), "--body")
+            except ContentError as exc:
+                print(f"swarph board cards edit: {exc}", file=sys.stderr)
+                return 1
+            try:
+                patch = _card_edit_payload(self_name, args.title, body_text)
+            except ValueError as exc:
+                print(f"swarph board cards edit: {exc}", file=sys.stderr)
+                return 2
+            st, d = _patch_json(f"{gw}/board/cards/{args.id}", patch, token)
+            # Surface body_version: it is the latch every verdict stamp keys on
+            # (#199), so an edit that re-opens reviewed work is visible in the
+            # success line, not only in a later audit.
+            return _out(st, d, lambda x: f"card #{x.get('id')} edited "
+                                         f"(body_version={x.get('body_version')})", aj)
         if args.command == "thread":
             st, d = _http_get_json(_thread_url(gw, args.id, limit=args.limit), token)
             # NO special-casing of 403/409. `_out` already returns 1 and prints the
