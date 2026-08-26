@@ -92,3 +92,66 @@ def test_format_card_strips_terminal_escapes():
             "body": "b\x1b[31mody", "links": {"k\x1b[0m": "v\x1b[1m"}}
     out = board._format_card(card)
     assert "\x1b" not in out, "peer-authored card content can't inject terminal escapes"
+
+
+# ── #191: cards edit — the body is no longer write-once ─────────────────────
+
+def test_card_edit_payload_title_only():
+    p = board._card_edit_payload("cursor-lin", "new title", None)
+    assert p == {"actor": "cursor-lin", "title": "new title"}
+    assert "body" not in p, "None means NOT MENTIONED — the gateway must not "
+    "see a body key at all, or an unrelated title edit would clear the body"
+
+
+def test_card_edit_payload_body_only():
+    p = board._card_edit_payload("cursor-lin", None, "corrected body")
+    assert p == {"actor": "cursor-lin", "body": "corrected body"}
+
+
+def test_card_edit_payload_empty_string_body_is_a_real_value():
+    p = board._card_edit_payload("cursor-lin", None, "")
+    assert p["body"] == "", "'' CLEARS — it must survive the builder; only "
+    "None means 'not mentioned' (the null-means-two-things trap)"
+
+
+def test_card_edit_payload_refuses_the_empty_patch():
+    import pytest
+    with pytest.raises(ValueError, match="nothing to edit"):
+        board._card_edit_payload("cursor-lin", None, None)
+
+
+def _run_edit(monkeypatch, argv, patch_impl):
+    monkeypatch.setattr(board, "_resolve_self_name", lambda *_a, **_k: "cursor-lin")
+    monkeypatch.setattr(board, "_resolve_token", lambda *_a, **_k: "tok")
+    monkeypatch.setattr(board, "_patch_json", patch_impl)
+    return board.run_board(argv)
+
+
+def test_edit_dispatch_sends_title_and_body(monkeypatch):
+    sent = {}
+    def fake_patch(url, body, token, **k):
+        sent.update(url=url, body=body, token=token)
+        return 200, {"id": 125, "title": body.get("title"), "body_version": 3}
+    rc = _run_edit(monkeypatch,
+                   ["cards", "edit", "125", "--title", "T2", "--body", "B2"],
+                   fake_patch)
+    assert rc == 0
+    assert sent["url"].endswith("/board/cards/125")
+    assert sent["body"] == {"actor": "cursor-lin", "title": "T2", "body": "B2"}
+
+
+def test_edit_dispatch_with_neither_field_never_touches_the_wire(monkeypatch, capsys):
+    def boom(*_a, **_k):
+        raise AssertionError("an empty edit must not become a PATCH — a 200 "
+                             "that changes nothing reads as 'correction landed'")
+    rc = _run_edit(monkeypatch, ["cards", "edit", "125"], boom)
+    assert rc == 2
+    assert "nothing to edit" in capsys.readouterr().err
+
+
+def test_edit_dispatch_surfaces_the_gateway_refusal(monkeypatch, capsys):
+    rc = _run_edit(monkeypatch, ["cards", "edit", "125", "--title", "T"],
+                   lambda *a, **k: (403, {"detail": "orchestrator, the assignee "
+                                          "with an execute grant, ..."}))
+    assert rc == 1
+    assert "execute grant" in capsys.readouterr().err
