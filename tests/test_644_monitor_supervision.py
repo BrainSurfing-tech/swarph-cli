@@ -184,6 +184,10 @@ def test_installer_content_pins_the_six_properties():
     assert "New-ScheduledTaskTrigger -AtLogOn" in text
     # the runner owns the process lifetime
     assert "'--foreground'" in text
+    # THE EXIT CODE IS THE RESTART SIGNAL — metal-found 2026-08-27: without
+    # this, powershell -File exits 0 even when the monitor was killed, and
+    # restart-on-failure never fires (event log read "code de retour 0")
+    assert "exit `$LASTEXITCODE" in text
     # the watchdog is load-bearing: heartbeat-check always, revive only when down
     assert "heartbeat-check" in text
     assert "$LASTEXITCODE -eq 2" in text

@@ -150,6 +150,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "#636's shape. The watchdog is what catches it.",
     )
     install.add_argument(
+        "--swarph-bin",
+        default=None,
+        help="explicit swarph executable the tasks invoke (default: whatever "
+             "swarph.exe resolves on PATH). Needed to supervise a NON-default "
+             "build — e.g. demonstrating a branch on metal before release.",
+    )
+    install.add_argument(
         "--start",
         action="store_true",
         help="start the runner task immediately after registering",
@@ -1095,6 +1102,8 @@ def _cmd_install_task(args: argparse.Namespace) -> int:
     ]
     for sink in sinks:
         cmd += ["-Deliver", sink.name]
+    if args.swarph_bin:
+        cmd += ["-SwarphBin", args.swarph_bin]
     if args.start:
         cmd.append("-Start")
     return subprocess.run(cmd).returncode

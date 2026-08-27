@@ -105,6 +105,11 @@ $runnerContent = @"
 `$log = $(Quote-PowerShell (Join-Path $StateDir 'monitor-runner.log'))
 `$invokeArgs = @($runnerArgsLiteral)
 & `$swarph @invokeArgs *>> `$log
+# THE EXIT CODE IS THE RESTART SIGNAL. powershell -File exits 0 on script
+# completion UNLESS told otherwise — measured on metal 2026-08-27: a
+# force-killed monitor read "code de retour 0" in the task log and
+# restart-on-failure never fired. Propagate or the runner is blind.
+exit `$LASTEXITCODE
 "@
 Write-Utf8NoBom $runnerLauncher $runnerContent
 
@@ -160,11 +165,12 @@ if ($PSCmdlet.ShouldProcess($runnerTask, 'register Task Scheduler runner')) {
 }
 
 $watchdogSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+# PS 5.1 quirk (measured on metal): a trigger's .Repetition is not settable
+# property-by-property — build a second trigger that carries the repetition
+# and copy the whole Repetition object. 3650 days ≈ indefinitely.
 $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date)
-# PS 5.1 cannot express "repeat forever" through -RepetitionDuration; set the
-# repetition directly. Empty Duration = indefinitely.
-$watchdogTrigger.Repetition.Interval = "PT$($WatchdogIntervalMinutes)M"
-$watchdogTrigger.Repetition.Duration = ""
+$repetition = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $WatchdogIntervalMinutes) -RepetitionDuration (New-TimeSpan -Days 3650)
+$watchdogTrigger.Repetition = $repetition.Repetition
 $watchdogAction = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"{0}" "{1}"' -f $hiddenRunner, $watchdogLauncher)
 
 if ($PSCmdlet.ShouldProcess($watchdogTask, 'register Task Scheduler watchdog')) {
