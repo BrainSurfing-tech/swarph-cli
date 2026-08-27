@@ -1791,13 +1791,9 @@ def _wake_still_pending(target: str) -> Optional[bool]:
     return state == "wake"
 
 
-#: cursor's EMPTY composer is not bare: it renders the marker plus a dimmed
-#: placeholder ('→ Add a follow-up', measured live on cursor-lin 2026-08-24).
-#: Treating any text-after-marker as busy would defer every wake forever on
-#: cursor; treating the placeholder as human text is the only false positive
-#: it can produce, and the failure direction there is a wake never sent —
-#: visible in the log, never a keystroke into someone's line.
-_CURSOR_COMPOSER_PLACEHOLDER = "Add a follow-up"
+#: Empty composer placeholders measured in the supported interactive harnesses.
+#: Treating either as human text would defer every wake forever for that harness.
+_COMPOSER_PLACEHOLDERS = ("Add a follow-up", "Ask Codex to do anything")
 
 #: cursor's composer row carries a right-aligned run-state hint while a turn
 #: runs ('ctrl+c to stop', measured live on cursor-lin 2026-08-24). Read on
@@ -1856,7 +1852,7 @@ def _composer_state(target: str) -> Optional[str]:
     # not the whole line. A human message beginning with the exact placeholder
     # text is the accepted false positive — the only failure it can produce
     # is an inject alongside contrived text, never a silent deferral.
-    if not content or content.startswith(_CURSOR_COMPOSER_PLACEHOLDER):
+    if not content or content.startswith(_COMPOSER_PLACEHOLDERS):
         return "clear"
     # A human who types exactly 'check mesh' by hand is indistinguishable
     # from our own unsubmitted wake — and submitting it runs the same

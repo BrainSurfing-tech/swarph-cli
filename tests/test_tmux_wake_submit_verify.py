@@ -299,6 +299,7 @@ def test_failed_wake_with_nothing_landed_retries_next_poll(gate):
     ("→ ", "clear"),                          # bare cursor composer
     ("› half-typed human line", "busy"),
     ("› check mesh", "wake"),
+    ("› Ask Codex to do anything", "clear"),  # Codex's EMPTY placeholder
     ("→ Add a follow-up", "clear"),           # cursor's EMPTY placeholder
     ("> half-typed human line", "busy"),
     ("→ half-typed human line", "busy"),
