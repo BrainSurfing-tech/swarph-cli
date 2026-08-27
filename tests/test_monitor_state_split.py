@@ -71,7 +71,7 @@ def test_parse_sink_covers_the_shipped_axis():
     assert notify.name == "tmux-notify:lab:0.0" and notify.target == "lab:0.0"
 
 
-def test_tmux_notify_reports_delivery_without_waking_a_pane(monkeypatch, tmp_path):
+def test_tmux_notify_reports_delivery_without_waking_a_pane(monkeypatch, tmp_path, capsys):
     """A status-line notice is distinct from a prompt injection."""
     monkeypatch.setattr(mesh, "_http_get_json", _window(_dm(5000)))
     notices = []
@@ -88,6 +88,7 @@ def test_tmux_notify_reports_delivery_without_waking_a_pane(monkeypatch, tmp_pat
 
     assert notices == [("lab:0.0", 1)]
     assert state.ledger(sink.name)["last_delivered_id"] == 5000
+    assert "delivered to tmux-notify:lab:0.0 up to id 5000" in capsys.readouterr().out
 
 
 def test_pull_keeps_a_ledger_and_none_does_not():
@@ -181,6 +182,44 @@ def test_failed_delivery_names_the_sink_on_stderr(monkeypatch, tmp_path, capsys)
 
     err = capsys.readouterr().err
     assert "tmux:gone:0.0" in err, "a failure nobody can attribute is a failure nobody fixes"
+
+
+def test_deferred_tmux_delivery_persists_and_alerts(monkeypatch, tmp_path):
+    """A busy composer must eventually surface, not defer forever silently."""
+    import swarph_cli.stall_alert as alerts
+
+    monkeypatch.setattr(mesh, "_http_get_json", _window(_dm(702)))
+    monkeypatch.setattr(mesh, "_composer_state", lambda target: "busy")
+    sent = []
+    monkeypatch.setattr(
+        alerts, "send_stall_alert", lambda *args: sent.append(args) or True
+    )
+
+    sink = mesh.parse_sink("tmux:busy:0.0")
+    state = _state(tmp_path, [sink])
+    for _ in range(6):
+        mesh._monitor_iteration(state)
+
+    ledger = state.ledger(sink.name)
+    assert ledger["deferred_ticks"] == 6
+    assert sent == [("http://gw:8788", "tok", "lab-ovh", 6, 1)]
+    assert _state(tmp_path, [sink]).ledger(sink.name)["deferred_ticks"] == 6
+
+
+def test_successful_delivery_resets_deferred_ticks(monkeypatch, tmp_path):
+    monkeypatch.setattr(mesh, "_http_get_json", _window(_dm(703)))
+    composer = {"state": "busy"}
+    monkeypatch.setattr(mesh, "_composer_state", lambda target: composer["state"])
+    monkeypatch.setattr(mesh, "_tmux_wake", lambda target: True)
+
+    sink = mesh.parse_sink("tmux:busy:0.0")
+    state = _state(tmp_path, [sink])
+    mesh._monitor_iteration(state)
+    assert state.ledger(sink.name)["deferred_ticks"] == 1
+
+    composer["state"] = "clear"
+    mesh._monitor_iteration(state)
+    assert state.ledger(sink.name)["deferred_ticks"] == 0
 
 
 # ── the ledger IS the retry mechanism (re-selection is not) ──────────────────

@@ -1544,6 +1544,7 @@ def _new_ledger() -> dict:
         "last_delivered_id": 0,
         "last_delivery_at": 0.0,
         "consecutive_failures": 0,
+        "deferred_ticks": 0,
         "created_at": time.time(),
     }
 
@@ -2177,18 +2178,31 @@ def _monitor_deliver(state: MonitorState) -> None:
             if outcome is None:
                 # DEFERRED (e.g. TmuxSink's politeness gate): the wake stays
                 # owed — the cursor does NOT advance — but a deferral is not
-                # a failure: no count, no alarm, no ledger write. Retried on
-                # the next poll like any owed delivery.
+                # a failure. Its durable count alarms across restarts; the
+                # delivery cursor still does not move. Retried on the next
+                # poll like any owed delivery.
+                ticks = int(led.get("deferred_ticks", 0)) + 1
+                led["deferred_ticks"] = ticks
+                from swarph_cli import stall_alert
+                if stall_alert.is_alert_tick(ticks):
+                    stall_alert.send_stall_alert(
+                        state.gateway, state.token, state.self_name, ticks, len(dms)
+                    )
+                changed = True
                 print(f"{state.log_prefix} delivery DEFERRED for {sink.name} "
                       f"(composer holds human text); wake stays owed, "
                       f"no failure counted",
                       flush=True)
                 continue
+            if led.get("deferred_ticks"):
+                led["deferred_ticks"] = 0
             if outcome:
                 led["last_delivered_id"] = observed
                 led["last_delivery_at"] = now
                 led["consecutive_failures"] = 0
                 state.deliveries[sink.name] = state.deliveries.get(sink.name, 0) + 1
+                print(f"{state.log_prefix} delivered to {sink.name} up to id {observed}",
+                      flush=True)
             else:
                 # A dead sink is VISIBLE instead of silently freezing anything.
                 led["consecutive_failures"] = int(led["consecutive_failures"]) + 1
