@@ -94,16 +94,23 @@ def test_status_names_the_supervisor(monkeypatch, tmp_path, capsys):
     assert "supervised by: task:Swarph cursor-win Monitor" in capsys.readouterr().out
 
 
-def test_status_says_ORPHAN_when_nothing_claims_the_pid(monkeypatch, tmp_path, capsys):
+def test_status_marks_an_unclaimed_pid(monkeypatch, tmp_path, capsys):
     """The ownership query must answer for a hand-started monitor too — the
     answer is ORPHAN. Omitting the line is how 4 orphaned monitors hid on
-    lab-ovh."""
+    lab-ovh.
+
+    TWO forgery guards, both earned: (1) this function's name must NOT contain
+    the keyword — pytest derives tmp_path from it, and a path segment like
+    `test_..._ORPHAN_..._n0` in the printed state dir satisfies a bare
+    substring assert (lab-ovh's ORPHAN→SUPERVISED mutation survived exactly
+    that); (2) assert the FULL LINE, so a mutation of the keyword alone fails.
+    """
     _env(monkeypatch)
     _write_pidfile(tmp_path, _own_record())
     assert _run(["status"], tmp_path) in (0, 1)
     out = capsys.readouterr().out
-    assert "ORPHAN" in out
-    assert "supervised by: NOTHING ON RECORD" in out
+    assert ("supervised by: NOTHING ON RECORD — hand-started or predates "
+            "#644 (ORPHAN)") in out
 
 
 # ── the supervision hold ────────────────────────────────────────────────────
