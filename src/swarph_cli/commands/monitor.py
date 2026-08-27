@@ -84,6 +84,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run the poll loop inline instead of detaching (for supervisors)",
     )
+    start.add_argument(
+        "--supervisor",
+        default=None,
+        metavar="SPEC",
+        help="who supervises this process (e.g. task:Swarph cursor-win "
+        "Monitor). Recorded in the pidfile so `status` can answer "
+        "\"what supervises this pid\" — Windows has no pid→task reverse "
+        "map, so ownership is this convention or nothing (#644). Default: "
+        "$SWARPH_SUPERVISOR, read at RUN time (a parser-built default would "
+        "freeze whatever the builder's environment held).",
+    )
     start.add_argument("--once", action="store_true", help="poll once and exit")
     _add_common(start)
 
@@ -116,6 +127,47 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_common(hcheck)
 
+    install = sub.add_parser(
+        "install-task",
+        help="#644: register the Windows Task Scheduler runner+watchdog pair "
+             "that supervises this peer's monitor (Windows only)",
+    )
+    install.add_argument(
+        "--deliver",
+        action="append",
+        default=[],
+        metavar="SINK",
+        help="sink(s) the supervised monitor delivers to — same syntax as "
+             "`start`. Recorded in the runner task's action.",
+    )
+    install.add_argument(
+        "--watchdog-min",
+        type=int,
+        default=5,
+        help="watchdog interval in minutes (default 5). The watchdog is "
+             "LOAD-BEARING: restart-on-failure is exit-code keyed, so an "
+             "exit-0 crash loop is invisible to the runner task — exactly "
+             "#636's shape. The watchdog is what catches it.",
+    )
+    install.add_argument(
+        "--swarph-bin",
+        default=None,
+        help="explicit swarph executable the tasks invoke (default: whatever "
+             "swarph.exe resolves on PATH). Needed to supervise a NON-default "
+             "build — e.g. demonstrating a branch on metal before release.",
+    )
+    install.add_argument(
+        "--start",
+        action="store_true",
+        help="start the runner task immediately after registering",
+    )
+    install.add_argument(
+        "--print-path",
+        action="store_true",
+        help="print the packaged installer script path and exit",
+    )
+    _add_common(install)
+
     return p
 
 
@@ -134,6 +186,42 @@ def _resolve(args: argparse.Namespace) -> tuple[str, Path]:
     state_dir_arg = Path(args.state_dir).expanduser() if args.state_dir else None
     self_name = mesh._resolve_self_name(args.self_name, state_dir=state_dir_arg)
     return self_name, state_dir_arg or mesh._default_sidecar_state_dir(self_name)
+
+
+def _resolve_supervisor(args: argparse.Namespace) -> "str | None":
+    """The flag wins; $SWARPH_SUPERVISOR is the fallback. Read at RUN time —
+    a scheduled task's launcher sets the env, an operator types the flag."""
+    return args.supervisor or os.environ.get("SWARPH_SUPERVISOR")
+
+
+def _read_cgroup(pid: int) -> "str | None":
+    """/proc/<pid>/cgroup, or None anywhere it cannot be read (Windows,
+    restricted procfs, dead pid). Module-level so tests can stub the seam."""
+    try:
+        return Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _derive_systemd_unit(pid: "int | None") -> "str | None":
+    """The supervisor Linux already knows (#344 review): Windows has no
+    pid→task map so the pidfile CLAIM is the whole answer there, but on
+    Linux /proc/<pid>/cgroup names the owning unit — and no fleet unit sets
+    SWARPH_SUPERVISOR, so without this every systemd-owned monitor prints
+    ORPHAN while its cgroup says otherwise. Derive where you can; assert
+    only where you must."""
+    if pid is None:
+        return None
+    text = _read_cgroup(pid)
+    if not text:
+        return None
+    for line in text.splitlines():
+        # v2: "0::/system.slice/swarph-monitor@cell.service"; v1 carries the
+        # same unit path per subsystem. The leaf is the unit name.
+        leaf = line.rsplit("/", 1)[-1].strip()
+        if leaf.endswith(".service"):
+            return leaf[: -len(".service")]
+    return None
 
 
 def _self_name_was_derived(args: argparse.Namespace) -> bool:
@@ -184,6 +272,13 @@ def _verify_self_is_registered(self_name, gateway, token):
 # ── start ────────────────────────────────────────────────────────────────────
 
 _DAEMON_PIDFILE = "daemon.pid"
+
+# A deliberate `monitor stop` writes this marker; the #644 watchdog refuses to
+# revive a held monitor and `monitor start` (any path) clears it. systemd
+# semantics: `systemctl stop` is not a failure, so restart policy must not
+# treat it as one — a watchdog that revives a deliberately-stopped monitor is
+# the same class of surprise as a second instance beside a hand-started one.
+_SUPERVISION_HOLD = "supervision_hold.json"
 
 
 def _daemon_owns_state_dir(state_dir):
@@ -335,9 +430,32 @@ def _cmd_start(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
 
+    supervisor = _resolve_supervisor(args)
+    hold_path = state_dir / _SUPERVISION_HOLD
+    if supervisor is None:
+        # An OPERATOR's start is an un-hold: a human asked for running, so
+        # the deliberate-stop marker must not outlive the request.
+        hold_path.unlink(missing_ok=True)
+    elif hold_path.exists():
+        # A supervisor's retry is NOT an operator's request (#344 review):
+        # `monitor stop` under the runner exits 15, restart-on-failure fires
+        # within a minute, and if this start cleared the hold the deliberate
+        # stop would be revived and the evidence erased with it. The runner
+        # launcher gates on the hold before ever calling this; this is the
+        # backstop. Exit 0 — a non-zero here would restart-loop the runner.
+        print(
+            "swarph monitor: supervision HOLD present and this start is "
+            f"supervised ({supervisor}) — NOT starting; the hold stands. "
+            "An operator clears it with `swarph monitor start` (no "
+            "--supervisor, no $SWARPH_SUPERVISOR).",
+            file=sys.stderr,
+        )
+        return 0
+
     if args.once:
         mesh.write_pidfile(
-            pidfile, self_name=self_name, sinks=sinks, poll_s=args.poll_s
+            pidfile, self_name=self_name, sinks=sinks, poll_s=args.poll_s,
+            supervisor=supervisor,
         )
         mesh._monitor_iteration(state)
         return 0
@@ -346,13 +464,17 @@ def _cmd_start(args: argparse.Namespace) -> int:
         if not hasattr(os, "fork"):
             print("swarph monitor: no fork() on this platform — running in the "
                   "foreground", file=sys.stderr)
-        return _run_pinned(state, pidfile, self_name, sinks, args.poll_s)
+        return _run_pinned(state, pidfile, self_name, sinks, args.poll_s,
+                           supervisor=supervisor)
 
-    return _start_detached(state, pidfile, self_name, sinks, args.poll_s)
+    return _start_detached(state, pidfile, self_name, sinks, args.poll_s,
+                           supervisor=supervisor)
 
 
-def _run_pinned(state, pidfile: Path, self_name: str, sinks: list, poll_s: int) -> int:
-    mesh.write_pidfile(pidfile, self_name=self_name, sinks=sinks, poll_s=poll_s)
+def _run_pinned(state, pidfile: Path, self_name: str, sinks: list, poll_s: int,
+                supervisor: "str | None" = None) -> int:
+    mesh.write_pidfile(pidfile, self_name=self_name, sinks=sinks, poll_s=poll_s,
+                       supervisor=supervisor)
     try:
         return mesh._monitor_loop(state)
     finally:
@@ -362,7 +484,8 @@ def _run_pinned(state, pidfile: Path, self_name: str, sinks: list, poll_s: int) 
             pidfile.unlink(missing_ok=True)
 
 
-def _start_detached(state, pidfile: Path, self_name: str, sinks: list, poll_s: int) -> int:
+def _start_detached(state, pidfile: Path, self_name: str, sinks: list, poll_s: int,
+                    supervisor: "str | None" = None) -> int:
     log_path = state.state_dir / "monitor.log"
     state.state_dir.mkdir(parents=True, exist_ok=True)
     pid = os.fork()
@@ -381,7 +504,8 @@ def _start_detached(state, pidfile: Path, self_name: str, sinks: list, poll_s: i
         os.dup2(devnull, 0)
         os.dup2(fd, 1)
         os.dup2(fd, 2)
-        mesh.write_pidfile(pidfile, self_name=self_name, sinks=sinks, poll_s=poll_s)
+        mesh.write_pidfile(pidfile, self_name=self_name, sinks=sinks, poll_s=poll_s,
+                           supervisor=supervisor)
         mesh._monitor_loop(state)
     finally:
         # os._exit, never sys.exit: the child must not run the parent's atexit
@@ -452,6 +576,17 @@ def _collect(args: argparse.Namespace) -> dict:
         # a build predating the feature. Established independently of the
         # heartbeat file, because inferring it from that file is circular.
         "emits_heartbeat": (rec or {}).get("emits_heartbeat"),
+        # #644 ownership: who CLAIMS this process. None means hand-started or
+        # predates the feature — an ORPHAN, which status must SAY, not omit.
+        "supervisor": (rec or {}).get("supervisor"),
+        # ...and who the OS says owns it, where the OS can answer (#344
+        # review): on Linux the cgroup names the systemd unit even when no
+        # claim was recorded. None on Windows or unreadable procfs.
+        "supervisor_derived": (
+            _derive_systemd_unit((rec or {}).get("pid"))
+            if pstatus == "live_ours" else None
+        ),
+        "supervision_hold": (state_dir / _SUPERVISION_HOLD).exists(),
         "configured_sinks": [s.name for s in sinks],
         "observation_cursor": observed,
         # `none` keeps no ledger, so there is nothing to subtract. Saying "0
@@ -508,11 +643,32 @@ def _print_status(info: dict, pending: int) -> None:
         print(f"monitor {info['self']}: not running{extra}")
         print(f"  state: {info['state_dir']}")
         print(f"  observation cursor: last_msg_id={info['observation_cursor']}")
-        print("  start it with: swarph monitor start")
+        if info.get("supervision_hold"):
+            print("  supervision HOLD present (deliberate `monitor stop`) — the "
+                  "watchdog will not revive it; `swarph monitor start` clears "
+                  "the hold.")
+        else:
+            print("  start it with: swarph monitor start")
         return
 
     print(f"monitor {info['self']}: running pid={info['pid']} "
           f"sinks={','.join(info['configured_sinks']) or '(none configured)'}")
+    claim = info.get("supervisor")
+    derived = info.get("supervisor_derived")
+    if claim:
+        print(f"  supervised by: {claim}")
+        if derived and derived not in claim:
+            # A claim that contradicts the cgroup is the divergence the
+            # ownership census (#517) exists to NAME — print both, never
+            # pick one silently.
+            print(f"  cgroup reports: systemd:{derived} — claim and cgroup "
+                  "DIVERGE; the pidfile claim is stale or the unit was "
+                  "restarted under a different name")
+    elif derived:
+        print(f"  supervised by: systemd:{derived} (derived from cgroup)")
+    else:
+        print("  supervised by: NOTHING ON RECORD — hand-started or predates "
+              "#644 (ORPHAN)")
     print(f"  state: {info['state_dir']}")
     print(f"  observation cursor: last_msg_id={info['observation_cursor']}")
 
@@ -571,9 +727,15 @@ def _cmd_stop(args: argparse.Namespace) -> int:
 
     mesh._terminate(int(rec["pid"]))
     pidfile.unlink(missing_ok=True)
+    mesh._write_cursor_atomic(
+        state_dir / _SUPERVISION_HOLD,
+        {"since": time.time(), "by": "swarph monitor stop"},
+    )
     print(f"swarph monitor: stopped pid {rec['pid']}. Owed deliveries are "
           "ABANDONED, not flushed — every ledger persists on disk, so the next "
           "`swarph monitor start` resumes exactly where this one stopped.")
+    print("swarph monitor: supervision HOLD written — a #644 watchdog will NOT "
+          "revive this monitor. `swarph monitor start` clears the hold.")
     return 0
 
 
@@ -921,6 +1083,18 @@ def _cmd_heartbeat_check(args: argparse.Namespace) -> int:
         ),
     }
 
+    if info.get("supervision_hold"):
+        # A DELIBERATE stop is not an outage. Report HELD — a third state, not
+        # folded into OK (the monitor is NOT draining) nor DEGRADED (nothing is
+        # wrong; a red here trains readers to skip the row).
+        since_path.unlink(missing_ok=True)
+        caps["drain_status"] = "HELD"
+        caps["degraded_cause"] = "deliberately_stopped"
+        rc = _register_capabilities(self_name, args.gateway, args.token_file, caps)
+        print(f"heartbeat-check {self_name}: HELD (deliberate stop — "
+              f"{_SUPERVISION_HOLD} present; `monitor start` clears it)")
+        return rc
+
     if not stale:
         since_path.unlink(missing_ok=True)
         caps["drain_status"] = "OK"
@@ -954,6 +1128,52 @@ def _cmd_heartbeat_check(args: argparse.Namespace) -> int:
     return 1 if rc == 0 else rc
 
 
+# ── install-task (#644 Windows supervision) ──────────────────────────────────
+
+def _cmd_install_task(args: argparse.Namespace) -> int:
+    """Register the runner+watchdog Task Scheduler pair for this peer.
+
+    The mechanics live in a packaged .ps1 (ff53570's precedent: the waker
+    installer) because ScheduledTasks cmdlets are the only sane registration
+    surface; this verb is the discoverable, testable front door.
+    """
+    from importlib import resources
+
+    script = resources.files("swarph_cli").joinpath(
+        "scripts", "install_monitor_task_windows.ps1")
+    if args.print_path:
+        print(script)
+        return 0
+    if os.name != "nt":
+        print(
+            "swarph monitor install-task: Windows-only. On Linux the systemd "
+            "units are the supervision layer (#517); this verb is the Windows "
+            "equivalent (#644).",
+            file=sys.stderr,
+        )
+        return 2
+
+    self_name, state_dir = _resolve(args)
+    # Parse sinks NOW so a bad --deliver fails before anything is registered.
+    sinks = [mesh.parse_sink(spec) for spec in (args.deliver or ["pull"])]
+
+    cmd = [
+        "powershell.exe", "-NoLogo", "-NonInteractive",
+        "-ExecutionPolicy", "Bypass", "-File", str(script),
+        "-Peer", self_name,
+        "-StateDir", str(state_dir),
+        "-Gateway", args.gateway,
+        "-WatchdogIntervalMinutes", str(args.watchdog_min),
+    ]
+    for sink in sinks:
+        cmd += ["-Deliver", sink.name]
+    if args.swarph_bin:
+        cmd += ["-SwarphBin", args.swarph_bin]
+    if args.start:
+        cmd.append("-Start")
+    return subprocess.run(cmd).returncode
+
+
 def run_monitor(argv: list[str]) -> int:
     parser = _build_parser()
     try:
@@ -966,6 +1186,8 @@ def run_monitor(argv: list[str]) -> int:
             return _cmd_stop(args)
         if args.command == "heartbeat-check":
             return _cmd_heartbeat_check(args)
+        if args.command == "install-task":
+            return _cmd_install_task(args)
         parser.error(f"unknown command: {args.command}")
     except mesh.MonitorSinkError as exc:
         print(f"swarph monitor: {exc}", file=sys.stderr)

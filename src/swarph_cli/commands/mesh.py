@@ -2481,7 +2481,8 @@ def pidfile_status(path: Path) -> tuple[str, Optional[dict]]:
     return "foreign", rec
 
 
-def write_pidfile(path: Path, *, self_name: str, sinks: list, poll_s: int) -> None:
+def write_pidfile(path: Path, *, self_name: str, sinks: list, poll_s: int,
+                  supervisor: "str | None" = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rec = {
         "pid": os.getpid(),
@@ -2499,6 +2500,12 @@ def write_pidfile(path: Path, *, self_name: str, sinks: list, poll_s: int) -> No
         # that can and has stopped -- and the two must never share a cause.
         "emits_heartbeat": True,
     }
+    if supervisor:
+        # WHO SUPERVISES THIS PROCESS (#644). Windows has no pid->task reverse
+        # map, so ownership is a CONVENTION: the supervisor names itself here
+        # and `monitor status` reads it back. Absent => hand-started or
+        # predates the feature — an ORPHAN, which is a fact, not an error.
+        rec["supervisor"] = supervisor
     tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
     tmp.write_text(json.dumps(rec, indent=2, sort_keys=True), encoding="utf-8")
     os.replace(tmp, path)

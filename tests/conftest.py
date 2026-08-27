@@ -83,6 +83,9 @@ _SWARPH_ENV = (
     "SWARPH_CELL",
     "SWARPH_SESSION_NAME",
     "SWARPH_TMUX_TARGET",
+    # supervision (#644): who claims the monitor process — a test box's
+    # supervisor env must not leak into pidfile assertions
+    "SWARPH_SUPERVISOR",
     # gateways
     "MESH_GATEWAY_URL",
     "SWARPH_GATEWAY",
