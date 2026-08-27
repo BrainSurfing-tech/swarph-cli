@@ -71,7 +71,7 @@ def test_parse_sink_covers_the_shipped_axis():
     assert notify.name == "tmux-notify:lab:0.0" and notify.target == "lab:0.0"
 
 
-def test_tmux_notify_reports_delivery_without_waking_a_pane(monkeypatch, tmp_path):
+def test_tmux_notify_reports_delivery_without_waking_a_pane(monkeypatch, tmp_path, capsys):
     """A status-line notice is distinct from a prompt injection."""
     monkeypatch.setattr(mesh, "_http_get_json", _window(_dm(5000)))
     notices = []
@@ -88,6 +88,7 @@ def test_tmux_notify_reports_delivery_without_waking_a_pane(monkeypatch, tmp_pat
 
     assert notices == [("lab:0.0", 1)]
     assert state.ledger(sink.name)["last_delivered_id"] == 5000
+    assert "delivered to tmux-notify:lab:0.0 up to id 5000" in capsys.readouterr().out
 
 
 def test_pull_keeps_a_ledger_and_none_does_not():

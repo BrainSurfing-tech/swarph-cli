@@ -500,14 +500,16 @@ class _EngineState:
 def test_engine_counts_deferral_as_neither_success_nor_failure(tmp_path, capsys):
     """The engine contract for None: cursor NOT advanced (wake stays owed),
     consecutive_failures NOT incremented (a busy composer is not a dead
-    sink), no DELIVERY FAILED alarm, no ledger write."""
+    sink), and no DELIVERY FAILED alarm. A deferral persists only its count
+    so the stall alarm survives a monitor restart; it still moves no cursor."""
     state = _EngineState(tmp_path)
     mesh._monitor_deliver(state)
     led = state.ledgers["defer-stub"]
     assert led["last_delivered_id"] == 0
     assert led["consecutive_failures"] == 0
+    assert led["deferred_ticks"] == 1
     assert state.deliveries == {}
-    assert not state.ledgers_path.exists()  # nothing changed, nothing written
+    assert state.ledgers_path.exists()  # durable count, but no delivery cursor change
     out = capsys.readouterr()
     assert "DEFERRED" in out.out
     assert "DELIVERY FAILED" not in out.err
@@ -519,7 +521,8 @@ def test_engine_defers_on_adopted_mid_settle_with_real_tmux_sink(tmp_path, tmux,
     the ENGINE does. This pins the real path end-to-end: a REAL TmuxSink,
     scripted clear→merged captures, through _monitor_deliver. The DM stays
     owed (cursor held at 0), no failure counted, no delivery recorded, no
-    ledger written."""
+    delivery cursor moved. The durable deferral count is the sole write so
+    the alarm survives monitor restarts."""
     calls, capstate = tmux
     capstate["captures"] = [
         "> ",                              # gate: observed clean
@@ -531,8 +534,9 @@ def test_engine_defers_on_adopted_mid_settle_with_real_tmux_sink(tmp_path, tmux,
     led = state.ledgers["tmux:pane"]
     assert led["last_delivered_id"] == 0  # id 5 still owed
     assert led["consecutive_failures"] == 0
+    assert led["deferred_ticks"] == 1
     assert state.deliveries == {}
-    assert not state.ledgers_path.exists()
+    assert state.ledgers_path.exists()
     out = capsys.readouterr()
     assert "DEFERRED" in out.out
     assert "DELIVERY FAILED" not in out.err
