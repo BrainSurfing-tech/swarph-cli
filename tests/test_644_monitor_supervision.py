@@ -173,6 +173,26 @@ def test_status_unclaimed_when_cgroup_names_no_service(
             "#644 (ORPHAN)") in out
 
 
+def test_a_user_manager_leaf_is_not_a_supervisor(monkeypatch, tmp_path, capsys):
+    """#647: user@<uid>.service passes the .service suffix test but is the
+    systemd SESSION MANAGER — it restarts nothing and owns no lifecycle, so
+    a process directly under it is unsupervised. A false GREEN inside the
+    fix for a false RED. The stub feeds a cgroup STRING to the real parser
+    (the parser is what was wrong); the accept check's other leg — without
+    the guard this same string prints "supervised by: user@1000" — is the
+    can-fail run cited in the PR."""
+    _env(monkeypatch)
+    _write_pidfile(tmp_path, _own_record())
+    monkeypatch.setattr(
+        monitor, "_read_cgroup",
+        lambda pid: "0::/user.slice/user-1000.slice/user@1000.service\n")
+    assert _run(["status"], tmp_path) in (0, 1)
+    out = capsys.readouterr().out
+    assert ("supervised by: NOTHING ON RECORD — hand-started or predates "
+            "#644 (ORPHAN)") in out
+    assert "user@1000" not in out
+
+
 # ── the supervision hold ────────────────────────────────────────────────────
 
 def test_stop_writes_the_hold(monkeypatch, tmp_path):

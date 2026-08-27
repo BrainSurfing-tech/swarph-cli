@@ -220,6 +220,13 @@ def _derive_systemd_unit(pid: "int | None") -> "str | None":
         # same unit path per subsystem. The leaf is the unit name.
         leaf = line.rsplit("/", 1)[-1].strip()
         if leaf.endswith(".service"):
+            # user@<uid>.service passes the suffix test but is the systemd
+            # SESSION MANAGER, not a supervisor (#647): it restarts nothing,
+            # owns no lifecycle — a process directly under it is unsupervised.
+            # Accepting it would be a false GREEN shipped inside the fix for
+            # a false RED. Keep looking.
+            if leaf.startswith("user@"):
+                continue
             return leaf[: -len(".service")]
     return None
 
