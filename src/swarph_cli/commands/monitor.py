@@ -194,6 +194,36 @@ def _resolve_supervisor(args: argparse.Namespace) -> "str | None":
     return args.supervisor or os.environ.get("SWARPH_SUPERVISOR")
 
 
+def _read_cgroup(pid: int) -> "str | None":
+    """/proc/<pid>/cgroup, or None anywhere it cannot be read (Windows,
+    restricted procfs, dead pid). Module-level so tests can stub the seam."""
+    try:
+        return Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _derive_systemd_unit(pid: "int | None") -> "str | None":
+    """The supervisor Linux already knows (#344 review): Windows has no
+    pid→task map so the pidfile CLAIM is the whole answer there, but on
+    Linux /proc/<pid>/cgroup names the owning unit — and no fleet unit sets
+    SWARPH_SUPERVISOR, so without this every systemd-owned monitor prints
+    ORPHAN while its cgroup says otherwise. Derive where you can; assert
+    only where you must."""
+    if pid is None:
+        return None
+    text = _read_cgroup(pid)
+    if not text:
+        return None
+    for line in text.splitlines():
+        # v2: "0::/system.slice/swarph-monitor@cell.service"; v1 carries the
+        # same unit path per subsystem. The leaf is the unit name.
+        leaf = line.rsplit("/", 1)[-1].strip()
+        if leaf.endswith(".service"):
+            return leaf[: -len(".service")]
+    return None
+
+
 def _self_name_was_derived(args: argparse.Namespace) -> bool:
     """True when the identity came from the STATE DIR BASENAME, not the operator.
 
@@ -400,10 +430,27 @@ def _cmd_start(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
 
-    # Any start path is an un-hold: the operator (or a supervisor) asked for
-    # running, so the deliberate-stop marker must not outlive the request.
-    (state_dir / _SUPERVISION_HOLD).unlink(missing_ok=True)
     supervisor = _resolve_supervisor(args)
+    hold_path = state_dir / _SUPERVISION_HOLD
+    if supervisor is None:
+        # An OPERATOR's start is an un-hold: a human asked for running, so
+        # the deliberate-stop marker must not outlive the request.
+        hold_path.unlink(missing_ok=True)
+    elif hold_path.exists():
+        # A supervisor's retry is NOT an operator's request (#344 review):
+        # `monitor stop` under the runner exits 15, restart-on-failure fires
+        # within a minute, and if this start cleared the hold the deliberate
+        # stop would be revived and the evidence erased with it. The runner
+        # launcher gates on the hold before ever calling this; this is the
+        # backstop. Exit 0 — a non-zero here would restart-loop the runner.
+        print(
+            "swarph monitor: supervision HOLD present and this start is "
+            f"supervised ({supervisor}) — NOT starting; the hold stands. "
+            "An operator clears it with `swarph monitor start` (no "
+            "--supervisor, no $SWARPH_SUPERVISOR).",
+            file=sys.stderr,
+        )
+        return 0
 
     if args.once:
         mesh.write_pidfile(
@@ -532,6 +579,13 @@ def _collect(args: argparse.Namespace) -> dict:
         # #644 ownership: who CLAIMS this process. None means hand-started or
         # predates the feature — an ORPHAN, which status must SAY, not omit.
         "supervisor": (rec or {}).get("supervisor"),
+        # ...and who the OS says owns it, where the OS can answer (#344
+        # review): on Linux the cgroup names the systemd unit even when no
+        # claim was recorded. None on Windows or unreadable procfs.
+        "supervisor_derived": (
+            _derive_systemd_unit((rec or {}).get("pid"))
+            if pstatus == "live_ours" else None
+        ),
         "supervision_hold": (state_dir / _SUPERVISION_HOLD).exists(),
         "configured_sinks": [s.name for s in sinks],
         "observation_cursor": observed,
@@ -599,8 +653,19 @@ def _print_status(info: dict, pending: int) -> None:
 
     print(f"monitor {info['self']}: running pid={info['pid']} "
           f"sinks={','.join(info['configured_sinks']) or '(none configured)'}")
-    if info.get("supervisor"):
-        print(f"  supervised by: {info['supervisor']}")
+    claim = info.get("supervisor")
+    derived = info.get("supervisor_derived")
+    if claim:
+        print(f"  supervised by: {claim}")
+        if derived and derived not in claim:
+            # A claim that contradicts the cgroup is the divergence the
+            # ownership census (#517) exists to NAME — print both, never
+            # pick one silently.
+            print(f"  cgroup reports: systemd:{derived} — claim and cgroup "
+                  "DIVERGE; the pidfile claim is stale or the unit was "
+                  "restarted under a different name")
+    elif derived:
+        print(f"  supervised by: systemd:{derived} (derived from cgroup)")
     else:
         print("  supervised by: NOTHING ON RECORD — hand-started or predates "
               "#644 (ORPHAN)")

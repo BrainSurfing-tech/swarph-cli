@@ -7,8 +7,10 @@ claim is an ORPHAN — a fact, said plainly, never omitted.
 
 The supervision hold exists because a watchdog that revives a
 deliberately-stopped monitor is the same class of surprise as a second
-instance beside a hand-started one. `stop` writes it, `start` clears it,
-heartbeat-check reports HELD (a third state — not OK, not DEGRADED).
+instance beside a hand-started one. `stop` writes it, an OPERATOR's `start`
+clears it (a supervisor's retry is not an operator's request — the hold
+binds the runner too), heartbeat-check reports HELD (a third state — not
+OK, not DEGRADED).
 """
 from __future__ import annotations
 
@@ -28,6 +30,15 @@ INSTALLER = ROOT / "src" / "swarph_cli" / "scripts" / "install_monitor_task_wind
 @pytest.fixture(autouse=True)
 def _clean_composer(monkeypatch):
     monkeypatch.setattr(mesh, "_composer_state", lambda t: "clear")
+
+
+@pytest.fixture(autouse=True)
+def _no_host_cgroup(monkeypatch):
+    """Tests must not read the HOST's cgroup: on Linux a CI job running under
+    user@UID.service would make every unclaimed-pid assertion answer
+    "systemd:user@UID" instead of NOTHING ON RECORD. Derivation is exercised
+    only by the tests that stub it deliberately."""
+    monkeypatch.setattr(monitor, "_read_cgroup", lambda pid: None)
 
 
 def _env(monkeypatch):
@@ -113,6 +124,55 @@ def test_status_marks_an_unclaimed_pid(monkeypatch, tmp_path, capsys):
             "#644 (ORPHAN)") in out
 
 
+def test_status_derives_the_unit_from_cgroup_when_nothing_claims(
+        monkeypatch, tmp_path, capsys):
+    """#344 review (drop-on-meta-edge, demonstrated live): no fleet systemd
+    unit sets SWARPH_SUPERVISOR, so a claim-only line prints ORPHAN for
+    every unit-owned Linux monitor while /proc/<pid>/cgroup names the unit.
+    Derive where you can; assert only where you must."""
+    _env(monkeypatch)
+    _write_pidfile(tmp_path, _own_record())
+    monkeypatch.setattr(
+        monitor, "_read_cgroup",
+        lambda pid: "0::/system.slice/swarph-monitor@cursor-win.service\n")
+    assert _run(["status"], tmp_path) in (0, 1)
+    out = capsys.readouterr().out
+    assert ("supervised by: systemd:swarph-monitor@cursor-win "
+            "(derived from cgroup)") in out
+
+
+def test_status_prints_both_when_claim_and_cgroup_diverge(
+        monkeypatch, tmp_path, capsys):
+    """A claim that contradicts the cgroup is the divergence the #517 census
+    exists to NAME — print both, never pick one silently."""
+    _env(monkeypatch)
+    _write_pidfile(tmp_path, _own_record(supervisor="task:Swarph cursor-win Monitor"))
+    monkeypatch.setattr(
+        monitor, "_read_cgroup",
+        lambda pid: "0::/system.slice/swarph-monitor@cursor-win.service\n")
+    assert _run(["status"], tmp_path) in (0, 1)
+    out = capsys.readouterr().out
+    assert "supervised by: task:Swarph cursor-win Monitor" in out
+    assert "cgroup reports: systemd:swarph-monitor@cursor-win" in out
+    assert "DIVERGE" in out
+
+
+def test_status_unclaimed_when_cgroup_names_no_service(
+        monkeypatch, tmp_path, capsys):
+    """A scope/user-slice cgroup is not a supervisor — only a .service leaf
+    answers the question. (Name carries no asserted keyword — the self-
+    forging-fixture lesson of test_status_marks_an_unclaimed_pid.)"""
+    _env(monkeypatch)
+    _write_pidfile(tmp_path, _own_record())
+    monkeypatch.setattr(
+        monitor, "_read_cgroup",
+        lambda pid: "0::/user.slice/user-1000.slice/session-3.scope\n")
+    assert _run(["status"], tmp_path) in (0, 1)
+    out = capsys.readouterr().out
+    assert ("supervised by: NOTHING ON RECORD — hand-started or predates "
+            "#644 (ORPHAN)") in out
+
+
 # ── the supervision hold ────────────────────────────────────────────────────
 
 def test_stop_writes_the_hold(monkeypatch, tmp_path):
@@ -134,6 +194,29 @@ def test_start_clears_the_hold(monkeypatch, tmp_path):
     monkeypatch.setattr(mesh, "_monitor_iteration", lambda state: None)
     assert _run(["start", "--once"], tmp_path) == 0
     assert not (tmp_path / "supervision_hold.json").exists()
+
+
+def test_a_supervised_start_neither_clears_the_hold_nor_starts(
+        monkeypatch, tmp_path, capsys):
+    """#344 review (blocking): `monitor stop` under the runner exits 15 —
+    exactly what restart-on-failure exists to revive. If a supervised start
+    cleared the hold, a deliberate stop would be a <=1min outage followed by
+    an automatic revive, with the evidence erased. A supervisor's retry is
+    not an operator's request: the hold stands, nothing starts, exit 0 (a
+    non-zero here would restart-loop the runner)."""
+    _env(monkeypatch)
+    (tmp_path / "supervision_hold.json").write_text(
+        json.dumps({"since": 1.0, "by": "swarph monitor stop"}), encoding="utf-8")
+    monkeypatch.setattr(monitor, "_verify_self_is_registered",
+                        lambda *a, **k: (True, "registered"))
+    started = []
+    monkeypatch.setattr(mesh, "_monitor_iteration",
+                        lambda state: started.append(1))
+    assert _run(["start", "--once", "--supervisor", "task:Swarph cursor-win Monitor"],
+                tmp_path) == 0
+    assert (tmp_path / "supervision_hold.json").exists()
+    assert not started
+    assert "NOT starting" in capsys.readouterr().err
 
 
 def test_status_names_the_hold_when_not_running(monkeypatch, tmp_path, capsys):
@@ -199,8 +282,16 @@ def test_installer_content_pins_the_six_properties():
     assert "heartbeat-check" in text
     assert "$LASTEXITCODE -eq 2" in text
     assert "Start-Process" in text
-    # the hold is respected
+    # ...and the revive goes THROUGH the runner task (#344 review): a detached
+    # Start-Process revive runs unowned while claiming the runner — the claim
+    # must not overstate. Start-Process remains only as the fallback leg.
+    assert "Start-ScheduledTask" in text
+    # the hold is respected — by the watchdog AND by the runner (#344 review:
+    # `monitor stop` under the runner exits 15, which restart-on-failure is
+    # built to revive; the runner must gate on the hold BEFORE launching, and
+    # exit 0 so the gate itself does not trigger a restart)
     assert "supervision_hold.json" in text
+    assert "runner: supervision hold present" in text
     # ownership convention
     assert "SWARPH_SUPERVISOR" in text
     # the counter/journal leg is enabled or the installer REFUSES

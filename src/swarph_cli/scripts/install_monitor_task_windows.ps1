@@ -30,6 +30,21 @@ Ownership convention: both launchers set SWARPH_SUPERVISOR to the runner
 task's name; the monitor records it in its pidfile and `swarph monitor
 status` reads it back. Windows has no pid→task reverse map — this
 convention is the ownership query, or there is none.
+
+Session semantics: the pair is registered with -LogonType Interactive and
+an AtLogOn trigger — it lives only while this user's session does. That
+is workstation supervision, not service semantics: no logon, no monitor.
+
+The supervision HOLD binds BOTH tasks (#344 review): `monitor stop` kills
+the runner-owned monitor with exit 15, which is exactly what the runner's
+restart-on-failure is built to revive — so the runner launcher checks the
+hold BEFORE launching and exits 0 (a completed task does not restart),
+and a supervised `monitor start` refuses to clear it. Only an operator's
+start (no SWARPH_SUPERVISOR) un-holds. To resume a held monitor:
+`swarph monitor start` clears the hold and runs one hand-started; the
+runner re-claims supervision at next logon, or immediately when that
+instance exits (the watchdog revives THROUGH the runner task, so the
+ownership claim stays true).
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -103,6 +118,17 @@ $runnerContent = @"
 `$env:SWARPH_SUPERVISOR = $(Quote-PowerShell $supervisorSpec)
 `$swarph = $(Quote-PowerShell $SwarphBin)
 `$log = $(Quote-PowerShell (Join-Path $StateDir 'monitor-runner.log'))
+`$hold = $(Quote-PowerShell (Join-Path $StateDir 'supervision_hold.json'))
+# THE HOLD BINDS THE RUNNER TOO (#344 review): `monitor stop` kills the
+# foreground monitor with exit 15, which is precisely what this task's
+# restart-on-failure exists to revive. Without this gate a deliberate stop
+# is a <=1min outage followed by an automatic revive — and the hold file
+# erased with it. Exit 0: a COMPLETED task does not trigger restart-on-
+# failure, so gating here is silent by construction.
+if (Test-Path -LiteralPath `$hold) {
+    "runner: supervision hold present — deliberate stop, NOT launching" *>> `$log
+    exit 0
+}
 `$invokeArgs = @($runnerArgsLiteral)
 & `$swarph @invokeArgs *>> `$log
 # THE EXIT CODE IS THE RESTART SIGNAL. powershell -File exits 0 on script
@@ -134,11 +160,24 @@ if (Test-Path -LiteralPath `$hold) {
 if (`$LASTEXITCODE -eq 2) {
     # DOWN (not merely hung — a live-but-hung process is REPORTED, not killed:
     # killing a live pid on a heartbeat heuristic is a bigger hammer than this
-    # card swings). Detach so this launcher can exit.
-    `$env:SWARPH_SUPERVISOR = $(Quote-PowerShell $supervisorSpec)
-    `$startArgs = @($wdStartArgsLiteral)
-    Start-Process -WindowStyle Hidden -FilePath `$swarph -ArgumentList `$startArgs -RedirectStandardOutput (Join-Path `$stateDir 'monitor.out.log') -RedirectStandardError (Join-Path `$stateDir 'monitor.err.log')
-    "watchdog: monitor was DOWN (status exit 2) — restarted detached, supervisor=$supervisorSpec" *>> `$log
+    # card swings). Revive THROUGH THE RUNNER TASK (#344 review): a detached
+    # Start-Process from here would run unowned while claiming
+    # supervisor=$supervisorSpec — the claim must not overstate. Starting the
+    # runner makes the claim true AND gives the revival the runner's restart
+    # accounting. IgnoreNew makes this a no-op if the runner is mid-restart.
+    try {
+        Start-ScheduledTask -TaskName $(Quote-PowerShell $runnerTask) -ErrorAction Stop
+        "watchdog: monitor was DOWN (status exit 2) — started runner task '$runnerTask' (revival is runner-owned)" *>> `$log
+    } catch {
+        # The pair is registered together; a missing runner means someone
+        # uninstalled half the supervision. Fall back to a detached start so
+        # the monitor is not left dead — the claim still names the runner,
+        # and the divergence is exactly what the ownership line is FOR.
+        `$env:SWARPH_SUPERVISOR = $(Quote-PowerShell $supervisorSpec)
+        `$startArgs = @($wdStartArgsLiteral)
+        Start-Process -WindowStyle Hidden -FilePath `$swarph -ArgumentList `$startArgs -RedirectStandardOutput (Join-Path `$stateDir 'monitor.out.log') -RedirectStandardError (Join-Path `$stateDir 'monitor.err.log')
+        "watchdog: monitor was DOWN; Start-ScheduledTask '$runnerTask' FAILED (`$(`$_.Exception.Message)) — revived detached as fallback" *>> `$log
+    }
 }
 "@
 Write-Utf8NoBom $watchdogLauncher $watchdogContent
