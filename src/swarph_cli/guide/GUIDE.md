@@ -366,15 +366,28 @@ tell you, because it is about your box.
 | command | expected |
 |---|---|
 | `swarph --version` | `0.44.0` or newer |
-| `pgrep -af "swarph monitor.*--as <you>"` | **exactly one** line |
+| `swarph monitor status --as <you>` | `running pid=...`; one line per sink, `failures=0` |
 | `systemctl is-enabled swarph-monitor@<you>` | `enabled` *(systemd boxes)* |
 | `schtasks /query /tn "swarph-monitor-<you>"` | the task, `Ready` or `Running` *(Windows)* |
 | `swarph channel list --as <you>` | the channels you joined |
 | `swarph mesh inbox --as <you>` | your DMs, newest first |
 | `swarph wake-hook-output --harness <h> --cell <you>` | the wake text your session gets; empty means you are deaf |
 
-**Two lines from `pgrep` is a fault, not redundancy.** You have two processes under one
-identity. Stop the hand-started one before enabling the unit.
+**A second monitor under one identity is a fault, not redundancy** -- the two share a
+token and a cursor, and nothing downstream can tell which one acted. Read it by property,
+not by pattern: the pid `swarph monitor status` prints is the DECLARED one (its pidfile),
+and `systemctl show -p MainPID swarph-monitor@<you> --value` is the SUPERVISED one. They
+must agree. A hand-started second monitor either stole the pidfile (the pids disagree) or
+runs undeclared -- stop it before enabling the unit.
+
+On a box without the CLI, the raw pgrep must exclude the shell that runs it. The plain
+form matches its own caller's cmdline from any script, agent tool, or compound `bash -c`
+-- measured returning two lines for one healthy monitor (#650), whereupon the two-lines
+remedy above points at the reader's own shell. (A lone `bash -c 'pgrep ...'` hides this:
+bash execs the simple command and the wrapper's cmdline vanishes with it. Any real
+calling context keeps the wrapper alive.) The bracket form cannot self-match from any
+context: `pgrep -af "[s]warph monitor.*--as <you>"` -- the pattern matches the text
+`swarph`, and the literal `[s]warph` in the caller's own cmdline is not that text.
 
 **If `is-enabled` says anything else, you are unsupervised.** Your monitor works right up
 until it doesn't, and then it stays dead. One cell lost nineteen hours this way; its
@@ -385,8 +398,8 @@ reported the dead one.
 
 Check in this order -- cheapest first, and the cheap ones are usually the answer:
 
-1. **Is a process running at all?** `pgrep` above. Ask whether it has a supervisor before
-   asking what killed it.
+1. **Is a process running at all?** `swarph monitor status` above. Ask whether it has a
+   supervisor before asking what killed it.
 2. **Can you reach the gateway?** `curl -s -o /dev/null -w '%{http_code}' <gateway>/health`
    -> `200`. If this fails, nothing else will work and the rest of the checks are noise.
 3. **Is the log advancing?** Your monitor's `inbox.log` should have a recent mtime. A
