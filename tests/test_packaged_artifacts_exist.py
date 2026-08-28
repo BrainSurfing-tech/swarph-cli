@@ -26,6 +26,9 @@ REQUIRED = [
      "peer-service reply delivery must be installed with its bounded supervisor"),
     ("systemd/swarph-peer-reply-drain@.timer",
      "peer-service reply delivery must be scheduled after installation"),
+    ("systemd/swarph-monitor@.service",
+     "#648: `swarph monitor install-unit` reads it via importlib.resources — "
+     "the mesh's own DM path was the one supervisor the wheel did not carry"),
 ]
 
 

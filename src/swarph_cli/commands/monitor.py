@@ -35,6 +35,7 @@ prints nothing at all when there is nothing to say.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -167,6 +168,50 @@ def _build_parser() -> argparse.ArgumentParser:
         help="print the packaged installer script path and exit",
     )
     _add_common(install)
+
+    install_unit = sub.add_parser(
+        "install-unit",
+        help="#648: install the PACKAGED Linux systemd template "
+             "(swarph-monitor@.service, the @-instance form #130 prescribes). "
+             "Prints the rendered unit by default; --write installs it.",
+    )
+    install_unit.add_argument(
+        "--write",
+        action="store_true",
+        help="write the rendered template to --dir. Without it the unit is "
+             "printed to stdout and nothing is touched. Enabling/starting an "
+             "instance is the operator's act, not this verb's.",
+    )
+    install_unit.add_argument(
+        "--dir",
+        default="/etc/systemd/system",
+        help="target directory for --write (default /etc/systemd/system). "
+             "Point elsewhere to stage a unit for review.",
+    )
+    install_unit.add_argument(
+        "--user",
+        default=None,
+        help="the user the box's cells run as (default: the invoking user). "
+             "Baked into User= — systemd has no specifier for it.",
+    )
+    install_unit.add_argument(
+        "--home",
+        default=None,
+        help="home directory for Environment=HOME (default: the invoking "
+             "user's home).",
+    )
+    install_unit.add_argument(
+        "--swarph-bin",
+        default=None,
+        help="swarph executable for ExecStart (default: <home>/.local/bin/"
+             "swarph, the pipx path). Needed to supervise a NON-default build.",
+    )
+    install_unit.add_argument(
+        "--print-path",
+        action="store_true",
+        help="print the packaged template path and exit",
+    )
+    _add_common(install_unit)
 
     return p
 
@@ -1181,6 +1226,116 @@ def _cmd_install_task(args: argparse.Namespace) -> int:
     return subprocess.run(cmd).returncode
 
 
+# ── install-unit (#648 Linux supervision) ────────────────────────────────────
+
+_UNIT_TEMPLATE = ("systemd", "swarph-monitor@.service")
+_UNIT_OUT = "swarph-monitor@.service"
+
+
+def _read_unit_template() -> str:
+    """The packaged template, read from the INSTALLED package.
+
+    A missing entry is a mis-built wheel, and it must say so by name: the
+    clean-room can-fail for #648 rebuilds the wheel without the package-data
+    entry and requires THIS error — not a FileNotFoundError traceback, which
+    reads as a bug in the verb rather than the packaging it diagnoses.
+    """
+    from importlib import resources
+
+    try:
+        return resources.files("swarph_cli").joinpath(*_UNIT_TEMPLATE).read_text(
+            encoding="utf-8")
+    except FileNotFoundError:
+        raise RuntimeError(
+            "packaged resource 'systemd/swarph-monitor@.service' is ABSENT from "
+            "this install — the wheel is mis-built (#648: the package-data "
+            "declaration is what puts it there, and only a clean-room install "
+            "sees the omission; the source tree has the file either way). "
+            "Reinstall from a fixed wheel."
+        ) from None
+
+
+def _render_unit(template: str, *, gateway: str, user: str, home: str,
+                 swarph_bin: str) -> str:
+    """Substitute the install-time placeholders. %i (the peer) is systemd's to
+    resolve per instance and must survive untouched; any <PLACEHOLDER> left
+    standing means a substitution was missed, and a unit carrying one must not
+    be written — the CLI would refuse the non-absolute value at poll time,
+    which is loud but one layer too late."""
+    out = (template
+           .replace("<USER>", user)
+           .replace("<HOME>", home)
+           .replace("<GATEWAY>", gateway)
+           .replace("<SWARPH_BIN>", swarph_bin))
+    left = sorted(set(re.findall(r"<[A-Z_]+>", out)))
+    if left:
+        raise RuntimeError(
+            f"unit template still carries unsubstituted placeholder(s) "
+            f"{', '.join(left)} — refusing to emit a unit that would fail "
+            f"after installation"
+        )
+    return out
+
+
+def _cmd_install_unit(args: argparse.Namespace) -> int:
+    """Print or install the packaged swarph-monitor@.service template.
+
+    Distribution only (#648): this verb renders and optionally writes the
+    template. It does NOT enable or start an instance — that act starts a
+    monitor, and it is the operator's, one cell at a time (#130's migration
+    is commander-gated precisely because a broadcast is what created the
+    original write race).
+    """
+    from importlib import resources
+
+    if args.print_path:
+        print(resources.files("swarph_cli").joinpath(*_UNIT_TEMPLATE))
+        return 0
+
+    gateway = (args.gateway or "").strip()
+    if not gateway:
+        raise RuntimeError(
+            "no gateway: pass --gateway or set MESH_GATEWAY_URL. A unit "
+            "without one refuses on every poll — #578 removed the code "
+            "default, so the env var IS the configuration and absent means "
+            "absent."
+        )
+    if not gateway.startswith(("http://", "https://")):
+        raise RuntimeError(
+            f"gateway {gateway!r} is not an absolute http(s) URL — the "
+            f"monitor would refuse it by name on every poll; fix it HERE, "
+            f"where the refusal is free"
+        )
+    user = args.user or getpass.getuser()
+    home = args.home or str(Path.home())
+    swarph_bin = args.swarph_bin or f"{home}/.local/bin/swarph"
+
+    rendered = _render_unit(_read_unit_template(), gateway=gateway,
+                            user=user, home=home, swarph_bin=swarph_bin)
+
+    if not args.write:
+        print(rendered, end="")
+        return 0
+
+    if os.name == "nt":
+        print("swarph monitor install-unit --write: Linux-only. On Windows "
+              "the supervisor is `swarph monitor install-task` (#644).",
+              file=sys.stderr)
+        return 2
+    target_dir = Path(args.dir)
+    target = target_dir / _UNIT_OUT
+    if not target_dir.is_dir() or not os.access(target_dir, os.W_OK):
+        print(f"swarph monitor install-unit: {target_dir} is not writable — "
+              f"rerun with sudo, or stage with --dir and install by hand.",
+              file=sys.stderr)
+        return 2
+    target.write_text(rendered, encoding="utf-8")
+    print(f"wrote {target}")
+    peer = getattr(args, "self_name", None) or "<peer>"
+    print(f"next: systemctl enable --now swarph-monitor@{peer}")
+    return 0
+
+
 def run_monitor(argv: list[str]) -> int:
     parser = _build_parser()
     try:
@@ -1195,6 +1350,8 @@ def run_monitor(argv: list[str]) -> int:
             return _cmd_heartbeat_check(args)
         if args.command == "install-task":
             return _cmd_install_task(args)
+        if args.command == "install-unit":
+            return _cmd_install_unit(args)
         parser.error(f"unknown command: {args.command}")
     except mesh.MonitorSinkError as exc:
         print(f"swarph monitor: {exc}", file=sys.stderr)
