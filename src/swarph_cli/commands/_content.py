@@ -53,7 +53,8 @@ class ContentError(ValueError):
 # instead of trying to detect what it already did.
 
 
-def add_content_args(parser, flag: str = "--content", *, required: bool = True) -> None:
+def add_content_args(parser, flag: str = "--content", *, required: bool = True,
+                     noun: str = "message body", noun_plural: str = "bodies") -> None:
     """Add ``FLAG`` and ``FLAG-file`` as a mutually exclusive pair."""
     dest = flag.lstrip("-").replace("-", "_")
     group = parser.add_mutually_exclusive_group(required=required)
@@ -61,7 +62,7 @@ def add_content_args(parser, flag: str = "--content", *, required: bool = True) 
         flag,
         dest=dest,
         default=None,
-        help=f"message body; '-' reads stdin. For bodies containing backticks, "
+        help=f"{noun}; '-' reads stdin. For {noun_plural} containing backticks, "
              f"quotes or $(...), prefer {flag}-file — a shell can alter them "
              f"before the CLI ever sees them (board #458).",
     )
@@ -70,7 +71,7 @@ def add_content_args(parser, flag: str = "--content", *, required: bool = True) 
         dest=f"{dest}_file",
         default=None,
         metavar="PATH",
-        help="read the body verbatim from PATH (no shell involved)",
+        help=f"read the {noun} verbatim from PATH (no shell involved)",
     )
 
 
