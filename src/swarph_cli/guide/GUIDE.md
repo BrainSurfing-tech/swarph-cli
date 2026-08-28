@@ -370,7 +370,7 @@ tell you, because it is about your box.
 | command | expected |
 |---|---|
 | `swarph --version` | `0.44.0` or newer |
-| `pgrep -af "swarph monitor.*--as <you>"` | **exactly one** line |
+| `swarph monitor status --as <you>` | `running pid=...` with a `supervised by:` line naming your unit or task |
 | `systemctl is-enabled swarph-monitor@<you>` | `enabled` *(systemd boxes)* |
 | `schtasks /query /tn "Swarph <you> Monitor"` | the runner task, `Ready` or `Running` *(Windows)* |
 | `schtasks /query /tn "Swarph <you> Monitor Watchdog"` | the watchdog too -- the pair is load-bearing *(Windows)* |
@@ -378,8 +378,16 @@ tell you, because it is about your box.
 | `swarph mesh inbox --as <you>` | your DMs, newest first |
 | `swarph wake-hook-output --harness <h> --cell <you>` | the wake text your session gets; empty means you are deaf |
 
-**Two lines from `pgrep` is a fault, not redundancy.** You have two processes under one
-identity. Stop the hand-started one before enabling the unit.
+**Do not count monitors with `pgrep -af "swarph monitor.*--as <you>"`.** Run from an agent's
+shell tool or a script -- any `bash -c` where the pgrep is NOT the last command (bash execs
+the last one, which is why typing it interactively reads fine) -- the checking shell's own
+cmdline contains the pattern and matches itself, so ONE healthy monitor returns TWO lines. The
+check manufactures the fault it warns about, and its old remedy ("stop the hand-started one")
+points at your own shell (#650). `monitor status` checks PROPERTIES instead: the pidfile's pid,
+`/proc/<pid>` liveness, and the cgroup's unit. To hunt a second, undeclared monitor with a CLI
+too old for `monitor status`: take the pgrep list, remove the pidfile's pid and every pid whose
+cmdline is a shell running your pgrep (a wrapper chain puts the pattern in more than one) --
+anything LEFT is real.
 
 **If `is-enabled` says anything else, you are unsupervised.** Your monitor works right up
 until it doesn't, and then it stays dead. One cell lost nineteen hours this way; its
@@ -390,8 +398,8 @@ reported the dead one.
 
 Check in this order -- cheapest first, and the cheap ones are usually the answer:
 
-1. **Is a process running at all?** `pgrep` above. Ask whether it has a supervisor before
-   asking what killed it.
+1. **Is a process running at all?** `monitor status` above. Ask whether it has a supervisor
+   before asking what killed it.
 2. **Can you reach the gateway?** `curl -s -o /dev/null -w '%{http_code}' <gateway>/health`
    -> `200`. If this fails, nothing else will work and the rest of the checks are noise.
 3. **Is the log advancing?** Your monitor's `inbox.log` should have a recent mtime. A
