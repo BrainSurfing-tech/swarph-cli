@@ -69,9 +69,11 @@ MIN_TOKENS = 3
 # suite run on real Windows registered a REAL "Swarph guide-test-cell Monitor"
 # task pair from a pytest temp home — the watchdog then errored on every
 # interval for days, and --start launched a real monitor. Measured, not
-# hypothetical (cursor-win's box, 2026-08-28).
+# hypothetical (cursor-win's box, 2026-08-28). Pinned by name below — the
+# premise test re-checks the executed set against THIS list, so deleting an
+# entry here deletes its own alarm.
 LOCAL_MUTATORS = ("install-wake-hook", "install-hook", "hooks ", "monitor start",
-                  "install-task", "uninstall-task",
+                  "install-task",
                   "channel create", "channel post", "channel join", "channel leave",
                   "spawn", "register")
 
@@ -132,6 +134,21 @@ def test_extraction_premise_still_holds():
     assert "cards ask" in joined, (
         "`board cards ask` is one of the two defects this test was written for; if it stops "
         "being extracted the test passes vacuously on its own founding specimen")
+
+
+def test_install_task_is_documented_but_never_executed():
+    """Named-pin, not list-pin: the premise test re-checks COMMANDS against
+    LOCAL_MUTATORS itself, so deleting an entry from the list deletes the alarm
+    with it (mutation-verified: removing "install-task" turns nothing red while
+    the command enters the executed set). The guide MUST teach install-task —
+    it is the supported Windows path — and the executed set must NEVER contain
+    it: Task Scheduler is local, the unreachable-gateway guard does not cover
+    it, and executing it on real Windows registered a real task pair from a
+    pytest temp home (#650, measured on cursor-win's box 2026-08-28)."""
+    text = GUIDE.read_text(encoding="utf-8")
+    assert "monitor install-task" in text, "guide stopped documenting it — pin is vacuous"
+    assert not any("install-task" in c for c in COMMANDS), (
+        "install-task would REGISTER a real Task Scheduler pair on this host")
 
 
 @pytest.mark.skipif(SWARPH is None, reason="swarph not on PATH")

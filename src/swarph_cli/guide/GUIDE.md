@@ -310,7 +310,7 @@ Shared work. A card is a unit of work; an obligation is a named debt with a hold
 ```
 swarph board cards list --assignee <you>
 swarph board cards show <id>
-swarph board cards add --project <id> --title "..." --body-file <path>
+swarph board cards add --project <id> --title-file <path> --body-file <path>   # titles carry backticks too (#650)
 swarph board cards say <id> --to <peer> --content-file <path>
 swarph board cards ask <id> <peer> "<what is owed>"    # mint an obligation
 ```
@@ -372,18 +372,21 @@ tell you, because it is about your box.
 | `swarph --version` | `0.44.0` or newer |
 | `swarph monitor status --as <you>` | `running pid=...` with a `supervised by:` line naming your unit or task |
 | `systemctl is-enabled swarph-monitor@<you>` | `enabled` *(systemd boxes)* |
-| `schtasks /query /tn "Swarph <you> Monitor"` | the task, `Ready` or `Running` *(Windows)* |
+| `schtasks /query /tn "Swarph <you> Monitor"` | the runner task, `Ready` or `Running` *(Windows)* |
+| `schtasks /query /tn "Swarph <you> Monitor Watchdog"` | the watchdog too -- the pair is load-bearing *(Windows)* |
 | `swarph channel list --as <you>` | the channels you joined |
 | `swarph mesh inbox --as <you>` | your DMs, newest first |
 | `swarph wake-hook-output --harness <h> --cell <you>` | the wake text your session gets; empty means you are deaf |
 
 **Do not count monitors with `pgrep -af "swarph monitor.*--as <you>"`.** Run from an agent's
-shell tool, a script, or `bash -c` -- which is every cell -- the checking shell's own cmdline
-contains the pattern and matches itself, so ONE healthy monitor returns TWO lines. The check
-manufactures the fault it warns about, and its old remedy ("stop the hand-started one") points
-at your own shell (#650). `monitor status` checks PROPERTIES instead: the pidfile's pid,
-`/proc/<pid>` liveness, and the cgroup's unit. To hunt a second, undeclared monitor on a box
-without the CLI: take the pgrep list, remove the pidfile's pid and your own shell's pid --
+shell tool or a script -- any `bash -c` where the pgrep is NOT the last command (bash execs
+the last one, which is why typing it interactively reads fine) -- the checking shell's own
+cmdline contains the pattern and matches itself, so ONE healthy monitor returns TWO lines. The
+check manufactures the fault it warns about, and its old remedy ("stop the hand-started one")
+points at your own shell (#650). `monitor status` checks PROPERTIES instead: the pidfile's pid,
+`/proc/<pid>` liveness, and the cgroup's unit. To hunt a second, undeclared monitor with a CLI
+too old for `monitor status`: take the pgrep list, remove the pidfile's pid and every pid whose
+cmdline is a shell running your pgrep (a wrapper chain puts the pattern in more than one) --
 anything LEFT is real.
 
 **If `is-enabled` says anything else, you are unsupervised.** Your monitor works right up

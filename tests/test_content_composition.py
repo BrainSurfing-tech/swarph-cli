@@ -149,7 +149,10 @@ def test_board_cards_add_delivers_backticks(monkeypatch):
 # backticked `pgrep …` inside a double-quoted --title EXECUTED in the shell and
 # its output was stored as the title.
 
-def test_cards_add_title_file_round_trips_byte_identical(tmp_path, monkeypatch):
+def test_cards_add_title_file_is_verbatim_but_for_one_trailing_newline(tmp_path, monkeypatch):
+    """A title is a one-line field; a body is not. The file's content arrives
+    byte-identical EXCEPT the single trailing newline an editor or `echo`
+    appends — that one is stripped by decision, not by accident."""
     cap = {}
     monkeypatch.setattr(board, "_post_json",
                         lambda url, body, *a, **k: (cap.update(body=body), (200, {"id": 1}))[1])
@@ -157,10 +160,11 @@ def test_cards_add_title_file_round_trips_byte_identical(tmp_path, monkeypatch):
     p.write_text(HOSTILE, encoding="utf-8")
     assert board.run_board(["cards", "add", "--project", "1",
                             "--title-file", str(p)]) == 0
-    assert cap["body"]["title"] == HOSTILE
+    assert cap["body"]["title"] == HOSTILE.removesuffix("\n")
+    assert HOSTILE.endswith("\n"), "fixture must carry the editor newline this test is about"
 
 
-def test_cards_edit_title_file_round_trips_byte_identical(tmp_path, monkeypatch):
+def test_cards_edit_title_file_strips_one_trailing_newline(tmp_path, monkeypatch):
     cap = {}
     monkeypatch.setattr(board, "_patch_json",
                         lambda url, body, *a, **k: (cap.update(body=body),
@@ -168,7 +172,33 @@ def test_cards_edit_title_file_round_trips_byte_identical(tmp_path, monkeypatch)
     p = tmp_path / "title.txt"
     p.write_text(HOSTILE, encoding="utf-8")
     assert board.run_board(["cards", "edit", "1", "--title-file", str(p)]) == 0
-    assert cap["body"]["title"] == HOSTILE
+    assert cap["body"]["title"] == HOSTILE.removesuffix("\n")
+
+
+def test_cards_add_refuses_two_stdin_readers(monkeypatch, capsys):
+    """--title - and --body - share one stdin: the second read gets "", and ""
+    is a REAL value (it clears). Refuse the collision instead of posting a
+    titleless card that reports success."""
+    sent = {}
+    monkeypatch.setattr(board, "_post_json",
+                        lambda url, body, *a, **k: (sent.update(body=body), (200, {"id": 1}))[1])
+    rc = board.run_board(["cards", "add", "--project", "1", "--title", "-", "--body", "-"])
+    assert rc == 1
+    assert not sent, "nothing may be posted when the invocation is ambiguous"
+    assert "only one field can read stdin" in capsys.readouterr().err
+
+
+def test_cards_edit_refuses_two_stdin_readers(monkeypatch, capsys):
+    """On edit the drained second read is worse than a lost title: the patch
+    would CLEAR the stored title and print success."""
+    sent = {}
+    monkeypatch.setattr(board, "_patch_json",
+                        lambda url, body, *a, **k: (sent.update(body=body),
+                                                   (200, {"id": 1, "body_version": 2}))[1])
+    rc = board.run_board(["cards", "edit", "1", "--title", "-", "--body", "-"])
+    assert rc == 1
+    assert not sent
+    assert "only one field can read stdin" in capsys.readouterr().err
 
 
 def test_cards_add_title_and_title_file_are_mutually_exclusive(tmp_path):
@@ -196,12 +226,21 @@ def test_missing_title_file_is_a_refusal_not_a_traceback(tmp_path, monkeypatch):
 
 def test_title_help_carries_the_458_warning(capsys):
     """The hazardous flag is the one whose help must name the safe path —
-    #458's warning text on --title, not only on --body."""
+    #458's warning text on --title, not only on --body. Asserted against the
+    --title ENTRY specifically: the blob also contains --body's help, which
+    carries the same warning, so a blob-wide assertion passes even when
+    --title's help says nothing (mutation-verified)."""
+    import re
     with pytest.raises(SystemExit):
         board.run_board(["cards", "add", "--help"])
     out = capsys.readouterr().out
+    # Anchored on the option-list entry ("\n  --title TITLE "), NOT the usage
+    # line — the usage renders the mutex group as "(--title TITLE | ...)" and
+    # an unanchored search matches there first (measured).
+    m = re.search(r"\n  --title TITLE(.*?)(?:\n  --|\Z)", out, re.S)
+    assert m, "--title option entry not found in cards add --help"
+    assert "#458" in m.group(1)
     assert "--title-file" in out
-    assert "#458" in out
 
 
 def test_resolve_content_never_rejects_a_shell_active_value():
