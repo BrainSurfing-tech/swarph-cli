@@ -393,7 +393,12 @@ def _build_parser() -> argparse.ArgumentParser:
     cs = cards.add_parser("show", help="show one card"); cs.add_argument("id", type=int)
     cs.add_argument("--json", action="store_true"); _add_common(cs)
     ca = cards.add_parser("add", help="create a card")
-    ca.add_argument("--project", required=True, help="project id or slug"); ca.add_argument("--title", required=True)
+    ca.add_argument("--project", required=True, help="project id or slug")
+    # #650: a TITLE is the field most likely to carry a command name or code
+    # identifier — the exact strings with backticks — so #458's file escape
+    # hatch applies here too, not only on --body.
+    add_content_args(ca, "--title", required=True,
+                     noun="card title", noun_plural="titles")
     add_content_args(ca, "--body", required=False); ca.add_argument("--ai2", action="store_true")
     ca.add_argument("--priority", type=int, default=0)
     ca.add_argument("--label", action="append", dest="labels", metavar="LABEL",
@@ -446,7 +451,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "edit", help="edit a card's title and/or body (#191: a correction "
                      "belongs ON the card, not only in its thread)")
     ce.add_argument("id", type=int)
-    ce.add_argument("--title", default=None, help="new title")
+    add_content_args(ce, "--title", required=False,
+                     noun="card title", noun_plural="titles")
     add_content_args(ce, "--body", required=False)
     ce.add_argument("--json", action="store_true"); _add_common(ce)
 
@@ -576,17 +582,30 @@ def run_board(argv: list[str]) -> int:
             st, d = _http_get_json(f"{gw}/board/cards/{args.id}", token)
             return _out(st, d, _format_card, aj)
         if args.command == "add":
+            if args.title == "-" and args.body == "-":
+                # Two stdin readers, one stdin: the second read gets "", and ""
+                # is a REAL value (it clears) — refuse rather than post a
+                # titleless card that reports success (#256's class).
+                print("swarph board cards add: only one field can read stdin — "
+                      "pass the other as --title-file/--body-file", file=sys.stderr)
+                return 1
             try:
                 body = resolve_content(args.body, getattr(args, "body_file", None), "--body")
+                title = resolve_content(args.title, getattr(args, "title_file", None), "--title")
             except ContentError as exc:
                 print(f"swarph board cards add: {exc}", file=sys.stderr)
                 return 1
+            if title is not None:
+                # A title is a one-line field; a body is not. Strip the single
+                # trailing newline an editor or `echo` appends to a title file —
+                # byte-identical is --body's contract, not --title's.
+                title = title.removesuffix("\n")
             pid, err = _resolve_project(gw, token, args.project)
             if err or pid is None:
                 print(f"swarph board: {err or 'project required'}", file=sys.stderr)
                 return 1
             st, d = _post_json(f"{gw}/board/cards", _card_add_payload(
-                self_name, pid, args.title, body=body, ai2=args.ai2,
+                self_name, pid, title, body=body, ai2=args.ai2,
                 priority=args.priority, labels=getattr(args, "labels", None)), token)
             return _out(st, d, lambda x: f"created card #{x.get('id')} [{x.get('stage')}] (stage defaults to proposed — use `cards move` to advance)", aj)
         if args.command == "label":
@@ -612,13 +631,23 @@ def run_board(argv: list[str]) -> int:
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "assignee": args.assignee}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} assignee -> {x.get('assignee')}", aj)
         if args.command == "edit":
+            if args.title == "-" and args.body == "-":
+                # As in `add`: two stdin readers, one stdin — and on edit the
+                # drained second read is "", which CLEARS the stored title
+                # while the CLI prints success.
+                print("swarph board cards edit: only one field can read stdin — "
+                      "pass the other as --title-file/--body-file", file=sys.stderr)
+                return 1
             try:
                 body_text = resolve_content(args.body, getattr(args, "body_file", None), "--body")
+                title_text = resolve_content(args.title, getattr(args, "title_file", None), "--title")
             except ContentError as exc:
                 print(f"swarph board cards edit: {exc}", file=sys.stderr)
                 return 1
+            if title_text is not None:
+                title_text = title_text.removesuffix("\n")  # one-line field; see add
             try:
-                patch = _card_edit_payload(self_name, args.title, body_text)
+                patch = _card_edit_payload(self_name, title_text, body_text)
             except ValueError as exc:
                 print(f"swarph board cards edit: {exc}", file=sys.stderr)
                 return 2
