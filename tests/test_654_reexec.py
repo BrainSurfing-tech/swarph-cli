@@ -83,6 +83,16 @@ def _run(root: Path, *extra: str) -> int:
 
 # ── R1/R2: the .path unit ─────────────────────────────────────────────────
 
+def test_oneshot_applies_not_dry_runs():
+    """The path unit's oneshot must pass --apply. Without it the verb
+    prints a plan and restarts nobody — the fleet reads as protected
+    while INSTALLED vs RUNNING stays open. Found at accept, before
+    enable: the first render was a dry-run ExecStart."""
+    text = monitor._read_packaged(("systemd", "swarph-monitor-reexec.service"))
+    start = [line for line in text.splitlines() if line.startswith("ExecStart=")]
+    assert start and "--apply" in start[0], start
+
+
 def test_path_unit_uses_pathchanged_never_pathmodified():
     text = monitor._read_packaged(("systemd", "swarph-monitor-reexec.path"))
     directives = [line for line in text.splitlines()

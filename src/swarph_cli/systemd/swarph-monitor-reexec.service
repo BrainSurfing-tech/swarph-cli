@@ -16,4 +16,4 @@ Documentation=https://github.com/BrainSurfing-tech/swarph-cli
 
 [Service]
 Type=oneshot
-ExecStart=<SWARPH_BIN> monitor reexec-on-change --state-root <STATE_ROOT>
+ExecStart=<SWARPH_BIN> monitor reexec-on-change --apply --state-root <STATE_ROOT>
