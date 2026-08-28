@@ -125,8 +125,13 @@ def test_install_reexec_names_the_interpreter_bump_caveat(capsys):
     assert "interpreter bump" in out, "the R2 expiry must be printed, not implied"
 
 
-def test_install_reexec_write_lands_both_units(tmp_path):
+def test_install_reexec_write_lands_both_units(tmp_path, capsys):
     rc = monitor.run_monitor(["install-reexec", "--write", "--dir", str(tmp_path)])
+    if os.name == "nt":
+        assert rc == 2
+        assert "Linux-only" in capsys.readouterr().err
+        assert list(tmp_path.iterdir()) == []
+        return
     assert rc == 0
     names = sorted(p.name for p in tmp_path.iterdir())
     assert names == ["swarph-monitor-reexec.path", "swarph-monitor-reexec.service"]
