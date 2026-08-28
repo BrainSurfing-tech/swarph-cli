@@ -64,7 +64,14 @@ MIN_TOKENS = 3
 #
 # These are documented-but-unexecuted here. That is a real coverage hole, named rather than
 # hidden: a broken flag on one of these verbs would not turn this test red.
+# `install-task` joined this list the day the guide documented it (#650): the
+# unreachable-gateway guard does NOTHING for it (Task Scheduler is local), and a
+# suite run on real Windows registered a REAL "Swarph guide-test-cell Monitor"
+# task pair from a pytest temp home — the watchdog then errored on every
+# interval for days, and --start launched a real monitor. Measured, not
+# hypothetical (cursor-win's box, 2026-08-28).
 LOCAL_MUTATORS = ("install-wake-hook", "install-hook", "hooks ", "monitor start",
+                  "install-task", "uninstall-task",
                   "channel create", "channel post", "channel join", "channel leave",
                   "spawn", "register")
 
