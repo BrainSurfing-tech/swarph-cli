@@ -19,6 +19,7 @@ tests guard everything the tree CAN guard.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -81,13 +82,19 @@ def test_default_prints_and_writes_nothing(tmp_path, capsys):
     assert list(tmp_path.iterdir()) == [], "print mode must not write"
 
 
-def test_write_lands_the_at_instance_form(tmp_path):
+def test_write_lands_the_at_instance_form(tmp_path, capsys):
     """#130's guard on this verb: the file on disk is the TEMPLATE name —
     swarph-monitor@.service — never the bare or hyphen-suffixed form that
-    diverged across the fleet."""
+    diverged across the fleet. --write is Linux-only; on Windows the verb
+    must name that and write nothing (reviewers-pixel on #347)."""
     rc = monitor.run_monitor(
         ["install-unit", "--gateway", "http://g:1", "--write",
          "--dir", str(tmp_path), "--as", "crespo3"])
+    if os.name == "nt":
+        assert rc == 2
+        assert "Linux-only" in capsys.readouterr().err
+        assert list(tmp_path.iterdir()) == []
+        return
     assert rc == 0
     names = [p.name for p in tmp_path.iterdir()]
     assert names == ["swarph-monitor@.service"], names
@@ -97,8 +104,13 @@ def test_write_refuses_an_unwritable_dir(capsys):
     rc = monitor.run_monitor(
         ["install-unit", "--gateway", "http://g:1", "--write",
          "--dir", "/proc/1/no-such-dir"])
+    err = capsys.readouterr().err
     assert rc == 2
-    assert "not writable" in capsys.readouterr().err
+    if os.name == "nt":
+        # Linux-only fires before the writable check — the named refuse.
+        assert "Linux-only" in err
+    else:
+        assert "not writable" in err
 
 
 def test_unsubstituted_placeholder_is_loud(monkeypatch):
@@ -114,4 +126,6 @@ def test_print_path_names_the_packaged_template(capsys):
     rc = monitor.run_monitor(["install-unit", "--print-path"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert out.strip().endswith("systemd/swarph-monitor@.service")
+    # Traversable on Windows prints backslashes; the packaged name is posix.
+    assert out.strip().replace("\\", "/").endswith(
+        "systemd/swarph-monitor@.service")
