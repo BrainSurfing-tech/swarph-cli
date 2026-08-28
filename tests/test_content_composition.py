@@ -141,6 +141,69 @@ def test_board_cards_add_delivers_backticks(monkeypatch):
     assert cap["body"]["body"] == "a `backtick`"
 
 
+# ── #650: the TITLE field gets the same escape hatch ─────────────────────────
+#
+# #458's remedy was applied to --body and not to --title, and a title is the
+# field MOST likely to carry a command name or code identifier — the exact
+# strings with backticks. #650's own card title was mangled at creation: a
+# backticked `pgrep …` inside a double-quoted --title EXECUTED in the shell and
+# its output was stored as the title.
+
+def test_cards_add_title_file_round_trips_byte_identical(tmp_path, monkeypatch):
+    cap = {}
+    monkeypatch.setattr(board, "_post_json",
+                        lambda url, body, *a, **k: (cap.update(body=body), (200, {"id": 1}))[1])
+    p = tmp_path / "title.txt"
+    p.write_text(HOSTILE, encoding="utf-8")
+    assert board.run_board(["cards", "add", "--project", "1",
+                            "--title-file", str(p)]) == 0
+    assert cap["body"]["title"] == HOSTILE
+
+
+def test_cards_edit_title_file_round_trips_byte_identical(tmp_path, monkeypatch):
+    cap = {}
+    monkeypatch.setattr(board, "_patch_json",
+                        lambda url, body, *a, **k: (cap.update(body=body),
+                                                   (200, {"id": 1, "body_version": 2}))[1])
+    p = tmp_path / "title.txt"
+    p.write_text(HOSTILE, encoding="utf-8")
+    assert board.run_board(["cards", "edit", "1", "--title-file", str(p)]) == 0
+    assert cap["body"]["title"] == HOSTILE
+
+
+def test_cards_add_title_and_title_file_are_mutually_exclusive(tmp_path):
+    with pytest.raises(SystemExit):
+        board.run_board(["cards", "add", "--project", "1", "--title", "t",
+                         "--title-file", str(tmp_path / "t.txt")])
+
+
+def test_cards_add_requires_a_title_source():
+    """The group is required: dropping --title must not silently produce a
+    titleless card."""
+    with pytest.raises(SystemExit):
+        board.run_board(["cards", "add", "--project", "1"])
+
+
+def test_missing_title_file_is_a_refusal_not_a_traceback(tmp_path, monkeypatch):
+    sent = {}
+    monkeypatch.setattr(board, "_post_json",
+                        lambda url, body, *a, **k: (sent.update(body=body), (200, {"id": 1}))[1])
+    rc = board.run_board(["cards", "add", "--project", "1",
+                          "--title-file", str(tmp_path / "nope.txt")])
+    assert rc == 1
+    assert not sent, "nothing may be posted when the title could not be read"
+
+
+def test_title_help_carries_the_458_warning(capsys):
+    """The hazardous flag is the one whose help must name the safe path —
+    #458's warning text on --title, not only on --body."""
+    with pytest.raises(SystemExit):
+        board.run_board(["cards", "add", "--help"])
+    out = capsys.readouterr().out
+    assert "--title-file" in out
+    assert "#458" in out
+
+
 def test_resolve_content_never_rejects_a_shell_active_value():
     """Unit-level statement of the same rule: resolve_content has no reject path
     for --content. Anything the shell handed us is delivered as received."""

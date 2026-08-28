@@ -393,7 +393,12 @@ def _build_parser() -> argparse.ArgumentParser:
     cs = cards.add_parser("show", help="show one card"); cs.add_argument("id", type=int)
     cs.add_argument("--json", action="store_true"); _add_common(cs)
     ca = cards.add_parser("add", help="create a card")
-    ca.add_argument("--project", required=True, help="project id or slug"); ca.add_argument("--title", required=True)
+    ca.add_argument("--project", required=True, help="project id or slug")
+    # #650: a TITLE is the field most likely to carry a command name or code
+    # identifier — the exact strings with backticks — so #458's file escape
+    # hatch applies here too, not only on --body.
+    add_content_args(ca, "--title", required=True,
+                     noun="card title", noun_plural="titles")
     add_content_args(ca, "--body", required=False); ca.add_argument("--ai2", action="store_true")
     ca.add_argument("--priority", type=int, default=0)
     ca.add_argument("--label", action="append", dest="labels", metavar="LABEL",
@@ -446,7 +451,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "edit", help="edit a card's title and/or body (#191: a correction "
                      "belongs ON the card, not only in its thread)")
     ce.add_argument("id", type=int)
-    ce.add_argument("--title", default=None, help="new title")
+    add_content_args(ce, "--title", required=False,
+                     noun="card title", noun_plural="titles")
     add_content_args(ce, "--body", required=False)
     ce.add_argument("--json", action="store_true"); _add_common(ce)
 
@@ -578,6 +584,7 @@ def run_board(argv: list[str]) -> int:
         if args.command == "add":
             try:
                 body = resolve_content(args.body, getattr(args, "body_file", None), "--body")
+                title = resolve_content(args.title, getattr(args, "title_file", None), "--title")
             except ContentError as exc:
                 print(f"swarph board cards add: {exc}", file=sys.stderr)
                 return 1
@@ -586,7 +593,7 @@ def run_board(argv: list[str]) -> int:
                 print(f"swarph board: {err or 'project required'}", file=sys.stderr)
                 return 1
             st, d = _post_json(f"{gw}/board/cards", _card_add_payload(
-                self_name, pid, args.title, body=body, ai2=args.ai2,
+                self_name, pid, title, body=body, ai2=args.ai2,
                 priority=args.priority, labels=getattr(args, "labels", None)), token)
             return _out(st, d, lambda x: f"created card #{x.get('id')} [{x.get('stage')}] (stage defaults to proposed — use `cards move` to advance)", aj)
         if args.command == "label":
@@ -614,11 +621,12 @@ def run_board(argv: list[str]) -> int:
         if args.command == "edit":
             try:
                 body_text = resolve_content(args.body, getattr(args, "body_file", None), "--body")
+                title_text = resolve_content(args.title, getattr(args, "title_file", None), "--title")
             except ContentError as exc:
                 print(f"swarph board cards edit: {exc}", file=sys.stderr)
                 return 1
             try:
-                patch = _card_edit_payload(self_name, args.title, body_text)
+                patch = _card_edit_payload(self_name, title_text, body_text)
             except ValueError as exc:
                 print(f"swarph board cards edit: {exc}", file=sys.stderr)
                 return 2
