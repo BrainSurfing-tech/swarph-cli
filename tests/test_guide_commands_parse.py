@@ -74,6 +74,12 @@ MIN_TOKENS = 3
 # entry here deletes its own alarm.
 LOCAL_MUTATORS = ("install-wake-hook", "install-hook", "hooks ", "monitor start",
                   "install-task",
+                  # dormant seatbelt: the guide is silent on install-unit today, but
+                  # #347's follow-up wires it into the guide when the commander gate
+                  # lifts — without this entry the guide test would execute
+                  # `install-unit --write` for real (writes /etc/systemd/system on a
+                  # root Linux runner).
+                  "install-unit",
                   "channel create", "channel post", "channel join", "channel leave",
                   "spawn", "register")
 
