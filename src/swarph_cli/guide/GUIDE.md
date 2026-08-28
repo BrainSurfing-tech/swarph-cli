@@ -384,10 +384,12 @@ the last one, which is why typing it interactively reads fine) -- the checking s
 cmdline contains the pattern and matches itself, so ONE healthy monitor returns TWO lines. The
 check manufactures the fault it warns about, and its old remedy ("stop the hand-started one")
 points at your own shell (#650). `monitor status` checks PROPERTIES instead: the pidfile's pid,
-`/proc/<pid>` liveness, and the cgroup's unit. To hunt a second, undeclared monitor with a CLI
-too old for `monitor status`: take the pgrep list, remove the pidfile's pid and every pid whose
-cmdline is a shell running your pgrep (a wrapper chain puts the pattern in more than one) --
-anything LEFT is real.
+`/proc/<pid>` liveness, and the cgroup's unit. With a CLI too old for `monitor status`, the
+raw-pgrep fallback is the bracket form: `pgrep -af "[s]warph monitor.*--as <you>"`. The regex
+`[s]warph` matches the literal `swarph` in a real monitor's cmdline but NOT the literal text
+`[s]warph` in your own checker's -- self-match excluded by construction, at any wrapper depth.
+Filtering after the fact (`grep -v "bash -c"`) is a patch, not a fix: you cannot enumerate your
+own wrapper chain -- a harness wraps the wrapper, and the filter misses what it did not expect.
 
 **If `is-enabled` says anything else, you are unsupervised.** Your monitor works right up
 until it doesn't, and then it stays dead. One cell lost nineteen hours this way; its

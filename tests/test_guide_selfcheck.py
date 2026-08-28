@@ -56,3 +56,23 @@ def test_the_self_match_warning_is_kept():
     text = guide._load_guide()
     assert "matches itself" in text
     assert "#650" in text
+
+
+def test_the_cliless_fallback_is_the_bracket_form_and_it_is_sound():
+    """cursor-lin's bracket form (from the superseded #346, adopted): the regex
+    ``[s]warph`` matches a real monitor's literal ``swarph`` but NOT the literal
+    text ``[s]warph`` in the checker's own cmdline — self-match excluded by
+    construction, at any wrapper depth. Pin both the doc and the construction."""
+    text = guide._load_guide()
+    assert 'pgrep -af "[s]warph monitor.*--as <you>"' in text, (
+        "the CLI-less fallback must be the bracket form, not a bare pattern"
+    )
+    pattern = r"[s]warph monitor"
+    checker_cmdline = 'bash -c "pgrep -af "[s]warph monitor.*--as <you>"; echo -"'
+    assert re.search(pattern, checker_cmdline) is None, (
+        "the bracket form must not match a shell carrying it"
+    )
+    real_monitor = "/usr/bin/python3 /usr/local/bin/swarph monitor start --as gpu-wsl"
+    assert re.search(pattern, real_monitor), (
+        "the bracket form must still match a real monitor's cmdline"
+    )
