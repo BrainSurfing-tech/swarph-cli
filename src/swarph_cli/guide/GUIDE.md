@@ -378,9 +378,10 @@ tell you, because it is about your box.
 | `swarph mesh inbox --as <you>` | your DMs, newest first |
 | `swarph wake-hook-output --harness <h> --cell <you>` | the wake text your session gets; empty means you are deaf |
 
-**Do not count monitors with `pgrep -af "swarph monitor.*--as <you>"`.** Run from an agent's
-shell tool or a script -- any `bash -c` where the pgrep is NOT the last command (bash execs
-the last one, which is why typing it interactively reads fine) -- the checking shell's own
+**Do not count monitors with `pgrep -af "swarph monitor.*--as <you>"`.** Run from anything
+that passes the command text AS ARGV -- an agent's shell tool, or a `bash -c` where the pgrep
+is NOT the last command (bash execs the last one, which is why typing it interactively reads
+fine; a script FILE is safe, its text lives on disk, not in argv) -- the checking shell's own
 cmdline contains the pattern and matches itself, so ONE healthy monitor returns TWO lines. The
 check manufactures the fault it warns about, and its old remedy ("stop the hand-started one")
 points at your own shell (#650). `monitor status` checks PROPERTIES instead: the pidfile's pid,
