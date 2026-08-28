@@ -23,6 +23,15 @@ def _write_timeline(path: Path, lines: list[str]) -> None:
     path.write_text("# timeline\n\n" + "\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _today() -> str:
+    """Entries the test expects to SURVIVE the 7-day window must be dated
+    dynamically — a hardcoded date ages out of the window and the test turns
+    red on main exactly 7 days after it was written (2026-08-21 dates died
+    on 2026-08-28, red on all four lanes, branch-independent)."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+
+
 def _run_pc(monkeypatch, timeline: Path | None, stdin: str = "{}") -> dict:
     if timeline is not None:
         monkeypatch.setenv("SWARPH_TIMELINE", str(timeline))
@@ -48,7 +57,7 @@ def test_missing_timeline_is_a_silent_noop(monkeypatch):
 
 def test_malformed_stdin_still_reads_timeline(monkeypatch, tmp_path):
     tl = tmp_path / "TIMELINE.md"
-    _write_timeline(tl, ["- 2026-08-21T04:55Z · **cursor-lin** · shipped #541"])
+    _write_timeline(tl, [f"- {_today()} · **cursor-lin** · shipped #541"])
     out = _run_pc(monkeypatch, tl, stdin="not json at all")
     ctx = out["hookSpecificOutput"]["additionalContext"]
     assert "shipped #541" in ctx
@@ -59,7 +68,7 @@ def test_malformed_lines_are_skipped_not_fatal(monkeypatch, tmp_path):
     _write_timeline(tl, [
         "this line is not an entry",
         "- not-a-date · **x** · bad ts",
-        "- 2026-08-21T04:55Z · **cursor-lin** · the good line",
+        f"- {_today()} · **cursor-lin** · the good line",
     ])
     out = _run_pc(monkeypatch, tl)
     ctx = out["hookSpecificOutput"]["additionalContext"]
