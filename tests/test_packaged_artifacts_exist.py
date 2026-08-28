@@ -29,6 +29,11 @@ REQUIRED = [
     ("systemd/swarph-monitor@.service",
      "#648: `swarph monitor install-unit` reads it via importlib.resources — "
      "the mesh's own DM path was the one supervisor the wheel did not carry"),
+    ("systemd/swarph-monitor-reexec.path",
+     "#654: `swarph monitor install-reexec` reads it via importlib.resources — "
+     "the watch that closes INSTALLED vs RUNNING"),
+    ("systemd/swarph-monitor-reexec.service",
+     "#654: the oneshot the .path unit fires; both must ship together"),
 ]
 
 

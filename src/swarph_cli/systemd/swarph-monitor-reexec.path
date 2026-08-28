@@ -1,0 +1,31 @@
+[Unit]
+# #654: close the gap between INSTALLED and RUNNING on one box.
+#
+# A long-running Python process holds the modules it imported AT START.
+# `pipx install --force` replaces files in a shared site-packages, and every
+# already-running monitor keeps executing the old code while `swarph --version`
+# (which reads the disk) reports the new one. Measured 2026-08-27: 9 of 10
+# monitors stale on a five-day-old box — the steady-state drift rate.
+#
+# This path unit watches the installed package's __init__.py and runs
+# swarph-monitor-reexec.service, which restarts the supervised monitor
+# instances — staggered, honouring recorded holds, and reporting each restart.
+#
+# PathChanged, NEVER PathModified: PathChanged fires on close-after-write, so a
+# half-written tree mid-install does not trigger it. PathModified would.
+#
+# R2: <SITE_PACKAGES_INIT> is resolved FROM THE LIVE INTERPRETER at install time
+# by `swarph monitor install-reexec` — not hardcoded. The resolved path contains
+# the Python minor version (lib/python3.14/); an interpreter bump moves it, and
+# this unit would then watch a path that never changes and NEVER FIRE — the
+# silent shape this card family exists to kill. After any pipx interpreter
+# change, RE-RUN `swarph monitor install-reexec --write`.
+Description=Re-exec supervised swarph monitors when the installed package changes (#654)
+Documentation=https://github.com/BrainSurfing-tech/swarph-cli
+
+[Path]
+PathChanged=<SITE_PACKAGES_INIT>
+Unit=swarph-monitor-reexec.service
+
+[Install]
+WantedBy=multi-user.target

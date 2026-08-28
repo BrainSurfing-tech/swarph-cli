@@ -122,6 +122,7 @@ where = ["src"]
 # importlib.resources, so an undeclared GUIDE.md passes every test in the
 # tree and fails on every installed wheel -- the 0.39.3 bug above, again.
 swarph_cli = ["systemd/*.service", "systemd/*.timer", "systemd/*.default",
+              "systemd/*.path",
               "scripts/*.sh", "scripts/*.ps1", "guide/*.md",
               "payloads/postcompact/*.sh", "payloads/postcompact/*.cmd",
     "skills/*/SKILL.md", "skills/*/LICENSE"]
