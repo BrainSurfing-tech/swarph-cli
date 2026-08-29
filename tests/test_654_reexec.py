@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -150,6 +151,16 @@ def test_dry_run_restarts_nothing_and_names_the_plan(tmp_path, rig, capsys):
     assert "DRY RUN" in out
 
 
+def test_dry_run_uses_the_default_state_root_when_omitted(tmp_path, rig, capsys, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / "swarph_state"
+    _mk_state(root, "alpha", 111)
+    rc = monitor.run_monitor(["reexec-on-change"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "would restart: alpha" in out
+
+
 def test_apply_restarts_serially_with_the_stagger(tmp_path, rig, capsys):
     _mk_state(tmp_path, "alpha", 111)
     _mk_state(tmp_path, "beta", 222)
@@ -192,6 +203,16 @@ def test_a_corrupt_hold_reads_as_held_never_absent(tmp_path, rig, capsys):
     assert "UNREADABLE HOLD FILE" in out
 
 
+def test_a_non_utf8_hold_reads_as_held_never_absent(tmp_path, rig, capsys):
+    sd = _mk_state(tmp_path, "alpha", 111)
+    (sd / monitor._REEXEC_HOLD).write_bytes(b"\xff")
+    rc = _run(tmp_path, "--apply")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert rig["restart"] == ["swarph-monitor@beta.service"], rig["restart"]
+    assert "UNREADABLE HOLD FILE (UnicodeDecodeError)" in out
+
+
 def test_out_of_scope_cells_are_NAMED_not_omitted(tmp_path, rig, capsys):
     """R6: meta-muse/mistral's shape — tmux-scoped monitors the unit cannot
     reach must appear in the report, or the box reads fully covered while
@@ -230,6 +251,19 @@ def test_a_failed_restart_is_loud_and_exits_nonzero(tmp_path, rig, capsys, monke
     assert rc == 1, "a failed restart must fail the oneshot — a green oneshot " \
                     "with a dead cell is the silent shape this card kills"
     assert "reexec FAILED: alpha" in out
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [OSError("missing systemctl"), subprocess.CalledProcessError(1, ["systemctl"])],
+)
+def test_unit_owned_instances_translates_probe_failures_to_runtimeerror(monkeypatch, exc):
+    def _boom(*_args, **_kwargs):
+        raise exc
+
+    monkeypatch.setattr(monitor.subprocess, "run", _boom)
+    with pytest.raises(RuntimeError, match="systemctl cannot list running"):
+        monitor._unit_owned_instances()
 
 
 # ── hold verbs + status readability (R4) ──────────────────────────────────

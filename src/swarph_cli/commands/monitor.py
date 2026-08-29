@@ -1445,7 +1445,7 @@ def _read_reexec_hold(state_dir: Path) -> "dict | None":
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return {"reason": f"UNREADABLE HOLD FILE ({exc.__class__.__name__}) — "
                           f"treating as held; fix or remove {path}",
                 "recorded_by": "?", "recorded_at": "?"}
@@ -1506,11 +1506,16 @@ def _unit_owned_instances() -> "list[str]":
     matches what you expect the world to look like; this asks the owner).
     Empty when systemctl cannot answer, and the CALLER hears why via the
     exception — an unreadable registry must not render as an empty fleet."""
-    out = subprocess.run(
-        ["systemctl", "list-units", "swarph-monitor@*", "--state=running",
-         "--no-legend", "--no-pager", "--plain"],
-        capture_output=True, text=True, check=True,
-        encoding="utf-8", errors="replace").stdout
+    try:
+        out = subprocess.run(
+            ["systemctl", "list-units", "swarph-monitor@*", "--state=running",
+             "--no-legend", "--no-pager", "--plain"],
+            capture_output=True, text=True, check=True,
+            encoding="utf-8", errors="replace").stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            "systemctl cannot list running swarph-monitor instances"
+        ) from exc
     peers = []
     for line in out.splitlines():
         first = line.split()[0] if line.split() else ""
@@ -1528,7 +1533,7 @@ def _cmd_reexec_on_change(args: argparse.Namespace) -> int:
     a systemd unit — tmux-scoped or hand-started) is NAMED in the report, so
     the box can never read fully covered while a fifth of it is untouched.
     """
-    state_root = Path(args.state_root).expanduser()
+    state_root = Path(args.state_root or "~/swarph_state").expanduser()
     version, origin, mtime = _installed_build()
     print(f"reexec-on-change: installed swarph-cli {version} "
           f"(package {origin}, mtime {mtime})")
