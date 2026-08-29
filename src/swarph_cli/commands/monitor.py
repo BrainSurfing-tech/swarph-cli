@@ -1509,7 +1509,8 @@ def _unit_owned_instances() -> "list[str]":
     out = subprocess.run(
         ["systemctl", "list-units", "swarph-monitor@*", "--state=running",
          "--no-legend", "--no-pager", "--plain"],
-        capture_output=True, text=True, check=True).stdout
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", check=True).stdout
     peers = []
     for line in out.splitlines():
         first = line.split()[0] if line.split() else ""
