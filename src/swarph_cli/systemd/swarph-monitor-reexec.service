@@ -1,0 +1,22 @@
+[Unit]
+# #654: the oneshot the .path unit fires. Runs `swarph monitor reexec-on-change`,
+# which restarts each UNIT-OWNED swarph-monitor@<peer> instance — serially with a
+# stagger (R3: eight simultaneous restarts put the whole box's DM path down at
+# once), skipping instances with a recorded reexec hold (R4: a deliberate hold is
+# a correct engineering decision, not drift), reporting every action to the
+# journal (R5), and naming the cells it cannot reach — tmux-scoped monitors are
+# OUT OF SCOPE and must be reported, not omitted (R6).
+#
+# Runs as root: restarting system units owned by the cells' user requires it.
+# The oneshot itself executes the NEWLY-INSTALLED code — it starts after the
+# install completed, which is exactly the code the fleet is being moved to.
+Description=Re-exec supervised swarph monitors after a swarph-cli reinstall (#654)
+Documentation=https://github.com/BrainSurfing-tech/swarph-cli
+# After the path unit fires; nothing else to order against.
+
+[Service]
+Type=oneshot
+# Default oneshot timeout is 90s. Nine stale monitors at the verb's 15s
+# stagger is 135s — PID1 kills the job mid-fleet if we inherit it.
+TimeoutStartSec=5min
+ExecStart=<SWARPH_BIN> monitor reexec-on-change --apply --state-root <STATE_ROOT>

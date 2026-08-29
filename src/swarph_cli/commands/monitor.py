@@ -213,6 +213,78 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_common(install_unit)
 
+    reexec = sub.add_parser(
+        "reexec-on-change",
+        help="#654: restart every unit-owned swarph-monitor@<peer> onto the "
+             "installed build — staggered, hold-honouring, reported. Fired by "
+             "swarph-monitor-reexec.path; DRY RUN unless --apply.",
+    )
+    reexec.add_argument(
+        "--state-root",
+        default=None,
+        help="root holding every peer's state dir (default ~/swarph_state)",
+    )
+    reexec.add_argument(
+        "--stagger-s",
+        type=float,
+        default=15.0,
+        help="seconds BETWEEN instance restarts (R3: a simultaneous fleet "
+             "restart puts the box's whole DM path down at once). Default 15.",
+    )
+    reexec.add_argument(
+        "--apply",
+        action="store_true",
+        help="actually restart. Without it the verb prints the plan and "
+             "touches nothing.",
+    )
+
+    hold = sub.add_parser(
+        "hold-reexec",
+        help="#654 R4: record a deliberate hold — the reinstall path unit "
+             "SKIPS this monitor. The hold is a file with a reason, readable "
+             "by `monitor status`, not a note in one cell's memory.",
+    )
+    hold.add_argument("--reason", required=True,
+                      help="why this cell is held — required, because a hold "
+                           "without its reason is unactionable later")
+    _add_common(hold)
+
+    clear = sub.add_parser(
+        "clear-reexec-hold",
+        help="lift a hold recorded by hold-reexec",
+    )
+    _add_common(clear)
+
+    install_reexec = sub.add_parser(
+        "install-reexec",
+        help="#654: install the reexec .path/.service pair. The watched "
+             "site-packages path is resolved from the LIVE INTERPRETER at "
+             "install time (R2 — never hardcoded). Prints by default; "
+             "--write installs.",
+    )
+    install_reexec.add_argument(
+        "--write", action="store_true",
+        help="write the rendered units to --dir. Default prints only.",
+    )
+    install_reexec.add_argument(
+        "--dir", default="/etc/systemd/system",
+        help="target directory for --write (default /etc/systemd/system)",
+    )
+    install_reexec.add_argument(
+        "--swarph-bin", default=None,
+        help="swarph executable for the oneshot (default: <home>/.local/bin/"
+             "swarph)",
+    )
+    install_reexec.add_argument(
+        "--state-root", default=None,
+        help="cells' state root baked into the oneshot (default: "
+             "<home>/swarph_state)",
+    )
+    install_reexec.add_argument(
+        "--print-path", action="store_true",
+        help="print the packaged template paths and exit",
+    )
+
     return p
 
 
@@ -331,6 +403,13 @@ _DAEMON_PIDFILE = "daemon.pid"
 # treat it as one — a watchdog that revives a deliberately-stopped monitor is
 # the same class of surprise as a second instance beside a hand-started one.
 _SUPERVISION_HOLD = "supervision_hold.json"
+
+# #654 R4: a deliberate hold against REEXEC (restart-into-new-build on
+# reinstall), distinct from the supervision hold above (a deliberate STOP —
+# the watchdog refuses revival). A reexec-held monitor is RUNNING and must
+# still be revived if it crashes; only the reinstall-triggered restart skips
+# it. Separate file, because the two holds want opposite crash behaviour.
+_REEXEC_HOLD = "reexec_hold.json"
 
 
 def _daemon_owns_state_dir(state_dir):
@@ -639,6 +718,10 @@ def _collect(args: argparse.Namespace) -> dict:
             if pstatus == "live_ours" else None
         ),
         "supervision_hold": (state_dir / _SUPERVISION_HOLD).exists(),
+        # #654 R4: a hold against reinstall-triggered REEXEC is recorded as a
+        # file with its reason, and status is where it is READ — a hold that
+        # lives in one cell's memory is not a hold the fleet can see.
+        "reexec_hold": _read_reexec_hold(state_dir),
         "configured_sinks": [s.name for s in sinks],
         "observation_cursor": observed,
         # `none` keeps no ledger, so there is nothing to subtract. Saying "0
@@ -701,6 +784,8 @@ def _print_status(info: dict, pending: int) -> None:
                   "the hold.")
         else:
             print("  start it with: swarph monitor start")
+        if info.get("reexec_hold"):
+            print(f"  {_fmt_reexec_hold(info['reexec_hold'])}")
         return
 
     print(f"monitor {info['self']}: running pid={info['pid']} "
@@ -723,6 +808,8 @@ def _print_status(info: dict, pending: int) -> None:
               "#644 (ORPHAN)")
     print(f"  state: {info['state_dir']}")
     print(f"  observation cursor: last_msg_id={info['observation_cursor']}")
+    if info.get("reexec_hold"):
+        print(f"  {_fmt_reexec_hold(info['reexec_hold'])}")
 
     if not info["unread_reportable"]:
         print("  unread: CANNOT REPORT — no configured sink keeps a delivery "
@@ -1232,8 +1319,8 @@ _UNIT_TEMPLATE = ("systemd", "swarph-monitor@.service")
 _UNIT_OUT = "swarph-monitor@.service"
 
 
-def _read_unit_template() -> str:
-    """The packaged template, read from the INSTALLED package.
+def _read_packaged(rel: tuple) -> str:
+    """A packaged resource, read from the INSTALLED package.
 
     A missing entry is a mis-built wheel, and it must say so by name: the
     clean-room can-fail for #648 rebuilds the wheel without the package-data
@@ -1242,17 +1329,22 @@ def _read_unit_template() -> str:
     """
     from importlib import resources
 
+    name = "/".join(rel)
     try:
-        return resources.files("swarph_cli").joinpath(*_UNIT_TEMPLATE).read_text(
+        return resources.files("swarph_cli").joinpath(*rel).read_text(
             encoding="utf-8")
     except FileNotFoundError:
         raise RuntimeError(
-            "packaged resource 'systemd/swarph-monitor@.service' is ABSENT from "
-            "this install — the wheel is mis-built (#648: the package-data "
-            "declaration is what puts it there, and only a clean-room install "
-            "sees the omission; the source tree has the file either way). "
-            "Reinstall from a fixed wheel."
+            f"packaged resource '{name}' is ABSENT from this install — the "
+            f"wheel is mis-built (#648: the package-data declaration is what "
+            f"puts it there, and only a clean-room install sees the omission; "
+            f"the source tree has the file either way). Reinstall from a "
+            f"fixed wheel."
         ) from None
+
+
+def _read_unit_template() -> str:
+    return _read_packaged(_UNIT_TEMPLATE)
 
 
 def _render_unit(template: str, *, gateway: str, user: str, home: str,
@@ -1336,6 +1428,279 @@ def _cmd_install_unit(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── reexec-on-change + holds + install-reexec (#654) ────────────────────────
+
+_REEXEC_TEMPLATES = {
+    "swarph-monitor-reexec.path": ("systemd", "swarph-monitor-reexec.path"),
+    "swarph-monitor-reexec.service": ("systemd", "swarph-monitor-reexec.service"),
+}
+
+
+def _read_reexec_hold(state_dir: Path) -> "dict | None":
+    """The recorded reexec hold, or None. A CORRUPT hold reads as HELD with the
+    parse failure as its reason — a hold that cannot be read must not render
+    as no hold (absent-renders-as-good is the defect class this card kills)."""
+    path = state_dir / _REEXEC_HOLD
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {"reason": f"UNREADABLE HOLD FILE ({exc.__class__.__name__}) — "
+                          f"treating as held; fix or remove {path}",
+                "recorded_by": "?", "recorded_at": "?"}
+
+
+def _fmt_reexec_hold(hold: dict) -> str:
+    return (f"reexec HOLD: {hold.get('reason', '(no reason recorded)')} "
+            f"(recorded by {hold.get('recorded_by', '?')} at "
+            f"{hold.get('recorded_at', '?')})")
+
+
+def _proc_start_iso(pid: int) -> "str | None":
+    """The process's start time, from /proc — a running build is UNKNOWABLE
+    from outside (#649: the process reports the disk's version), so the honest
+    old-side coordinate is when this process STARTED. None where unreadable."""
+    try:
+        btime = next(int(line.split()[1]) for line in
+                     Path("/proc/stat").read_text().splitlines()
+                     if line.startswith("btime "))
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        # field 22 (starttime, jiffies since boot); comm in parens may hold
+        # spaces, so split after the LAST ')'
+        after = stat[stat.rindex(")") + 2:].split()
+        start_jiffies = int(after[19])
+        hz = os.sysconf("SC_CLK_TCK")
+        import datetime as _dt
+        return _dt.datetime.fromtimestamp(
+            btime + start_jiffies / hz, tz=_dt.timezone.utc).isoformat()
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+
+
+def _installed_build() -> "tuple[str, str, str]":
+    """(version, package __init__ path, its mtime ISO) — read from the DISK,
+    i.e. the build a restarted process will run."""
+    import datetime as _dt
+    from importlib import metadata, util
+    version = metadata.version("swarph-cli")
+    origin = util.find_spec("swarph_cli").origin
+    mtime = _dt.datetime.fromtimestamp(
+        Path(origin).stat().st_mtime, tz=_dt.timezone.utc).isoformat()
+    return version, origin, mtime
+
+
+def _systemctl_run(unit_args: list[str]) -> int:
+    """Seam for tests. Returns the systemctl exit code."""
+    return subprocess.run(["systemctl", *unit_args]).returncode
+
+
+def _sleep(seconds: float) -> None:
+    """Seam for tests."""
+    time.sleep(seconds)
+
+
+def _unit_owned_instances() -> "list[str]":
+    """The peers whose monitor systemd is running RIGHT NOW, from systemd's own
+    registry — the property, not a process pattern (#517's lesson: a pattern
+    matches what you expect the world to look like; this asks the owner).
+    Empty when systemctl cannot answer, and the CALLER hears why via the
+    exception — an unreadable registry must not render as an empty fleet."""
+    try:
+        out = subprocess.run(
+            ["systemctl", "list-units", "swarph-monitor@*", "--state=running",
+             "--no-legend", "--no-pager", "--plain"],
+            capture_output=True, text=True, check=True,
+            encoding="utf-8", errors="replace").stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            "systemctl cannot list running swarph-monitor instances"
+        ) from exc
+    peers = []
+    for line in out.splitlines():
+        first = line.split()[0] if line.split() else ""
+        if first.startswith("swarph-monitor@") and first.endswith(".service"):
+            peers.append(first[len("swarph-monitor@"):-len(".service")])
+    return sorted(peers)
+
+
+def _cmd_reexec_on_change(args: argparse.Namespace) -> int:
+    """Restart every UNIT-OWNED swarph-monitor@<peer> instance — staggered,
+    hold-honouring, reported. Fired by swarph-monitor-reexec.path after a
+    reinstall; runnable by hand (--apply) with a dry-run default.
+
+    Scope is DECLARED (R6): a monitor this verb cannot restart (not owned by
+    a systemd unit — tmux-scoped or hand-started) is NAMED in the report, so
+    the box can never read fully covered while a fifth of it is untouched.
+    """
+    state_root = Path(args.state_root or "~/swarph_state").expanduser()
+    version, origin, mtime = _installed_build()
+    print(f"reexec-on-change: installed swarph-cli {version} "
+          f"(package {origin}, mtime {mtime})")
+    print("  note: a RUNNING process's build is unknowable from outside "
+          "(#649) — 'running since' is the honest old-side coordinate")
+
+    unit_owned = _unit_owned_instances()
+    held, out_of_scope, not_running, failed = [], [], [], []
+    plan = []  # (peer, since-string)
+    for peer in unit_owned:
+        state_dir = state_root / peer / "mesh-sidecar"
+        hold = _read_reexec_hold(state_dir)
+        if hold:
+            held.append(f"{peer} — {_fmt_reexec_hold(hold)}")
+            continue
+        pstatus, rec = mesh.pidfile_status(state_dir / mesh._MONITOR_PIDFILE)
+        since = (_proc_start_iso(rec["pid"]) if pstatus == "live_ours"
+                 else None) or f"unknown (pidfile {pstatus})"
+        plan.append((peer, since))
+
+    # R6: monitors with a LIVE pidfile that no unit owns — tmux-scoped or
+    # hand-started — are named, never omitted.
+    if state_root.is_dir():
+        for peer_dir in sorted(state_root.iterdir()):
+            peer = peer_dir.name
+            if peer in unit_owned or not peer_dir.is_dir():
+                continue
+            state_dir = peer_dir / "mesh-sidecar"
+            pstatus, rec = mesh.pidfile_status(state_dir / mesh._MONITOR_PIDFILE)
+            if pstatus == "live_ours":
+                cgroup = _read_cgroup(rec["pid"]) or ""
+                scope = next((p for p in reversed(cgroup.replace("\n", " ").split("/"))
+                              if p), "unreadable cgroup")
+                out_of_scope.append(f"{peer} (pid {rec['pid']} in {scope})")
+            elif pstatus in ("stale", "foreign"):
+                not_running.append(f"{peer} (pidfile {pstatus} — revival is "
+                                   f"the watchdog's job, not this verb's)")
+
+    for i, (peer, since) in enumerate(plan):
+        if not args.apply:
+            print(f"  would restart: {peer} (running since {since})")
+            continue
+        rc = _systemctl_run(["restart", f"swarph-monitor@{peer}.service"])
+        if rc == 0:
+            print(f"  reexec: {peer} restarted onto {version} "
+                  f"(was running since {since})")
+        else:
+            failed.append(f"{peer} (systemctl restart rc={rc})")
+            print(f"  reexec FAILED: {peer} (systemctl rc={rc})")
+        if i < len(plan) - 1:
+            _sleep(args.stagger_s)  # R3: serial, never simultaneous
+
+    for line in held:
+        print(f"  HELD, skipped: {line}")
+    for line in not_running:
+        print(f"  not running: {line}")
+    # R6: the report is where out-of-scope cells exist at all.
+    for line in out_of_scope:
+        print(f"  OUT OF SCOPE (not unit-owned; cannot be re-exec'd here): {line}")
+    print(f"reexec-on-change: {len(plan)} restarted"
+          f"{'' if args.apply else ' (DRY RUN — pass --apply to act)'}, "
+          f"{len(held)} held, {len(out_of_scope)} out of scope, "
+          f"{len(not_running)} not running, {len(failed)} failed")
+    return 1 if failed else 0
+
+
+def _cmd_hold_reexec(args: argparse.Namespace) -> int:
+    reason = (args.reason or "").strip()
+    if not reason:
+        print("swarph monitor hold-reexec: --reason is required — a hold "
+              "without its reason is a note nobody can act on later",
+              file=sys.stderr)
+        return 2
+    self_name, state_dir = _resolve(args)
+    import datetime as _dt
+    hold = {"reason": reason, "recorded_by": self_name,
+            "recorded_at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+    (state_dir / _REEXEC_HOLD).write_text(json.dumps(hold, indent=2),
+                                          encoding="utf-8")
+    print(f"reexec hold recorded for {self_name}: {reason}")
+    print("  the reinstall path unit will SKIP this monitor; "
+          "`swarph monitor clear-reexec-hold` lifts it")
+    return 0
+
+
+def _cmd_clear_reexec_hold(args: argparse.Namespace) -> int:
+    self_name, state_dir = _resolve(args)
+    path = state_dir / _REEXEC_HOLD
+    if not path.exists():
+        print(f"no reexec hold recorded for {self_name}")
+        return 0
+    hold = _read_reexec_hold(state_dir)
+    path.unlink()
+    print(f"reexec hold cleared for {self_name} "
+          f"(was: {hold.get('reason', '?')})")
+    return 0
+
+
+def _cmd_install_reexec(args: argparse.Namespace) -> int:
+    """Print or install the reexec .path/.service pair.
+
+    R2: the watched path is resolved FROM THE LIVE INTERPRETER at install
+    time (importlib, not a literal) — a hardcoded site-packages path is
+    correct at merge and silently wrong at the next interpreter bump. The
+    same bump caveat applies to the INSTALLED unit: after a pipx interpreter
+    change, re-run this verb.
+    """
+    from importlib import util
+
+    if args.print_path:
+        from importlib import resources
+        for name, rel in _REEXEC_TEMPLATES.items():
+            print(resources.files("swarph_cli").joinpath(*rel))
+        return 0
+
+    spec = util.find_spec("swarph_cli")
+    if spec is None or not spec.origin:
+        raise RuntimeError("cannot resolve the installed swarph_cli package "
+                           "path — is this a broken install?")
+    init_path = spec.origin.replace("\\", "/")
+    home = str(Path.home())
+    swarph_bin = args.swarph_bin or f"{home}/.local/bin/swarph"
+    state_root = args.state_root or f"{home}/swarph_state"
+
+    rendered = {}
+    for name, rel in _REEXEC_TEMPLATES.items():
+        text = _read_packaged(rel)
+        out = (text
+               .replace("<SITE_PACKAGES_INIT>", init_path)
+               .replace("<SWARPH_BIN>", swarph_bin)
+               .replace("<STATE_ROOT>", state_root))
+        left = sorted(set(re.findall(r"<[A-Z_]+>", out)))
+        if left:
+            raise RuntimeError(
+                f"template {name} still carries unsubstituted placeholder(s) "
+                f"{', '.join(left)} — refusing to emit it")
+        rendered[name] = out
+
+    if not args.write:
+        for name, text in rendered.items():
+            print(f"# ── {name} ──")
+            print(text, end="")
+        print(f"# watching: {init_path}")
+        print("# interpreter bump moves site-packages — re-run "
+              "`swarph monitor install-reexec --write` after one")
+        return 0
+
+    if os.name == "nt":
+        print("swarph monitor install-reexec --write: Linux-only.",
+              file=sys.stderr)
+        return 2
+    target_dir = Path(args.dir)
+    if not target_dir.is_dir() or not os.access(target_dir, os.W_OK):
+        print(f"swarph monitor install-reexec: {target_dir} is not writable — "
+              f"rerun with sudo, or stage with --dir and install by hand.",
+              file=sys.stderr)
+        return 2
+    for name, text in rendered.items():
+        (target_dir / name).write_text(text, encoding="utf-8")
+        print(f"wrote {target_dir / name}")
+    print(f"watching: {init_path}")
+    print("next: systemctl enable --now swarph-monitor-reexec.path")
+    print("NOTE: an interpreter bump moves site-packages — re-run this verb "
+          "after one, or the watch goes silently dead (R2).")
+    return 0
+
+
 def run_monitor(argv: list[str]) -> int:
     parser = _build_parser()
     try:
@@ -1352,6 +1717,14 @@ def run_monitor(argv: list[str]) -> int:
             return _cmd_install_task(args)
         if args.command == "install-unit":
             return _cmd_install_unit(args)
+        if args.command == "reexec-on-change":
+            return _cmd_reexec_on_change(args)
+        if args.command == "hold-reexec":
+            return _cmd_hold_reexec(args)
+        if args.command == "clear-reexec-hold":
+            return _cmd_clear_reexec_hold(args)
+        if args.command == "install-reexec":
+            return _cmd_install_reexec(args)
         parser.error(f"unknown command: {args.command}")
     except mesh.MonitorSinkError as exc:
         print(f"swarph monitor: {exc}", file=sys.stderr)
