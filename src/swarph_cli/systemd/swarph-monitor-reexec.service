@@ -16,4 +16,7 @@ Documentation=https://github.com/BrainSurfing-tech/swarph-cli
 
 [Service]
 Type=oneshot
+# Default oneshot timeout is 90s. Nine stale monitors at the verb's 15s
+# stagger is 135s — PID1 kills the job mid-fleet if we inherit it.
+TimeoutStartSec=5min
 ExecStart=<SWARPH_BIN> monitor reexec-on-change --apply --state-root <STATE_ROOT>

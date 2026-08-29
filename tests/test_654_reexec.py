@@ -94,6 +94,24 @@ def test_oneshot_applies_not_dry_runs():
     assert start and "--apply" in start[0], start
 
 
+def test_oneshot_timeout_outlasts_a_full_fleet_stagger():
+    """PID1's oneshot default is 90s. Nine stale monitors at the verb's
+    default 15s stagger is 135s — the oneshot is killed mid-fleet
+    (cursor-win on #348). The packaged unit must set TimeoutStartSec
+    above that product, not inherit 90s."""
+    text = monitor._read_packaged(("systemd", "swarph-monitor-reexec.service"))
+    lines = [ln for ln in text.splitlines() if ln.startswith("TimeoutStartSec=")]
+    assert lines, "oneshot default 90s is shorter than 9x15s stagger"
+    raw = lines[0].split("=", 1)[1].strip().lower()
+    if raw.endswith("min"):
+        seconds = float(raw[:-3]) * 60
+    elif raw.endswith("s"):
+        seconds = float(raw[:-1])
+    else:
+        seconds = float(raw)
+    assert seconds >= 180, f"{raw!r} is still shorter than a full-fleet stagger"
+
+
 def test_path_unit_uses_pathchanged_never_pathmodified():
     text = monitor._read_packaged(("systemd", "swarph-monitor-reexec.path"))
     directives = [line for line in text.splitlines()
