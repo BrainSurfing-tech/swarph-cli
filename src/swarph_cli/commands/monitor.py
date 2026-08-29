@@ -1509,7 +1509,8 @@ def _unit_owned_instances() -> "list[str]":
     out = subprocess.run(
         ["systemctl", "list-units", "swarph-monitor@*", "--state=running",
          "--no-legend", "--no-pager", "--plain"],
-        capture_output=True, text=True, check=True).stdout
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", check=True).stdout
     peers = []
     for line in out.splitlines():
         first = line.split()[0] if line.split() else ""
@@ -1647,7 +1648,7 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
     if spec is None or not spec.origin:
         raise RuntimeError("cannot resolve the installed swarph_cli package "
                            "path — is this a broken install?")
-    init_path = str(Path(spec.origin).resolve())
+    init_path = Path(spec.origin).resolve().as_posix()
     home = str(Path.home())
     swarph_bin = args.swarph_bin or f"{home}/.local/bin/swarph"
     state_root = args.state_root or f"{home}/swarph_state"
