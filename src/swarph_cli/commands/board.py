@@ -41,6 +41,9 @@ from swarph_cli.commands.mesh import (
 )
 
 
+_SENTINEL = object()
+
+
 # ── HTTP: PATCH (mesh.py has GET + POST; the board needs PATCH for move/link) ──
 
 def _patch_json(url: str, body: dict, token: str, *, timeout: float = 10.0) -> tuple[int, dict]:
@@ -71,14 +74,24 @@ def _cards_list_url(gateway: str, *, project=None, stage=None, assignee=None,
     return f"{base}?{urllib.parse.urlencode(q)}" if q else base
 
 
+def _normalize_due_at(value: str) -> str:
+    """``YYYY-MM-DD`` or ISO datetime → gateway ``due_at`` string (#145)."""
+    raw = value.strip()
+    if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
+        return f"{raw}T00:00:00"
+    return raw
+
+
 def _card_add_payload(actor, project_id, title, *, body=None, ai2=False, priority=0,
-                      labels=None) -> dict:
+                      labels=None, due_at=None) -> dict:
     p = {"actor": actor, "project_id": int(project_id), "title": title,
          "ai2": bool(ai2), "priority": int(priority)}
     if body:
         p["body"] = body
     if labels:
         p["labels"] = list(labels)
+    if due_at is not None:
+        p["due_at"] = _normalize_due_at(due_at) if due_at else None
     return p
 
 
@@ -125,7 +138,7 @@ def _format_obligations(data: dict) -> str:
     return "\n".join(lines)
 
 
-def _card_edit_payload(actor, title, body) -> dict:
+def _card_edit_payload(actor, title, body, *, due_at=_SENTINEL) -> dict:
     """#191: the edit patch — title and/or body, the two fields that made a
     card's text write-once until the gateway grew them (BoardCardPatch).
 
@@ -134,14 +147,19 @@ def _card_edit_payload(actor, title, body) -> dict:
     editor it reads as "your correction landed" when nothing did. None means
     "not mentioned"; an empty string is a real value (it clears), so the
     distinction is `is not None`, never truthiness.
+
+    ``due_at=_SENTINEL`` means the caller did not pass ``--due``; an explicit
+    empty string clears the due date (#145).
     """
     patch = {"actor": actor}
     if title is not None:
         patch["title"] = title
     if body is not None:
         patch["body"] = body
+    if due_at is not _SENTINEL:
+        patch["due_at"] = _normalize_due_at(due_at) if due_at else None
     if len(patch) == 1:
-        raise ValueError("nothing to edit — pass --title and/or --body")
+        raise ValueError("nothing to edit — pass --title, --body, and/or --due")
     return patch
 
 
@@ -462,6 +480,8 @@ def _build_parser() -> argparse.ArgumentParser:
                      noun="card title", noun_plural="titles")
     add_content_args(ca, "--body", required=False); ca.add_argument("--ai2", action="store_true")
     ca.add_argument("--priority", type=int, default=0)
+    ca.add_argument("--due", default=None, metavar="DATE",
+                    help="due date (YYYY-MM-DD or ISO datetime); sent as due_at")
     ca.add_argument("--label", action="append", dest="labels", metavar="LABEL",
                     help="attach a label (repeatable)")
     ca.add_argument("--json", action="store_true"); _add_common(ca)
@@ -515,6 +535,8 @@ def _build_parser() -> argparse.ArgumentParser:
     add_content_args(ce, "--title", required=False,
                      noun="card title", noun_plural="titles")
     add_content_args(ce, "--body", required=False)
+    ce.add_argument("--due", default=_SENTINEL, metavar="DATE",
+                    help="set due date (YYYY-MM-DD or ISO); pass empty string to clear")
     ce.add_argument("--json", action="store_true"); _add_common(ce)
 
     obl = top.add_parser(
@@ -667,7 +689,8 @@ def run_board(argv: list[str]) -> int:
                 return 1
             st, d = _post_json(f"{gw}/board/cards", _card_add_payload(
                 self_name, pid, title, body=body, ai2=args.ai2,
-                priority=args.priority, labels=getattr(args, "labels", None)), token)
+                priority=args.priority, labels=getattr(args, "labels", None),
+                due_at=args.due), token)
             return _out(st, d, lambda x: f"created card #{x.get('id')} [{x.get('stage')}] (stage defaults to proposed — use `cards move` to advance)", aj)
         if args.command == "label":
             # READ the current set before replacing it. If the GET fails we must
@@ -708,7 +731,8 @@ def run_board(argv: list[str]) -> int:
             if title_text is not None:
                 title_text = title_text.removesuffix("\n")  # one-line field; see add
             try:
-                patch = _card_edit_payload(self_name, title_text, body_text)
+                patch = _card_edit_payload(
+                    self_name, title_text, body_text, due_at=args.due)
             except ValueError as exc:
                 print(f"swarph board cards edit: {exc}", file=sys.stderr)
                 return 2

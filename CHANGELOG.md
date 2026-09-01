@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **`swarph board cards add --due` / `edit --due` (#145 item 3).** Forwards
+  ``due_at`` to the gateway on create; ``edit --due`` sets or clears (empty
+  string) on existing cards. ``YYYY-MM-DD`` expands to midnight local-naive ISO.
+
 - **`swarph monitor reexec-on-change` bespoke units (#665).** Enumerates all
   running `swarph-monitor*` systemd units (template and bespoke names), restarts
   each via its actual unit name, and reports `N unit-supervised` plus `M state

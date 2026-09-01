@@ -37,6 +37,14 @@ def test_card_add_payload_with_body():
     assert p["body"] == "hello" and p["ai2"] is True and p["priority"] == 3
 
 
+def test_card_add_payload_with_due():
+    p = board._card_add_payload("cursor-lin", 8, "T", due_at="2026-09-07")
+    assert p["due_at"] == "2026-09-07T00:00:00"
+    p2 = board._card_add_payload("cursor-lin", 8, "T", due_at="2026-09-07T12:00:00Z")
+    assert p2["due_at"] == "2026-09-07T12:00:00Z"
+    assert "due_at" not in board._card_add_payload("cursor-lin", 8, "T")
+
+
 def test_project_add_payload():
     assert board._project_add_payload("lab-ovh", "fed-brain", "Fed Brain", goal="g") == \
         {"actor": "lab-ovh", "slug": "fed-brain", "title": "Fed Brain", "goal": "g"}
@@ -175,6 +183,16 @@ def test_card_edit_payload_refuses_the_empty_patch():
     import pytest
     with pytest.raises(ValueError, match="nothing to edit"):
         board._card_edit_payload("cursor-lin", None, None)
+
+
+def test_card_edit_payload_due_only():
+    p = board._card_edit_payload("cursor-lin", None, None, due_at="2026-09-14")
+    assert p == {"actor": "cursor-lin", "due_at": "2026-09-14T00:00:00"}
+
+
+def test_card_edit_payload_clear_due():
+    p = board._card_edit_payload("cursor-lin", None, None, due_at="")
+    assert p["due_at"] is None
 
 
 def _run_edit(monkeypatch, argv, patch_impl):
