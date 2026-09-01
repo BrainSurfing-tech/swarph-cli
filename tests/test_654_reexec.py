@@ -19,10 +19,15 @@ The requirements as tests:
       the new build.
   R6  monitors systemd does not own (tmux-scoped, hand-started) are NAMED
       out of scope, never omitted.
+  R7  the oneshot must survive the install that triggers it: pipx deletes
+      ~/.local/bin/swarph between closing __init__.py (PathChanged) and
+      restoring the shim. Restart=on-failure + RestartSec retries a 203/EXEC
+      into the healed state. A touch-based green does NOT prove R7.
 
-The live accept legs (touch the watched file on a real box; a held cell
-stays; the report names the tmux-scoped two) run against the installed
-unit — commander-gated. These tests guard everything short of systemd.
+The live accept legs (real `pipx install --force` on a real box; a held cell
+stays; the report names the tmux-scoped two; a forced 203 is loud) run
+against the installed unit — commander-gated. These tests guard everything
+short of systemd.
 """
 
 from __future__ import annotations
@@ -110,6 +115,31 @@ def test_oneshot_timeout_outlasts_a_full_fleet_stagger():
     else:
         seconds = float(raw)
     assert seconds >= 180, f"{raw!r} is still shorter than a full-fleet stagger"
+
+
+def test_oneshot_retries_through_the_pipx_shim_race():
+    """R7: PathChanged fires when pipx closes __init__.py, BEFORE the
+    ~/.local/bin/swarph shim is restored. Without Restart=on-failure the
+    oneshot dies 203/EXEC once and the .path unit stays green while the
+    fleet stays stale (lab-ovh 2026-08-30). Restart=always is refused for
+    Type=oneshot — on-failure is the legal retry."""
+    text = monitor._read_packaged(("systemd", "swarph-monitor-reexec.service"))
+    assert "Type=oneshot" in text
+    restarts = [ln for ln in text.splitlines() if ln.startswith("Restart=")]
+    assert restarts == ["Restart=on-failure"], restarts
+    secs = [ln for ln in text.splitlines() if ln.startswith("RestartSec=")]
+    assert secs, "RestartSec= missing — immediate retry races the same missing shim"
+    raw = secs[0].split("=", 1)[1].strip().lower().rstrip("s")
+    assert float(raw) >= 2, f"RestartSec={raw!r} is too short to outlast a pipx shim rewrite"
+    # Cap permanent failure so a missing binary cannot loop forever.
+    assert any(ln.startswith("StartLimitBurst=") for ln in text.splitlines())
+    assert any(ln.startswith("StartLimitIntervalSec=") for ln in text.splitlines())
+    # Box-local alerters (mercury-alert@) must NOT be baked into the template
+    # as a live directive (a comment naming the drop-in pattern is fine).
+    live = [ln for ln in text.splitlines()
+            if ln.startswith("OnFailure=")]
+    assert not live, (
+        f"OnFailure= couples every install to one box's alerter — use a drop-in: {live}")
 
 
 def test_path_unit_uses_pathchanged_never_pathmodified():
