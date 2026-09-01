@@ -170,11 +170,16 @@ def test_resolve_cell_falls_to_hostname_only_when_nothing_else(tmp_path, monkeyp
 
 
 def test_credential_error_near_match_forbids_register(tmp_path, monkeypatch):
-    """#657 ACCEPT (c): case-only mismatch must NOT recommend mesh register."""
+    """#657 ACCEPT (c): case-only mismatch must NOT recommend mesh register.
+
+    `_peer_token_near_match` uses ``Path.home()``, which is USERPROFILE on
+    Windows and HOME on Posix. Patch ``Path.home`` directly so both lanes see
+    the fixture (pixel REVISE on #359 — HOME-only left Windows red).
+    """
     cfg = tmp_path / ".config" / "swarph"
     cfg.mkdir(parents=True)
     (cfg / "lab-ovh.peer_token").write_text("tok\n")
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(hl.Path, "home", classmethod(lambda cls: tmp_path))
     msg = hl._credential_error("Lab-ovh", "hostname",
                                RuntimeError("cannot resolve a mesh credential"))
     assert "did you mean 'lab-ovh'" in msg
