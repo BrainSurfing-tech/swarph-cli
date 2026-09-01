@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`swarph monitor reexec-on-change` bespoke units (#665).** Enumerates all
+  running `swarph-monitor*` systemd units (template and bespoke names), restarts
+  each via its actual unit name, and reports `N unit-supervised` plus `M state
+  dirs with pidfile` so a partial fleet restart cannot read as full coverage.
+
 - **`swarph watchdog --orphan-daemons` (#666 T1).** Read-only detector for
   Anthropic `claude daemon run` processes whose `--spawned-by` parent is dead
   and whose `tmux-spawn-*.scope` no longer maps to a live tmux session.
