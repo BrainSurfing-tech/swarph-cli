@@ -162,6 +162,7 @@ Usage:
                           [--peer-health-window-sec SEC]
                           [--peer-health-recovery-threshold SEC]
                           [--log PATH] [--verbose]
+  swarph watchdog --orphan-daemons
   swarph watchdog --install-service [--cell ROLE] [--dry-run]
 
 Detects stranded Claude sessions (API throttle / harness death) and attempts
@@ -1917,6 +1918,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="One-shot check (cron-callable; exits with status code).",
     )
     p.add_argument(
+        "--orphan-daemons", action="store_true",
+        help="#666 T1: read-only scan for orphaned `claude daemon run` "
+             "processes (spawner dead + tmux-spawn scope gone). Prints a "
+             "report; never signals. UNKNOWN ≠ ORPHANED.",
+    )
+    p.add_argument(
         "--install-service", action="store_true",
         help="Install systemd timer + service for periodic --check invocation. "
              "Requires sudo. Closes ev_6954f748 substrate-component-install gap.",
@@ -2092,6 +2099,10 @@ def run_watchdog(argv: Optional[list[str]] = None) -> int:
 
     if args.install_service:
         return run_install_service(args)
+
+    if args.orphan_daemons:
+        from swarph_cli.orphan_daemons import run_orphan_daemons_report
+        return run_orphan_daemons_report()
 
     if not args.check:
         print(_USAGE, file=sys.stderr)

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **`swarph watchdog --orphan-daemons` (#666 T1).** Read-only detector for
+  Anthropic `claude daemon run` processes whose `--spawned-by` parent is dead
+  and whose `tmux-spawn-*.scope` no longer maps to a live tmux session.
+  Three-state classification (LIVE / ORPHANED / UNKNOWN); UNKNOWN is never
+  treated as ORPHANED. Self-exclusion (A3) keeps the caller's own daemon off
+  the orphan list. Prints an explicit `none` when the box is clean. No
+  signals — `--reap` is a later opt-in behind graduation.
+
 ## 0.49.1 — 2026-08-25
 
 - **`mcp` extra pinned below 2.0 (#317).** mcp 2.0.0 removed
