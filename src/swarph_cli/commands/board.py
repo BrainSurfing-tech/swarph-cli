@@ -199,16 +199,77 @@ def _cards_of(data):
     return data.get("cards", []) if isinstance(data, dict) else (data or [])
 
 
+def _rel_due(days_until) -> str:
+    """Spell the relative age — a bare date makes the reader compute (#145)."""
+    if days_until is None:
+        return "?"
+    n = int(days_until)
+    if n < 0:
+        d = -n
+        return "1 day ago" if d == 1 else f"{d} days ago"
+    if n == 0:
+        return "today"
+    return "in 1 day" if n == 1 else f"in {n} days"
+
+
+def _format_due_head(data) -> list[str]:
+    """Render the list endpoint's `due` summary + dated cards at the head.
+
+    Built ONLY from the LIST response (#661: GET /board/cards/{id} returns
+    due_state=None even when due_at is set — a single-card readout would
+    report zero overdue forever with no error).
+    """
+    if not isinstance(data, dict):
+        return []
+    due = data.get("due")
+    if not isinstance(due, dict):
+        return []
+    lines = [
+        f"due:  overdue={due.get('overdue', 0)}  today={due.get('today', 0)}  "
+        f"upcoming={due.get('upcoming', 0)}  undated={due.get('undated', 0)}"
+    ]
+    # Prefer overdue, then today, then upcoming — sorted by days_until ascending
+    # so the most overdue sits first. Pull rows from the cards array (the due
+    # block itself is counts only).
+    dated = [c for c in _cards_of(data)
+             if c.get("due_state") in ("overdue", "today", "upcoming")]
+    order = {"overdue": 0, "today": 1, "upcoming": 2}
+    dated.sort(key=lambda c: (
+        order.get(c.get("due_state"), 9),
+        c.get("days_until") is None,
+        c.get("days_until") if c.get("days_until") is not None else 0,
+    ))
+    for c in dated:
+        title = _s(c.get("title") or "")
+        if len(title) > 60:
+            title = title[:57] + "..."
+        lines.append(
+            f"  #{c.get('id')}  {c.get('due_state'):<9}  "
+            f"{_rel_due(c.get('days_until')):<14}  {title}"
+        )
+    if not dated and (due.get("overdue") or due.get("today") or due.get("upcoming")):
+        # Counts say something is dated but this page's cards don't carry them
+        # (filtered list / pagination). Say so — silent empty is the #145 lie.
+        lines.append("  (dated cards not in this page — widen the list filter)")
+    elif not dated:
+        lines.append("  (none dated in this list)")
+    return lines
+
+
 def _format_cards(data) -> str:
+    head = _format_due_head(data)
     rows = _cards_of(data)
     if not rows:
-        return "(no cards)"
-    lines = [f"{'ID':>4}  {'STAGE':<9} {'PRJ':>4} {'AI²':<3} TITLE"]
-    for c in rows:
-        ai2 = "AI²" if c.get("ai2") else ""
-        lines.append(f"{c.get('id',''):>4}  {c.get('stage',''):<9} "
-                     f"{c.get('project_id',''):>4} {ai2:<3} {_s(c.get('title'))}")
-    return "\n".join(lines)
+        body = ["(no cards)"]
+    else:
+        body = [f"{'ID':>4}  {'STAGE':<9} {'PRJ':>4} {'AI²':<3} TITLE"]
+        for c in rows:
+            ai2 = "AI²" if c.get("ai2") else ""
+            body.append(f"{c.get('id',''):>4}  {c.get('stage',''):<9} "
+                        f"{c.get('project_id',''):>4} {ai2:<3} {_s(c.get('title'))}")
+    if head:
+        return "\n".join(head + [""] + body)
+    return "\n".join(body)
 
 
 def _format_card(card: dict) -> str:

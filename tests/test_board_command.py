@@ -63,6 +63,63 @@ def test_format_cards_columns():
     out = board._format_cards(data)
     assert "36" in out and "build" in out and "board CLI" in out
     assert "33" in out and "idea" in out
+    assert not out.startswith("due:"), "no due block → no due header"
+
+
+def test_format_cards_due_header_overdue_first():
+    """#145: list response already carries `due` + per-card due_state.
+    Render at the head with relative age; overdue before today/upcoming.
+    Built from the LIST payload only (#661)."""
+    data = {
+        "due": {"overdue": 2, "today": 1, "upcoming": 1, "undated": 3,
+                "unparseable": 0, "as_of": "2026-09-01T04:04:21Z"},
+        "cards": [
+            {"id": 10, "stage": "plan", "project_id": 1, "ai2": False,
+             "title": "undated one", "due_state": None, "days_until": None},
+            {"id": 20, "stage": "plan", "project_id": 1, "ai2": False,
+             "title": "soon", "due_state": "upcoming", "days_until": 7},
+            {"id": 30, "stage": "plan", "project_id": 1, "ai2": False,
+             "title": "graduation for xxxx", "due_state": "overdue",
+             "days_until": -2},
+            {"id": 40, "stage": "spec", "project_id": 1, "ai2": False,
+             "title": "today item", "due_state": "today", "days_until": 0},
+            {"id": 50, "stage": "plan", "project_id": 1, "ai2": False,
+             "title": "older overdue", "due_state": "overdue",
+             "days_until": -21},
+        ],
+    }
+    out = board._format_cards(data)
+    assert out.startswith("due:")
+    assert "overdue=2" in out and "today=1" in out and "upcoming=1" in out
+    assert "21 days ago" in out and "2 days ago" in out
+    assert "today" in out.splitlines()[3] or "today" in out  # due_state column
+    # overdue first among dated rows, most overdue before less overdue
+    dated_lines = [ln for ln in out.splitlines() if ln.startswith("  #")]
+    assert dated_lines[0].startswith("  #50"), dated_lines
+    assert "21 days ago" in dated_lines[0]
+    assert dated_lines[1].startswith("  #30")
+    assert dated_lines[2].startswith("  #40")  # today before upcoming
+    assert dated_lines[3].startswith("  #20")
+    # table still present below
+    assert "ID" in out and "graduation for xxxx" in out
+
+
+def test_format_cards_due_counts_without_dated_rows_is_loud():
+    """Filtered page can show due counts with zero dated rows in `cards`.
+    Silent empty would re-open the #145 lie."""
+    data = {"due": {"overdue": 3, "today": 0, "upcoming": 0, "undated": 10},
+            "cards": [{"id": 1, "stage": "plan", "project_id": 1, "ai2": False,
+                       "title": "x", "due_state": None}]}
+    out = board._format_cards(data)
+    assert "dated cards not in this page" in out
+
+
+def test_rel_due_spells_relative_age():
+    assert board._rel_due(-21) == "21 days ago"
+    assert board._rel_due(-1) == "1 day ago"
+    assert board._rel_due(0) == "today"
+    assert board._rel_due(1) == "in 1 day"
+    assert board._rel_due(7) == "in 7 days"
 
 
 def test_format_card_detail_shows_links():
