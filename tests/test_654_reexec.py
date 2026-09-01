@@ -19,10 +19,15 @@ The requirements as tests:
       the new build.
   R6  monitors systemd does not own (tmux-scoped, hand-started) are NAMED
       out of scope, never omitted.
+  R7  the oneshot must survive the install that triggers it: pipx deletes
+      ~/.local/bin/swarph between closing __init__.py (PathChanged) and
+      restoring the shim. Restart=on-failure + RestartSec retries a 203/EXEC
+      into the healed state. A touch-based green does NOT prove R7.
 
-The live accept legs (touch the watched file on a real box; a held cell
-stays; the report names the tmux-scoped two) run against the installed
-unit — commander-gated. These tests guard everything short of systemd.
+The live accept legs (real `pipx install --force` on a real box; a held cell
+stays; the report names the tmux-scoped two; a forced 203 is loud) run
+against the installed unit — commander-gated. These tests guard everything
+short of systemd.
 """
 
 from __future__ import annotations
@@ -110,6 +115,51 @@ def test_oneshot_timeout_outlasts_a_full_fleet_stagger():
     else:
         seconds = float(raw)
     assert seconds >= 180, f"{raw!r} is still shorter than a full-fleet stagger"
+
+
+def test_oneshot_retries_through_the_pipx_shim_race():
+    """R7: PathChanged fires when pipx closes __init__.py, BEFORE the
+    ~/.local/bin/swarph shim is restored. Without Restart=on-failure the
+    oneshot dies 203/EXEC once and the .path unit stays green while the
+    fleet stays stale (lab-ovh 2026-08-30). Restart=always is refused for
+    Type=oneshot — on-failure is the legal retry.
+
+    A 203/EXEC fails instantly, so coverage is (Burst-1)*RestartSec. The
+    measured shim gap on lab-ovh was ~120s; drop's review pins coverage
+    >= 240s (2x floor) and Interval > that span so the limit is not reset
+    mid-gap. Presence of the keys alone is not enough — arithmetic must hold.
+    """
+    text = monitor._read_packaged(("systemd", "swarph-monitor-reexec.service"))
+    assert "Type=oneshot" in text
+    restarts = [ln for ln in text.splitlines() if ln.startswith("Restart=")]
+    assert restarts == ["Restart=on-failure"], restarts
+
+    def _sec(key: str) -> float:
+        lines = [ln for ln in text.splitlines() if ln.startswith(f"{key}=")]
+        assert lines, f"{key}= missing"
+        raw = lines[0].split("=", 1)[1].strip().lower()
+        if raw.endswith("min"):
+            return float(raw[:-3]) * 60
+        return float(raw.rstrip("s"))
+
+    restart_sec = _sec("RestartSec")
+    burst_lines = [ln for ln in text.splitlines() if ln.startswith("StartLimitBurst=")]
+    assert burst_lines, "StartLimitBurst= missing"
+    burst = int(burst_lines[0].split("=", 1)[1].strip())
+    interval = _sec("StartLimitIntervalSec")
+    coverage = (burst - 1) * restart_sec
+    assert coverage >= 240, (
+        f"retry coverage {coverage}s = ({burst}-1)*{restart_sec}s is shorter "
+        f"than the 240s floor (2x the measured 120s shim gap)")
+    assert interval > coverage, (
+        f"StartLimitIntervalSec={interval} must exceed coverage span {coverage} "
+        f"or the burst resets mid-gap and never terminates")
+    # Box-local alerters (mercury-alert@) must NOT be baked into the template
+    # as a live directive (a comment naming the drop-in pattern is fine).
+    live = [ln for ln in text.splitlines()
+            if ln.startswith("OnFailure=")]
+    assert not live, (
+        f"OnFailure= couples every install to one box's alerter — use a drop-in: {live}")
 
 
 def test_path_unit_uses_pathchanged_never_pathmodified():

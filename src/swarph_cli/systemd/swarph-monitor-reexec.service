@@ -7,16 +7,44 @@
 # journal (R5), and naming the cells it cannot reach — tmux-scoped monitors are
 # OUT OF SCOPE and must be reported, not omitted (R6).
 #
+# R7: THE RE-EXEC MUST SURVIVE THE INSTALL THAT TRIGGERS IT.
+# `pipx install --force` closes site-packages/__init__.py (PathChanged fires)
+# BEFORE it restores ~/.local/bin/swarph. Measured 2026-08-30 on lab-ovh:
+#   __init__.py mtime 11:31:27Z  -> PathChanged
+#   ~/.local/bin/swarph 11:33:27Z -> shim back
+#   shim absent ~120s (one box, one install — treat as a FLOOR, not a constant)
+# A 203/EXEC fails instantly, so each Restart= cycle costs only RestartSec.
+# Coverage of the gap is therefore (StartLimitBurst - 1) * RestartSec:
+#   RestartSec=15, StartLimitBurst=17  -> last retry at 240s (>= 2x measured floor)
+# StartLimitIntervalSec must EXCEED that span so the burst is not reset mid-gap
+# (interval > coverage); after coverage the cap terminates a permanent miss.
+# Restart=on-failure (not always — refused for Type=oneshot on systemd 259).
+# A touch on the watched file never reproduces this race: shim stays put.
+#
+# LOUD FAILURE (R5 extended): a permanently failed oneshot must reach an
+# operator. Do NOT bake a box-local alerter into this template — mercury-alert@
+# exists on lab-ovh and not everywhere. Add a drop-in, e.g.
+#   OnFailure=mercury-alert@%n.service
+# or the box's equivalent, when installing. The Restart= below closes the race;
+# the drop-in closes the silence if retries exhaust.
+#
 # Runs as root: restarting system units owned by the cells' user requires it.
 # The oneshot itself executes the NEWLY-INSTALLED code — it starts after the
 # install completed, which is exactly the code the fleet is being moved to.
 Description=Re-exec supervised swarph monitors after a swarph-cli reinstall (#654)
 Documentation=https://github.com/BrainSurfing-tech/swarph-cli
-# After the path unit fires; nothing else to order against.
+# Cap retries after full gap coverage — see R7 derivation above.
+# Interval (300) > coverage span (240) so the burst is not refreshed mid-gap.
+StartLimitIntervalSec=300
+StartLimitBurst=17
 
 [Service]
 Type=oneshot
 # Default oneshot timeout is 90s. Nine stale monitors at the verb's 15s
 # stagger is 135s — PID1 kills the job mid-fleet if we inherit it.
 TimeoutStartSec=5min
+# systemd 230+: Restart=always|on-success are refused for Type=oneshot;
+# Restart=on-failure is accepted (verified systemd-analyze verify on 259).
+Restart=on-failure
+RestartSec=15
 ExecStart=<SWARPH_BIN> monitor reexec-on-change --apply --state-root <STATE_ROOT>
