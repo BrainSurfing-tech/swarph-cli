@@ -17,8 +17,10 @@ from swarph_cli.commands import highlight as hl
 def _no_ambient_gateway(monkeypatch):
     """Isolate git-path tests: clear any gateway env so a developer/CI with
     SWARPH_BRAIN_GATEWAY set doesn't silently flip these into the gateway path.
-    Gateway tests set the env explicitly."""
-    for v in ("SWARPH_HIGHLIGHT_GATEWAY", "SWARPH_GATEWAY", "SWARPH_BRAIN_GATEWAY"):
+    Gateway tests set the env explicitly. Also clear SWARPH_SELF (#657) so a
+    box-ambient identity cannot outrank a test's SWARPH_CELL."""
+    for v in ("SWARPH_HIGHLIGHT_GATEWAY", "SWARPH_GATEWAY", "SWARPH_BRAIN_GATEWAY",
+              "SWARPH_SELF"):
         monkeypatch.delenv(v, raising=False)
 
 
@@ -138,3 +140,57 @@ def test_local_flag_forces_git_even_with_gateway(tmp_path, monkeypatch):
     assert called["n"] == 0                                        # gateway NOT called
     body = (tmp_path / "tl" / "TIMELINE.md").read_text()
     assert "local please" in body and "**c**" in body             # git path ran
+
+
+# --- #657 cell identity house order -----------------------------------------
+
+def test_resolve_cell_swarph_self_outranks_cell_and_hostname(tmp_path, monkeypatch):
+    """#657 ACCEPT (a): SELF wins; case-fold is NOT the fix (FAIL condition)."""
+    monkeypatch.setenv("SWARPH_SELF", "lab-ovh")
+    monkeypatch.setenv("SWARPH_CELL", "wrong-cell")
+    monkeypatch.setattr(hl.socket, "gethostname", lambda: "Lab-ovh")
+    cell, source = hl._resolve_cell(None, tmp_path)
+    assert cell == "lab-ovh"
+    assert source == "$SWARPH_SELF"
+
+
+def test_resolve_cell_flag_outranks_self(tmp_path, monkeypatch):
+    monkeypatch.setenv("SWARPH_SELF", "lab-ovh")
+    cell, source = hl._resolve_cell("explicit", tmp_path)
+    assert (cell, source) == ("explicit", "--cell")
+
+
+def test_resolve_cell_falls_to_hostname_only_when_nothing_else(tmp_path, monkeypatch):
+    """Can-fail (b) shape: without SELF, hostname is reached — and may case-mismatch."""
+    monkeypatch.delenv("SWARPH_CELL", raising=False)
+    monkeypatch.setattr(hl.socket, "gethostname", lambda: "Lab-ovh")
+    cell, source = hl._resolve_cell(None, tmp_path)
+    assert cell == "Lab-ovh"
+    assert source == "hostname"
+
+
+def test_credential_error_near_match_forbids_register(tmp_path, monkeypatch):
+    """#657 ACCEPT (c): case-only mismatch must NOT recommend mesh register."""
+    cfg = tmp_path / ".config" / "swarph"
+    cfg.mkdir(parents=True)
+    (cfg / "lab-ovh.peer_token").write_text("tok\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    msg = hl._credential_error("Lab-ovh", "hostname",
+                               RuntimeError("cannot resolve a mesh credential"))
+    assert "did you mean 'lab-ovh'" in msg
+    assert "mesh register" in msg and "Do NOT" in msg
+    # The harmful bare advice must not stand alone as the remedy.
+    assert "is what mints one" not in msg
+
+
+def test_gateway_uses_swarph_self_when_cell_unset(monkeypatch):
+    cap = {}
+    monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")
+    monkeypatch.setenv("SWARPH_SELF", "lab-ovh")
+    monkeypatch.delenv("SWARPH_CELL", raising=False)
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setattr(hl.socket, "gethostname", lambda: "Lab-ovh")
+    monkeypatch.setattr(hl, "_post_json", _fake_post(cap))
+    rc = hl.run_highlight(["from self"])
+    assert rc == 0
+    assert cap["body"]["cell"] == "lab-ovh"

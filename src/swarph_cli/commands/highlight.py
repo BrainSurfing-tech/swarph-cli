@@ -12,7 +12,9 @@ Usage:
 
 Timeline dir: ``--timeline-dir`` > ``SWARPH_TIMELINE_DIR`` > ``~/.swarph/timeline``
   (auto-created + ``git init``'d + given a ``merge=union`` .gitattributes if absent).
-Cell identity: ``--cell`` > ``SWARPH_CELL`` > git user.name > hostname.
+Cell identity (#657 / house order #332): ``--cell`` > ``SWARPH_SELF`` >
+``SWARPH_CELL`` > git user.name > hostname. SELF outranks CELL — psmux leaks
+``SWARPH_CELL`` (#538), so CELL-first posts under another cell's name.
 Push: only if an ``origin`` remote exists and ``--no-push`` is not set; otherwise
   the highlight is committed locally (solo/offline timelines work).
 """
@@ -44,8 +46,47 @@ def _resolve_gateway(arg: str | None) -> str:
             or "").strip()
 
 
+def _peer_token_near_match(name: str) -> str | None:
+    """Case-insensitive near-match against on-disk peer tokens (#657 / #510 shape).
+
+    When the resolved cell name has no credential, suggesting `mesh register`
+    mints a DUPLICATE peer if the real name differs only in case (Lab-ovh vs
+    lab-ovh). Prefer "did you mean …" over that advice.
+    """
+    root = Path.home() / ".config" / "swarph"
+    if not root.is_dir():
+        return None
+    want = name.casefold()
+    for path in sorted(root.glob("*.peer_token")):
+        peer = path.name[: -len(".peer_token")]
+        if peer.casefold() == want and peer != name:
+            return peer
+    return None
+
+
+def _credential_error(cell: str, source: str, exc: RuntimeError) -> str:
+    """Name WHERE the cell identity came from; never push register on a near-match."""
+    near = _peer_token_near_match(cell)
+    header = (
+        f"swarph highlight: cannot resolve a mesh credential for {cell!r} "
+        f"(resolved from {source})"
+    )
+    if near is not None:
+        return (
+            f"{header}.\n"
+            f"  did you mean {near!r}? A peer token exists at "
+            f"{Path.home() / '.config' / 'swarph' / (near + '.peer_token')}.\n"
+            f"  Do NOT `swarph mesh register` under {cell!r} — that mints a "
+            f"second identity for a cell that already has one (#657)."
+        )
+    # No near-match: keep the underlying resolver text (includes register advice
+    # for a genuinely unknown name).
+    return f"swarph highlight: {exc}"
+
+
 def _log_via_gateway(gateway: str, cell: str, highlight: str,
-                     memory: str, when: str, token_file: str | None) -> int:
+                     memory: str, when: str, token_file: str | None,
+                     *, cell_source: str = "unknown") -> int:
     """POST the highlight to the gateway `/highlights` — the gateway holds the git
     push credential, so the cell needs only its mesh peer token (no GitHub PAT).
     Fail-loud: a non-200 or connection error returns 1 (never a silent git double-write)."""
@@ -58,7 +99,7 @@ def _log_via_gateway(gateway: str, cell: str, highlight: str,
     try:
         token = _resolve_token(cell, token_file)
     except RuntimeError as exc:
-        print(f"swarph highlight: {exc}", file=sys.stderr)
+        print(_credential_error(cell, cell_source, exc), file=sys.stderr)
         return 1
     status, resp = _post_json(url, body, token)
     if status == 200:
@@ -109,17 +150,27 @@ def _is_git_repo(repo: Path) -> bool:
     return r.returncode == 0 and r.stdout.strip() == "true"
 
 
-def _resolve_cell(arg, repo: Path) -> str:
+def _resolve_cell(arg, repo: Path) -> tuple[str, str]:
+    """Return ``(cell, source)``.
+
+    Order is the house rule (#332 / #538 / #657), matching
+    ``memory_emit_hook._cell``: flag, then SWARPH_SELF, then SWARPH_CELL, then
+    git user.name, then hostname. NEVER case-fold — the FAIL condition on #657
+    is normalising case instead of fixing this order.
+    """
     if arg:
-        return _collapse(arg)
-    env = os.environ.get("SWARPH_CELL")
-    if env:
-        return _collapse(env)
+        return _collapse(arg), "--cell"
+    self_env = os.environ.get("SWARPH_SELF")
+    if self_env:
+        return _collapse(self_env), "$SWARPH_SELF"
+    cell_env = os.environ.get("SWARPH_CELL")
+    if cell_env:
+        return _collapse(cell_env), "$SWARPH_CELL"
     if _is_git_repo(repo):
         r = _git(repo, "config", "user.name")
         if r.returncode == 0 and r.stdout.strip():
-            return _collapse(r.stdout.strip())
-    return socket.gethostname()
+            return _collapse(r.stdout.strip()), "git user.name"
+    return socket.gethostname(), "hostname"
 
 
 def _ensure_timeline(repo: Path, cell: str) -> None:
@@ -158,7 +209,8 @@ def run_highlight(argv: list) -> int:
     p.add_argument("memory", nargs="?", default="",
                    help="optional memory pointer, e.g. [[some-memory]]")
     p.add_argument("--cell", default=None,
-                   help="cell identity (else SWARPH_CELL / git user / hostname)")
+                   help="cell identity (else SWARPH_SELF / SWARPH_CELL / "
+                        "git user / hostname)")
     p.add_argument("--timeline-dir", default=None,
                    help="timeline repo (else SWARPH_TIMELINE_DIR / ~/.swarph/timeline)")
     p.add_argument("--when", default=None,
@@ -175,7 +227,7 @@ def run_highlight(argv: list) -> int:
     args = p.parse_args(argv)
 
     repo = _resolve_dir(args.timeline_dir)
-    cell = _resolve_cell(args.cell, repo)
+    cell, cell_source = _resolve_cell(args.cell, repo)
     highlight = _collapse(args.highlight)
     memory = _collapse(args.memory)
     when = _collapse(args.when) if args.when else ""
@@ -186,7 +238,8 @@ def run_highlight(argv: list) -> int:
     # path too, so existing solo/offline timelines are unaffected.
     gateway = "" if args.local else _resolve_gateway(args.gateway)
     if gateway:
-        return _log_via_gateway(gateway, cell, highlight, memory, when, args.token_file)
+        return _log_via_gateway(gateway, cell, highlight, memory, when,
+                                args.token_file, cell_source=cell_source)
 
     _ensure_timeline(repo, cell)
     ts = when or _now_ts()
