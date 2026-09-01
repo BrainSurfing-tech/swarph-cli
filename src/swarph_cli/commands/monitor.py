@@ -1500,15 +1500,39 @@ def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def _unit_owned_instances() -> "list[str]":
-    """The peers whose monitor systemd is running RIGHT NOW, from systemd's own
-    registry — the property, not a process pattern (#517's lesson: a pattern
-    matches what you expect the world to look like; this asks the owner).
-    Empty when systemctl cannot answer, and the CALLER hears why via the
-    exception — an unreadable registry must not render as an empty fleet."""
+def _peer_from_monitor_unit(unit: str) -> "str | None":
+    """Mesh peer for a running ``swarph-monitor*.service`` unit.
+
+    Template instances encode the peer in the unit name; bespoke units carry
+    it in ``ExecStart --as`` (#665).
+    """
+    if unit.startswith("swarph-monitor@") and unit.endswith(".service"):
+        return unit[len("swarph-monitor@"):-len(".service")]
+    try:
+        proc = subprocess.run(
+            ["systemctl", "show", unit, "-p", "ExecStart", "--value"],
+            capture_output=True, text=True, check=True,
+            encoding="utf-8", errors="replace", timeout=10,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    text = proc.stdout.strip()
+    if "monitor start" not in text:
+        return None
+    m = re.search(r"--as\s+(\S+)", text)
+    return m.group(1) if m else None
+
+
+def _supervised_monitor_units() -> "list[tuple[str, str]]":
+    """Every running swarph-monitor unit → ``(peer, unit.service)``.
+
+    Lists ``swarph-monitor*`` from systemd — template AND bespoke names — and
+    confirms each unit's ExecStart is ``monitor start``. The old
+    ``swarph-monitor@*`` glob alone missed bespoke-named units (#665).
+    """
     try:
         out = subprocess.run(
-            ["systemctl", "list-units", "swarph-monitor@*", "--state=running",
+            ["systemctl", "list-units", "swarph-monitor*", "--state=running",
              "--no-legend", "--no-pager", "--plain"],
             capture_output=True, text=True, check=True,
             encoding="utf-8", errors="replace").stdout
@@ -1516,12 +1540,40 @@ def _unit_owned_instances() -> "list[str]":
         raise RuntimeError(
             "systemctl cannot list running swarph-monitor instances"
         ) from exc
-    peers = []
+    by_peer: dict[str, str] = {}
     for line in out.splitlines():
-        first = line.split()[0] if line.split() else ""
-        if first.startswith("swarph-monitor@") and first.endswith(".service"):
-            peers.append(first[len("swarph-monitor@"):-len(".service")])
-    return sorted(peers)
+        unit = line.split()[0] if line.split() else ""
+        if not unit.endswith(".service"):
+            continue
+        if unit == "swarph-monitor-reexec.service":
+            continue
+        if not unit.startswith("swarph-monitor"):
+            continue
+        peer = _peer_from_monitor_unit(unit)
+        if peer:
+            by_peer[peer] = unit
+    return sorted(by_peer.items(), key=lambda t: t[0])
+
+
+def _unit_owned_instances() -> "list[str]":
+    """Peer names whose monitor is running under a systemd unit RIGHT NOW."""
+    return [peer for peer, _ in _supervised_monitor_units()]
+
+
+def _count_pidfile_state_dirs(state_root: Path) -> int:
+    """State dirs that have ever claimed a monitor pidfile (#665 denominator)."""
+    if not state_root.is_dir():
+        return 0
+    n = 0
+    for peer_dir in state_root.iterdir():
+        if peer_dir.is_dir() and (peer_dir / "mesh-sidecar" / mesh._MONITOR_PIDFILE).exists():
+            n += 1
+    return n
+
+
+def _is_swarph_monitor_unit_name(unit_leaf: str) -> bool:
+    """True when a cgroup-derived unit leaf names a swarph monitor service."""
+    return unit_leaf.startswith("swarph-monitor") and unit_leaf.endswith(".service")
 
 
 def _cmd_reexec_on_change(args: argparse.Namespace) -> int:
@@ -1540,49 +1592,61 @@ def _cmd_reexec_on_change(args: argparse.Namespace) -> int:
     print("  note: a RUNNING process's build is unknowable from outside "
           "(#649) — 'running since' is the honest old-side coordinate")
 
-    unit_owned = _unit_owned_instances()
+    supervised = _supervised_monitor_units()
+    supervised_peers = {peer for peer, _ in supervised}
+    pidfile_dirs = _count_pidfile_state_dirs(state_root)
     held, out_of_scope, not_running, failed = [], [], [], []
-    plan = []  # (peer, since-string)
-    for peer in unit_owned:
+    plan = []  # (peer, unit.service, since-string)
+    for peer, unit in supervised:
         state_dir = state_root / peer / "mesh-sidecar"
         hold = _read_reexec_hold(state_dir)
         if hold:
-            held.append(f"{peer} — {_fmt_reexec_hold(hold)}")
+            held.append(f"{peer} ({unit}) — {_fmt_reexec_hold(hold)}")
             continue
         pstatus, rec = mesh.pidfile_status(state_dir / mesh._MONITOR_PIDFILE)
         since = (_proc_start_iso(rec["pid"]) if pstatus == "live_ours"
                  else None) or f"unknown (pidfile {pstatus})"
-        plan.append((peer, since))
+        plan.append((peer, unit, since))
 
     # R6: monitors with a LIVE pidfile that no unit owns — tmux-scoped or
     # hand-started — are named, never omitted.
     if state_root.is_dir():
         for peer_dir in sorted(state_root.iterdir()):
             peer = peer_dir.name
-            if peer in unit_owned or not peer_dir.is_dir():
+            if peer in supervised_peers or not peer_dir.is_dir():
                 continue
             state_dir = peer_dir / "mesh-sidecar"
             pstatus, rec = mesh.pidfile_status(state_dir / mesh._MONITOR_PIDFILE)
             if pstatus == "live_ours":
+                derived = _derive_systemd_unit(rec["pid"])
                 cgroup = _read_cgroup(rec["pid"]) or ""
                 scope = next((p for p in reversed(cgroup.replace("\n", " ").split("/"))
                               if p), "unreadable cgroup")
-                out_of_scope.append(f"{peer} (pid {rec['pid']} in {scope})")
+                if derived and _is_swarph_monitor_unit_name(f"{derived}.service"):
+                    # Enumerator missed a unit-owned monitor — name it loudly.
+                    out_of_scope.append(
+                        f"{peer} (pid {rec['pid']} in {derived}.service — "
+                        f"unit-owned but not enumerated; fix the enumerator)"
+                    )
+                else:
+                    out_of_scope.append(f"{peer} (pid {rec['pid']} in {scope})")
             elif pstatus in ("stale", "foreign"):
                 not_running.append(f"{peer} (pidfile {pstatus} — revival is "
                                    f"the watchdog's job, not this verb's)")
 
-    for i, (peer, since) in enumerate(plan):
+    restarted_n = 0
+    for i, (peer, unit, since) in enumerate(plan):
         if not args.apply:
-            print(f"  would restart: {peer} (running since {since})")
+            print(f"  would restart: {peer} via {unit} (running since {since})")
             continue
-        rc = _systemctl_run(["restart", f"swarph-monitor@{peer}.service"])
+        rc = _systemctl_run(["restart", unit])
         if rc == 0:
-            print(f"  reexec: {peer} restarted onto {version} "
+            restarted_n += 1
+            print(f"  reexec: {peer} restarted onto {version} via {unit} "
                   f"(was running since {since})")
         else:
-            failed.append(f"{peer} (systemctl restart rc={rc})")
-            print(f"  reexec FAILED: {peer} (systemctl rc={rc})")
+            failed.append(f"{peer} ({unit}, systemctl restart rc={rc})")
+            print(f"  reexec FAILED: {peer} ({unit}, systemctl rc={rc})")
         if i < len(plan) - 1:
             _sleep(args.stagger_s)  # R3: serial, never simultaneous
 
@@ -1593,8 +1657,10 @@ def _cmd_reexec_on_change(args: argparse.Namespace) -> int:
     # R6: the report is where out-of-scope cells exist at all.
     for line in out_of_scope:
         print(f"  OUT OF SCOPE (not unit-owned; cannot be re-exec'd here): {line}")
-    print(f"reexec-on-change: {len(plan)} restarted"
+    action = "restarted" if args.apply else "would restart"
+    print(f"reexec-on-change: {restarted_n if args.apply else len(plan)} {action}"
           f"{'' if args.apply else ' (DRY RUN — pass --apply to act)'}, "
+          f"{len(supervised)} unit-supervised, {pidfile_dirs} state dirs with pidfile, "
           f"{len(held)} held, {len(out_of_scope)} out of scope, "
           f"{len(not_running)} not running, {len(failed)} failed")
     return 1 if failed else 0

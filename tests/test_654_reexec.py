@@ -63,7 +63,10 @@ def rig(monkeypatch):
                         lambda a: calls["restart"].append(a[-1]) or 0)
     monkeypatch.setattr(monitor, "_sleep",
                         lambda s: calls["sleep"].append(s))
-    monkeypatch.setattr(monitor, "_unit_owned_instances", lambda: ["alpha", "beta"])
+    monkeypatch.setattr(monitor, "_supervised_monitor_units", lambda: [
+        ("alpha", "swarph-monitor@alpha.service"),
+        ("beta", "swarph-monitor@beta.service"),
+    ])
     monkeypatch.setattr(monitor, "_proc_start_iso", lambda pid: "2026-08-27T10:37:00+00:00")
     monkeypatch.setattr(monitor, "_installed_build",
                         lambda: ("0.53.1", "/x/lib/python3.14/site-packages/swarph_cli/__init__.py",
@@ -302,7 +305,7 @@ def test_a_stale_pidfile_is_reported_not_restarted(tmp_path, rig, capsys, monkey
     _mk_state(tmp_path, "gamma", 333)
     monkeypatch.setattr(monitor.mesh, "pidfile_status",
                         lambda path: ("stale", {"pid": 333}))
-    monkeypatch.setattr(monitor, "_unit_owned_instances", lambda: [])
+    monkeypatch.setattr(monitor, "_supervised_monitor_units", lambda: [])
     rc = _run(tmp_path, "--apply")
     out = capsys.readouterr().out
     assert rc == 0
@@ -331,7 +334,33 @@ def test_unit_owned_instances_translates_probe_failures_to_runtimeerror(monkeypa
 
     monkeypatch.setattr(monitor.subprocess, "run", _boom)
     with pytest.raises(RuntimeError, match="systemctl cannot list running"):
-        monitor._unit_owned_instances()
+        monitor._supervised_monitor_units()
+
+
+def test_bespoke_named_monitor_units_restarted_with_actual_unit_name(
+    tmp_path, rig, capsys, monkeypatch,
+):
+    """#665: lab-ovh / gemini-researcher / gridiron bespoke units must reexec
+    via their REAL unit name, not be misreported OUT OF SCOPE."""
+    monkeypatch.setattr(monitor, "_supervised_monitor_units", lambda: [
+        ("alpha", "swarph-monitor@alpha.service"),
+        ("gemini-researcher", "swarph-monitor-gemini-researcher.service"),
+        ("lab-ovh", "swarph-monitor.service"),
+    ])
+    _mk_state(tmp_path, "alpha", 111)
+    _mk_state(tmp_path, "gemini-researcher", 555)
+    _mk_state(tmp_path, "lab-ovh", 444)
+    rc = _run(tmp_path, "--apply")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert rig["restart"] == [
+        "swarph-monitor@alpha.service",
+        "swarph-monitor-gemini-researcher.service",
+        "swarph-monitor.service",
+    ]
+    assert "OUT OF SCOPE" not in out or "lab-ovh" not in out
+    assert "3 unit-supervised" in out
+    assert "3 state dirs with pidfile" in out
 
 
 # ── hold verbs + status readability (R4) ──────────────────────────────────
