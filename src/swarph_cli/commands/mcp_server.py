@@ -289,8 +289,11 @@ try:
         [[link]] edges into knowledge. Complements semantic recall; $0, no model."""
         return _timeline_navigate(op, start=start, end=end, date=date, window=window)
 
-except ImportError:  # pragma: no cover - exercised only when SDK absent
+except ImportError as exc:  # pragma: no cover - exercised only when SDK absent
     mcp = None
+    _MCP_IMPORT_ERROR = exc
+else:
+    _MCP_IMPORT_ERROR = None
 
 
 def _mcp_missing_hint() -> str:
@@ -312,6 +315,19 @@ def _mcp_missing_hint() -> str:
             "swarph mcp-server: the MCP Python SDK is not installed. Install it with:\n"
             "    pip install 'swarph-cli[mcp]'\n"
             "(or: pip install 'mcp>=1.0,<2')"
+        )
+    failed = getattr(_MCP_IMPORT_ERROR, "name", None) or ""
+    if not failed.startswith("mcp.server.fastmcp"):
+        # The THIRD world, and the one a two-branch message would misfile as
+        # "too new": mcp is present at a supported version and something ELSE
+        # under it failed to import. Never guess at it — print what was raised.
+        return (
+            f"swarph mcp-server: the MCP Python SDK IS installed (mcp {found}) and the\n"
+            f"failing import was not fastmcp, so this is not a version pin. The import\n"
+            f"error was:\n"
+            f"    {_MCP_IMPORT_ERROR!r}\n"
+            "Nothing here diagnoses that further — read the traceback with:\n"
+            "    python -c 'import mcp.server.fastmcp'"
         )
     return (
         f"swarph mcp-server: the MCP Python SDK IS installed (mcp {found}), but its\n"
