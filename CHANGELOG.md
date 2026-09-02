@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Fail-closed query filters (#356).** GET `/messages` no longer ignores
+  unknown query keys (`unread=1` used to return the unfiltered inbox). The
+  client refuses the request before it leaves; the bundled gateway returns
+  400 naming the extra key. `unread_only` is unchanged.
+
 - **`swarph board cards add --due` / `edit --due` (#145 item 3).** Forwards
   ``due_at`` to the gateway on create; ``edit --due`` sets or clears (empty
   string) on existing cards. ``YYYY-MM-DD`` expands to midnight local-naive ISO.
