@@ -162,7 +162,7 @@ Usage:
                           [--peer-health-window-sec SEC]
                           [--peer-health-recovery-threshold SEC]
                           [--log PATH] [--verbose]
-  swarph watchdog --orphan-daemons
+  swarph watchdog --orphan-daemons [--reap]
   swarph watchdog --install-service [--cell ROLE] [--dry-run]
 
 Detects stranded Claude sessions (API throttle / harness death) and attempts
@@ -1921,7 +1921,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--orphan-daemons", action="store_true",
         help="#666 T1: read-only scan for orphaned `claude daemon run` "
              "processes (spawner dead + tmux-spawn scope gone). Prints a "
-             "report; never signals. UNKNOWN ≠ ORPHANED.",
+             "report; never signals unless --reap. UNKNOWN ≠ ORPHANED.",
+    )
+    p.add_argument(
+        "--reap", action="store_true",
+        help="#666 T3: with --orphan-daemons, SIGTERM (then SIGKILL) each "
+             "ORPHANED daemon tree BY PID. Default OFF. Re-verifies "
+             "starttime+cmdline+scope immediately before each signal. "
+             "Never pkill -f. LIVE/UNKNOWN are never signalled. No timer "
+             "ships with this flag (T4 graduation).",
     )
     p.add_argument(
         "--install-service", action="store_true",
@@ -2102,7 +2110,11 @@ def run_watchdog(argv: Optional[list[str]] = None) -> int:
 
     if args.orphan_daemons:
         from swarph_cli.orphan_daemons import run_orphan_daemons_report
-        return run_orphan_daemons_report()
+        return run_orphan_daemons_report(reap=bool(args.reap))
+
+    if getattr(args, "reap", False):
+        print("swarph watchdog: --reap requires --orphan-daemons", file=sys.stderr)
+        return 4
 
     if not args.check:
         print(_USAGE, file=sys.stderr)
