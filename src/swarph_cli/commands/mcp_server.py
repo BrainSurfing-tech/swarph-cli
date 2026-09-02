@@ -33,6 +33,7 @@ without the SDK installed.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import os
 import urllib.error
@@ -288,15 +289,54 @@ try:
         [[link]] edges into knowledge. Complements semantic recall; $0, no model."""
         return _timeline_navigate(op, start=start, end=end, date=date, window=window)
 
-except ImportError:  # pragma: no cover - exercised only when SDK absent
+except ImportError as exc:  # pragma: no cover - exercised only when SDK absent
     mcp = None
+    _MCP_IMPORT_ERROR = exc
+else:
+    _MCP_IMPORT_ERROR = None
 
 
-_MCP_MISSING_HINT = (
-    "swarph mcp-server: the MCP Python SDK is not installed. Install it with:\n"
-    "    pip install 'swarph-cli[mcp]'\n"
-    "(or: pip install 'mcp>=1.0')"
-)
+def _mcp_missing_hint() -> str:
+    """Say WHICH of the two faults reached the `except ImportError` above.
+
+    That except wraps the whole tool-definition block, so two different worlds
+    land on it: the SDK genuinely absent, and the SDK present but too new — mcp
+    2.0 removed `mcp.server.fastmcp` and this command is written against 1.x.
+    Emitting one message for both is what made the second fault take a manual
+    version check to diagnose (drop-on-meta-edge measured it, 2026-09-02, #649).
+
+    Both remedies are BOUNDED. The old hint read `pip install 'mcp>=1.0'`, which
+    resolves to 2.x and so reproduces the very failure it was diagnosing.
+    """
+    try:
+        found = importlib.metadata.version("mcp")
+    except importlib.metadata.PackageNotFoundError:
+        return (
+            "swarph mcp-server: the MCP Python SDK is not installed. Install it with:\n"
+            "    pip install 'swarph-cli[mcp]'\n"
+            "(or: pip install 'mcp>=1.0,<2')"
+        )
+    failed = getattr(_MCP_IMPORT_ERROR, "name", None) or ""
+    if not failed.startswith("mcp.server.fastmcp"):
+        # The THIRD world, and the one a two-branch message would misfile as
+        # "too new": mcp is present at a supported version and something ELSE
+        # under it failed to import. Never guess at it — print what was raised.
+        return (
+            f"swarph mcp-server: the MCP Python SDK IS installed (mcp {found}) and the\n"
+            f"failing import was not fastmcp, so this is not a version pin. The import\n"
+            f"error was:\n"
+            f"    {_MCP_IMPORT_ERROR!r}\n"
+            "Nothing here diagnoses that further — read the traceback with:\n"
+            "    python -c 'import mcp.server.fastmcp'"
+        )
+    return (
+        f"swarph mcp-server: the MCP Python SDK IS installed (mcp {found}), but its\n"
+        "fastmcp API did not import. mcp 2.0 moved FastMCP out of the SDK package;\n"
+        "this command is written against the 1.x API. Pin it back with:\n"
+        "    pip install 'mcp>=1.0,<2'\n"
+        "(reinstalling swarph-cli? the extra must be re-typed or it is dropped:\n"
+        "    pipx install --force 'swarph-cli[mcp]==<version>')"
+    )
 
 
 def run_mcp_server(argv) -> int:
@@ -329,7 +369,7 @@ def run_mcp_server(argv) -> int:
         return int(exc.code or 0)
 
     if mcp is None:
-        print(_MCP_MISSING_HINT)
+        print(_mcp_missing_hint())
         return 1
 
     if args.metaedge_url:
