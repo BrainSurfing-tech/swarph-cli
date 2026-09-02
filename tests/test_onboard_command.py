@@ -381,6 +381,91 @@ def test_pre_defer_gateway_mint_is_SURFACED_not_discarded(
     (Path(tempfile.gettempdir()) / "test-peer-handshake.md").unlink(missing_ok=True)
 
 
+def _fake_get_peers(*, peers):
+    def fake_get(url, token):
+        if url.rstrip("/").endswith("/peers"):
+            return 200, {"peers": peers}
+        return 404, {}
+    return fake_get
+
+
+def test_fresh_mesh_operator_onboard_MINTS_and_CAPTURES(
+    monkeypatch, tmp_path, capsys
+):
+    """Zero ratified peers: operator onboard is the first-peer path.
+    Do NOT defer. Capture the token so the new mesh can use tools."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setenv("SWARPH_SELF", "workstation-lc")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    mint_body = {
+        "status": "registered", "name": "first-cell",
+        "registered_at": "2026-09-02T06:00:00Z", "ratified": False,
+        "registered_unratified": True,
+        "peer_token": "first-peer-secret", "token_status": "minted",
+        "bootstrap_mint": True,
+    }
+    fake_post, captured = _mock_post_factory(register_body=mint_body)
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    monkeypatch.setattr(onboard, "_get_json", _fake_get_peers(peers=[]))
+    _stub_subscription(monkeypatch)
+    rc = onboard.run_onboard(
+        ["first-cell", "--gateway", "http://localhost:8788",
+         "--state-dir", str(tmp_path / "state")]
+    )
+    assert rc == 0
+    reg = [c for c in captured if c["url"].endswith("/peers/register")][0]
+    assert reg["body"]["defer_token_mint"] is False
+    tok = tmp_path / ".config" / "swarph" / "first-cell.peer_token"
+    assert tok.read_text().strip() == "first-peer-secret"
+    out = capsys.readouterr().out
+    assert "once-only token captured" in out
+    assert "first-peer mint on a fresh mesh" in out
+    (Path(tempfile.gettempdir()) / "first-cell-handshake.md").unlink(missing_ok=True)
+
+
+def test_established_mesh_operator_still_DEFERS(monkeypatch, tmp_path, capsys):
+    """A ratified peer already exists: operator onboard of someone else
+    still defers. The #564 trap stays unreachable."""
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setenv("SWARPH_SELF", "workstation-lc")
+    deferred_body = {
+        "status": "registered", "name": "remote-cell",
+        "registered_at": "2026-09-02T06:00:00Z", "ratified": False,
+        "registered_unratified": True,
+        "peer_token": None, "token_status": "deferred",
+        "bootstrap_mint": False,
+    }
+    fake_post, captured = _mock_post_factory(register_body=deferred_body)
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    monkeypatch.setattr(
+        onboard, "_get_json",
+        _fake_get_peers(peers=[{"name": "anchor", "ratified": True}]),
+    )
+    _stub_subscription(monkeypatch)
+    rc = onboard.run_onboard(
+        ["remote-cell", "--gateway", "http://localhost:8788",
+         "--state-dir", str(tmp_path / "state")]
+    )
+    assert rc == 0
+    reg = [c for c in captured if c["url"].endswith("/peers/register")][0]
+    assert reg["body"]["defer_token_mint"] is True
+    assert "mint DEFERRED" in capsys.readouterr().out
+    (Path(tempfile.gettempdir()) / "remote-cell-handshake.md").unlink(missing_ok=True)
+
+
+def test_registry_is_bootstrap_window():
+    assert onboard._registry_is_bootstrap_window(200, {"peers": []}) is True
+    assert onboard._registry_is_bootstrap_window(
+        200, {"peers": [{"name": "a", "ratified": False}]}
+    ) is True
+    assert onboard._registry_is_bootstrap_window(
+        200, {"peers": [{"name": "a", "ratified": True}]}
+    ) is False
+    assert onboard._registry_is_bootstrap_window(0, {}) is False
+    assert onboard._registry_is_bootstrap_window(200, {}) is False
+
+
 def test_run_onboard_reports_reregister_as_existing_not_fresh_mint(
     monkeypatch, tmp_path, capsys
 ):

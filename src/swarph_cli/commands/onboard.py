@@ -517,6 +517,21 @@ def _get_json(url: str, token: str) -> tuple[int, dict]:
         return 0, {}
 
 
+def _registry_is_bootstrap_window(status: int, payload: dict) -> bool:
+    """True only when we can SEE that no ratified peer exists.
+
+    Unknown (transport fail, odd shape) is False — do not change #564-C
+    defer behaviour on an established mesh we failed to read. A fresh
+    mesh is the empty list or a list of unratified rows.
+    """
+    if status != 200 or not isinstance(payload, dict):
+        return False
+    peers = payload.get("peers")
+    if not isinstance(peers, list):
+        return False
+    return not any(isinstance(p, dict) and p.get("ratified") for p in peers)
+
+
 def _parse_capability(spec: str) -> tuple[str, object]:
     """``KEY=VALUE`` → (key, value). VALUE parsed as JSON when possible
     (so ``can_claim_tasks=true`` lands as bool, not string)."""
@@ -866,11 +881,20 @@ def run_onboard(argv: list[str]) -> int:
     # captures the once-only token below; operator-context DEFERS the mint to
     # the cell's own first register, so the token never enters a process that
     # would discard it (the trap the card measured end-to-end).
+    #
+    # >>> EXCEPT A FRESH MESH. <<< Zero ratified peers means this IS the
+    # first-peer path: `pip install swarph-cli && swarph gateway serve &&
+    # swarph onboard`. Defer there leaves the first cells with no
+    # credential — they cannot use the tools. Detected only when GET
+    # /peers is readable; a failed read keeps established-mesh defer.
     cell_context = os.environ.get("SWARPH_SELF", "").strip() == canonical
+    rstatus, rpayload = _get_json(f"{args.gateway}/peers", token)
+    bootstrap_window = _registry_is_bootstrap_window(rstatus, rpayload)
+    defer_mint = (not cell_context) and (not bootstrap_window)
     status, body = _post_json(
         f"{args.gateway}/peers/register",
         {"name": canonical, "url": peer_url, "capabilities": capabilities,
-         "defer_token_mint": not cell_context},
+         "defer_token_mint": defer_mint},
         token,
     )
     if status != 200:
@@ -941,16 +965,16 @@ def run_onboard(argv: list[str]) -> int:
         print_safe(f"      ok (registered_unratified=true)")
 
     # >>> #564: THE MINTED TOKEN'S THREE FATES, EACH NAMED. <<<
-    # deferred  — operator-context register on a #564-C gateway: nothing was
-    #             minted; the cell mints on its own first register.
-    # captured  — cell-context register that minted: the token is written to
-    #             the target's peer-token file (mode 600) RIGHT HERE, so the
-    #             cell-first order through `onboard` captures exactly like
-    #             `mesh register` always has.
-    # surfaced  — a minted token in an OPERATOR-context process: only a
-    #             pre-#564-C gateway (the flag unknown to it) does this. That
-    #             is the original trap; the token is printed ONCE with
-    #             delivery instructions instead of evaporating.
+    # deferred  — operator-context register on an established mesh: nothing
+    #             was minted; the cell mints on its own first register.
+    # captured  — cell-context OR first-peer-on-a-fresh-mesh: the token is
+    #             written to the target's peer-token file (mode 600) HERE.
+    #             A new mesh has no "other box" yet — the person running
+    #             onboard is the first peer and must walk away with a
+    #             credential they can use.
+    # surfaced  — a minted token in an OPERATOR-context process on an
+    #             established mesh (pre-#564-C gateway that ignored defer).
+    #             Printed ONCE with delivery instructions.
     if body.get("token_status") == "deferred":
         print_safe(
             "      mint DEFERRED (#564): an operator-context register mints "
@@ -959,7 +983,10 @@ def run_onboard(argv: list[str]) -> int:
             f" — on {canonical}'s box:\n"
             f"          swarph onboard {canonical}")
     minted_token = body.get("peer_token")
-    if minted_token and cell_context:
+    first_peer_mint = bool(
+        bootstrap_window or body.get("bootstrap_mint")
+    )
+    if minted_token and (cell_context or first_peer_mint):
         from swarph_cli.tokens import peer_token_path, write_secret_file
         tok_path = peer_token_path(canonical)
         try:
@@ -975,6 +1002,11 @@ def run_onboard(argv: list[str]) -> int:
             )
             return 1
         print_safe(f"      once-only token captured → {tok_path} (mode 600)")
+        if first_peer_mint and not cell_context:
+            print_safe(
+                "      first-peer mint on a fresh mesh — this cell can now "
+                "use swarph tools"
+            )
     elif minted_token:
         print_safe(
             f"\n      *** ONCE-ONLY TOKEN for {canonical} — this gateway "

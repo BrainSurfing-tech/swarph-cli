@@ -1061,6 +1061,10 @@ class PeerRegisterRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
     url: str = Field(..., min_length=1, max_length=256)
     capabilities: dict = Field(default_factory=dict)
+    # #564-C: operator-context register mints nothing — EXCEPT while this
+    # mesh has zero ratified peers. First peers on a new `swarph gateway
+    # serve` must receive a token or they cannot use the tools.
+    defer_token_mint: bool = False
 
 
 @app.post("/peers/register")
@@ -1094,6 +1098,7 @@ async def peers_register(req: PeerRegisterRequest,
     # rotated/falsely-revoked peer can re-onboard with a fresh key. See below.
     minted_raw_token: Optional[str] = None
     token_status = "existing"
+    bootstrap_mint = False
     with _conn() as c:
         # Phase 5.5: new peers default ratified=0 on INSERT.
         # ON CONFLICT preserves existing ratification state (so a peer
@@ -1154,7 +1159,16 @@ async def peers_register(req: PeerRegisterRequest,
                 new_gen = hwm + 1
             else:
                 new_gen = None  # live token exists → keep it (mint-once)
-            if new_gen is not None:
+            if new_gen is not None and req.defer_token_mint:
+                n_ratified_row = c.execute(
+                    "SELECT COUNT(*) AS n FROM claude_peers WHERE ratified = 1"
+                ).fetchone()
+                n_ratified = n_ratified_row["n"] if n_ratified_row else 0
+                if n_ratified == 0:
+                    bootstrap_mint = True
+                else:
+                    token_status = "deferred"
+            if new_gen is not None and token_status != "deferred":
                 minted_raw_token = secrets.token_urlsafe(32)
                 token_sha = hashlib.sha256(minted_raw_token.encode()).hexdigest()
                 c.execute(
@@ -1186,6 +1200,7 @@ async def peers_register(req: PeerRegisterRequest,
         # subsequent register it is None with token_status='existing'.
         "peer_token": minted_raw_token,
         "token_status": token_status,
+        "bootstrap_mint": bootstrap_mint,
     }
 
 
