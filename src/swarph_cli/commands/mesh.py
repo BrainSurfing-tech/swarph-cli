@@ -411,6 +411,14 @@ def _http_get_json(
     timeout: float = 10.0,
 ) -> tuple[int, dict]:
     _require_absolute_gateway_url(url)
+    # #356: refuse a GET whose query names a filter the endpoint does not
+    # accept. FastAPI ignores unknown params; the result is an unfiltered
+    # superset that reads as a working query.
+    from swarph_cli.query_filters import UnknownQueryFilter, refuse_unknown_query_on_url
+    try:
+        refuse_unknown_query_on_url(url)
+    except UnknownQueryFilter as exc:
+        return 400, {"detail": str(exc)}
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

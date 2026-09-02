@@ -2345,7 +2345,8 @@ def _message_post_channel(req: MessagePostRequest, auth: AuthContext) -> dict:
 
 
 @app.get("/messages")
-async def message_list(authorization: Optional[str] = Header(None),
+async def message_list(request: Request,
+                        authorization: Optional[str] = Header(None),
                         to: Optional[str] = Query(None),
                         to_node: Optional[str] = Query(None,
                             description="Alias for `to`. The POST body field is "
@@ -2366,6 +2367,16 @@ async def message_list(authorization: Optional[str] = Header(None),
                         since: Optional[str] = Query(None,
                             description="ISO timestamp; messages strictly after"),
                         limit: int = Query(100, ge=1, le=1000)) -> dict:
+    # #356: FastAPI ignores unknown query keys. `unread=1` used to return the
+    # unfiltered inbox while `unread_only=true` filtered. Refuse extras.
+    from swarph_cli.query_filters import MESSAGES_GET_PARAMS, UnknownQueryFilter
+    from swarph_cli.query_filters import refuse_unknown_query_params
+    try:
+        refuse_unknown_query_params(
+            request.query_params.keys(), MESSAGES_GET_PARAMS, endpoint="/messages",
+        )
+    except UnknownQueryFilter as exc:
+        raise HTTPException(400, str(exc)) from exc
     auth = _authorize(authorization)
     # Coalesce the body-field-name aliases onto the canonical filter vars so a
     # ?to_node= / ?from_node= query filters identically to ?to= / ?from=.
