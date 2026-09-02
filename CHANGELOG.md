@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`swarph watchdog --orphan-daemons --reap` (#666 T3).** Opt-in, default
+  OFF. SIGTERM (then SIGKILL) each ORPHANED daemon tree **by PID** — never
+  `pkill -f`. Re-verifies starttime + cmdline + scope immediately before
+  each signal; a recycled pid is skipped. LIVE/UNKNOWN are never signalled.
+  Report names every pid and outcome (A4). No timer ships with `--reap` (T4).
+
 - **Fail-closed query filters (#356).** GET `/messages` no longer ignores
   unknown query keys (`unread=1` used to return the unfiltered inbox). The
   client refuses the request before it leaves; the bundled gateway returns
