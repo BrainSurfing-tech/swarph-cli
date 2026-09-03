@@ -136,9 +136,9 @@ swarph board cards link <id> <key> <value>    # add/update a link (merges — ne
 swarph board cards assign <id> <who>
 swarph board cards thread <id> [--limit N]     # the card's conversation (a card IS a thread)
 swarph board cards say <id> --content "…" [--to <peer>] [--kind fyi|question|answer|status|unblock]
-swarph board cards ask <id> <holder> "<what>" [--timeout-hours N]   # MINT an obligation:
+swarph board cards ask <id> "<what>" --step <step> --holder <peer>   # omit --holder to request the step; --holder me to take it; --done EVIDENCE to mint+take+close [--timeout-hours N]   # MINT an obligation:
                                               # name who owes what as a ROW, not a sentence (#307)
-swarph board obligations close <id> --outcome <pass|fail|cannot_evaluate> --evidence "what you observed"
+swarph board obligations close <id> --outcome <pass|fail|cannot_evaluate|skipped> --evidence "what you observed"
 ```
 
 `--project` accepts a numeric id **or** a slug (resolved via `projects list`). Note: card creation always starts at `proposed` (the gateway has no stage-on-create) — use `cards move` to advance.

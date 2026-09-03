@@ -396,6 +396,31 @@ def _card_say_payload(from_node: str, to_node: str, kind: str, content: str,
     }
 
 
+_NO_TIMEOUT = "NO TIMEOUT — this never goes red on its own; pass --timeout-hours if it should"
+
+
+def _accept_line(accept) -> str:
+    """#532's mint-time falsifier readout — shared by the pre-#591 and the §2
+    success lines, because the rule is about the MOMENT, not the response
+    shape: a row with no accept check reads RED in the sweep and looks
+    identical to a sound one the instant after it is minted."""
+    if not accept:
+        return ("NO ACCEPT CHECK — reads RED in the sweep; pass --accept "
+                "\"PASS = ... | FAIL = ...\" naming an observable and a way "
+                "it comes out negative")
+    if not _FAIL_MARKER_RE.search(str(accept)):
+        return ("accept check has NO FAIL BRANCH — marked NO-FAIL-BRANCH in "
+                "the sweep; a check that cannot come out negative is not one")
+    return f"accept: {_s(accept)}"
+
+
+def _thread_line(d) -> str:
+    return (f"thread {d.get('thread_uuid')} — work lands IN that thread; CLOSE "
+            f"it with `swarph board obligations close {d.get('id')}` plus an "
+            f"outcome and evidence; a plain `mesh send` cannot close it "
+            f"(#509/#562 — the VERB is the mechanism, the thread is where it lands)")
+
+
 def _format_ask(d) -> str:
     """One line naming the obligation, its holder, and when it goes red.
 
@@ -411,25 +436,11 @@ def _format_ask(d) -> str:
     rows look identical to sound ones.
     """
     when = d.get("timeout_at")
-    deadline = f"overdue after {when}" if when else (
-        "NO TIMEOUT — this never goes red on its own; pass --timeout-hours if it should")
-    accept = d.get("accept")
-    if not accept:
-        falsifier = ("NO ACCEPT CHECK — reads RED in the sweep; pass --accept "
-                     "\"PASS = ... | FAIL = ...\" naming an observable and a way "
-                     "it comes out negative")
-    elif not _FAIL_MARKER_RE.search(str(accept)):
-        falsifier = ("accept check has NO FAIL BRANCH — marked NO-FAIL-BRANCH in "
-                     "the sweep; a check that cannot come out negative is not one")
-    else:
-        falsifier = f"accept: {accept}"
+    deadline = f"overdue after {when}" if when else _NO_TIMEOUT
     return (f"obligation #{d.get('id')} on card #{d.get('card_id')}: "
             f"{d.get('holder')} owes it, status={d.get('status')}, {deadline}\n"
-            f"  {falsifier}\n"
-            f"  thread {d.get('thread_uuid')} — work lands IN that thread; CLOSE "
-            f"it with `swarph board obligations close {d.get('id')}` plus an "
-            f"outcome and evidence; a plain `mesh send` cannot close it "
-            f"(#509/#562 — the VERB is the mechanism, the thread is where it lands)")
+            f"  {_accept_line(d.get('accept'))}\n"
+            f"  {_thread_line(d)}")
 
 
 def _format_thread(data) -> str:
@@ -452,7 +463,225 @@ def _format_thread(data) -> str:
     return "\n".join(lines)
 
 
+# ── #591: the card step graph (contract v0.4.1) ───────────────────────────────
+# ask/graph/take/decline/amend. Every success prints its next act and every
+# refusal is the gateway's `detail` verbatim (`_out`) — the contract's premise
+# is that a refusal naming its fix is a step, and one that only says no is the
+# gap cells route around. Nothing here derives state: the gateway's `state`,
+# `take_with`, `close_with`, `warn` strings are printed, never reconstructed.
+
+def _step_list(values) -> list[str]:
+    """`--needs a,b --needs +c` → ['a', 'b', 'c']. Repeated flags and comma
+    lists both flatten (a plain `store` kept only the LAST `--needs`, silently
+    — #591 review), and the contract's `+step` spelling (§1) drops its sign:
+    sent verbatim, `+build` is off-menu and 400s. A `-step` keeps its sign for
+    `_amend_payload` to route."""
+    if isinstance(values, str):
+        values = [values]
+    names = (s.strip().lstrip("+") for v in values or [] for s in str(v).split(","))
+    return [n for n in names if n]
+
+
+def _ask_payload(self_name, what, *, holder=None, step=None, needs=None, hours=None,
+                 done=None, accept=None, kind="action", timeout_hours=None) -> dict:
+    """POST /board/cards/{id}/ask body. None = not mentioned = key ABSENT (#191's
+    rule; test_532 pins that a null `accept` on the wire would overwrite the
+    gateway's own normalization). No holder → `requested`; `me` → the caller's
+    own `--as` identity (the contract binds `me` to the token, never to an env
+    var). `needs` is whatever `--needs` collected — see `_step_list`.
+    """
+    p = {"what": what, "created_by": self_name, "kind": kind}
+    if holder is not None:
+        p["holder"] = self_name if holder == "me" else holder
+    if step is not None:
+        p["step"] = step
+    if needs is not None and _step_list(needs):
+        p["needs"] = _step_list(needs)  # an empty --needs is "no extra edges" = the key absent
+    if hours is not None:
+        p["hours"] = hours
+    if done is not None:
+        p["done"] = done
+    if accept is not None:
+        p["accept"] = accept
+    if timeout_hours is not None:
+        p["timeout_hours"] = timeout_hours
+    return p
+
+
+def _ask_line(d) -> str:
+    """§2's stdout-on-success, keyed on the gateway's `state`. A response with
+    no `state` is the pre-#591 shape — `_format_ask` keeps rendering it
+    (test_307/test_532 pin that output). The gateway sets `state` on EVERY
+    ask since #591, so the #532/#145 mint-time lines (NO ACCEPT CHECK /
+    NO-FAIL-BRANCH; and on an unstepped row NO TIMEOUT + the thread/close
+    hint) are appended here too — a live row not yet closed looks identical
+    to a sound one the instant after this prints. `warn` prints last, on its
+    own line, verbatim: the step-less ask is legal and buys no gate credit,
+    and the moment it is minted is the only moment that is not silent.
+
+    Contract §2 also carries `menu fleet vN`, `still missing on #20: …`,
+    `ack by +24h`, `due +24h after build closes`, `(evidence: pull/57) ·
+    unblocked: …` — fields the live response (b6a7bb1) does not send
+    (`menu_source`, `missing`, `ack_by`, `due`, `evidence`, `unblocked`), and
+    the rule above forbids deriving them here or reading the graph a second
+    time. Each prints in its contract position the moment the gateway sends
+    it; absent, the line is byte-identical to today's (#591 review item 2 —
+    the gateway half is the open hypothesis)."""
+    state = d.get("state")
+    if state is None:
+        return _format_ask(d)
+    n = d.get("id"); card = d.get("card_id")
+    step = _s(d.get("step")) or "unstepped"
+    holder = _s(d.get("holder")); take = _s(d.get("take_with"))
+    missing = ", ".join(_s(m) for m in d.get("still_missing") or [])  # the gateway's field (mesh-gateway #157)
+    if state == "requested":
+        elig = ", ".join(_s(e) for e in d.get("eligible") or []) or "(nobody)"
+        menu = (f"menu {_s(d['menu_source'])} " if d.get("menu_source") else "menu ") + \
+            f"v{d.get('menu_version') or '-'}"
+        line = (f"minted #{n} requested ({step} on #{card}) · offered to: {elig} · {menu}"
+                + (f" · still missing on #{card}: {missing}" if missing else "")
+                + f" — take with: {take}")
+    elif state == "offered":
+        ack = f", ack by {_s(d['ack_by'])}" if d.get("ack_by") else ""
+        line = (f"minted #{n} offered to {holder} ({step} on #{card}{ack}) — "
+                f"{holder} takes with: {take}")
+    elif state == "open":
+        due = f", due {_s(d['due'])}" if d.get("due") else ""
+        line = (f"#{n} open ({holder}, {step} on #{card}{due}) — close with: swarph board "
+                f"obligations close {n} --outcome pass --evidence \"<container>\"")
+    else:
+        line = f"minted #{n} {step} on #{card} · {_s(state)}"
+        if d.get("evidence"):
+            line += f" (evidence: {_s(d['evidence'])})"
+        if d.get("unblocked"):
+            line += " · unblocked: " + ", ".join(_s(u) for u in d["unblocked"])
+        if missing:
+            line += f" · still missing: {missing}"
+    if not str(state).startswith("closed"):
+        line += "\n  " + _accept_line(d.get("accept"))
+        if d.get("step") is None:
+            # unstepped: no menu clock, no container — the pre-#591 rules hold
+            if not d.get("timeout_at"):
+                line += "\n  " + _NO_TIMEOUT
+            line += "\n  " + _thread_line(d)
+    if d.get("warn"):
+        line += "\n" + _s(d["warn"])
+    return line
+
+
+def _format_graph(g) -> str:
+    """GET /board/cards/{id}/graph: one header, one line per menu step (every
+    step at every stage — the read renders the menu, not only the rows), then
+    the `unstepped` section. `eligible` prints only when the gateway sent it
+    (non-null): it is computed for missing/unstaffable steps only, and printing
+    `eligible=-` on a closed step would read as "nobody may hold this"."""
+    menu = g.get("menu") or {}
+    gate = g.get("gate") or {}
+    missing = ", ".join(_s(m) for m in g.get("missing") or []) or "none"
+    lines = [f"card #{g.get('card_id')} stage={_s(g.get('stage')) or '-'} "
+             f"implied={_s(g.get('stage_implied')) or '-'} "
+             f"gate={_s(gate.get('mode')) or '-'} flip_at={_s(gate.get('flip_at')) or '-'} "
+             f"menu {_s(menu.get('source')) or '?'} v{menu.get('version') or '-'} · missing: {missing}"]
+    for s in g.get("steps") or []:
+        needs = ", ".join(
+            (f"{_s(n.get('step'))} — no row" if n.get("row_id") is None else
+             f"{_s(n.get('step'))} #{n.get('row_id')} "
+             f"{'ok' if n.get('satisfied') else _s(n.get('state')) or '-'}")
+            for n in s.get("needs") or []) or "-"
+        line = (f"  {_s(s.get('step'))} [{'M' if s.get('mandatory') else 'opt'}] "
+                f"{_s(s.get('state'))} holder={_s(s.get('holder')) or '-'} "
+                f"due={_s(s.get('due')) or '-'} needs={needs}")
+        if s.get("eligible") is not None:
+            line += f" eligible={', '.join(_s(e) for e in s['eligible']) or '(nobody)'}"
+        lines.append(line)
+    if g.get("unstepped"):
+        lines.append("unstepped:")
+        for r in g["unstepped"]:
+            outcome = f" outcome={_s(r['close_outcome'])}" if r.get("close_outcome") else ""
+            lines.append(f"  #{r.get('id')} holder={_s(r.get('holder')) or '-'} "
+                         f"status={_s(r.get('status'))}{outcome}")
+    return "\n".join(lines)
+
+
+def _move_line(x) -> str:
+    """`cards move` success — plus the §4 gate's `warn` on its own line. In
+    warn mode the write succeeds and this line is the only place the missing
+    steps and the flip date are said."""
+    line = f"card #{x.get('id')} -> {x.get('stage')}"
+    if x.get("warn"):
+        line += "\n" + _s(x["warn"])
+    return line
+
+
+def _amend_payload(step=None, holder=None, accept=None, hours=None,
+                   needs_add=None, needs_remove=None, needs=None) -> dict:
+    """PATCH /board/obligations/{id}/amend body. None = not mentioned; an empty
+    `holder` is a REAL value (clears → `requested`), so the test is
+    `is not None`, never truthiness (#191). `needs` is the contract's signed
+    spelling (§2: `+step` adds, `-step` removes) routed onto needs_add /
+    needs_remove; every edge list flattens through `_step_list`. Refuses the
+    empty patch locally — the gateway 400s it too, but a round trip to learn
+    you said nothing is the #256 shape one hop later."""
+    signed = _step_list(needs)
+    add = _step_list(needs_add) + [x for x in signed if not x.startswith("-")]
+    rem = _step_list(needs_remove) + [x[1:] for x in signed if x.startswith("-")]
+    patch = {k: v for k, v in (("step", step), ("holder", holder), ("accept", accept),
+                               ("hours", hours), ("needs_add", add or None),
+                               ("needs_remove", rem or None)) if v is not None}
+    if not patch:
+        raise ValueError("nothing to amend — pass --step, --holder, --accept, --hours, "
+                         "--needs-add and/or --needs-remove")
+    return patch
+
+
+def _obligation_act_line(d) -> str:
+    """take / decline / amend success lines, told apart by the keys the gateway
+    sends (decline carries `declined_by`, amend carries `amended`, take carries
+    `close_with`). `close_with` is printed verbatim — the next act, not a
+    reconstruction of it."""
+    n = d.get("id"); state = _s(d.get("state")) or "-"; due = _s(d.get("due")) or "-"
+    if "declined_by" in d:
+        rem = ", ".join(_s(e) for e in d.get("remaining_eligible") or []) or "(nobody)"
+        line = (f"#{n} declined by {_s(d.get('declined_by'))} · remaining eligible: {rem} "
+                f"· state: {state}")
+        if d.get("unstaffable"):
+            line += ("\n  UNSTAFFABLE — every eligible holder declined; the asker or "
+                     "assignee exits with `obligations close --outcome cannot_evaluate`")
+        return line
+    if "amended" in d:
+        was = d.get("was") or {}
+        fields = ", ".join(f"{_s(k)} (was: {_s(was.get(k)) or 'none'})" if k in was else _s(k)
+                           for k in d.get("amended") or []) or "-"
+        return f"#{n} amended: {fields} · state: {state} · due: {due}"
+    return (f"#{n} {state} ({_s(d.get('holder'))}, {_s(d.get('step')) or 'unstepped'} on "
+            f"#{d.get('card_id')}) · due: {due}\n  close with: {_s(d.get('close_with'))}")
+
+
 # ── parser + dispatch ─────────────────────────────────────────────────────────
+
+class _Parser(argparse.ArgumentParser):
+    """`intermixed=True` lets positionals sit on either side of options —
+    `ask <id> <holder> --accept "…" "<what>"`, the pre-#591 form with an
+    option between its two positionals. Plain argparse matches positionals
+    per contiguous chunk, so once `holder` became optional (nargs='?') that
+    argv parsed holder=None what=<holder> and left "<what>" unrecognized
+    (#591 review, measured on 3.14; identical on 3.11). The re-entrancy guard
+    is for 3.10-3.12, whose intermixed parser calls parse_known_args on
+    itself."""
+
+    def __init__(self, *a, intermixed=False, **kw):
+        super().__init__(*a, **kw)
+        self._intermixed, self._parsing = intermixed, False
+
+    def parse_known_args(self, args=None, namespace=None):
+        if not self._intermixed or self._parsing:
+            return super().parse_known_args(args, namespace)
+        self._parsing = True
+        try:
+            return self.parse_known_intermixed_args(args, namespace)
+        finally:
+            self._parsing = False
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="swarph board", description="Mesh board (projects + cards).")
@@ -464,7 +693,8 @@ def _build_parser() -> argparse.ArgumentParser:
     pa.add_argument("slug"); pa.add_argument("--title", required=True); pa.add_argument("--goal")
     pa.add_argument("--json", action="store_true"); _add_common(pa)
 
-    cards = top.add_parser("cards", help="board cards").add_subparsers(dest="command", required=True)
+    cards = top.add_parser("cards", help="board cards").add_subparsers(
+        dest="command", required=True, parser_class=_Parser)
     cl = cards.add_parser("list", help="list cards")
     cl.add_argument("--project"); cl.add_argument("--stage"); cl.add_argument("--assignee")
     cl.add_argument("--label", help="only cards carrying this label (exact match)")
@@ -509,9 +739,12 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_common(cy)
 
     ck = cards.add_parser(
-        "ask", help="MINT an obligation on this card: name who owes what, as a ROW")
+        "ask", intermixed=True,
+        help="MINT an obligation on this card: name who owes what, as a ROW")
     ck.add_argument("id", type=int)
-    ck.add_argument("holder", help="the peer who OWES the delivery")
+    ck.add_argument("holder", nargs="?", default=None,
+                    help="the peer who OWES the delivery (optional since #591: "
+                         "omit it, or pass --holder, to mint a `requested` row)")
     ck.add_argument("what", help="what is owed, in one line")
     ck.add_argument("--timeout-hours", type=int, default=None,
                     help="hours until this obligation reads OVERDUE (default: none, "
@@ -522,7 +755,30 @@ def _build_parser() -> argparse.ArgumentParser:
                          "in the sweep; a check with no FAIL branch is marked "
                          "NO-FAIL-BRANCH — 'verify it works' is not a check")
     ck.add_argument("--kind", default="action", help="obligation kind (default: action)")
+    # #591: the step graph. `--holder` is an OPTION with its own dest — sharing
+    # the positional's dest makes `--holder me --step build "<what>"` parse
+    # holder=None (the `?` positional's empty match overwrites the option).
+    ck.add_argument("--step", default=None, metavar="STEP",
+                    help="the menu step this row fills (build, validate, plan-review, "
+                         "...). Omitting it mints an `unstepped` row that buys no gate "
+                         "credit — the gateway says so on success")
+    ck.add_argument("--needs", action="append", default=None, metavar="S[,S]",
+                    help="explicit edges by step name (added to the menu's); repeatable, "
+                         "comma lists and the contract's `+step` spelling all accepted")
+    ck.add_argument("--hours", type=int, default=None,
+                    help="clock override, up to 4x the menu value")
+    ck.add_argument("--holder", dest="holder_flag", default=None, metavar="PEER|me",
+                    help="who owes it: a peer (offered), `me` (open: a bound self-ask "
+                         "is a take), or omit (requested: the eligible set is DM'd)")
+    ck.add_argument("--done", default=None, metavar="EVIDENCE",
+                    help="mint + take + close in ONE act (needs --holder me); the "
+                         "container the step names — a ref, >=40 words, or a verdict")
     ck.add_argument("--json", action="store_true"); _add_common(ck)
+
+    cg = cards.add_parser("graph", help="read the card's step graph (#591): every menu "
+                                        "step, its state, holder, due, edges, eligible set")
+    cg.add_argument("id", type=int)
+    cg.add_argument("--json", action="store_true"); _add_common(cg)
 
     cr = cards.add_parser("ready", help="flag a card ready-to-advance (move_ready) for the orchestrator")
     cr.add_argument("id", type=int); cr.add_argument("--clear", action="store_true", help="unset move_ready")
@@ -550,8 +806,9 @@ def _build_parser() -> argparse.ArgumentParser:
              "close an obligation (#562) — this does")
     oc.add_argument("id", type=int, help="the obligation id")
     oc.add_argument("--outcome", required=True,
-                    choices=("pass", "fail", "cannot_evaluate"),
-                    help="the accept check's OUTCOME")
+                    choices=("pass", "fail", "cannot_evaluate", "skipped"),
+                    help="the accept check's OUTCOME (`skipped` only on an "
+                         "optional step — #591)")
     oc.add_argument("--evidence", required=True,
                     help="what you OBSERVED running the check — whitespace is "
                          "refused: whitespace evidence is the vibe-close this "
@@ -568,6 +825,37 @@ def _build_parser() -> argparse.ArgumentParser:
     ol.add_argument("--overdue", action="store_true",
                     help="only open obligations past their timeout")
     ol.add_argument("--json", action="store_true"); _add_common(ol)
+
+    # #591: the row lifecycle beyond close. take = the comprehension receipt
+    # (silence is not evidence); decline = an ignored offer must not be free
+    # and indistinguishable from never seeing it; amend = re-plan by the asker
+    # or card assignee, mint-time fields only while requested/offered.
+    ot = obl.add_parser("take", help="TAKE a requested/offered obligation: the receipt "
+                                     "that you read it; starts the clock")
+    ot.add_argument("id", type=int, help="the obligation id")
+    ot.add_argument("--json", action="store_true"); _add_common(ot)
+    od = obl.add_parser("decline", help="DECLINE an offer: removes you from the row's "
+                                        "eligible set and prints who remains")
+    od.add_argument("id", type=int, help="the obligation id")
+    od.add_argument("--why", required=True, help="why you decline, in one line")
+    od.add_argument("--json", action="store_true"); _add_common(od)
+    oa = obl.add_parser("amend", help="AMEND a row's step/holder/accept/hours/edges "
+                                      "(asker or card assignee; `--step` also backfills "
+                                      "a pre-v0.4 unstepped row)")
+    oa.add_argument("id", type=int, help="the obligation id")
+    oa.add_argument("--step", default=None, metavar="STEP")
+    oa.add_argument("--holder", default=None, metavar="PEER",
+                    help="reassign; pass an empty string to clear (back to requested)")
+    oa.add_argument("--accept", default=None, metavar='"PASS = ... | FAIL = ..."')
+    oa.add_argument("--hours", type=int, default=None, help="clock override, up to 4x the menu value")
+    oa.add_argument("--needs-add", action="append", dest="needs_add", default=None,
+                    metavar="STEP", help="add an edge (repeatable)")
+    oa.add_argument("--needs-remove", action="append", dest="needs_remove", default=None,
+                    metavar="STEP", help="remove an edge (repeatable; asker/assignee only)")
+    oa.add_argument("--needs", action="append", default=None, metavar="+STEP|-STEP",
+                    help="the contract's signed spelling: `+step` adds, `-step` removes "
+                         "(write the latter `--needs=-step`; a bare `-step` reads as a flag)")
+    oa.add_argument("--json", action="store_true"); _add_common(oa)
     return p
 
 
@@ -650,6 +938,26 @@ def run_board(argv: list[str]) -> int:
                                       card_id=args.card_id, overdue=args.overdue),
                 token)
             return _out(st, d, _format_obligations, aj)
+        if args.command == "take":
+            # The gateway takes no body (caller = token); `_post_json` always
+            # serialises a dict, so send the empty one.
+            st, d = _post_json(f"{gw}/board/obligations/{args.id}/take", {}, token)
+            return _out(st, d, _obligation_act_line, aj)
+        if args.command == "decline":
+            st, d = _post_json(f"{gw}/board/obligations/{args.id}/decline",
+                               {"why": args.why}, token)
+            return _out(st, d, _obligation_act_line, aj)
+        if args.command == "amend":
+            try:
+                patch = _amend_payload(step=args.step, holder=args.holder,
+                                       accept=args.accept, hours=args.hours,
+                                       needs_add=args.needs_add,
+                                       needs_remove=args.needs_remove, needs=args.needs)
+            except ValueError as exc:
+                print(f"swarph board obligations amend: {exc}", file=sys.stderr)
+                return 2
+            st, d = _patch_json(f"{gw}/board/obligations/{args.id}/amend", patch, token)
+            return _out(st, d, _obligation_act_line, aj)
 
     if args.group == "cards":
         if args.command == "list":
@@ -710,7 +1018,7 @@ def run_board(argv: list[str]) -> int:
                                          f"{', '.join(x.get('labels') or []) or '(none)'}", aj)
         if args.command == "move":
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "stage": args.stage}, token)
-            return _out(st, d, lambda x: f"card #{x.get('id')} -> {x.get('stage')}", aj)
+            return _out(st, d, _move_line, aj)
         if args.command == "assign":
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "assignee": args.assignee}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} assignee -> {x.get('assignee')}", aj)
@@ -760,14 +1068,30 @@ def run_board(argv: list[str]) -> int:
             # decays exactly like the prose it replaces. So there is no separate
             # "record an obligation" verb, deliberately — this posts the request AND
             # the row in one gateway call, or neither.
-            body = {"holder": args.holder, "what": args.what, "created_by": self_name,
-                    "kind": args.kind}
-            if args.timeout_hours is not None:
-                body["timeout_hours"] = args.timeout_hours
-            if args.accept is not None:
-                body["accept"] = args.accept
+            if args.holder is not None and args.holder_flag is not None:
+                print("swarph board cards ask: holder given twice (positional and "
+                      "--holder) — pass one", file=sys.stderr)
+                return 2
+            holder = args.holder_flag or args.holder
+            if holder is None and args.step is None:
+                # The gateway 400s this too ("a holder-less ask needs --step"),
+                # but the likeliest cause is the pre-#591 form with "<what>"
+                # forgotten — `ask 20 lab-ovh --accept …` parses what='lab-ovh'
+                # — and only the CLI can name that.
+                print(f"swarph board cards ask: no holder and no --step — pass --step S "
+                      f"(the step's eligible set is asked) or a holder (--holder P|me, "
+                      f"or positional). If {args.what!r} was meant as the holder, the "
+                      f"\"<what>\" text is missing", file=sys.stderr)
+                return 2
+            body = _ask_payload(self_name, args.what, holder=holder,
+                                step=args.step, needs=args.needs, hours=args.hours,
+                                done=args.done, accept=args.accept, kind=args.kind,
+                                timeout_hours=args.timeout_hours)
             st, d = _post_json(f"{gw}/board/cards/{args.id}/ask", body, token)
-            return _out(st, d, _format_ask, args.json)
+            return _out(st, d, _ask_line, args.json)
+        if args.command == "graph":
+            st, d = _http_get_json(f"{gw}/board/cards/{args.id}/graph", token)
+            return _out(st, d, _format_graph, aj)
         if args.command == "say":
             try:
                 content = resolve_content(args.content, getattr(args, "content_file", None))
