@@ -54,27 +54,37 @@ def _capture(pane_id: str) -> Optional[str]:
     return r.stdout or ""
 
 
-def probe_pane(pane_id: str) -> str:
-    """Three-way pane state: "idle" | "busy" | "modal".
+def _membrane_for(provider: Optional[str]):
+    """Look up the spawn membrane. None → caller fails closed.
 
-    "modal" (a known-safe dismissable telemetry popup) is checked BEFORE
-    "busy" so it routes to the dismiss path. Positive-idle only: an idle
-    footer/bare-">" prompt with NO busy marker. Everything else, incl. any
-    capture failure, → "busy" (defer, never inject)."""
+    Lazy import: spawn.py does not import session_bridge, so this does not
+    cycle. A parallel marker table here is the defect #682 is replacing.
+    """
+    if not provider:
+        return None
+    from swarph_cli.commands.spawn import MEMBRANES
+    return MEMBRANES.get(provider)
+
+
+def probe_pane(pane_id: str, provider: Optional[str] = None) -> str:
+    """Pane state: "idle" | "busy" | "modal" | "unknown".
+
+    Capture failure / empty pane → "busy" (defer, never inject).
+    No provider, or a membrane that has not declared a pane predicate →
+    "unknown". The daemon treats unknown exactly as busy.
+
+    idle is NOT "a hint string is present". That hint is the empty-input
+    chrome and vanishes when the box has text — the self-sealing deadlock.
+    Each membrane declares its own busy marker and input-box shape;
+    idle == no busy marker AND empty input.
+    """
     content = _capture(pane_id)
     if content is None or not content.strip():
         return "busy"
-    low = content.lower()
-    if any(m in low for m in _SAFE_DISMISSABLE_MODALS):
-        return "modal"
-    if any(m in low for m in _BUSY_MARKERS):
-        return "busy"
-    if _IDLE_SENTINEL in low:
-        return "idle"
-    non_empty = [ln.rstrip() for ln in content.splitlines() if ln.strip()]
-    if non_empty and non_empty[-1].strip() == ">":
-        return "idle"
-    return "busy"
+    membrane = _membrane_for(provider)
+    if membrane is None:
+        return "unknown"
+    return membrane.pane_state(content)
 
 
 def _send_key(pane_id: str, key: str) -> bool:
