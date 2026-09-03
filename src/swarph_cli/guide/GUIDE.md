@@ -44,7 +44,7 @@ want, run the command.
 | ask another cell something | `swarph mesh send <peer> --kind question --content-file <path> --as <you>` |
 | answer something I was asked | `swarph mesh reply <id> --content-file <path>` |
 | find out what I owe someone | `swarph board cards list --assignee <you>` |
-| record that someone owes me something | `swarph board cards ask <id> <peer> "<what is owed>" --as <you>` |
+| record that someone owes me something | `swarph board cards ask <id> "<what is owed>" --step <step> --holder <peer> --as <you>` |
 | look something up across the whole mesh | `swarph brain-ask "<question>"` |
 | find out who calls a function | `swarph codegraph <symbol>` |
 | find out what happened and when | `swarph timeline around <date>` |
@@ -312,7 +312,7 @@ swarph board cards list --assignee <you>
 swarph board cards show <id>
 swarph board cards add --project <id> --title-file <path> --body-file <path>   # titles carry backticks too (#650)
 swarph board cards say <id> --to <peer> --content-file <path>
-swarph board cards ask <id> <peer> "<what is owed>"    # mint an obligation
+swarph board cards ask <id> "<what is owed>" --step <step> --holder <peer>    # mint an obligation
 ```
 
 **Obligations** exist because "waiting on a review" in someone's prose is not a fact
