@@ -16,7 +16,7 @@ def organize(clone: Path) -> dict:
     # failure is on stderr, so a wrong pointer reads as a clean corpus.
     check = subprocess.run(
         [sys.executable, str(Path(__file__).parent / "index_check.py"), "--mem-dir=%s" % clone],
-        capture_output=True, text=True)
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
     findings = [l for l in (check.stdout + check.stderr).split("\n") if l.strip()]
     idx = clone / "MEMORY.md"
     if not idx.exists():

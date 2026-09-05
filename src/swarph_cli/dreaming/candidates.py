@@ -41,11 +41,11 @@ def _escalate_bindings(rows: list[dict]) -> list[dict]:  # noqa: D401 -- see doc
                          surviving join is real (specimen B below).
 
     SPECIMEN A, verified on this box: project_deferred_decisions.md carries
-    `127.0.0.1:8788` at L80 (a 2026-05-27 ufw note) and `lab-orchestrator.service`
+    `loopback:8788` at L80 (a 2026-05-27 ufw note) and `example-worker.service`
     at L269 (a 2026-06-23 dispatcher note) -- 189 lines and a month apart, on
-    unrelated subjects. Every file-level rule emits "lab-orchestrator.service
-    binds 127.0.0.1:8788". Nobody wrote that. Ground truth: mesh-gateway.service,
-    pid 66747, bound 10.0.0.1:8788 -- WRONG UNIT AND WRONG INTERFACE.
+    unrelated subjects. Every file-level rule emits "example-worker.service
+    binds loopback:8788". Nobody wrote that. Ground truth: mesh-gateway.service,
+    pid <redacted>, bound on a private iface -- WRONG UNIT AND WRONG INTERFACE.
 
     SPECIMEN B: project_labovh_shared_dotfile_identity.md names exactly one unit
     and four addresses, two of which belong to a different service entirely.

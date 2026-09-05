@@ -9,7 +9,7 @@ from swarph_cli.dreaming.probes import probe
 AGREE, DISAGREE, INCOMPARABLE = "agree", "disagree", "incomparable"
 # >>> A MENTION IS NOT A CLAIM. <<< A line that NAMES an artifact and asserts
 # nothing about it ("crontab -l > /tmp/crontab.bak", "-> default becomes
-# http://100.107.222.72:8788") was scored as the assertion "this exists NOW",
+# http://example.host:8788") was scored as the assertion "this exists NOW",
 # and an absent artifact became `disagree` -- a confident correction against a
 # memory that never claimed anything. MEASURED 2026-09-04 on the first real
 # run: 108 of 149 disagreements (path 62/62, listen_addr 30/30, http 16/16)

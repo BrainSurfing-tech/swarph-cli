@@ -85,8 +85,11 @@ def deployment_population() -> int:
         return -1
     written = datetime.datetime.fromtimestamp(st.stat().st_mtime)
     try:
-        out = subprocess.run(["ps", "-eo", "pid,lstart,args", "--no-headers"],
-                             capture_output=True, text=True, timeout=10).stdout
+        out = subprocess.run(
+            ["ps", "-eo", "pid,lstart,args", "--no-headers"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10,
+        ).stdout
     except Exception:
         return -1
     live = cov = 0

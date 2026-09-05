@@ -2,7 +2,7 @@
 
 GC4: a kind may have MORE THAN ONE authoritative surface. `unit_bind` has
 two -- what the unit declares and what the running container actually did. On
-2026-09-03 those disagreed on this box (unit: -p 10.0.0.1:8081:8080;
+2026-09-03 those disagreed on this box (unit: -p <private-ip>:8081:8080;
 container: HostIp empty = all interfaces) because the container was
 hand-started and outlived its unit. A one-surface probe would have "corrected"
 a memory that is accurate about the designed state. Disagreement is an
@@ -40,7 +40,10 @@ def _run(argv: list[str]) -> str:
         raise RuntimeError("verb not in the GC3 table: %r" % (argv[:2],))
     # No shell, ever. argv elements come only from candidates that passed
     # candidates.SAFE_REF.
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=TIMEOUT)
+    r = subprocess.run(
+        argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=TIMEOUT,
+    )
     return r.stdout
 
 
@@ -207,7 +210,7 @@ def _http_endpoint(c):
         # recorded as unreachable — a confidently WRONG observation, not noise.
         # MEASURED 2026-09-04 (a peer, seat-A review): 14 of the 16
         # "refused" endpoints on the real corpus actually answer. gbrain
-        # http://10.0.0.1:8792/mcp -> 405, alive, counted refused TWICE.
+        # http://<private-host>:8792/mcp -> 405, alive, counted refused TWICE.
         #
         # GC3a is already written into this plan — "the CLAIM decides what counts
         # as alive, not the response code; only connection refused or timeout is
