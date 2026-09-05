@@ -230,7 +230,7 @@ Same token model as `swarph brain-ask` (`GBRAIN_MCP_URL`/`SWARPH_BRAIN_MCP` endp
 
 > Note: gbrain reclassifies its own page `type`, so `--tag` is more reliable than `--type` for scoping.
 
-### `swarph dreaming` (unreleased — #684)
+### `swarph dreaming` (#684)
 
 Between-sessions memory pass: **VERIFY · ORGANIZE · ENRICH** against a **CLONE** of your corpus. The live store is never written. Nothing is scheduled by install — the verb exists; enabling it is your deliberate act (and your wrapper must propagate the exit code).
 
