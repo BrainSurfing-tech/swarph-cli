@@ -5,7 +5,7 @@ peer's swarph monitor (board card #644).
 
 .DESCRIPTION
 Two tasks, because Task Scheduler's restart-on-failure is EXIT-CODE KEYED:
-a monitor that crash-loops with exit 0 is invisible to it — #636's exact
+a monitor that crash-loops with exit 0 is invisible to it -- #636's exact
 shape (1147 restarts, every one exit 0, invisible to NRestarts, OnFailure
 and is-enabled simultaneously on Linux). The runner owns the process
 lifetime; the watchdog catches what the runner cannot see.
@@ -21,23 +21,23 @@ lifetime; the watchdog catches what the runner cannot see.
                                            is down (status exit 2) and no
                                            supervision hold is present.
 
-Also enables the TaskScheduler/Operational event log — the restart-counter
+Also enables the TaskScheduler/Operational event log -- the restart-counter
 and journal legs are SILENT without it (IsEnabled=False is the default on
 this fleet's Windows box, measured 2026-08-27). Enabling needs elevation;
 the installer REFUSES to proceed silently without it.
 
 Ownership convention: both launchers set SWARPH_SUPERVISOR to the runner
 task's name; the monitor records it in its pidfile and `swarph monitor
-status` reads it back. Windows has no pid→task reverse map — this
+status` reads it back. Windows has no pid->task reverse map -- this
 convention is the ownership query, or there is none.
 
 Session semantics: the pair is registered with -LogonType Interactive and
-an AtLogOn trigger — it lives only while this user's session does. That
+an AtLogOn trigger -- it lives only while this user's session does. That
 is workstation supervision, not service semantics: no logon, no monitor.
 
 The supervision HOLD binds BOTH tasks (#344 review): `monitor stop` kills
 the runner-owned monitor with exit 15, which is exactly what the runner's
-restart-on-failure is built to revive — so the runner launcher checks the
+restart-on-failure is built to revive -- so the runner launcher checks the
 hold BEFORE launching and exits 0 (a completed task does not restart),
 and a supervised `monitor start` refuses to clear it. Only an operator's
 start (no SWARPH_SUPERVISOR) un-holds. To resume a held monitor:
@@ -85,12 +85,12 @@ $runnerTask = "Swarph $Peer Monitor"
 $watchdogTask = "Swarph $Peer Monitor Watchdog"
 $supervisorSpec = "task:$runnerTask"
 
-# ── The operational log is the restart counter and the journal — or it is nothing. ──
+# || The operational log is the restart counter and the journal -- or it is nothing. ||
 $tsLog = Get-WinEvent -ListLog Microsoft-Windows-TaskScheduler/Operational
 if (-not $tsLog.IsEnabled) {
     & wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        throw "TaskScheduler/Operational log is DISABLED and enabling it failed (exit $LASTEXITCODE — elevation required). Without it the restart-counter and journal legs are SILENT, which is #644's CANNOT-EVALUATE clause. Re-run elevated, or accept a supervision layer that cannot count restarts."
+        throw "TaskScheduler/Operational log is DISABLED and enabling it failed (exit $LASTEXITCODE -- elevation required). Without it the restart-counter and journal legs are SILENT, which is #644's CANNOT-EVALUATE clause. Re-run elevated, or accept a supervision layer that cannot count restarts."
     }
     Write-Host "Enabled Microsoft-Windows-TaskScheduler/Operational (restart counter + journal leg)."
 }
@@ -109,7 +109,7 @@ if ($WhatIfPreference) {
 
 New-Item -ItemType Directory -Force -Path $launcherDir | Out-Null
 
-# ── Runner: the task owns the monitor process lifetime (--foreground). ──
+# || Runner: the task owns the monitor process lifetime (--foreground). ||
 $runnerArgsList = @('monitor', 'start', '--foreground', '--as', $Peer, '--state-dir', $StateDir, '--gateway', $Gateway)
 foreach ($d in $Deliver) { $runnerArgsList += @('--deliver', $d) }
 $runnerArgsLiteral = ($runnerArgsList | ForEach-Object { Quote-PowerShell $_ }) -join ', '
@@ -122,24 +122,24 @@ $runnerContent = @"
 # THE HOLD BINDS THE RUNNER TOO (#344 review): `monitor stop` kills the
 # foreground monitor with exit 15, which is precisely what this task's
 # restart-on-failure exists to revive. Without this gate a deliberate stop
-# is a <=1min outage followed by an automatic revive — and the hold file
+# is a <=1min outage followed by an automatic revive -- and the hold file
 # erased with it. Exit 0: a COMPLETED task does not trigger restart-on-
 # failure, so gating here is silent by construction.
 if (Test-Path -LiteralPath `$hold) {
-    "runner: supervision hold present — deliberate stop, NOT launching" *>> `$log
+    "runner: supervision hold present -- deliberate stop, NOT launching" *>> `$log
     exit 0
 }
 `$invokeArgs = @($runnerArgsLiteral)
 & `$swarph @invokeArgs *>> `$log
 # THE EXIT CODE IS THE RESTART SIGNAL. powershell -File exits 0 on script
-# completion UNLESS told otherwise — measured on metal 2026-08-27: a
+# completion UNLESS told otherwise -- measured on metal 2026-08-27: a
 # force-killed monitor read "code de retour 0" in the task log and
 # restart-on-failure never fired. Propagate or the runner is blind.
 exit `$LASTEXITCODE
 "@
 Write-Utf8NoBom $runnerLauncher $runnerContent
 
-# ── Watchdog: report ALWAYS, revive only when DOWN and not HELD. ──
+# || Watchdog: report ALWAYS, revive only when DOWN and not HELD. ||
 $wdStartArgsList = @('monitor', 'start', '--as', $Peer, '--state-dir', $StateDir, '--gateway', $Gateway)
 foreach ($d in $Deliver) { $wdStartArgsList += @('--deliver', $d) }
 $wdStartArgsLiteral = ($wdStartArgsList | ForEach-Object { Quote-PowerShell $_ }) -join ', '
@@ -153,30 +153,30 @@ $watchdogContent = @"
 # should see. heartbeat-check classifies the cause; it never revives.
 & `$swarph monitor heartbeat-check --as $(Quote-PowerShell $Peer) --state-dir `$stateDir --gateway $(Quote-PowerShell $Gateway) *>> `$log
 if (Test-Path -LiteralPath `$hold) {
-    "watchdog: supervision hold present — deliberate stop, NOT reviving" *>> `$log
+    "watchdog: supervision hold present -- deliberate stop, NOT reviving" *>> `$log
     exit 0
 }
 & `$swarph monitor status --as $(Quote-PowerShell $Peer) --state-dir `$stateDir --brief *> `$null
 if (`$LASTEXITCODE -eq 2) {
-    # DOWN (not merely hung — a live-but-hung process is REPORTED, not killed:
+    # DOWN (not merely hung -- a live-but-hung process is REPORTED, not killed:
     # killing a live pid on a heartbeat heuristic is a bigger hammer than this
     # card swings). Revive THROUGH THE RUNNER TASK (#344 review): a detached
     # Start-Process from here would run unowned while claiming
-    # supervisor=$supervisorSpec — the claim must not overstate. Starting the
+    # supervisor=$supervisorSpec -- the claim must not overstate. Starting the
     # runner makes the claim true AND gives the revival the runner's restart
     # accounting. IgnoreNew makes this a no-op if the runner is mid-restart.
     try {
         Start-ScheduledTask -TaskName $(Quote-PowerShell $runnerTask) -ErrorAction Stop
-        "watchdog: monitor was DOWN (status exit 2) — started runner task '$runnerTask' (revival is runner-owned)" *>> `$log
+        "watchdog: monitor was DOWN (status exit 2) -- started runner task '$runnerTask' (revival is runner-owned)" *>> `$log
     } catch {
         # The pair is registered together; a missing runner means someone
         # uninstalled half the supervision. Fall back to a detached start so
-        # the monitor is not left dead — the claim still names the runner,
+        # the monitor is not left dead -- the claim still names the runner,
         # and the divergence is exactly what the ownership line is FOR.
         `$env:SWARPH_SUPERVISOR = $(Quote-PowerShell $supervisorSpec)
         `$startArgs = @($wdStartArgsLiteral)
         Start-Process -WindowStyle Hidden -FilePath `$swarph -ArgumentList `$startArgs -RedirectStandardOutput (Join-Path `$stateDir 'monitor.out.log') -RedirectStandardError (Join-Path `$stateDir 'monitor.err.log')
-        "watchdog: monitor was DOWN; Start-ScheduledTask '$runnerTask' FAILED (`$(`$_.Exception.Message)) — revived detached as fallback" *>> `$log
+        "watchdog: monitor was DOWN; Start-ScheduledTask '$runnerTask' FAILED (`$(`$_.Exception.Message)) -- revived detached as fallback" *>> `$log
     }
 }
 "@
@@ -205,8 +205,8 @@ if ($PSCmdlet.ShouldProcess($runnerTask, 'register Task Scheduler runner')) {
 
 $watchdogSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
 # PS 5.1 quirk (measured on metal): a trigger's .Repetition is not settable
-# property-by-property — build a second trigger that carries the repetition
-# and copy the whole Repetition object. 3650 days ≈ indefinitely.
+# property-by-property -- build a second trigger that carries the repetition
+# and copy the whole Repetition object. 3650 days ~ indefinitely.
 $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date)
 $repetition = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $WatchdogIntervalMinutes) -RepetitionDuration (New-TimeSpan -Days 3650)
 $watchdogTrigger.Repetition = $repetition.Repetition
