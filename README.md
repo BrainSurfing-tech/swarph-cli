@@ -60,6 +60,7 @@ This is one of three repos in the v0.3.x architecture:
 swarph "prompt"          one-shot against any provider (claude/openai/gemini/deepseek/grok)
 swarph chat              interactive REPL — multi-turn, slash commands, live provider switch
 swarph brain-ask "<q>"   search the swarph-brain (gbrain) memory — $0 cited answer or raw chunks
+swarph dreaming run ...  between-sessions memory verify/organize/enrich (clone only; never default)
 swarph codegraph "<q>"   structural code search — find where a symbol is defined / what calls it
 swarph brain serve       run the gbrain HTTP brain server (the $0 semantic memory)
 swarph gateway serve     run the bundled mesh-gateway server (the mesh's coordination/DM hub)
@@ -228,6 +229,18 @@ swarph memory links <slug>               # a concept's forward [[wiki-links]]
 Same token model as `swarph brain-ask` (`GBRAIN_MCP_URL`/`SWARPH_BRAIN_MCP` endpoint; `--token-file` > `GBRAIN_TOKEN` > `SWARPH_BRAIN_TOKEN` > mesh peer token). Add `--json` for the raw payload. Read-only. Also exposed to any MCP host as the `swarph_memory_navigate` tool.
 
 > Note: gbrain reclassifies its own page `type`, so `--tag` is more reliable than `--type` for scoping.
+
+### `swarph dreaming` (unreleased — #684)
+
+Between-sessions memory pass: **VERIFY · ORGANIZE · ENRICH** against a **CLONE** of your corpus. The live store is never written. Nothing is scheduled by install — the verb exists; enabling it is your deliberate act (and your wrapper must propagate the exit code).
+
+```
+$ swarph dreaming run --corpus ~/.claude/projects/.../memory --out /tmp/dreaming-out
+$ swarph dreaming run --corpus <dir> --out <dir> --verify-only
+$ echo $?   # 0 clean-and-adjudicated | 1 findings | 2 refused | 3 ran-but-adjudicated-nothing
+```
+
+**Scope is single-cell:** your corpus and your local transcripts. This is not the cross-agent multi-transcript dreaming from the Anthropic talk — that needs a shared transcript surface this release does not claim.
 
 #### The AI Router (why a tool, not a hook)
 

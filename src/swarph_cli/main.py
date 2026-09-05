@@ -112,6 +112,8 @@ _VERB_HANDLERS: dict[str, str] = {
     "cell": "swarph_cli.commands.cell.run_cell",
     "brain-ask": "swarph_cli.commands.brain_ask.run_brain_ask",
     "brain": "swarph_cli.commands.brain.run_brain",
+    # #684 / #656 v1.1: between-sessions memory pass — verb only; never a default.
+    "dreaming": "swarph_cli.commands.dreaming.run_dreaming",
     "gateway": "swarph_cli.commands.gateway.run_gateway",
     "service": "swarph_cli.commands.service.run_service",
     "channel": "swarph_cli.commands.channel.run_channel",
