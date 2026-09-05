@@ -50,6 +50,13 @@ DEFAULT_CALLER_CELL = "lab-ovh"
 # separate from the VISIBILITY axis stdout carries. rc is the one channel the frozen
 # stdout contract left free.
 RC_NO_INDEX = 3
+#: #312: the query matched only on a COMMON TOKEN — no returned symbol's name
+#: contains it. `format_human` has SAID so since 2026-08-01 and the exit code has
+#: been 0 the whole time: the verdict was computed and discarded before reaching
+#: $?. A tool that tells the truth in prose and lies in its exit code is safe for
+#: a reader and unsafe for every caller — and the caller is the one that cannot
+#: read. Distinct from RC_NO_INDEX (nothing was searched) and from 0 (a real hit).
+RC_FUZZY_ONLY = 4
 
 # --- textsearch (ported verbatim from codegraph_index/textsearch.py) ------
 
@@ -428,4 +435,42 @@ def run_codegraph(argv) -> int:
         pass
     else:
         print(format_human(rows, a.query))
-    return 0 if index_present else RC_NO_INDEX
+    if not index_present:
+        return RC_NO_INDEX
+    # >>> THE REFUSAL MUST REACH $?, NOT ONLY THE READER. <<< Recomputed here rather
+    # than threaded out of format_human because the JSON path never calls it — and
+    # the JSON path is precisely the machine-facing one this card is about.
+    # _match_quality is IMPORTED, never reimplemented: a second copy is how the verb
+    # ended up without the check in the first place.
+    # SINGLE-TOKEN QUERIES ONLY. _match_quality picks the LONGEST content token and
+    # asks whether a symbol NAME contains it — sound for `renderThing`, wrong for a
+    # prose query: "renders the thing" yields the token "renders", and `renderThing`
+    # contains "render" but not "renders". A stemming miss. The hook has printed the
+    # fuzzy label over such hits since 2026-08-01 and nobody saw it, because an
+    # ADVISORY label costs nothing when wrong. >>> PROMOTING IT TO AN EXIT CODE MAKES
+    # ITS FALSE POSITIVES EXPENSIVE, SO IT ONLY RUNS WHERE IT IS RELIABLE. <<<
+    # Measured: 0 false positives on 12 verbatim symbol-name queries; 1 on the one
+    # multi-word phrase in the suite (test_run_codegraph_cli_smoke), which is the
+    # test that caught this.
+    if rows and len(a.query.split()) == 1:
+        _key, _hits = _match_quality(a.query, [dict(r) for r in rows])
+        # SUFFIX-TOLERANT SECOND PASS. _match_quality asks whether a symbol NAME
+        # contains the query token LITERALLY, so an inflected query stem-misses its
+        # own answer: `loads` -> `load`, `renders` -> `render`, `gateways` ->
+        # `_gateway_url`. science-claude measured 3 of 8 natural single-token
+        # queries exiting non-zero with the RIGHT symbol at rank 1.
+        #
+        # >>> AND MY OWN CLEARANCE COULD NOT HAVE CAUGHT IT: "0 false positives on
+        # 12 VERBATIM symbol names" excludes the failure mode BY CONSTRUCTION — a
+        # verbatim name cannot stem-miss. The sample was self-selecting. <<<
+        #
+        # Only the EXIT CODE is suffix-tolerant. The printed label is untouched:
+        # a warning that is occasionally over-cautious costs a reader nothing,
+        # while a wrong exit code costs every caller. Different consequences,
+        # deliberately different thresholds.
+        if _key and _hits == 0:
+            _stem = _key.rstrip("s") if len(_key) > 3 else _key
+            _soft = sum(1 for r in rows if _stem in str(dict(r).get("name", "")).lower())
+            if _soft == 0:
+                return RC_FUZZY_ONLY
+    return 0
