@@ -63,6 +63,18 @@ def test_merge_link_from_none():
     assert board._merge_link(None, "k", "v") == {"k": "v"}
 
 
+def test_727_link_patch_body_default_omits_replace_flag():
+    body = board._link_patch_body("cursor-win", "related", "617")
+    assert body == {"actor": "cursor-win", "links": {"related": "617"}}
+    assert "replace_links" not in body
+
+
+def test_727_link_patch_body_replace_sets_flag():
+    body = board._link_patch_body("cursor-win", "related", "666", replace=True)
+    assert body["replace_links"] is True
+    assert body["links"] == {"related": "666"}
+
+
 def test_format_cards_columns():
     data = {"cards": [
         {"id": 36, "stage": "build", "project_id": 6, "ai2": False, "title": "board CLI"},
