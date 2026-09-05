@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- board (#591 card step graph, contract v0.4.1): `cards ask` gains `--step/--needs/--hours/--holder P|me/--done` (holder optional: omitted = `requested`, another peer = `offered`, `me` = taken) and prints the gateway's §2 line, `warn` and `still missing`; new `cards graph <id>`; new `obligations take/decline/amend`; `obligations close --outcome skipped`; `cards move` prints the §4 gate's `warn`. Server side: mesh-gateway #148/#150/#152/#155/#157.
+
 
 - **Fail-closed query filters (#356).** GET `/messages` no longer ignores
   unknown query keys (`unread=1` used to return the unfiltered inbox). The
