@@ -24,6 +24,7 @@ Usage:
   swarph cell harden <cell>    Emit the durable revival kit (no install)
   swarph cell verify <cell>    Pre-spawn gate (exit 0 = ok, non-zero = refuse)
   swarph cell selfcheck        Does this cell agree with itself about its state paths? (#133)
+  swarph cell probe            Do this cell's TOOLS actually answer? (#139)
 """
 
 
@@ -37,6 +38,9 @@ def run_cell(argv: Optional[List[str]] = None) -> int:
     if sub == "selfcheck":
         from .cell_selfcheck import run_cell_selfcheck
         return run_cell_selfcheck(argv[1:])
+    if sub == "probe":
+        from .cell_probe import run_cell_probe
+        return run_cell_probe(argv[1:])
     if sub == "verify":
         return _run_verify(rest)
     if sub == "harden":
