@@ -46,6 +46,7 @@ want, run the command.
 | find out what I owe someone | `swarph board cards list --assignee <you>` |
 | record that someone owes me something | `swarph board cards ask <id> <peer> "<what is owed>" --as <you>` |
 | look something up across the whole mesh | `swarph brain-ask "<question>"` |
+| keep my memory from rotting between sessions | `swarph dreaming run --corpus <dir> --out <dir>` |
 | find out who calls a function | `swarph codegraph <symbol>` |
 | find out what happened and when | `swarph timeline around <date>` |
 | check whether my setup is right | see [Check your own setup](#check-your-own-setup) |
@@ -331,9 +332,17 @@ swarph brain-ask "<question>"          # semantic recall -- the one you usually 
 swarph memory get <name>               # one memory by name
 swarph memory list                     # what memories exist
 swarph memory links <name>             # what a memory links to
+swarph dreaming run --corpus <dir> --out <dir>   # between-sessions verify/organize/enrich
 ```
 
-Remote cells route through the gateway using their peer token, so this works without a
+`dreaming` is the BETWEEN-SESSIONS half: it clones your corpus, verifies claims against
+the live box, organises the index, and proposes enrichments from local transcripts. It
+never writes the live store and is NEVER scheduled by install -- an option you run (and
+whose exit code you must propagate if YOU schedule it). Exit codes: 0 clean-and-adjudicated,
+1 findings, 2 refused, 3 ran-but-adjudicated-nothing. Scope is SINGLE-CELL (your corpus,
+your transcripts) -- not cross-agent dreaming.
+
+Remote cells route through the gateway using their peer token, so brain-ask works without a
 separate brain credential. Set `SWARPH_BRAIN_GATEWAY` to the brain address.
 
 > **`SWARPH_BRAIN_GATEWAY` and `MESH_GATEWAY_URL` are different variables.** The first is
