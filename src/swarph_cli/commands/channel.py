@@ -17,6 +17,7 @@ from ._gateway_client import (
     resolve_self_name,
     resolve_token,
 )
+from swarph_cli.console_safe import print_safe
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -191,7 +192,14 @@ def _run_read(args: argparse.Namespace) -> int:
     status, payload = get_json(_read_url(base, args.name, args.limit), token)
     if not _ok(status):
         return _fail("read", status, payload)
-    print(json.dumps(payload, indent=2) if args.json else _format_channel_messages(payload))
+    if args.json:
+        # ensure_ascii escapes — safe on any console; bare print is fine here.
+        print(json.dumps(payload, indent=2))
+    else:
+        # print_safe: stock Windows ACP=1252 raises on CJK/emoji inside one
+        # print() of the whole batch (#125 / #725 metal). errors=replace on a
+        # redirected/non-UTF8 sink is the load-bearing half (razorpeter 32116).
+        print_safe(_format_channel_messages(payload))
     return 0
 
 
