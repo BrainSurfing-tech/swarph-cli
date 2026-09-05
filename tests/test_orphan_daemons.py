@@ -14,10 +14,14 @@ from swarph_cli.orphan_daemons import (
     STATE_UNKNOWN,
     classify_daemon,
     format_report,
+    format_reap_report,
     is_claude_daemon_cmdline,
     parse_spawned_by,
+    reap_orphans,
     scan_orphan_daemons,
     self_related,
+    signal_one,
+    snapshot_identity,
 )
 
 
@@ -236,3 +240,93 @@ def test_watchdog_orphan_daemons_flag_dispatches(tmp_path, monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "orphan-daemons: none" in out
+
+
+def test_identity_change_is_skipped_not_killed(tmp_path):
+    """T3 accept: identity change between snapshot and signal → skip, no kill."""
+    _write_proc(tmp_path, 5000, cmdline="claude daemon run --origin transient")
+    ident = snapshot_identity(5000, proc_root=tmp_path)
+    assert ident is not None
+    # pid recycled: same pid, new cmdline + starttime
+    _write_proc(tmp_path, 5000, cmdline="sshd")
+    (tmp_path / "5000" / "stat").write_text(
+        "5000 (sshd) S 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 99\n"
+    )
+    killed = []
+    report = signal_one(
+        ident, proc_root=tmp_path,
+        kill=lambda pid, sig: killed.append((pid, sig)),
+        wait_s=0.01, poll_s=0.001, sleeper=lambda _s: None,
+    )
+    assert report.action == "skipped"
+    assert killed == []
+
+
+def test_reap_reports_every_pid_and_never_touches_live(tmp_path):
+    """A4: every signalled pid is named. LIVE is not in the reap list."""
+    import json
+    scope_dead = "tmux-spawn-dead.scope"
+    orphan_cmd = (
+        "/home/u/.local/bin/claude daemon run --origin transient "
+        f"--spawned-by {json.dumps({'label': 'claude', 'pid': 700337})}"
+    )
+    live_cmd = (
+        "/home/u/.local/bin/claude daemon run --origin transient "
+        f"--spawned-by {json.dumps({'label': 'claude', 'pid': 100})}"
+    )
+    _write_proc(tmp_path, 5000, cmdline=orphan_cmd, ppid=1,
+                cgroup=f"0::/user.slice/{scope_dead}")
+    _write_proc(tmp_path, 5001, cmdline="node mcp", ppid=5000,
+                cgroup=f"0::/user.slice/{scope_dead}")
+    _write_proc(tmp_path, 100, cmdline="claude", ppid=1,
+                cgroup="0::/user.slice/tmux-spawn-alive.scope")
+    _write_proc(tmp_path, 6000, cmdline=live_cmd, ppid=100,
+                cgroup="0::/user.slice/tmux-spawn-alive.scope")
+    _write_proc(tmp_path, 42, cmdline="/bin/bash", ppid=1,
+                cgroup="0::/user.slice/tmux-spawn-alive.scope")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["tmux", "list-sessions"]:
+            return SimpleNamespace(returncode=0, stdout="lab-ovh\n", stderr="")
+        if cmd[:2] == ["tmux", "list-panes"]:
+            return SimpleNamespace(returncode=0, stdout="42\n", stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    result = scan_orphan_daemons(
+        proc_root=tmp_path, caller_pid=99999, run=fake_run,
+    )
+    assert {d.pid: d.state for d in result.daemons}[5000] == STATE_ORPHANED
+    assert {d.pid: d.state for d in result.daemons}[6000] == STATE_LIVE
+
+    killed = []
+
+    def fake_kill(pid, sig):
+        killed.append((pid, sig))
+        # simulate death: remove the proc dir
+        import shutil
+        p = tmp_path / str(pid)
+        if p.exists():
+            shutil.rmtree(p)
+
+    reports = reap_orphans(
+        result, proc_root=tmp_path, kill=fake_kill,
+        wait_s=0.01, poll_s=0.001, sleeper=lambda _s: None,
+    )
+    pids = [r.pid for r in reports]
+    assert 5001 in pids and 5000 in pids
+    assert pids.index(5001) < pids.index(5000), "children first, parent last"
+    assert 6000 not in pids
+    text = format_reap_report(reports)
+    assert "pid=5000" in text and "pid=5001" in text
+    assert all(r.action in ("term", "kill", "already-gone") for r in reports)
+
+
+def test_reap_none_when_no_orphans():
+    from swarph_cli.orphan_daemons import ScanResult
+    assert "reap: none" in format_reap_report(reap_orphans(ScanResult()))
+
+
+def test_watchdog_reap_requires_orphan_daemons():
+    from swarph_cli.commands import watchdog
+    rc = watchdog.run_watchdog(["--reap"])
+    assert rc == 4

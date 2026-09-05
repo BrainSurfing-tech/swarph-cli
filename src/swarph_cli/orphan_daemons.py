@@ -1,12 +1,12 @@
 """Orphan ``claude daemon run --origin transient`` detector (#666).
 
-Read-only. Enumerate Anthropic's ``claude daemon run`` processes, classify
-each as LIVE / ORPHANED / UNKNOWN from ``--spawned-by`` + tmux-scope
-evidence, and print a report. No signals.
+Enumerate Anthropic's ``claude daemon run`` processes, classify each as
+LIVE / ORPHANED / UNKNOWN from ``--spawned-by`` + tmux-scope evidence.
 
 UNKNOWN must never be treated as ORPHANED
-([[feedback_absent_feature_looks_like_broken_feature]]). The reaper (T3)
-is a separate opt-in; this module does not kill anything.
+([[feedback_absent_feature_looks_like_broken_feature]]). T1 prints only.
+T3 ``--reap`` is opt-in, PID-only, re-verifies identity before each
+signal. Never ``pkill -f``.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ import json
 import os
 import re
 import subprocess
+import signal
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -174,12 +176,32 @@ def read_rss_kb(pid: int, *, proc_root: Path = Path("/proc")) -> int:
     return 0
 
 
-def read_ppid(pid: int, *, proc_root: Path = Path("/proc")) -> Optional[int]:
+def _stat_after_comm(pid: int, *, proc_root: Path = Path("/proc")) -> Optional[list[str]]:
     try:
         data = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
-        after = data[data.rfind(")") + 2:].split()
-        return int(after[1])
+        return data[data.rfind(")") + 2:].split()
     except (OSError, ValueError, IndexError):
+        return None
+
+
+def read_ppid(pid: int, *, proc_root: Path = Path("/proc")) -> Optional[int]:
+    after = _stat_after_comm(pid, proc_root=proc_root)
+    if after is None or len(after) < 2:
+        return None
+    try:
+        return int(after[1])
+    except ValueError:
+        return None
+
+
+def read_starttime(pid: int, *, proc_root: Path = Path("/proc")) -> Optional[int]:
+    """/proc/<pid>/stat field 22 — starttime in clock ticks. Identity, not age."""
+    after = _stat_after_comm(pid, proc_root=proc_root)
+    if after is None or len(after) < 20:
+        return None
+    try:
+        return int(after[19])
+    except ValueError:
         return None
 
 
@@ -434,15 +456,167 @@ def format_report(result: ScanResult) -> str:
     return "\n".join(lines)
 
 
+# ── T3 reap (opt-in, by PID, re-verify) ─────────────────────────────────────
+
+_DEFAULT_REAP_WAIT_S = 2.0
+_DEFAULT_REAP_POLL_S = 0.05
+
+
+@dataclass(frozen=True)
+class ProcIdentity:
+    """What must still match immediately before a signal (#666 T3)."""
+    pid: int
+    starttime: Optional[int]
+    cmdline: Optional[str]
+    scope: Optional[str]
+
+
+@dataclass
+class SignalReport:
+    pid: int
+    action: str  # term | kill | skipped | already-gone | survived
+    reason: str
+
+
+def snapshot_identity(pid: int, *, proc_root: Path = Path("/proc")) -> Optional[ProcIdentity]:
+    if pid_alive(pid, proc_root=proc_root) is not True:
+        return None
+    return ProcIdentity(
+        pid=pid,
+        starttime=read_starttime(pid, proc_root=proc_root),
+        cmdline=read_cmdline(pid, proc_root=proc_root),
+        scope=extract_tmux_scope(read_cgroup(pid, proc_root=proc_root)),
+    )
+
+
+def identities_match(expected: ProcIdentity, current: Optional[ProcIdentity]) -> bool:
+    if current is None:
+        return False
+    return (
+        current.pid == expected.pid
+        and current.starttime == expected.starttime
+        and current.cmdline == expected.cmdline
+        and current.scope == expected.scope
+    )
+
+
+def reap_order(root: int, *, proc_root: Path = Path("/proc")) -> list[int]:
+    """Children first (reverse BFS), then the daemon. Never a pattern kill."""
+    return list(reversed(process_tree(root, proc_root=proc_root))) + [root]
+
+
+def _default_kill(pid: int, sig: int) -> None:
+    os.kill(pid, sig)
+
+
+def _wait_gone(
+    pid: int,
+    *,
+    ident: ProcIdentity,
+    proc_root: Path,
+    wait_s: float,
+    poll_s: float,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> bool:
+    """True if pid is gone or no longer the snapshotted identity."""
+    deadline = time.monotonic() + wait_s
+    while True:
+        now = snapshot_identity(pid, proc_root=proc_root)
+        if not identities_match(ident, now):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        sleeper(min(poll_s, max(0.0, deadline - time.monotonic())))
+
+
+def signal_one(
+    ident: ProcIdentity,
+    *,
+    proc_root: Path = Path("/proc"),
+    kill: Callable[[int, int], None] = _default_kill,
+    wait_s: float = _DEFAULT_REAP_WAIT_S,
+    poll_s: float = _DEFAULT_REAP_POLL_S,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> SignalReport:
+    """SIGTERM, then SIGKILL if the same identity survives. Re-verify first."""
+    now = snapshot_identity(ident.pid, proc_root=proc_root)
+    if now is None:
+        return SignalReport(ident.pid, "already-gone", "pid gone before signal")
+    if not identities_match(ident, now):
+        return SignalReport(
+            ident.pid, "skipped",
+            "identity changed (starttime/cmdline/scope) — pid recycle, not killed",
+        )
+    try:
+        kill(ident.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return SignalReport(ident.pid, "already-gone", "gone at SIGTERM")
+    if _wait_gone(ident.pid, ident=ident, proc_root=proc_root,
+                  wait_s=wait_s, poll_s=poll_s, sleeper=sleeper):
+        return SignalReport(ident.pid, "term", "SIGTERM")
+    try:
+        kill(ident.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return SignalReport(ident.pid, "term", "gone during SIGKILL")
+    if _wait_gone(ident.pid, ident=ident, proc_root=proc_root,
+                  wait_s=wait_s, poll_s=poll_s, sleeper=sleeper):
+        return SignalReport(ident.pid, "kill", "SIGKILL after SIGTERM wait")
+    return SignalReport(ident.pid, "survived", "still the same identity after SIGKILL")
+
+
+def reap_orphans(
+    result: ScanResult,
+    *,
+    proc_root: Path = Path("/proc"),
+    kill: Callable[[int, int], None] = _default_kill,
+    wait_s: float = _DEFAULT_REAP_WAIT_S,
+    poll_s: float = _DEFAULT_REAP_POLL_S,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> list[SignalReport]:
+    """Signal only ORPHANED daemons and their trees. LIVE/UNKNOWN untouched."""
+    reports: list[SignalReport] = []
+    seen: set[int] = set()
+    for daemon in result.orphans:
+        for pid in reap_order(daemon.pid, proc_root=proc_root):
+            if pid in seen:
+                continue
+            seen.add(pid)
+            ident = snapshot_identity(pid, proc_root=proc_root)
+            if ident is None:
+                reports.append(SignalReport(pid, "already-gone", "gone before snapshot"))
+                continue
+            reports.append(signal_one(
+                ident, proc_root=proc_root, kill=kill,
+                wait_s=wait_s, poll_s=poll_s, sleeper=sleeper,
+            ))
+    return reports
+
+
+def format_reap_report(reports: list[SignalReport]) -> str:
+    if not reports:
+        return "reap: none (no ORPHANED daemons — LIVE/UNKNOWN are never signalled)"
+    lines = [f"reap: {len(reports)} pid(s)"]
+    for r in reports:
+        lines.append(f"  pid={r.pid}  {r.action}  {r.reason}")
+    return "\n".join(lines)
+
+
 def run_orphan_daemons_report(
     *,
     proc_root: Path = Path("/proc"),
     caller_pid: Optional[int] = None,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    reap: bool = False,
+    wait_s: float = _DEFAULT_REAP_WAIT_S,
 ) -> int:
-    """Print the T1 report. Always exit 0 on a completed scan (read-only)."""
+    """Print the T1 report. With reap=True, opt-in T3 by PID after the scan."""
     result = scan_orphan_daemons(
         proc_root=proc_root, caller_pid=caller_pid, run=run,
     )
     print(format_report(result))
+    if not reap:
+        return 0
+    reports = reap_orphans(result, proc_root=proc_root, wait_s=wait_s)
+    print(format_reap_report(reports))
     return 0
+
