@@ -454,6 +454,23 @@ def run_codegraph(argv) -> int:
     # test that caught this.
     if rows and len(a.query.split()) == 1:
         _key, _hits = _match_quality(a.query, [dict(r) for r in rows])
+        # SUFFIX-TOLERANT SECOND PASS. _match_quality asks whether a symbol NAME
+        # contains the query token LITERALLY, so an inflected query stem-misses its
+        # own answer: `loads` -> `load`, `renders` -> `render`, `gateways` ->
+        # `_gateway_url`. science-claude measured 3 of 8 natural single-token
+        # queries exiting non-zero with the RIGHT symbol at rank 1.
+        #
+        # >>> AND MY OWN CLEARANCE COULD NOT HAVE CAUGHT IT: "0 false positives on
+        # 12 VERBATIM symbol names" excludes the failure mode BY CONSTRUCTION — a
+        # verbatim name cannot stem-miss. The sample was self-selecting. <<<
+        #
+        # Only the EXIT CODE is suffix-tolerant. The printed label is untouched:
+        # a warning that is occasionally over-cautious costs a reader nothing,
+        # while a wrong exit code costs every caller. Different consequences,
+        # deliberately different thresholds.
         if _key and _hits == 0:
-            return RC_FUZZY_ONLY
+            _stem = _key.rstrip("s") if len(_key) > 3 else _key
+            _soft = sum(1 for r in rows if _stem in str(dict(r).get("name", "")).lower())
+            if _soft == 0:
+                return RC_FUZZY_ONLY
     return 0
