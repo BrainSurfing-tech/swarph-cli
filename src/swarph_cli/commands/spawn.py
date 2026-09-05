@@ -36,6 +36,7 @@ from typing import Callable, Optional
 from urllib.parse import quote
 
 from swarph_cli import __version__
+from swarph_cli.pane_probe import PANE_PREDICATES, pane_state as membrane_pane_state
 from swarph_cli.cell import (
     Cell,
     CellError,
@@ -1475,45 +1476,8 @@ class ProviderMembrane:
     pane_modal_markers: tuple = ()
 
     def pane_state(self, content: str) -> str:
-        """idle | busy | modal | unknown.
-
-        idle == no busy marker AND the input box is empty. The empty-input
-        hint string ("? for shortcuts") is NOT this test: that hint
-        vanishes under the exact condition we need to detect.
-        """
-        if not self.pane_busy_markers and not self.pane_composer_prefixes:
-            return "unknown"
-        low = content.lower()
-        if any(m in low for m in self.pane_modal_markers):
-            return "modal"
-        if any(m in low for m in self.pane_busy_markers):
-            return "busy"
-        line = self._pane_composer_line(content)
-        if line is None:
-            return "unknown"
-        if self._pane_composer_body(line):
-            return "busy"
-        return "idle"
-
-    def _pane_composer_line(self, content: str):
-        found = None
-        for raw in content.splitlines():
-            s = raw.strip()
-            for prefix in self.pane_composer_prefixes:
-                if s.startswith(prefix):
-                    found = s
-                    break
-        return found
-
-    def _pane_composer_body(self, line: str) -> str:
-        for prefix in self.pane_composer_prefixes:
-            if line.startswith(prefix):
-                body = line[len(prefix):].strip()
-                for ph in self.pane_empty_placeholders:
-                    if body.lower().startswith(ph.lower()):
-                        return ""
-                return body
-        return line.strip()
+        """idle | busy | modal | unknown. Algorithm lives in pane_probe."""
+        return membrane_pane_state(self.name, content)
 
     def uses_pinned_session(self) -> bool:
         """True if ``run_spawn`` should mint/resume a pinned UUID.
@@ -1698,9 +1662,10 @@ class ClaudeMembrane(ProviderMembrane):
     name = "claude"
     # Busy marker verified live 2026-09-03. Composer is `>` (mesh.py
     # _COMPOSER_MARKERS). Modal is the telemetry survey that stalls a wake.
-    pane_busy_markers = ("esc to interrupt",)
-    pane_composer_prefixes = (">",)
-    pane_modal_markers = ("how is claude doing this session",)
+    # Tuples sourced from pane_probe — session_bridge must not import spawn.
+    pane_busy_markers = PANE_PREDICATES["claude"].busy_markers
+    pane_composer_prefixes = PANE_PREDICATES["claude"].composer_prefixes
+    pane_modal_markers = PANE_PREDICATES["claude"].modal_markers
 
     env_builder = staticmethod(_claude_env)
     def apply_task_injection(self, cell: Cell, argv: list[str], text: str) -> None:
@@ -1774,8 +1739,8 @@ class CodexMembrane(ProviderMembrane):
     name = "codex"
     # Composer is `›` (gpt-ops live capture, mesh.py). Busy marker is the
     # same interrupt affordance Codex shares with Claude when a turn runs.
-    pane_busy_markers = ("esc to interrupt",)
-    pane_composer_prefixes = ("›",)
+    pane_busy_markers = PANE_PREDICATES["codex"].busy_markers
+    pane_composer_prefixes = PANE_PREDICATES["codex"].composer_prefixes
 
     env_builder = staticmethod(_scrubbed_codex_env)
     def apply_task_injection(self, cell: Cell, argv: list[str], text: str) -> None:
@@ -2589,9 +2554,9 @@ class CursorMembrane(ProviderMembrane):
     name = "cursor"
     # Composer is `→` with placeholder "Add a follow-up" (cursor-lin
     # 2026-08-24). Busy: "ctrl+c to stop" right-aligned on the composer row.
-    pane_busy_markers = ("ctrl+c to stop",)
-    pane_composer_prefixes = ("→",)
-    pane_empty_placeholders = ("add a follow-up",)
+    pane_busy_markers = PANE_PREDICATES["cursor"].busy_markers
+    pane_composer_prefixes = PANE_PREDICATES["cursor"].composer_prefixes
+    pane_empty_placeholders = PANE_PREDICATES["cursor"].empty_placeholders
 
     env_builder = staticmethod(_cursor_env)
 

@@ -12,6 +12,7 @@ import time
 from typing import Optional
 
 from swarph_cli.multiplexer import find_multiplexer
+from swarph_cli.pane_probe import pane_state as membrane_pane_state
 
 # Busy / dialog / approval markers in a Claude TUI pane. ANY (case-insensitive)
 # means mid-turn or a non-idle prompt → not safe to inject.
@@ -54,18 +55,6 @@ def _capture(pane_id: str) -> Optional[str]:
     return r.stdout or ""
 
 
-def _membrane_for(provider: Optional[str]):
-    """Look up the spawn membrane. None → caller fails closed.
-
-    Lazy import: spawn.py does not import session_bridge, so this does not
-    cycle. A parallel marker table here is the defect #682 is replacing.
-    """
-    if not provider:
-        return None
-    from swarph_cli.commands.spawn import MEMBRANES
-    return MEMBRANES.get(provider)
-
-
 def probe_pane(pane_id: str, provider: Optional[str] = None) -> str:
     """Pane state: "idle" | "busy" | "modal" | "unknown".
 
@@ -77,14 +66,14 @@ def probe_pane(pane_id: str, provider: Optional[str] = None) -> str:
     chrome and vanishes when the box has text — the self-sealing deadlock.
     Each membrane declares its own busy marker and input-box shape;
     idle == no busy marker AND empty input.
+
+    Predicates live in pane_probe, not spawn: importing MEMBRANES here
+    pulls spawn's unguarded prints into the daemon closure.
     """
     content = _capture(pane_id)
     if content is None or not content.strip():
         return "busy"
-    membrane = _membrane_for(provider)
-    if membrane is None:
-        return "unknown"
-    return membrane.pane_state(content)
+    return membrane_pane_state(provider, content)
 
 
 def _send_key(pane_id: str, key: str) -> bool:

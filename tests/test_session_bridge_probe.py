@@ -1,5 +1,7 @@
+import inspect
 import subprocess
 import swarph_cli.session_bridge as sb
+import swarph_cli.pane_probe as pane_probe
 
 
 class _CP:
@@ -107,3 +109,13 @@ def test_probe_busy_when_no_mux(monkeypatch):
 def test_dismiss_returns_false_when_no_safe_modal(monkeypatch):
     _fake_capture(monkeypatch, 0, "esc to interrupt\n")
     assert sb.try_dismiss_safe_modal("%1") is False
+
+
+def test_session_bridge_does_not_import_spawn():
+    """Review #371: a lazy MEMBRANES import pulls spawn's unguarded prints
+    into the daemon closure. The table lives in pane_probe instead.
+    """
+    src = inspect.getsource(sb)
+    assert "from swarph_cli.commands.spawn" not in src
+    assert "import MEMBRANES" not in src
+    assert pane_probe.PANE_PREDICATES["muse"] is pane_probe.PANE_PREDICATES["claude"]

@@ -86,6 +86,9 @@ _SWARPH_ENV = (
     # supervision (#644): who claims the monitor process — a test box's
     # supervisor env must not leak into pidfile assertions
     "SWARPH_SUPERVISOR",
+    # #682: daemon pane probe is per-membrane; a test box's provider
+    # must not leak into fail-closed / idle assertions
+    "SWARPH_PROVIDER",
     # gateways
     "MESH_GATEWAY_URL",
     "SWARPH_GATEWAY",
