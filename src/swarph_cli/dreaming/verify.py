@@ -151,6 +151,25 @@ _DATED = re.compile(r"\b(20\d{2}-\d{2}-\d{2}|20\d{2}-\d{2}|"
 _DATE_PROXIMITY = 60   # chars between the asserted value and the nearest date
 
 
+def _version_tuple(s):
+    """Parse a dotted version. None if it is not a version at all."""
+    try:
+        return tuple(int(p) for p in str(s).strip().split("."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _version_older(asserted, observed) -> bool:
+    """True iff both parse and asserted < observed (pad missing minors with 0)."""
+    a, b = _version_tuple(asserted), _version_tuple(observed)
+    if a is None or b is None:
+        return False
+    n = max(len(a), len(b))
+    a = a + (0,) * (n - len(a))
+    b = b + (0,) * (n - len(b))
+    return a < b
+
+
 def _is_dated_record(context: str, asserted=None) -> bool:
     """True when a date sits NEAR the asserted value on the claim's own line.
 
@@ -225,6 +244,19 @@ def verify(corpus: Path, manifest: dict) -> list[dict]:
             verdicts.append({**base, "observed": r["observed"],
                              "surface": r["surface"], "verdict": "unprobeable",
                              "reason": "dated_record"})
+            continue
+        # #689: a version OLDER than the installed one is a record of a past
+        # version, not a present-tense claim. Measured 2026-09-05: all 24
+        # pkg_version disagrees were this shape (dated record / adjacent
+        # tool / CI-matrix number). asserted > observed stays disagree —
+        # the box is behind a live claim. Equal stays agree.
+        if (c.get("kind") == "pkg_version"
+                and r.get("error") is None
+                and r.get("observed") is not None
+                and _version_older(c.get("asserted"), r["observed"])):
+            verdicts.append({**base, "observed": r["observed"],
+                             "surface": r["surface"], "verdict": "unprobeable",
+                             "reason": "older_than_installed"})
             continue
         verdict, reason = _compare(c["asserted"], r["observed"], r.get("error"))
         if verdict == INCOMPARABLE:
