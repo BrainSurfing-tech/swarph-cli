@@ -138,7 +138,7 @@ def _format_obligations(data: dict) -> str:
     return "\n".join(lines)
 
 
-def _card_edit_payload(actor, title, body, *, due_at=_SENTINEL) -> dict:
+def _card_edit_payload(actor, title, body, *, due_at=_SENTINEL, project_id=None) -> dict:
     """#191: the edit patch — title and/or body, the two fields that made a
     card's text write-once until the gateway grew them (BoardCardPatch).
 
@@ -158,8 +158,10 @@ def _card_edit_payload(actor, title, body, *, due_at=_SENTINEL) -> dict:
         patch["body"] = body
     if due_at is not _SENTINEL:
         patch["due_at"] = _normalize_due_at(due_at) if due_at else None
+    if project_id is not None:
+        patch["project_id"] = int(project_id)   # #740: re-home; the gateway gates it (orchestrator + both owners)
     if len(patch) == 1:
-        raise ValueError("nothing to edit — pass --title, --body, and/or --due")
+        raise ValueError("nothing to edit — pass --title, --body, --due and/or --project")
     return patch
 
 
@@ -807,6 +809,9 @@ def _build_parser() -> argparse.ArgumentParser:
     add_content_args(ce, "--title", required=False,
                      noun="card title", noun_plural="titles")
     add_content_args(ce, "--body", required=False)
+    ce.add_argument("--project", default=None, metavar="ID|SLUG",
+                    help="#740: re-home a mis-filed card (orchestrator who owns BOTH projects; "
+                         "the gateway refuses anyone else). Keeps the card's id, thread and links.")
     ce.add_argument("--due", default=_SENTINEL, metavar="DATE",
                     help="set due date (YYYY-MM-DD or ISO); pass empty string to clear")
     ce.add_argument("--json", action="store_true"); _add_common(ce)
@@ -1054,9 +1059,16 @@ def run_board(argv: list[str]) -> int:
                 return 1
             if title_text is not None:
                 title_text = title_text.removesuffix("\n")  # one-line field; see add
+            project_id = None
+            if getattr(args, "project", None) is not None:
+                project_id, perr = _resolve_project(gw, token, args.project)
+                if perr or project_id is None:
+                    print(f"swarph board cards edit: --project {args.project!r}: "
+                          f"{perr or 'unknown project'}", file=sys.stderr)
+                    return 1
             try:
                 patch = _card_edit_payload(
-                    self_name, title_text, body_text, due_at=args.due)
+                    self_name, title_text, body_text, due_at=args.due, project_id=project_id)
             except ValueError as exc:
                 print(f"swarph board cards edit: {exc}", file=sys.stderr)
                 return 2
