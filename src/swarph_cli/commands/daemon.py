@@ -264,6 +264,10 @@ class DaemonState:
         # SWARPH_SESSION_NAME overrides the session used for pane resolution;
         # defaults to self_name.
         self.session_name = os.environ.get("SWARPH_SESSION_NAME", self_name)
+        # #682: probe_pane is per-membrane. $SWARPH_PROVIDER is the explicit
+        # stamp; a missing value fails closed (unknown → defer), never
+        # defaults to Claude's markers.
+        self.provider = os.environ.get("SWARPH_PROVIDER")
         self.cursor = _read_cursor(self.cursor_path)
         self.consecutive_empty = 0
         self.disconnect_since: Optional[float] = None
@@ -364,12 +368,12 @@ def _legacy_attempt_delivery_removed(state: DaemonState) -> None:
             # Headless / non-standard cell — stay surface-only; DMs remain
             # queued (already logged). Not an error.
             return
-        st = session_bridge.probe_pane(pane)
+        st = session_bridge.probe_pane(pane, provider=state.provider)
         if st == "modal":
             if session_bridge.try_dismiss_safe_modal(pane) and \
-                    session_bridge.probe_pane(pane) == "idle":
+                    session_bridge.probe_pane(pane, provider=state.provider) == "idle":
                 st = "idle"
-        if st != "idle":
+        if st not in ("idle",):
             n = state.queue.bump_deferred()
             if stall_alert.is_alert_tick(n):
                 stall_alert.send_stall_alert(

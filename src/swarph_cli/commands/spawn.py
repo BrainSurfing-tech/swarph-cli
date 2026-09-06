@@ -36,6 +36,7 @@ from typing import Callable, Optional
 from urllib.parse import quote
 
 from swarph_cli import __version__
+from swarph_cli.pane_probe import PANE_PREDICATES, pane_state as membrane_pane_state
 from swarph_cli.cell import (
     Cell,
     CellError,
@@ -1464,6 +1465,20 @@ class ProviderMembrane:
 
     name: str = ""
 
+    # Pane idle predicate (#682). Base is unimplemented on purpose: an
+    # unknown / undeclared TUI returns "unknown", and the daemon treats
+    # unknown as busy (defer). Fail closed, never open. Do NOT default
+    # these to Claude's markers — that is how a union-of-all-TUIs false
+    # idle injects into a busy cell.
+    pane_busy_markers: tuple = ()
+    pane_composer_prefixes: tuple = ()
+    pane_empty_placeholders: tuple = ()
+    pane_modal_markers: tuple = ()
+
+    def pane_state(self, content: str) -> str:
+        """idle | busy | modal | unknown. Algorithm lives in pane_probe."""
+        return membrane_pane_state(self.name, content)
+
     def uses_pinned_session(self) -> bool:
         """True if ``run_spawn`` should mint/resume a pinned UUID.
 
@@ -1645,7 +1660,12 @@ class ProviderMembrane:
 
 class ClaudeMembrane(ProviderMembrane):
     name = "claude"
-
+    # Busy marker verified live 2026-09-03. Composer is `>` (mesh.py
+    # _COMPOSER_MARKERS). Modal is the telemetry survey that stalls a wake.
+    # Tuples sourced from pane_probe — session_bridge must not import spawn.
+    pane_busy_markers = PANE_PREDICATES["claude"].busy_markers
+    pane_composer_prefixes = PANE_PREDICATES["claude"].composer_prefixes
+    pane_modal_markers = PANE_PREDICATES["claude"].modal_markers
 
     env_builder = staticmethod(_claude_env)
     def apply_task_injection(self, cell: Cell, argv: list[str], text: str) -> None:
@@ -1717,7 +1737,10 @@ class ClaudeMembrane(ProviderMembrane):
 
 class CodexMembrane(ProviderMembrane):
     name = "codex"
-
+    # Composer is `›` (gpt-ops live capture, mesh.py). Busy marker is the
+    # same interrupt affordance Codex shares with Claude when a turn runs.
+    pane_busy_markers = PANE_PREDICATES["codex"].busy_markers
+    pane_composer_prefixes = PANE_PREDICATES["codex"].composer_prefixes
 
     env_builder = staticmethod(_scrubbed_codex_env)
     def apply_task_injection(self, cell: Cell, argv: list[str], text: str) -> None:
@@ -2529,6 +2552,11 @@ class CursorMembrane(ProviderMembrane):
     """
 
     name = "cursor"
+    # Composer is `→` with placeholder "Add a follow-up" (cursor-lin
+    # 2026-08-24). Busy: "ctrl+c to stop" right-aligned on the composer row.
+    pane_busy_markers = PANE_PREDICATES["cursor"].busy_markers
+    pane_composer_prefixes = PANE_PREDICATES["cursor"].composer_prefixes
+    pane_empty_placeholders = PANE_PREDICATES["cursor"].empty_placeholders
 
     env_builder = staticmethod(_cursor_env)
 
