@@ -6,10 +6,23 @@ provider/name/n fails closed (LaneError) BEFORE any DB write or fleetctl call.
 """
 from __future__ import annotations
 import json, logging, os, re, shutil, sqlite3, subprocess, sys, time
+from dataclasses import dataclass
 
 from . import services_control as _svc   # reuse _wrapper_trusted + FLEETCTL
 
 _log = logging.getLogger("mesh-gateway")
+
+
+@dataclass(frozen=True)
+class ResultRead:
+    """Lane verdict file read: success text XOR a stable refusal token (#739).
+
+    Exactly one of `text` / `refusal` is set for a completed read attempt.
+    Callers must never treat a bare null result as "empty success" when
+    `refusal` is present — path_escape is a security refusal, not absence.
+    """
+    text: str | None = None
+    refusal: str | None = None
 
 
 class LaneError(Exception):
@@ -323,44 +336,59 @@ def _read_task_row(pk: int) -> dict | None:
     return dict(r) if r is not None else None
 
 
-def _read_result_file(output_path: str) -> str | None:
+def _read_result_file(output_path: str | None) -> ResultRead:
     """Read output_path ONLY if it resolves under RESULTS_DIR (traversal guard);
-    bound the read to MAX_RESULT_BYTES. Returns None on any refusal / read error —
-    never reads an arbitrary path, never raises into the caller."""
+    bound the read to MAX_RESULT_BYTES. Returns ResultRead(text=...) on success
+    or ResultRead(refusal=<token>) for each distinct failure — never a bare
+    None sentinel for five causes (#739). Never raises into the caller."""
     if not output_path:
-        return None
+        return ResultRead(refusal="empty_output_path")
+    # NUL is malformed on every platform. On POSIX realpath raises ValueError;
+    # on Windows it often does not — without this check the path falls through
+    # to path_escape and two causes collapse (#739 / #725 class).
+    if "\x00" in output_path:
+        return ResultRead(refusal="malformed_path")
     base = os.path.realpath(RESULTS_DIR)
-    # A NUL byte in output_path makes os.path.realpath raise ValueError (and open()
-    # raises ValueError too). Treat any such malformed path as a refusal — return
-    # None ("no result"), never raise into the caller.
+    # Split ValueError (other malformed) from OSError — same class of trap
+    # swairm #86 fixed one generation up. Never raise into the caller.
     try:
         real = os.path.realpath(output_path)
-    except (ValueError, OSError):
-        return None
+    except ValueError:
+        return ResultRead(refusal="malformed_path")
+    except OSError:
+        return ResultRead(refusal="malformed_path")
     # Must be base itself's child: prefix check with a trailing sep so
     # '/x/lane-results-evil' can't pass as under '/x/lane-results'.
     if real != base and not real.startswith(base + os.sep):
-        return None
+        _log.warning("lane result path_escape refused: path=%r", output_path)
+        return ResultRead(refusal="path_escape")
     try:
-        with open(real, "r") as f:
-            return f.read(MAX_RESULT_BYTES)
-    except (ValueError, OSError):
-        return None
+        with open(real, "r", encoding="utf-8", errors="replace") as f:
+            return ResultRead(text=f.read(MAX_RESULT_BYTES))
+    except FileNotFoundError:
+        return ResultRead(refusal="absent")
+    except ValueError:
+        return ResultRead(refusal="malformed_path")
+    except OSError:
+        return ResultRead(refusal="unreadable")
 
 
 def get_job(name: str, job_id: int) -> dict:
     """Read a lane job back by its enqueue job_id. Returns
-    {job_id, status, result}: result is the verdict file content if done, the
-    task error if failed, else None. 404 (LaneError) if the task is absent or its
-    category != lane:<name> (it isn't this lane's job). The route stays thin."""
+    {job_id, status, result} and, when a done-job result read is refused,
+    result_refused_because=<stable token> (#739). result is the verdict file
+    content if done+readable, the task error if failed, else None. 404
+    (LaneError) if the task is absent or its category != lane:<name>."""
     row = _read_task_row(job_id)
     if row is None or row["category"] != f"lane:{name}":
         raise LaneError(404, f"job {job_id} not found for lane {name!r}")
     status = _STATUS_MAP.get(row["status"], row["status"])
     if status == "done":
-        result = _read_result_file(row["output_path"])
-    elif status == "failed":
-        result = row["last_error"]
-    else:
-        result = None
-    return {"job_id": job_id, "status": status, "result": result}
+        read = _read_result_file(row["output_path"])
+        out = {"job_id": job_id, "status": status, "result": read.text}
+        if read.refusal is not None:
+            out["result_refused_because"] = read.refusal
+        return out
+    if status == "failed":
+        return {"job_id": job_id, "status": status, "result": row["last_error"]}
+    return {"job_id": job_id, "status": status, "result": None}
