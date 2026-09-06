@@ -37,7 +37,35 @@ from __future__ import annotations
 
 import sys
 
-__all__ = ["print_safe"]
+__all__ = ["print_safe", "configure_stdio"]
+
+
+def configure_stdio() -> None:
+    """Force stdout/stderr to UTF-8 with replace — once, at CLI entry (#725 / #125).
+
+    Windows defaults to the ANSI code page (cp1252 / IBM437). A bare ``print`` of
+    non-ASCII then raises ``UnicodeEncodeError`` and aborts the WHOLE command —
+    measured on razorpeter 2026-09-05: ``swarph channel read`` exit 1 with nothing
+    printed when one channel post carried CJK/emoji (#125 smoke). ``--json``
+    survived only because ``json.dumps`` emits ASCII escapes.
+
+    Distinct from #724 (``.ps1`` source decode) and from subprocess ``encoding=``
+    (#725 exposure list): this is OUR stdout ENCODE. Reconfigure at entry so every
+    verb inherits the contract; ``errors="replace"`` turns a total crash into a
+    legible placeholder. No-ops on streams that lack ``reconfigure`` (closed,
+    custom, or already-captured under pytest).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError, AttributeError, TypeError):
+            # Never let stdio setup crash the CLI — a closed/redirected stream
+            # under Task Scheduler is exactly when we still need the rest of the
+            # command to run.
+            pass
 
 
 def print_safe(line: str, *, stream=None, file=None, flush: bool = True) -> None:

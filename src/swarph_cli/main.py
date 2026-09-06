@@ -30,6 +30,7 @@ from typing import Optional
 
 from swarph_cli import __version__
 from swarph_cli.caller import default_caller
+from swarph_cli.console_safe import configure_stdio
 
 
 _BANNER = """\
@@ -353,6 +354,8 @@ def _reject_unknown_verb(token: str) -> int:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    # Windows cp1252/IBM437 consoles raise on non-ASCII print otherwise (#125/#725).
+    configure_stdio()
     if argv is None:
         argv = sys.argv[1:]
 
