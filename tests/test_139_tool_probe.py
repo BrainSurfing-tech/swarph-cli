@@ -125,6 +125,30 @@ import subprocess
 import sys
 
 
+def test_two_path_is_registered_and_cli_can_fail_runs_it(capsys):
+    """reviewers-pixel on #378: a probe that only exists as a function is the
+    silence the card was written to catch. `swarph cell probe --can-fail` must
+    run it, and can_fail is the 2026-09-05 specimen (gateway answers, tool silent).
+    """
+    assert "gbrain-two-path" in cp.PROBES
+    v = cp.PROBES["gbrain-two-path"].can_fail()
+    assert v.state == cp.State.ABSENT
+    assert "tool returned nothing" in v.detail
+    rc = cp.run_cell_probe(["--can-fail"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "gbrain-two-path" in out
+    assert "CAN-FAIL DID NOT FAIL" not in out
+
+
+def test_two_path_run_without_gateway_is_no_entry_not_silence(monkeypatch):
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    monkeypatch.delenv("SWARPH_BRAIN_GATEWAY", raising=False)
+    v = cp.PROBES["gbrain-two-path"].run()
+    assert v.state == cp.State.NO_ENTRY
+    assert v.consumer == "gateway+mcp-tool"
+
+
 def test_every_registered_probe_has_a_can_fail_that_actually_fails():
     """A probe never observed producing a NON-present verdict proves nothing by its
     silence. The first check published for this card was invalid jq: it failed at

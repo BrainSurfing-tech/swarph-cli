@@ -156,12 +156,14 @@ def gateway_memory_list(gateway: str, token: str, timeout: int = 15) -> list[str
 
 
 def probe_gbrain_two_path(gateway: str, token: str,
-                          tool_list: Callable[[], object]) -> Verdict:
+                          tool_list: Callable[[], object],
+                          list_fn: Callable[..., list] | None = None) -> Verdict:
     """Ask the SAME subject down two paths. A tool that answers alone proves only
     that it answered; the second path is what makes silence legible as failure.
     The subject comes from the gateway's own list output, never a guessed slug."""
+    list_fn = list_fn or gateway_memory_list
     try:
-        slugs = gateway_memory_list(gateway, token)
+        slugs = list_fn(gateway, token)
     except Exception as exc:  # noqa: BLE001 — reference path down = no known answer
         return Verdict(State.UNREADABLE, "gateway+mcp-tool",
                        "no known answer available: gateway leg failed (%s)" % exc)
@@ -231,6 +233,67 @@ register(Probe(
     # CAN-FAIL: resolve with both CLI keys cleared. ENV_KEY alone is not
     # enough — GBRAIN_MCP_URL is the resolver's first preference.
     can_fail=lambda: _without_env((ENV_KEY, "GBRAIN_MCP_URL"), probe_cli_path),
+))
+
+
+def _mcp_memory_list() -> object:
+    """The MCP tool leg — direct :8792 list_pages, never the gateway proxy.
+
+    memory.list_pages routes through SWARPH_BRAIN_GATEWAY when that env is
+    set. Using it here would make both legs the same path and hide the
+    2026-09-05 specimen (gateway answered, tool silent).
+    """
+    from . import brain_ask, memory  # noqa: PLC0415 — lazy, stdlib-only at import
+    url = brain_ask._resolve_endpoint()
+    token = brain_ask._resolve_token(None, brain_ask._self_name()) or ""
+    out = memory._mcp_call(url, token, "list_pages", {"limit": 50})
+    if isinstance(out, list):
+        return [r.get("slug") if isinstance(r, dict) else r for r in out]
+    if isinstance(out, dict):
+        pages = out.get("pages") or []
+        return [r.get("slug") if isinstance(r, dict) else r for r in pages]
+    return out
+
+
+def run_gbrain_two_path() -> Verdict:
+    """Live two-path. Missing gateway is NO_ENTRY, not silence."""
+    try:
+        from swarph_cli.gateway_default import env_gateway  # noqa: PLC0415
+        from swarph_cli import tokens  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        return Verdict(State.UNREADABLE, "gateway+mcp-tool",
+                       "cannot import resolver: %s" % exc)
+    gw = env_gateway() or (os.environ.get("SWARPH_BRAIN_GATEWAY") or "").strip()
+    if not gw:
+        return Verdict(State.NO_ENTRY, "gateway+mcp-tool",
+                       "MESH_GATEWAY_URL unset — two-path has no gateway leg")
+    self_name = os.environ.get("SWARPH_SELF") or os.environ.get("SWARPH_NODE")
+    try:
+        res = tokens.resolve_token(self_name, None,
+                                   identity_is_explicit=bool(self_name))
+        token = (res.token if res else "") or ""
+    except Exception as exc:  # noqa: BLE001
+        return Verdict(State.UNREADABLE, "gateway+mcp-tool",
+                       "token resolve failed: %s" % exc)
+    if not token:
+        return Verdict(State.UNREADABLE, "gateway+mcp-tool",
+                       "no mesh token — two-path has no gateway credential")
+    return probe_gbrain_two_path(gw, token, tool_list=_mcp_memory_list)
+
+
+def _two_path_can_fail() -> Verdict:
+    """The 2026-09-05 specimen: gateway answered, tool returned nothing."""
+    return probe_gbrain_two_path(
+        "http://gw:8788", "tok",
+        tool_list=lambda: [],
+        list_fn=lambda g, t, timeout=15: ["card-20"],
+    )
+
+
+register(Probe(
+    name="gbrain-two-path", consumer="gateway+mcp-tool",
+    run=run_gbrain_two_path,
+    can_fail=_two_path_can_fail,
 ))
 
 
