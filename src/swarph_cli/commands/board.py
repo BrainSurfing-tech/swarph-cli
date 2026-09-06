@@ -194,6 +194,14 @@ def _merge_link(existing: Optional[dict], key: str, value: str) -> dict:
     return merged
 
 
+def _link_patch_body(actor: str, key: str, value: str, *, replace: bool = False) -> dict:
+    """#727: single-key PATCH. Server refuses same-key clobber unless replace_links."""
+    body = {"actor": actor, "links": {key: value}}
+    if replace:
+        body["replace_links"] = True
+    return body
+
+
 def _project_ref_to_id(value, projects) -> Optional[int]:
     """Resolve a --project ref (numeric id OR slug) to a project_id (pure).
 
@@ -717,8 +725,16 @@ def _build_parser() -> argparse.ArgumentParser:
     ca.add_argument("--json", action="store_true"); _add_common(ca)
     cm = cards.add_parser("move", help="move a card to a stage")
     cm.add_argument("id", type=int); cm.add_argument("stage"); cm.add_argument("--json", action="store_true"); _add_common(cm)
-    ck = cards.add_parser("link", help="add/update a link on a card (merges)")
+    ck = cards.add_parser(
+        "link",
+        help="set a link key on a card (refuses to overwrite an existing different "
+             "value unless --replace; #727)",
+    )
     ck.add_argument("id", type=int); ck.add_argument("key"); ck.add_argument("value")
+    ck.add_argument(
+        "--replace", action="store_true",
+        help="overwrite an existing different value for this key (sends replace_links=true)",
+    )
     ck.add_argument("--json", action="store_true"); _add_common(ck)
     cn = cards.add_parser("assign", help="set a card's assignee")
     cn.add_argument("id", type=int); cn.add_argument("assignee"); cn.add_argument("--json", action="store_true"); _add_common(cn)
@@ -1130,11 +1146,13 @@ def run_board(argv: list[str]) -> int:
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "move_ready": not args.clear}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} move_ready -> {x.get('move_ready')}", aj)
         if args.command == "link":
-            gst, gcard = _http_get_json(f"{gw}/board/cards/{args.id}", token)
-            if not (gst and 200 <= gst < 300):
-                return _out(gst, gcard, lambda x: x, aj)
-            merged = _merge_link(gcard.get("links"), args.key, args.value)
-            st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "links": merged}, token)
+            # #727: do NOT locally merge-then-PATCH the whole dict — that was a
+            # second writer of the silent clobber. Send the single key; the
+            # gateway refuses a conflicting value unless replace_links=true.
+            body = _link_patch_body(
+                self_name, args.key, args.value, replace=bool(args.replace),
+            )
+            st, d = _patch_json(f"{gw}/board/cards/{args.id}", body, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} link {args.key}={args.value}", aj)
 
     print("swarph board: unknown subcommand", file=sys.stderr)
