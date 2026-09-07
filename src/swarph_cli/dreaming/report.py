@@ -3,7 +3,7 @@ from __future__ import annotations
 import collections
 
 
-def render(verdicts, organized, proposals, corpus, clone) -> str:
+def render(verdicts, organized, proposals, corpus, clone, enrich_note: str | None = None) -> str:
     counts = collections.Counter(v["verdict"] for v in verdicts)
     # GC4g: coverage FIRST, because a finding count without a denominator
     # cannot tell "checked and fine" from "could not check", and the second
@@ -52,7 +52,10 @@ def render(verdicts, organized, proposals, corpus, clone) -> str:
         organized["index_bytes_before"], organized["index_bytes_after"])]
     if organized["trimmed"]:
         L.append("trimmed %d index line(s) to stay under budget" % len(organized["trimmed"]))
-    L += ["", "enrichment proposals (all marked derived, none applied): %d" % len(proposals), ""]
+    L += ["", "enrichment proposals (all marked derived, none applied): %d" % len(proposals)]
+    if enrich_note:
+        L.append(enrich_note)
+    L += [""]
     for v in verdicts:
         if v["verdict"] in ("disagree", "surface_disagreement"):
             L.append("- **%s** %s:%d [%s] asserted `%s` -- %s says `%s`" % (
