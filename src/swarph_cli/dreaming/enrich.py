@@ -15,6 +15,20 @@ PROMPT = ("Here is what one agent session was recently DOING:\n%s\n\n"
           "JSON array of {\"file\":..., \"link\":..., \"why\":...} and nothing else.")
 
 
+# Greppable skip line for reports / schedulers (#734). Exact string is a contract.
+ENRICH_SKIPPED_NO_SLM = "enrich skipped: no SLM client"
+
+
+def slm_client_available() -> bool:
+    """True iff the private-layout SLM client imports. Installed wheels lack
+    `workers` — that must degrade, not crash as exit 1 (#734)."""
+    try:
+        from workers.slm_client import SLMClient  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _client():
     from workers.slm_client import SLMClient
     return SLMClient()
@@ -49,7 +63,12 @@ def enrich(clone: Path, records: list[dict], client=None) -> list[dict]:
         # Resolve the client AFTER this exit so an empty delta never constructs
         # an SLMClient (and never calls generate).
         return []
-    client = client or _client()
+    if client is None:
+        if not slm_client_available():
+            # Caller should have skipped before here; never let ImportError become
+            # exit 1 ("findings"). Empty proposals + ENRICH_SKIPPED_NO_SLM in report.
+            return []
+        client = _client()
     proposals = []
     for sid, s in sessions.items():
         try:

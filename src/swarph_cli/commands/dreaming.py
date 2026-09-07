@@ -34,7 +34,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "  0  adjudicated >0 claims AND no disagreements\n"
             "  1  findings (disagree / surface_disagreement)\n"
             "  2  refused to run\n"
-            "  3  ran but adjudicated nothing"
+            "  3  ran but adjudicated nothing\n\n"
+            "Enrich: when the SLM client (workers.slm_client) is absent — the\n"
+            "normal installed-wheel case — enrich is skipped and the report\n"
+            "says 'enrich skipped: no SLM client' (never exit 1 as findings).\n"
+            "Pass --enrich to require it (rc=2 if unavailable)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -58,6 +62,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="transcript cursor JSON (default: ~/.dreaming-cursor.json)",
     )
     run.add_argument("--no-enrich", action="store_true", help="skip transcript enrich stage")
+    run.add_argument(
+        "--enrich", action="store_true",
+        help="require enrich; refuse (rc=2) if SLM client unavailable (#734)",
+    )
     run.add_argument("--verify-only", action="store_true", help="verify only; skip organize/enrich")
     return p
 
@@ -83,6 +91,8 @@ def run_dreaming(argv: list[str] | None = None) -> int:
         forwarded.extend(["--cursor", str(Path.home() / ".dreaming-cursor.json")])
     if args.no_enrich:
         forwarded.append("--no-enrich")
+    if getattr(args, "enrich", False):
+        forwarded.append("--enrich")
     if args.verify_only:
         forwarded.append("--verify-only")
     return dreaming_run.main(forwarded)

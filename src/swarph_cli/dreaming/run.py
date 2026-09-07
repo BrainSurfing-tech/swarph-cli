@@ -13,8 +13,16 @@ def main(argv=None) -> int:
     ap.add_argument("--corpus", required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--cursor", default=str(Path.home() / ".dreaming-cursor.json"))
     ap.add_argument("--no-enrich", action="store_true")
+    ap.add_argument(
+        "--enrich", action="store_true",
+        help="require enrich; refuse (rc=2) if SLM client is unavailable (#734)",
+    )
     ap.add_argument("--verify-only", action="store_true")
     a = ap.parse_args(argv)
+    if a.enrich and a.no_enrich:
+        print("dreaming: refusing to run -- --enrich and --no-enrich conflict",
+              file=sys.stderr)
+        return 2
     corpus, out = Path(a.corpus), Path(a.out)
     try:
         manifest = clone_corpus(corpus, out)
@@ -24,17 +32,37 @@ def main(argv=None) -> int:
     verdicts = verify(out, manifest)
     organized = {"index_bytes_before": 0, "index_bytes_after": 0, "trimmed": [], "findings": []}
     proposals = []
+    enrich_note = None
     if not a.verify_only:
         organized = organize(out)
-        if not a.no_enrich:
+        from swarph_cli.dreaming.enrich import (
+            ENRICH_SKIPPED_NO_SLM, enrich, slm_client_available,
+        )
+        available = slm_client_available()
+        # Default: enrich when SLM present; skip (do not crash) when absent (#734).
+        # Explicit --enrich with no client → refuse rc=2 (not findings rc=1).
+        # Explicit --no-enrich → skip always.
+        if a.no_enrich:
+            do_enrich = False
+        elif a.enrich:
+            if not available:
+                print("dreaming: refusing to run -- %s (explicit --enrich)" %
+                      ENRICH_SKIPPED_NO_SLM, file=sys.stderr)
+                return 2
+            do_enrich = True
+        elif not available:
+            do_enrich = False
+            enrich_note = ENRICH_SKIPPED_NO_SLM
+        else:
+            do_enrich = True
+        if do_enrich:
             from swarph_cli.dreaming.transcripts import read_new
-            from swarph_cli.dreaming.enrich import enrich
             records, cursor = read_new(Path(a.corpus).parent, Path(a.cursor))
             proposals = enrich(out, records)
             Path(a.cursor).write_text(json.dumps(cursor))   # only after success
     (out / "findings.json").write_text(json.dumps(verdicts, indent=2, default=str), encoding="utf-8")
     (out / "proposals.json").write_text(json.dumps(proposals, indent=2), encoding="utf-8")
-    text = render(verdicts, organized, proposals, corpus, out)
+    text = render(verdicts, organized, proposals, corpus, out, enrich_note=enrich_note)
     (out / "dreaming-report.md").write_text(text, encoding="utf-8")
     print(text)
     # >>> THE EXIT CODE CARRIES THE SAME THREE-WAY DISTINCTION AS THE REPORT, OR
