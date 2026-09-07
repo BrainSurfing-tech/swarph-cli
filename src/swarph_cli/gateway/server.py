@@ -2771,6 +2771,18 @@ SCHEDULER_LOCAL_CELLS = frozenset(
     c.strip() for c in os.environ.get("SCHEDULER_LOCAL_CELLS", "").split(",")
     if c.strip()
 )
+
+
+def _env_schedule_wake_runner_active() -> bool:
+    """Parse SCHEDULE_WAKE_RUNNER — only active|1|true|yes|on count as runnable."""
+    raw = (os.environ.get("SCHEDULE_WAKE_RUNNER") or "").strip().lower()
+    return raw in ("1", "true", "yes", "active", "on")
+
+
+# Bare-name wake path is workers/scheduler.py via lab-orchestrator.service.
+# Allowlist membership alone is NOT evidence the runner ticks (#742 / 33642).
+# Default unset/inactive → False so production cannot false-green dead rows.
+SCHEDULE_WAKE_RUNNER_ACTIVE = _env_schedule_wake_runner_active()
 # Sentinel so the "allowlist is DISABLED" warning fires once per process, not
 # per-request (avoids log spam while staying visible to ops).
 _sched_local_cells_warned: list = []  # non-empty = already warned
@@ -2803,10 +2815,12 @@ def _schedule_served_prefixes() -> tuple[tuple[str, ...], str]:
 
 
 def _target_cell_served(target: str) -> tuple[bool, str | None]:
-    """SERVED iff a live dispatcher will select this target_cell (#742).
+    """SERVED iff a live runner will select this target_cell (#742).
 
     - prefix match (SCHEDULE_SERVED_PREFIXES / builtin exec:,dm:) → SERVED
-    - bare name in SCHEDULER_LOCAL_CELLS → SERVED (wake path)
+    - bare name in SCHEDULER_LOCAL_CELLS AND SCHEDULE_WAKE_RUNNER active → SERVED
+    - bare name in allowlist but wake runner inactive → NOT served
+      (token ALLOWLIST-BUT-NO-RUNNER — third state; must not read as plain SERVED)
     - else UNSERVED (including bare names when the allowlist is empty —
       BEHAVIOUR CHANGE: empty allowlist no longer means any bare name creates)
 
@@ -2820,7 +2834,16 @@ def _target_cell_served(target: str) -> tuple[bool, str | None]:
         if target.startswith(p):
             return True, f"served by prefix {p!r} source={source}"
     if SCHEDULER_LOCAL_CELLS and target in SCHEDULER_LOCAL_CELLS:
-        return True, f"served by wake allowlist source={source}"
+        if SCHEDULE_WAKE_RUNNER_ACTIVE:
+            return True, (
+                f"served by wake allowlist (runner=active) source={source}"
+            )
+        return False, (
+            f"target_cell {target!r} is ALLOWLIST-BUT-NO-RUNNER "
+            f"(in SCHEDULER_LOCAL_CELLS but SCHEDULE_WAKE_RUNNER is not active — "
+            f"bare wake path not runnable; not plain SERVED). "
+            f"allowlist={sorted(SCHEDULER_LOCAL_CELLS)} source={source}"
+        )
     pref = ",".join(prefixes)
     if SCHEDULER_LOCAL_CELLS:
         return False, (
