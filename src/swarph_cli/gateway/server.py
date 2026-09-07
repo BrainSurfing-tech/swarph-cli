@@ -2774,6 +2774,66 @@ SCHEDULER_LOCAL_CELLS = frozenset(
 # Sentinel so the "allowlist is DISABLED" warning fires once per process, not
 # per-request (avoids log spam while staying visible to ops).
 _sched_local_cells_warned: list = []  # non-empty = already warned
+_sched_served_prefixes_warned: list = []
+
+
+def _schedule_served_prefixes() -> tuple[tuple[str, ...], str]:
+    """Live dispatcher prefixes + provenance (#742 / seat-A 33488).
+
+    Returns (prefixes, source) where source is `unit-env` if
+    SCHEDULE_SERVED_PREFIXES is set, else `builtin-default`. Production must
+    EnvironmentFile= a shared `schedule-selectors.env` into BOTH the gateway
+    unit and the exec-dispatcher unit — a drop-in on the dispatcher alone is
+    invisible to the gateway (different process, different env).
+    """
+    if "SCHEDULE_SERVED_PREFIXES" in os.environ:
+        raw = os.environ["SCHEDULE_SERVED_PREFIXES"]
+        parts = tuple(p.strip() for p in raw.split(",") if p.strip()) or ("exec:", "dm:")
+        return parts, "unit-env"
+    parts = ("exec:", "dm:")
+    if not _sched_served_prefixes_warned:
+        log.warning(
+            "SCHEDULE_SERVED_PREFIXES unset — using builtin-default %s. "
+            "EnvironmentFile= schedule-selectors.env into BOTH mesh-gateway and "
+            "exec-dispatcher units so provenance is unit-env (#742).",
+            parts,
+        )
+        _sched_served_prefixes_warned.append(True)
+    return parts, "builtin-default"
+
+
+def _target_cell_served(target: str) -> tuple[bool, str | None]:
+    """SERVED iff a live dispatcher will select this target_cell (#742).
+
+    - prefix match (SCHEDULE_SERVED_PREFIXES / builtin exec:,dm:) → SERVED
+    - bare name in SCHEDULER_LOCAL_CELLS → SERVED (wake path)
+    - else UNSERVED (including bare names when the allowlist is empty —
+      BEHAVIOUR CHANGE: empty allowlist no longer means any bare name creates)
+
+    served_reason / 400 bodies always carry source=unit-env|builtin-default so
+    a missing EnvironmentFile cannot look identical to a configured one.
+    """
+    prefixes, source = _schedule_served_prefixes()
+    if not target:
+        return False, f"target_cell is empty — UNSERVED source={source}"
+    for p in prefixes:
+        if target.startswith(p):
+            return True, f"served by prefix {p!r} source={source}"
+    if SCHEDULER_LOCAL_CELLS and target in SCHEDULER_LOCAL_CELLS:
+        return True, f"served by wake allowlist source={source}"
+    pref = ",".join(prefixes)
+    if SCHEDULER_LOCAL_CELLS:
+        return False, (
+            f"target_cell {target!r} is UNSERVED (no live dispatcher prefix "
+            f"match; not in SCHEDULER_LOCAL_CELLS). served_prefixes={pref} "
+            f"allowlist={sorted(SCHEDULER_LOCAL_CELLS)} source={source}"
+        )
+    return False, (
+        f"target_cell {target!r} is UNSERVED (no live dispatcher prefix match; "
+        f"SCHEDULER_LOCAL_CELLS empty so bare wake targets refuse at create). "
+        f"served_prefixes={pref} source={source}"
+    )
+
 
 
 def _validate_cron(expr: str) -> bool:
@@ -2894,12 +2954,22 @@ async def scheduled_event_create(req: ScheduledEventCreateRequest,
                 "Set SCHEDULER_LOCAL_CELLS in the service env before production use."
             )
             _sched_local_cells_warned.append(True)
-    elif req.target_cell not in SCHEDULER_LOCAL_CELLS:
-        raise HTTPException(
-            400,
-            "target_cell must be host-local / co-located with the orchestrator "
-            "(not reachable for a send-keys wake)",
-        )
+    else:
+        local_name = req.target_cell
+        prefixes, _src = _schedule_served_prefixes()
+        for p in prefixes:
+            if req.target_cell.startswith(p):
+                local_name = req.target_cell[len(p):]
+                break
+        if local_name not in SCHEDULER_LOCAL_CELLS:
+            raise HTTPException(
+                400,
+                "target_cell must be host-local / co-located with the orchestrator "
+                "(not reachable for a send-keys wake)",
+            )
+    served, reason = _target_cell_served(req.target_cell)
+    if not served:
+        raise HTTPException(400, reason)
     now = _utcnow_iso()
     try:
         with _conn() as c:
@@ -2917,7 +2987,8 @@ async def scheduled_event_create(req: ScheduledEventCreateRequest,
     log.info("scheduled event created: %s trigger=%s target=%s by=%s",
              req.name, req.trigger_type, req.target_cell, req.created_by)
     return {"name": req.name, "trigger_type": req.trigger_type, "enabled": 1,
-            "fire_count": 0, "created_at": now}
+            "fire_count": 0, "created_at": now, "served": True,
+            "target_cell": req.target_cell}
 
 
 def _sched_row(c, name):
@@ -2936,7 +3007,14 @@ async def scheduled_event_list(authorization: Optional[str] = Header(None),
     with _conn() as c:
         rows = c.execute(
             f"SELECT * FROM scheduled_events {where} ORDER BY name", params).fetchall()
-    return {"events": [dict(r) for r in rows], "n": len(rows)}
+    events = []
+    for r in rows:
+        d = dict(r)
+        served, reason = _target_cell_served(d.get("target_cell") or "")
+        d["served"] = served
+        d["served_reason"] = reason
+        events.append(d)
+    return {"events": events, "n": len(events)}
 
 
 @app.get("/scheduled-events/{name}")
@@ -2947,7 +3025,11 @@ async def scheduled_event_get(name: str,
         row = _sched_row(c, name)
     if row is None:
         raise HTTPException(404, f"scheduled event {name!r} not found")
-    return dict(row)
+    d = dict(row)
+    served, reason = _target_cell_served(d.get("target_cell") or "")
+    d["served"] = served
+    d["served_reason"] = reason
+    return d
 
 
 def _set_enabled(name: str, value: int) -> dict:
