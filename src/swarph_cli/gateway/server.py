@@ -2777,40 +2777,63 @@ _sched_local_cells_warned: list = []  # non-empty = already warned
 _sched_served_prefixes_warned: list = []
 
 
-def _schedule_served_prefixes() -> tuple[str, ...]:
-    """Live dispatcher prefixes — from unit env (#742). Default matches
-    exec_dispatcher (exec:, dm:)."""
-    raw = os.environ.get("SCHEDULE_SERVED_PREFIXES", "exec:,dm:")
-    parts = tuple(p.strip() for p in raw.split(",") if p.strip()) or ("exec:", "dm:")
-    if "SCHEDULE_SERVED_PREFIXES" not in os.environ and not _sched_served_prefixes_warned:
+def _schedule_served_prefixes() -> tuple[tuple[str, ...], str]:
+    """Live dispatcher prefixes + provenance (#742 / seat-A 33488).
+
+    Returns (prefixes, source) where source is `unit-env` if
+    SCHEDULE_SERVED_PREFIXES is set, else `builtin-default`. Production must
+    EnvironmentFile= a shared `schedule-selectors.env` into BOTH the gateway
+    unit and the exec-dispatcher unit — a drop-in on the dispatcher alone is
+    invisible to the gateway (different process, different env).
+    """
+    if "SCHEDULE_SERVED_PREFIXES" in os.environ:
+        raw = os.environ["SCHEDULE_SERVED_PREFIXES"]
+        parts = tuple(p.strip() for p in raw.split(",") if p.strip()) or ("exec:", "dm:")
+        return parts, "unit-env"
+    parts = ("exec:", "dm:")
+    if not _sched_served_prefixes_warned:
         log.warning(
-            "SCHEDULE_SERVED_PREFIXES unset — using default %s (#742).", parts,
+            "SCHEDULE_SERVED_PREFIXES unset — using builtin-default %s. "
+            "EnvironmentFile= schedule-selectors.env into BOTH mesh-gateway and "
+            "exec-dispatcher units so provenance is unit-env (#742).",
+            parts,
         )
         _sched_served_prefixes_warned.append(True)
-    return parts
+    return parts, "builtin-default"
 
 
 def _target_cell_served(target: str) -> tuple[bool, str | None]:
-    """SERVED iff a live dispatcher will select this target_cell (#742)."""
+    """SERVED iff a live dispatcher will select this target_cell (#742).
+
+    - prefix match (SCHEDULE_SERVED_PREFIXES / builtin exec:,dm:) → SERVED
+    - bare name in SCHEDULER_LOCAL_CELLS → SERVED (wake path)
+    - else UNSERVED (including bare names when the allowlist is empty —
+      BEHAVIOUR CHANGE: empty allowlist no longer means any bare name creates)
+
+    served_reason / 400 bodies always carry source=unit-env|builtin-default so
+    a missing EnvironmentFile cannot look identical to a configured one.
+    """
+    prefixes, source = _schedule_served_prefixes()
     if not target:
-        return False, "target_cell is empty — UNSERVED"
-    for p in _schedule_served_prefixes():
+        return False, f"target_cell is empty — UNSERVED source={source}"
+    for p in prefixes:
         if target.startswith(p):
-            return True, None
+            return True, f"served by prefix {p!r} source={source}"
     if SCHEDULER_LOCAL_CELLS and target in SCHEDULER_LOCAL_CELLS:
-        return True, None
-    prefixes = ",".join(_schedule_served_prefixes())
+        return True, f"served by wake allowlist source={source}"
+    pref = ",".join(prefixes)
     if SCHEDULER_LOCAL_CELLS:
         return False, (
             f"target_cell {target!r} is UNSERVED (no live dispatcher prefix "
-            f"match; not in SCHEDULER_LOCAL_CELLS). served_prefixes={prefixes} "
-            f"allowlist={sorted(SCHEDULER_LOCAL_CELLS)}"
+            f"match; not in SCHEDULER_LOCAL_CELLS). served_prefixes={pref} "
+            f"allowlist={sorted(SCHEDULER_LOCAL_CELLS)} source={source}"
         )
     return False, (
         f"target_cell {target!r} is UNSERVED (no live dispatcher prefix match; "
         f"SCHEDULER_LOCAL_CELLS empty so bare wake targets refuse at create). "
-        f"served_prefixes={prefixes}"
+        f"served_prefixes={pref} source={source}"
     )
+
 
 
 def _validate_cron(expr: str) -> bool:
@@ -2933,7 +2956,8 @@ async def scheduled_event_create(req: ScheduledEventCreateRequest,
             _sched_local_cells_warned.append(True)
     else:
         local_name = req.target_cell
-        for p in _schedule_served_prefixes():
+        prefixes, _src = _schedule_served_prefixes()
+        for p in prefixes:
             if req.target_cell.startswith(p):
                 local_name = req.target_cell[len(p):]
                 break
