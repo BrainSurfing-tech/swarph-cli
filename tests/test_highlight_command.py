@@ -117,15 +117,24 @@ def test_gateway_mode_is_default_when_configured(monkeypatch):
     assert cap["token"] == "tok"
 
 
-def test_gateway_failure_returns_1_no_git_fallback(monkeypatch, tmp_path):
+def test_716_gateway_fail_announces_local_fallback(monkeypatch, tmp_path, capsys):
+    """#716 can-fail (b): POST fails → LOCAL FALLBACK, never 'via gateway'.
+
+    A test that only asserts exit 0 passes on the old bug (rc=1, no write).
+    The write is loud, not a silent double-write.
+    """
     monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")
     monkeypatch.setenv("SWARPH_CELL", "c")
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.setenv("SWARPH_TIMELINE_DIR", str(tmp_path / "tl"))
-    monkeypatch.setattr(hl, "_post_json", _fake_post({}, status=502, resp={"detail": "boom"}))
-    rc = hl.run_highlight(["x"])
-    assert rc == 1                                                 # fail loud
-    assert not (tmp_path / "tl" / "TIMELINE.md").exists()          # no silent git double-write
+    monkeypatch.setattr(hl, "_post_json", _fake_post({}, status=0, resp={"detail": "down"}))
+    rc = hl.run_highlight(["marooned", "--no-push"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "LOCAL FALLBACK" in out
+    assert "via gateway" not in out
+    body = (tmp_path / "tl" / "TIMELINE.md").read_text(encoding="utf-8")
+    assert "marooned" in body
 
 
 def test_local_flag_forces_git_even_with_gateway(tmp_path, monkeypatch):

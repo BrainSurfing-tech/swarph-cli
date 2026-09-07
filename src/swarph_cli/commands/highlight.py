@@ -10,8 +10,9 @@ Usage:
   swarph highlight "<one-line highlight>" [memory-pointer]
     [--cell NAME] [--timeline-dir DIR] [--when ISO8601] [--no-push]
 
-Timeline dir: ``--timeline-dir`` > ``SWARPH_TIMELINE_DIR`` > ``~/.swarph/timeline``
-  (auto-created + ``git init``'d + given a ``merge=union`` .gitattributes if absent).
+Timeline dir: ``--timeline-dir`` > ``SWARPH_TIMELINE_DIR`` / ``SWARPH_TIMELINE``
+  > ``~/swarph-timeline`` (same default ``swarph timeline`` reads; #716).
+  Auto-created + ``git init``'d + given a ``merge=union`` .gitattributes if absent.
 Cell identity (#657 / house order #332): ``--cell`` > ``SWARPH_SELF`` >
 ``SWARPH_CELL`` > git user.name > hostname. SELF outranks CELL — psmux leaks
 ``SWARPH_CELL`` (#538), so CELL-first posts under another cell's name.
@@ -30,6 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from swarph_cli.commands.mesh import _post_json, _resolve_token
+from swarph_cli.timeline_paths import timeline_dir
 
 _PUSH_RETRIES = 8
 
@@ -86,10 +88,14 @@ def _credential_error(cell: str, source: str, exc: RuntimeError) -> str:
 
 def _log_via_gateway(gateway: str, cell: str, highlight: str,
                      memory: str, when: str, token_file: str | None,
-                     *, cell_source: str = "unknown") -> int:
+                     *, cell_source: str = "unknown") -> int | None:
     """POST the highlight to the gateway `/highlights` — the gateway holds the git
     push credential, so the cell needs only its mesh peer token (no GitHub PAT).
-    Fail-loud: a non-200 or connection error returns 1 (never a silent git double-write)."""
+
+    Returns 0 on success, 1 on a credential-resolve failure (no local write —
+    the cell's identity is wrong), or None when the POST itself failed so the
+    caller can write locally and announce LOCAL FALLBACK (#716).
+    """
     url = gateway.rstrip("/") + "/highlights"
     body: dict = {"highlight": highlight, "cell": cell}
     if memory:
@@ -113,7 +119,7 @@ def _log_via_gateway(gateway: str, cell: str, highlight: str,
     detail = resp.get("detail") if isinstance(resp, dict) else resp
     where = f"HTTP {status}" if status else "connection failed"
     print(f"swarph highlight: gateway POST failed ({where}): {detail}", file=sys.stderr)
-    return 1
+    return None  # caller takes the local path and announces LOCAL FALLBACK (#716)
 
 
 def _collapse(s: str) -> str:
@@ -139,8 +145,8 @@ def _git(repo: Path, *args: str, check: bool = False):
 
 
 def _resolve_dir(arg) -> Path:
-    raw = arg or os.environ.get("SWARPH_TIMELINE_DIR") or "~/.swarph/timeline"
-    return Path(os.path.expanduser(raw))
+    """Same default ``swarph timeline`` reads. Call-time — see timeline_paths."""
+    return timeline_dir(dir_arg=arg)
 
 
 def _is_git_repo(repo: Path) -> bool:
@@ -212,7 +218,8 @@ def run_highlight(argv: list) -> int:
                    help="cell identity (else SWARPH_SELF / SWARPH_CELL / "
                         "git user / hostname)")
     p.add_argument("--timeline-dir", default=None,
-                   help="timeline repo (else SWARPH_TIMELINE_DIR / ~/.swarph/timeline)")
+                   help="timeline repo (else SWARPH_TIMELINE_DIR / "
+                        "SWARPH_TIMELINE / ~/swarph-timeline)")
     p.add_argument("--when", default=None,
                    help="ISO8601 event time for a backfilled highlight; default now")
     p.add_argument("--no-push", action="store_true",
@@ -237,9 +244,13 @@ def run_highlight(argv: list) -> int:
     # `--local` forces the legacy git path; with no gateway configured it's the git
     # path too, so existing solo/offline timelines are unaffected.
     gateway = "" if args.local else _resolve_gateway(args.gateway)
+    fallback = False
     if gateway:
-        return _log_via_gateway(gateway, cell, highlight, memory, when,
-                                args.token_file, cell_source=cell_source)
+        gw_rc = _log_via_gateway(gateway, cell, highlight, memory, when,
+                                 args.token_file, cell_source=cell_source)
+        if gw_rc is not None:
+            return gw_rc
+        fallback = True
 
     _ensure_timeline(repo, cell)
     ts = when or _now_ts()
@@ -262,7 +273,15 @@ def run_highlight(argv: list) -> int:
         print(f"swarph highlight: commit failed: {commit.stderr.strip()}", file=sys.stderr)
         return 1
 
-    done = f"logged -> TIMELINE.md @ {ts}" + (f" -> {memory}" if memory else "")
+    if fallback:
+        done = f"logged -> {repo} (LOCAL FALLBACK — gateway unreachable)."
+    else:
+        done = f"logged -> TIMELINE.md @ {ts}" + (f" -> {memory}" if memory else "")
+    if fallback:
+        from swarph_cli.timeline_paths import default_timeline_file
+        wrote = repo / "TIMELINE.md"
+        if wrote.resolve() != default_timeline_file().resolve():
+            done += "\n`swarph timeline` will NOT show this until it is drained."
     if not pushing:
         print(done)
         return 0

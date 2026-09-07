@@ -18,22 +18,22 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import os
 import re
 import sys
 from collections import namedtuple
 
 from swarph_cli.commands.okf_links import parse_okf_links
+from swarph_cli.timeline_paths import timeline_file
 
 Entry = namedtuple("Entry", "ts cell text links")
 
-_DEFAULT_TIMELINE = os.path.expanduser("~/swarph-timeline/TIMELINE.md")
 # - <ISO-ts> · **<cell>** · <rest>
 _LINE = re.compile(r"^- (?P<ts>\S+)\s+·\s+\*\*(?P<cell>[^*]+)\*\*\s+·\s+(?P<rest>.*)$")
 
 
 def _timeline_path() -> str:
-    return os.environ.get("SWARPH_TIMELINE", _DEFAULT_TIMELINE)
+    """Same default ``swarph highlight`` writes. Call-time — see timeline_paths."""
+    return str(timeline_file())
 
 
 # EVERY FORM THE SHARED TIMELINE ACTUALLY CONTAINS, not only the one we write today.
@@ -134,8 +134,12 @@ def _fmt_human(e: Entry) -> str:
 def run_timeline(argv: list) -> int:
     p = argparse.ArgumentParser(
         prog="swarph timeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Deterministic temporal lookup over the git-backed swarph timeline "
-                    "(range/around/since). $0, no model, no network.")
+                    "(range/around/since). $0, no model, no network.\n"
+                    "Default file: ~/swarph-timeline/TIMELINE.md "
+                    "(SWARPH_TIMELINE / SWARPH_TIMELINE_DIR; same default "
+                    "swarph highlight writes; #716).")
     sub = p.add_subparsers(dest="subcommand")
     pr = sub.add_parser("range", help="entries between two dates (inclusive)")
     pr.add_argument("start"); pr.add_argument("end")
