@@ -60,8 +60,23 @@ swarph memory list --type <type> --limit 10
 swarph memory links <slug>                   # OKF graph edges out of / into a page
 ```
 
-## Known caveat
+## Tags exist only where a producer writes them
 
-`swarph memory list --tag <tag>` currently returns empty regardless of tag (the brain's
-tag index is not yet queryable). Use `--type` to scope a listing until the tag index is
-populated. This is a brain-service data issue, not a transport one.
+Both filter axes work — `--type` and `--tag`. A `--tag` query returning nothing usually
+means **no page carries that tag**, not that the filter is broken:
+
+```
+swarph memory list --tag reference       -> 0     no page is TAGGED `reference` (it is a TYPE)
+swarph memory list --tag author:droplet  -> 50    machine-written by the timeline chunker
+```
+
+Tags are written by producers, not by the brain. In the reference corpus only
+timeline/highlight pages carry any (`author:<cell>`, `inferred:true`); pages whose
+frontmatter declares no `tags:` are untagged and no tag query will find them. **Scope by
+`--type` when you do not know the tag vocabulary, and read a zero as "nothing carries this
+tag" until you have counted the source records that do.**
+
+> This section previously stated that `--tag` "returns empty regardless of tag" because
+> "the brain's tag index is not yet queryable". That was measured with `--tag reference` —
+> a value from the TYPE vocabulary that no page carries — so the zero was the index
+> answering correctly. Corrected 2026-09-08; see swarph-cli issue #127.
