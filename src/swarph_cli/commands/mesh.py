@@ -22,6 +22,7 @@ import argparse
 import difflib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -2018,11 +2019,27 @@ def _select_next_poll_seconds(state: MonitorState) -> int:
     return state.poll_s
 
 
+# Keep in lockstep with mesh-gateway/server.py:_channel_post_is_severe (#777).
+_SEVERITY_LEAD = re.compile(
+    r"^(?:🚨|\[[ \t]*(?:ALERT|CRITICAL|ERROR|FATAL)[ \t]*\])",
+    re.IGNORECASE,
+)
+_SEVERITY_TAGS = frozenset({"alert", "critical", "error", "fatal", "severe"})
+
+
+def _channel_post_is_severe(content: str, severity=None) -> bool:
+    tag = (severity or "").strip().lower()
+    if tag in _SEVERITY_TAGS:
+        return True
+    return bool(_SEVERITY_LEAD.match((content or "").lstrip()))
+
+
 def _wake_policy_admits(policy, msg: dict, self_name: str) -> bool:
     """#194 — does THIS cell's own wake_policy admit this channel post?
 
     `muted` is handled by the caller (it skips the fetch entirely). Here:
       · mentions_only -> only posts that name this cell
+      · severity_only -> only a leading severity marker / tagged post (#777)
       · all / anything else / None -> admit
 
     >>> FAIL OPEN, DELIBERATELY. <<< An unknown policy value, or a gateway that
@@ -2033,6 +2050,8 @@ def _wake_policy_admits(policy, msg: dict, self_name: str) -> bool:
     delivering is recoverable by the reader; one that errs toward silence is not.
     The inert case is announced by the caller so it cannot pass for enforcement.
     """
+    if policy == "severity_only":
+        return _channel_post_is_severe(msg.get("content") or "", msg.get("severity"))
     if policy != "mentions_only":
         return True
     raw = msg.get("mentions")

@@ -44,7 +44,8 @@ def _build_parser() -> argparse.ArgumentParser:
     join.add_argument(
         "--wake-policy",
         default=None,
-        choices=["mentions_only", "here_and_mentions", "all", "muted"],
+        choices=["mentions_only", "here_and_mentions", "all", "muted",
+                 "severity_only"],
     )
     add_common_args(join)
 

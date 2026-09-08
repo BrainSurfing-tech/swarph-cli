@@ -65,6 +65,15 @@ def test_mentions_only_EXCLUDES_when_not_named():
     assert mesh._wake_policy_admits("mentions_only", {"mentions": '["other"]'}, "cellA") is False
 
 
+def test_777_severity_only_admits_marker_not_body_word():
+    assert mesh._wake_policy_admits(
+        "severity_only", {"content": "[CRITICAL] disk"}, "cellA") is True
+    assert mesh._wake_policy_admits(
+        "severity_only", {"content": "this is an error"}, "cellA") is False
+    assert mesh._wake_policy_admits(
+        "severity_only", {"content": "plain", "severity": "critical"}, "cellA") is True
+
+
 def test_mentions_arrives_as_a_JSON_STRING_not_a_list():
     """Measured against the live gateway: mentions is '[]', a STRING. A build that
     assumed a list would treat every post as unmentioned and silently mute the cell."""
