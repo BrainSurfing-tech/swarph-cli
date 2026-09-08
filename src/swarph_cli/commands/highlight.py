@@ -87,30 +87,42 @@ def _credential_error(cell: str, source: str, exc: RuntimeError) -> str:
     return f"swarph highlight: {exc}"
 
 
+def _normalise_repo(repo: Path) -> Path:
+    return Path(os.path.normpath(os.path.expanduser(str(repo))))
+
+
+def _existing_ancestor(repo: Path) -> Path:
+    """Walk up to the nearest existing path. ``normpath`` first so
+    ``x/../swarph-timeline`` (x missing) still names the clone (#65)."""
+    repo = _normalise_repo(repo)
+    while not repo.exists() and repo != repo.parent:
+        repo = repo.parent
+    return repo
+
+
 def _git_gateway_clone_flag(repo: Path) -> bool:
     """``.git``-resident declaration. Survives clean/stash/reset; cannot be committed.
 
     ``git config --local swarph.gatewayClone 1`` (ops, once, on the gateway host).
     A worktree marker dies to ``git clean -fdx`` and propagates on ``git add -A``.
+    Ask git on the nearest existing ancestor — a nonexistent subpath of the
+    flagged clone is still the clone (#65).
     """
+    repo = _existing_ancestor(repo)
     if not _is_git_repo(repo):
         return False
-    r = _git(repo, "config", "--local", "--get", "swarph.gatewayClone")
-    if r.returncode != 0:
-        return False
-    v = (r.stdout or "").strip().lower()
-    return v not in ("", "0", "false", "no")
+    r = _git(repo, "config", "--local", "--type=bool", "--get", "swarph.gatewayClone")
+    return r.returncode == 0 and (r.stdout or "").strip().lower() == "true"
 
 
 def _is_gateway_clone(repo: Path) -> bool:
-    """True when ``repo`` is the live gateway working tree (PR #392 / #64).
+    """True when ``repo`` is the live gateway working tree (PR #392 / #64 / #65).
 
     The property belongs to the directory, not the caller's environ.
-    GATEWAY_TIMELINE_DIR is set in the gateway MainPID only (1 of 126
-    processes on lab-ovh) — unset must not mean "not the gateway host".
-    Honour env match when present, OR ``swarph.gatewayClone`` in the
-    repo's local git config. Either is enough; neither is required if
-    this is just a cell's own clone.
+    Honour env match (including subpaths) when present, OR
+    ``swarph.gatewayClone`` in the repo's local git config. Walk up to an
+    existing ancestor before either check so ``<clone>/newsub`` cannot
+    mkdir-and-commit into the gateway history.
     """
     if _git_gateway_clone_flag(repo):
         return True
@@ -118,9 +130,16 @@ def _is_gateway_clone(repo: Path) -> bool:
     if not raw:
         return False
     try:
-        return repo.resolve() == Path(os.path.expanduser(raw)).resolve()
+        flagged = Path(os.path.normpath(os.path.expanduser(raw))).resolve()
+        cand = _existing_ancestor(repo).resolve()
     except OSError:
         return False
+    if cand == flagged:
+        return True
+    try:
+        return cand.is_relative_to(flagged) or flagged.is_relative_to(cand)
+    except ValueError:
+        return flagged in cand.parents or cand in flagged.parents
 
 
 def _log_via_gateway(gateway: str, cell: str, highlight: str,
@@ -154,6 +173,9 @@ def _log_via_gateway(gateway: str, cell: str, highlight: str,
         return 1
     try:
         status, resp = _post_json(url, body, token)
+    except http.client.InvalidURL as exc:
+        print(f"swarph highlight: bad gateway URL ({exc})", file=sys.stderr)
+        return 1
     except (OSError, http.client.HTTPException, ValueError):
         print(
             "swarph highlight: AMBIGUOUS: the gateway may have committed — "
@@ -162,6 +184,10 @@ def _log_via_gateway(gateway: str, cell: str, highlight: str,
         )
         return 1
     if status == 200:
+        if not isinstance(resp, dict):
+            print("swarph highlight: gateway POST failed (HTTP 200): "
+                  "non-object body", file=sys.stderr)
+            return 1
         ts = resp.get("ts", "")
         print(f"logged -> TIMELINE.md @ {ts} (via gateway)"
               + (f" -> {memory}" if memory else ""))
@@ -256,15 +282,32 @@ def _has_remote(repo: Path) -> bool:
     return _git(repo, "remote", "get-url", "origin").returncode == 0
 
 
-def _revert_append(repo: Path, prior: int) -> None:
-    """Undo a failed add/commit so "NOT logged" is true and the tree is clean."""
+def _revert_append(repo: Path, line: str) -> None:
+    """Undo our failed add/commit without deleting another writer's bytes (#65).
+
+    If the worktree already equals HEAD, our line was swept into their commit
+    — leave it. Else strip our line from the tail only when HEAD does not
+    already end with it. Then ``git reset -q -- TIMELINE.md``. Not
+    checkout/restore: those are rc 128 under index.lock (the add-failure case).
+    """
+    if _git(repo, "diff", "--quiet", "HEAD", "--", "TIMELINE.md").returncode == 0:
+        return
+    our = line if line.endswith("\n") else line + "\n"
     tl = repo / "TIMELINE.md"
     try:
-        with tl.open("r+b") as f:
-            f.truncate(prior)
+        body = tl.read_text(encoding="utf-8")
     except OSError:
-        pass
-    _git(repo, "reset", "-q", "HEAD", "--", "TIMELINE.md")
+        _git(repo, "reset", "-q", "--", "TIMELINE.md")
+        return
+    if body.endswith(our):
+        head = _git(repo, "show", "HEAD:TIMELINE.md")
+        head_txt = head.stdout if head.returncode == 0 else ""
+        if not head_txt.endswith(our):
+            try:
+                tl.write_text(body[: -len(our)], encoding="utf-8")
+            except OSError:
+                pass
+    _git(repo, "reset", "-q", "--", "TIMELINE.md")
 
 
 def _current_branch(repo: Path) -> str:
@@ -340,17 +383,17 @@ def run_highlight(argv: list) -> int:
             return 1
 
     tl = repo / "TIMELINE.md"
-    prior = tl.stat().st_size if tl.exists() else 0
+    entry = _format_line(ts, cell, highlight, memory) + "\n"
     with tl.open("a", encoding="utf-8") as f:
-        f.write(_format_line(ts, cell, highlight, memory) + "\n")
+        f.write(entry)
     add = _git(repo, "add", "TIMELINE.md")
     if add.returncode != 0:
-        _revert_append(repo, prior)
+        _revert_append(repo, entry)
         print(f"swarph highlight: git add failed: {add.stderr.strip()}", file=sys.stderr)
         return 1
     commit = _git(repo, "commit", "-m", f"highlight({cell}): {highlight[:60]}")
     if commit.returncode != 0:
-        _revert_append(repo, prior)
+        _revert_append(repo, entry)
         print(f"swarph highlight: commit failed: {commit.stderr.strip()}", file=sys.stderr)
         return 1
 

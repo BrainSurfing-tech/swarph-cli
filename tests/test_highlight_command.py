@@ -6,6 +6,7 @@ so the real git mechanics run (init + append + commit) without a network.
 
 from __future__ import annotations
 
+import http.client
 import subprocess
 
 import pytest
@@ -272,6 +273,114 @@ def test_64_failed_commit_truncates_append(monkeypatch, tmp_path):
     body = (d / "TIMELINE.md").read_text(encoding="utf-8")
     assert "first ok" in body
     assert "must not stick" not in body
+
+
+def _flagged_clone(path):
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "-b", "main", str(path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "--local",
+                    "swarph.gatewayClone", "1"], check=True)
+    return path
+
+
+def test_65_nonexistent_subpath_of_flagged_clone_refuses(monkeypatch, tmp_path, capsys):
+    """#65 defect 1: <clone>/newsub must not mkdir-and-commit into the clone."""
+    clone = _flagged_clone(tmp_path / "swarph-timeline")
+    before = list(clone.rglob("*"))
+    monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")
+    monkeypatch.setenv("SWARPH_CELL", "c")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.delenv("GATEWAY_TIMELINE_DIR", raising=False)
+    monkeypatch.setattr(hl, "_post_json",
+                        _fake_post({}, status=0, resp={"detail": "down"}))
+    rc = hl.run_highlight(["x", "--timeline-dir", str(clone / "newsub"), "--no-push"])
+    assert rc == 1
+    assert "not writing into the gateway's clone" in capsys.readouterr().err
+    assert not (clone / "newsub").exists()
+    assert list(clone.rglob("*")) == before
+
+
+def test_65_off_is_not_a_gateway_clone_flag(tmp_path):
+    d = _flagged_clone(tmp_path / "tl")
+    subprocess.run(["git", "-C", str(d), "config", "--local",
+                    "swarph.gatewayClone", "off"], check=True)
+    assert hl._git_gateway_clone_flag(d) is False
+    assert hl._is_gateway_clone(d) is False
+
+
+def test_65_revert_does_not_delete_concurrent_commit(tmp_path):
+    """#65 defect 2: stale prior-size truncate must not drop another writer's line."""
+    d = tmp_path / "tl"
+    d.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(d)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(d), "config", "user.name", "t"], check=True)
+    subprocess.run(["git", "-C", str(d), "config", "user.email", "t@t"], check=True)
+    tl = d / "TIMELINE.md"
+    tl.write_text("# head\n\n- A\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(d), "add", "TIMELINE.md"], check=True)
+    subprocess.run(["git", "-C", str(d), "commit", "-m", "A"], check=True)
+    # other writer committed C; we then appended OUR
+    tl.write_text("# head\n\n- A\n- C\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(d), "add", "TIMELINE.md"], check=True)
+    subprocess.run(["git", "-C", str(d), "commit", "-m", "C"], check=True)
+    our = "- 2026-09-08T09:00Z · **c** · ours\n"
+    tl.write_text("# head\n\n- A\n- C\n" + our, encoding="utf-8")
+    hl._revert_append(d, our)
+    body = tl.read_text(encoding="utf-8")
+    assert "- C\n" in body
+    assert "ours" not in body
+    porcelain = subprocess.run(["git", "-C", str(d), "status", "--porcelain"],
+                               capture_output=True, text=True)
+    assert "TIMELINE.md" not in porcelain.stdout
+
+
+def test_65_http_200_non_object_is_not_a_traceback(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")
+    monkeypatch.setenv("SWARPH_CELL", "c")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setenv("SWARPH_TIMELINE_DIR", str(tmp_path / "tl"))
+    monkeypatch.setattr(hl, "_post_json", lambda *a, **k: (200, []))
+    rc = hl.run_highlight(["x", "--no-push"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "non-object" in err
+    assert "Traceback" not in err
+    assert not (tmp_path / "tl" / "TIMELINE.md").exists()
+
+
+def test_65_invalid_url_is_not_ambiguous(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")
+    monkeypatch.setenv("SWARPH_CELL", "c")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setenv("SWARPH_TIMELINE_DIR", str(tmp_path / "tl"))
+
+    def _boom(*_a, **_k):
+        raise http.client.InvalidURL("bad port")
+
+    monkeypatch.setattr(hl, "_post_json", _boom)
+    rc = hl.run_highlight(["x", "--no-push"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "bad gateway URL" in err
+    assert "AMBIGUOUS" not in err
+
+
+def test_65_dotdot_through_missing_dir_still_sees_the_clone(monkeypatch, tmp_path, capsys):
+    """#65: ``x/../clone`` with x missing must not skip the guard via exists()."""
+    clone = _flagged_clone(tmp_path / "swarph-timeline")
+    sneaky = tmp_path / "x" / ".." / "swarph-timeline"
+    monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")
+    monkeypatch.setenv("SWARPH_CELL", "c")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.delenv("GATEWAY_TIMELINE_DIR", raising=False)
+    monkeypatch.setattr(hl, "_post_json",
+                        _fake_post({}, status=0, resp={"detail": "down"}))
+    rc = hl.run_highlight(["x", "--timeline-dir", str(sneaky), "--no-push"])
+    assert rc == 1
+    assert "not writing into the gateway's clone" in capsys.readouterr().err
+    assert not (clone / "TIMELINE.md").exists()
 
 
 def test_local_flag_forces_git_even_with_gateway(tmp_path, monkeypatch):
