@@ -131,15 +131,25 @@ def _is_gateway_clone(repo: Path) -> bool:
         return False
     try:
         flagged = Path(os.path.normpath(os.path.expanduser(raw))).resolve()
+        intended = _normalise_repo(repo).resolve()
         cand = _existing_ancestor(repo).resolve()
     except OSError:
         return False
-    if cand == flagged:
+    # Equal or descendant of the flagged clone. Compare the intended
+    # path too — walking up a not-yet-existing flagged dir would
+    # otherwise miss `cand == flagged` (#63). Do NOT ask
+    # `flagged.is_relative_to(cand)`: cand is the parent of a new
+    # sibling and that over-refuses (#73).
+    if intended == flagged or cand == flagged:
         return True
-    try:
-        return cand.is_relative_to(flagged) or flagged.is_relative_to(cand)
-    except ValueError:
-        return flagged in cand.parents or cand in flagged.parents
+    for p in (intended, cand):
+        try:
+            if p.is_relative_to(flagged):
+                return True
+        except ValueError:
+            if flagged in p.parents:
+                return True
+    return False
 
 
 def _log_via_gateway(gateway: str, cell: str, highlight: str,

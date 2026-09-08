@@ -367,6 +367,30 @@ def test_65_invalid_url_is_not_ambiguous(monkeypatch, tmp_path, capsys):
     assert "AMBIGUOUS" not in err
 
 
+def test_73_new_dir_under_clone_parent_is_not_the_clone(monkeypatch, tmp_path, capsys):
+    """#73: env branch must not treat <parent>/new-tl as inside the clone.
+
+    cand is the nearest existing ancestor; flagged.is_relative_to(cand)
+    is true for any new sibling of the clone. Refuse only descendant-or-equal.
+    """
+    clone = tmp_path / "swarph-timeline"
+    clone.mkdir()
+    monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")
+    monkeypatch.setenv("SWARPH_CELL", "c")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setenv("GATEWAY_TIMELINE_DIR", str(clone))
+    monkeypatch.setattr(hl, "_post_json",
+                        _fake_post({}, status=0, resp={"detail": "down"}))
+    for rel in ("new-tl", "a/b/tl"):
+        dest = tmp_path / rel
+        rc = hl.run_highlight(["x", "--timeline-dir", str(dest), "--no-push"])
+        assert rc == 0, rel
+        err = capsys.readouterr().err
+        assert "not writing into the gateway's clone" not in err
+        assert (dest / "TIMELINE.md").exists()
+        assert not (clone / "TIMELINE.md").exists()
+
+
 def test_65_dotdot_through_missing_dir_still_sees_the_clone(monkeypatch, tmp_path, capsys):
     """#65: ``x/../clone`` with x missing must not skip the guard via exists()."""
     clone = _flagged_clone(tmp_path / "swarph-timeline")
