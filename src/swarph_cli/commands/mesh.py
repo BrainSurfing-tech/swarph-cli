@@ -2037,8 +2037,11 @@ def _wake_policy_admits(policy, msg: dict, self_name: str) -> bool:
     Failing CLOSED would drop channel posts silently — which is card
     #125's ORIGINAL DEFECT, not a safe default. `severity_only` is a
     named filter: missing/`normal` priority is not high, so it does not
-    admit. The inert case is announced by the caller so it cannot pass
-    for enforcement.
+    admit. The two inert cases are announced by the caller
+    (`_poll_channel_subscriptions_inner`) so they cannot pass for
+    enforcement: wake_policy absent from GET /channels, and
+    severity_only against a GET /messages that sends no `priority` key
+    (gateway predates #173).
     """
     if policy == "severity_only":
         return (msg.get("priority") or "").strip().lower() == "high"
@@ -2110,6 +2113,7 @@ def _poll_channel_subscriptions_inner(state: MonitorState) -> None:
               f"channel filtering INERT, surfacing all posts (gateway predates #125 C1)",
               file=sys.stderr, flush=True)
 
+    priority_inert_announced = False
     for channel in subscribed:
         policy = policies.get(channel)
         if policy == "muted":
@@ -2120,8 +2124,21 @@ def _poll_channel_subscriptions_inner(state: MonitorState) -> None:
         cstatus, cbody = _http_get_json(curl, state.token)
         if cstatus != 200:
             continue
+        fetched = cbody.get("messages", [])
+        # Mixed-version: a live gateway predating #173 accepts no
+        # severity_only join, but a rollback / partial deploy can leave
+        # a holder against a GET that sends no `priority` key. Then
+        # every post is silently dropped. Announce once per poll so
+        # that silence cannot pass for enforcement (#777 / #80).
+        if (policy == "severity_only" and fetched
+                and not any("priority" in m for m in fetched)
+                and not priority_inert_announced):
+            print(f"{state.log_prefix} priority absent from GET /messages — "
+                  f"severity_only filter INERT (gateway predates #173)",
+                  file=sys.stderr, flush=True)
+            priority_inert_announced = True
         new_posts = [
-            m for m in cbody.get("messages", [])
+            m for m in fetched
             if int(m.get("id", 0)) > last_id and m.get("from_node") != state.self_name
             and int(m.get("id", 0)) not in existing_ids
             and _wake_policy_admits(policy, m, state.self_name)
