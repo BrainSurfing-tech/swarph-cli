@@ -65,13 +65,21 @@ def test_mentions_only_EXCLUDES_when_not_named():
     assert mesh._wake_policy_admits("mentions_only", {"mentions": '["other"]'}, "cellA") is False
 
 
-def test_777_severity_only_admits_marker_not_body_word():
+def test_777_severity_only_reads_stored_priority_not_content():
+    """#80: the client is a reader, not a second producer. A tag-only-severe
+    post stores priority=high with plain words; a leading marker that was
+    never stored must not be re-inferred here."""
     assert mesh._wake_policy_admits(
-        "severity_only", {"content": "[CRITICAL] disk"}, "cellA") is True
+        "severity_only", {"content": "plain words", "priority": "high"},
+        "cellA") is True
     assert mesh._wake_policy_admits(
-        "severity_only", {"content": "this is an error"}, "cellA") is False
+        "severity_only", {"content": "[CRITICAL] disk", "priority": "normal"},
+        "cellA") is False
     assert mesh._wake_policy_admits(
-        "severity_only", {"content": "plain", "severity": "critical"}, "cellA") is True
+        "severity_only", {"content": "plain", "severity": "critical"},
+        "cellA") is False
+    assert mesh._wake_policy_admits(
+        "severity_only", {"content": "[CRITICAL] disk"}, "cellA") is False
 
 
 def test_mentions_arrives_as_a_JSON_STRING_not_a_list():
