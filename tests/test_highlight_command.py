@@ -206,6 +206,74 @@ def test_63_status_0_refuses_the_gateway_clone(monkeypatch, tmp_path, capsys):
     assert not (d / "TIMELINE.md").exists()
 
 
+def test_64_status_0_refuses_git_config_clone_without_env(monkeypatch, tmp_path, capsys):
+    """#64: env unset is the live pane. The .git-resident flag must bind alone.
+
+    A test that only sets GATEWAY_TIMELINE_DIR passes on the #64 bug.
+    """
+    d = tmp_path / "gw-clone"
+    d.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(d)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(d), "config", "user.name", "t"], check=True)
+    subprocess.run(["git", "-C", str(d), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(d), "config", "--local",
+                    "swarph.gatewayClone", "1"], check=True)
+    monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")
+    monkeypatch.setenv("SWARPH_CELL", "c")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setenv("SWARPH_TIMELINE_DIR", str(d))
+    monkeypatch.delenv("GATEWAY_TIMELINE_DIR", raising=False)
+    monkeypatch.setattr(hl, "_post_json",
+                        _fake_post({}, status=0, resp={"detail": "down"}))
+    rc = hl.run_highlight(["x", "--no-push"])
+    assert rc == 1
+    assert "not writing into the gateway's clone" in capsys.readouterr().err
+    assert not (d / "TIMELINE.md").exists()
+
+
+def test_64_post_send_exception_is_ambiguous(monkeypatch, tmp_path, capsys):
+    """Should-fix 1: ConnectionResetError (post-send) is AMBIGUOUS, not status 0."""
+    monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")
+    monkeypatch.setenv("SWARPH_CELL", "c")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setenv("SWARPH_TIMELINE_DIR", str(tmp_path / "tl"))
+
+    def _boom(*_a, **_k):
+        raise ConnectionResetError("reset after read")
+
+    monkeypatch.setattr(hl, "_post_json", _boom)
+    rc = hl.run_highlight(["x", "--when", "2026-09-08T09:00Z", "--no-push"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "AMBIGUOUS" in err
+    assert "2026-09-08T09:00Z" in err
+    assert not (tmp_path / "tl" / "TIMELINE.md").exists()
+
+
+def test_64_failed_commit_truncates_append(monkeypatch, tmp_path):
+    """Should-fix 2: commit fail leaves the tree clean — NOT logged is true."""
+    d = tmp_path / "tl"
+    monkeypatch.setenv("SWARPH_CELL", "c")
+    monkeypatch.setenv("SWARPH_TIMELINE_DIR", str(d))
+    assert hl.run_highlight(["first ok", "--no-push"]) == 0
+    real = hl._git
+
+    def _fail_commit(repo, *args, **kw):
+        if args and args[0] == "commit":
+            return subprocess.CompletedProcess(["git", *args], 1, "", "nope")
+        return real(repo, *args, **kw)
+
+    monkeypatch.setattr(hl, "_git", _fail_commit)
+    rc = hl.run_highlight(["must not stick", "--no-push"])
+    assert rc == 1
+    porcelain = subprocess.run(["git", "-C", str(d), "status", "--porcelain"],
+                               capture_output=True, text=True)
+    assert "TIMELINE.md" not in porcelain.stdout
+    body = (d / "TIMELINE.md").read_text(encoding="utf-8")
+    assert "first ok" in body
+    assert "must not stick" not in body
+
+
 def test_local_flag_forces_git_even_with_gateway(tmp_path, monkeypatch):
     called = {"n": 0}
     monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")   # configured...

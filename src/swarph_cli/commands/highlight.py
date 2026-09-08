@@ -23,6 +23,7 @@ Push: only if an ``origin`` remote exists and ``--no-push`` is not set; otherwis
 from __future__ import annotations
 
 import argparse
+import http.client
 import os
 import socket
 import subprocess
@@ -86,13 +87,33 @@ def _credential_error(cell: str, source: str, exc: RuntimeError) -> str:
     return f"swarph highlight: {exc}"
 
 
-def _is_gateway_clone(repo: Path) -> bool:
-    """True when ``repo`` is the live gateway working tree (PR #392 seat A).
+def _git_gateway_clone_flag(repo: Path) -> bool:
+    """``.git``-resident declaration. Survives clean/stash/reset; cannot be committed.
 
-    Honour GATEWAY_TIMELINE_DIR — the same env the gateway process reads.
-    A fallback write into that clone races the ingest lock and can dirty
-    TIMELINE.md for every cell. Unset = not the gateway host (or not declared).
+    ``git config --local swarph.gatewayClone 1`` (ops, once, on the gateway host).
+    A worktree marker dies to ``git clean -fdx`` and propagates on ``git add -A``.
     """
+    if not _is_git_repo(repo):
+        return False
+    r = _git(repo, "config", "--local", "--get", "swarph.gatewayClone")
+    if r.returncode != 0:
+        return False
+    v = (r.stdout or "").strip().lower()
+    return v not in ("", "0", "false", "no")
+
+
+def _is_gateway_clone(repo: Path) -> bool:
+    """True when ``repo`` is the live gateway working tree (PR #392 / #64).
+
+    The property belongs to the directory, not the caller's environ.
+    GATEWAY_TIMELINE_DIR is set in the gateway MainPID only (1 of 126
+    processes on lab-ovh) — unset must not mean "not the gateway host".
+    Honour env match when present, OR ``swarph.gatewayClone`` in the
+    repo's local git config. Either is enough; neither is required if
+    this is just a cell's own clone.
+    """
+    if _git_gateway_clone_flag(repo):
+        return True
     raw = (os.environ.get("GATEWAY_TIMELINE_DIR") or "").strip()
     if not raw:
         return False
@@ -110,14 +131,17 @@ def _log_via_gateway(gateway: str, cell: str, highlight: str,
 
     Returns 0 on success. Returns 1 (no local write) on credential failure,
     any HTTP status ≠ 200 (401/422/502 are refusals, not "unreachable"), or
-    TimeoutError — the client died at 10s while the gateway may already have
-    committed; that is AMBIGUOUS, not a fallback. Returns None only when
-    status == 0 (no HTTP response: refused/DNS/reset) so the caller may write
-    locally and announce LOCAL FALLBACK (#716 / PR #392).
+    a post-send exception (timeout, reset-after-read, bad status line,
+    incomplete body, JSON/Unicode decode of a 200) — the client died after
+    the request may have been committed; that is AMBIGUOUS, not a fallback.
+    Returns None only when status == 0 (no HTTP response: refused/DNS/reset
+    *before* send) so the caller may write locally and announce LOCAL
+    FALLBACK (#716 / PR #392).
 
-    Timeout is wrapped HERE, not in ``_post_json`` (17 callers). Catching
-    OSError there and returning status 0 would turn a committed-but-unseen
-    timeout into a duplicate local line.
+    The wrap is HERE, not in ``_post_json`` (17 callers). Catching OSError
+    there and returning status 0 would turn a committed-but-unseen timeout
+    into a duplicate local line. A reset belongs under status 0 only when
+    it beats the send (URLError); post-send resets escape ``_post_json``.
     """
     url = gateway.rstrip("/") + "/highlights"
     body: dict = {"highlight": highlight, "cell": cell, "when": when}
@@ -130,7 +154,7 @@ def _log_via_gateway(gateway: str, cell: str, highlight: str,
         return 1
     try:
         status, resp = _post_json(url, body, token)
-    except TimeoutError:
+    except (OSError, http.client.HTTPException, ValueError):
         print(
             "swarph highlight: AMBIGUOUS: the gateway may have committed — "
             f"check swarph timeline since {when} before retrying",
@@ -232,6 +256,17 @@ def _has_remote(repo: Path) -> bool:
     return _git(repo, "remote", "get-url", "origin").returncode == 0
 
 
+def _revert_append(repo: Path, prior: int) -> None:
+    """Undo a failed add/commit so "NOT logged" is true and the tree is clean."""
+    tl = repo / "TIMELINE.md"
+    try:
+        with tl.open("r+b") as f:
+            f.truncate(prior)
+    except OSError:
+        pass
+    _git(repo, "reset", "-q", "HEAD", "--", "TIMELINE.md")
+
+
 def _current_branch(repo: Path) -> str:
     r = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
     b = r.stdout.strip()
@@ -304,11 +339,18 @@ def run_highlight(argv: list) -> int:
                   "conflict) — NOT logged", file=sys.stderr)
             return 1
 
-    with (repo / "TIMELINE.md").open("a", encoding="utf-8") as f:
+    tl = repo / "TIMELINE.md"
+    prior = tl.stat().st_size if tl.exists() else 0
+    with tl.open("a", encoding="utf-8") as f:
         f.write(_format_line(ts, cell, highlight, memory) + "\n")
-    _git(repo, "add", "TIMELINE.md")
+    add = _git(repo, "add", "TIMELINE.md")
+    if add.returncode != 0:
+        _revert_append(repo, prior)
+        print(f"swarph highlight: git add failed: {add.stderr.strip()}", file=sys.stderr)
+        return 1
     commit = _git(repo, "commit", "-m", f"highlight({cell}): {highlight[:60]}")
     if commit.returncode != 0:
+        _revert_append(repo, prior)
         print(f"swarph highlight: commit failed: {commit.stderr.strip()}", file=sys.stderr)
         return 1
 
