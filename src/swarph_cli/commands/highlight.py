@@ -86,28 +86,57 @@ def _credential_error(cell: str, source: str, exc: RuntimeError) -> str:
     return f"swarph highlight: {exc}"
 
 
+def _is_gateway_clone(repo: Path) -> bool:
+    """True when ``repo`` is the live gateway working tree (PR #392 seat A).
+
+    Honour GATEWAY_TIMELINE_DIR — the same env the gateway process reads.
+    A fallback write into that clone races the ingest lock and can dirty
+    TIMELINE.md for every cell. Unset = not the gateway host (or not declared).
+    """
+    raw = (os.environ.get("GATEWAY_TIMELINE_DIR") or "").strip()
+    if not raw:
+        return False
+    try:
+        return repo.resolve() == Path(os.path.expanduser(raw)).resolve()
+    except OSError:
+        return False
+
+
 def _log_via_gateway(gateway: str, cell: str, highlight: str,
                      memory: str, when: str, token_file: str | None,
                      *, cell_source: str = "unknown") -> int | None:
     """POST the highlight to the gateway `/highlights` — the gateway holds the git
     push credential, so the cell needs only its mesh peer token (no GitHub PAT).
 
-    Returns 0 on success, 1 on a credential-resolve failure (no local write —
-    the cell's identity is wrong), or None when the POST itself failed so the
-    caller can write locally and announce LOCAL FALLBACK (#716).
+    Returns 0 on success. Returns 1 (no local write) on credential failure,
+    any HTTP status ≠ 200 (401/422/502 are refusals, not "unreachable"), or
+    TimeoutError — the client died at 10s while the gateway may already have
+    committed; that is AMBIGUOUS, not a fallback. Returns None only when
+    status == 0 (no HTTP response: refused/DNS/reset) so the caller may write
+    locally and announce LOCAL FALLBACK (#716 / PR #392).
+
+    Timeout is wrapped HERE, not in ``_post_json`` (17 callers). Catching
+    OSError there and returning status 0 would turn a committed-but-unseen
+    timeout into a duplicate local line.
     """
     url = gateway.rstrip("/") + "/highlights"
-    body: dict = {"highlight": highlight, "cell": cell}
+    body: dict = {"highlight": highlight, "cell": cell, "when": when}
     if memory:
         body["memory"] = memory
-    if when:
-        body["when"] = when
     try:
         token = _resolve_token(cell, token_file)
     except RuntimeError as exc:
         print(_credential_error(cell, cell_source, exc), file=sys.stderr)
         return 1
-    status, resp = _post_json(url, body, token)
+    try:
+        status, resp = _post_json(url, body, token)
+    except TimeoutError:
+        print(
+            "swarph highlight: AMBIGUOUS: the gateway may have committed — "
+            f"check swarph timeline since {when} before retrying",
+            file=sys.stderr,
+        )
+        return 1
     if status == 200:
         ts = resp.get("ts", "")
         print(f"logged -> TIMELINE.md @ {ts} (via gateway)"
@@ -119,7 +148,9 @@ def _log_via_gateway(gateway: str, cell: str, highlight: str,
     detail = resp.get("detail") if isinstance(resp, dict) else resp
     where = f"HTTP {status}" if status else "connection failed"
     print(f"swarph highlight: gateway POST failed ({where}): {detail}", file=sys.stderr)
-    return None  # caller takes the local path and announces LOCAL FALLBACK (#716)
+    if status == 0:
+        return None  # no HTTP response — local fallback is the closed-port case
+    return 1
 
 
 def _collapse(s: str) -> str:
@@ -237,7 +268,10 @@ def run_highlight(argv: list) -> int:
     cell, cell_source = _resolve_cell(args.cell, repo)
     highlight = _collapse(args.highlight)
     memory = _collapse(args.memory)
-    when = _collapse(args.when) if args.when else ""
+    # Always stamp `when` so a gateway commit and a local fallback are
+    # byte-identical (merge=union collapses the duplicate). The gateway
+    # accepts the client's minute verbatim.
+    when = _collapse(args.when) if args.when else _now_ts()
 
     # Peer-token path (default when a gateway is configured): the gateway holds the
     # git credential, so a cell logs with only its mesh peer token — no GitHub PAT.
@@ -252,8 +286,13 @@ def run_highlight(argv: list) -> int:
             return gw_rc
         fallback = True
 
+    if fallback and _is_gateway_clone(repo):
+        print("swarph highlight: gateway unreachable; not writing into the "
+              "gateway's clone; retry or use --timeline-dir", file=sys.stderr)
+        return 1
+
     _ensure_timeline(repo, cell)
-    ts = when or _now_ts()
+    ts = when
     branch = _current_branch(repo)
     pushing = (not args.no_push) and _has_remote(repo)
 
@@ -275,13 +314,15 @@ def run_highlight(argv: list) -> int:
 
     if fallback:
         done = f"logged -> {repo} (LOCAL FALLBACK — gateway unreachable)."
+        from swarph_cli.timeline_paths import timeline_file
+        wrote = repo / "TIMELINE.md"
+        if wrote.resolve() != timeline_file().resolve():
+            done += "\n`swarph timeline` will NOT show this until it is drained."
+        if not _has_remote(repo):
+            done += ("\nno origin remote — this commit stays on this filesystem "
+                     "until it is drained.")
     else:
         done = f"logged -> TIMELINE.md @ {ts}" + (f" -> {memory}" if memory else "")
-    if fallback:
-        from swarph_cli.timeline_paths import default_timeline_file
-        wrote = repo / "TIMELINE.md"
-        if wrote.resolve() != default_timeline_file().resolve():
-            done += "\n`swarph timeline` will NOT show this until it is drained."
     if not pushing:
         print(done)
         return 0

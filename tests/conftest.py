@@ -111,6 +111,9 @@ _SWARPH_ENV = (
     "SWARPH_FACADE_MODEL",
     "SWARPH_TIMELINE",
     "SWARPH_TIMELINE_DIR",
+    # gateway host only — a live MainPID exports this; fallback must not
+    # inherit the box's clone path (PR #392 / #716)
+    "GATEWAY_TIMELINE_DIR",
     "SWARPH_EMIT_STATE",
     "SWARPH_MEMORY_DIR",
     "SWARPH_CODEGRAPH_INDEX",

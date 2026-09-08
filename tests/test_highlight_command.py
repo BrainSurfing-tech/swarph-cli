@@ -20,7 +20,7 @@ def _no_ambient_gateway(monkeypatch):
     Gateway tests set the env explicitly. Also clear SWARPH_SELF (#657) so a
     box-ambient identity cannot outrank a test's SWARPH_CELL."""
     for v in ("SWARPH_HIGHLIGHT_GATEWAY", "SWARPH_GATEWAY", "SWARPH_BRAIN_GATEWAY",
-              "SWARPH_SELF"):
+              "SWARPH_SELF", "GATEWAY_TIMELINE_DIR"):
         monkeypatch.delenv(v, raising=False)
 
 
@@ -112,29 +112,98 @@ def test_gateway_mode_is_default_when_configured(monkeypatch):
     rc = hl.run_highlight(["a real highlight", "[[project_x]]"])
     assert rc == 0
     assert cap["url"] == "http://gw:8788/highlights"
-    assert cap["body"] == {"highlight": "a real highlight", "cell": "gridiron",
-                           "memory": "[[project_x]]"}
+    assert cap["body"]["highlight"] == "a real highlight"
+    assert cap["body"]["cell"] == "gridiron"
+    assert cap["body"]["memory"] == "[[project_x]]"
+    assert "when" in cap["body"] and cap["body"]["when"]
     assert cap["token"] == "tok"
 
 
-def test_716_gateway_fail_announces_local_fallback(monkeypatch, tmp_path, capsys):
-    """#716 can-fail (b): POST fails → LOCAL FALLBACK, never 'via gateway'.
+@pytest.mark.parametrize("status", [502, 401, 422])
+def test_63_http_refusal_is_not_a_local_success(status, monkeypatch, tmp_path, capsys):
+    """PR #392 / obligation #63: HTTP ≠ 200 → rc 1, no line, no 'logged'.
 
-    A test that only asserts exit 0 passes on the old bug (rc=1, no write).
-    The write is loud, not a silent double-write.
+    401/422/502 are refusals. Treating them as LOCAL FALLBACK was the
+    regression: a rejected highlight became a git success under whatever
+    _resolve_cell produced.
     """
     monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")
     monkeypatch.setenv("SWARPH_CELL", "c")
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.setenv("SWARPH_TIMELINE_DIR", str(tmp_path / "tl"))
-    monkeypatch.setattr(hl, "_post_json", _fake_post({}, status=0, resp={"detail": "down"}))
-    rc = hl.run_highlight(["marooned", "--no-push"])
+    monkeypatch.setattr(hl, "_post_json",
+                        _fake_post({}, status=status, resp={"detail": "no"}))
+    rc = hl.run_highlight(["x", "--no-push"])
+    assert rc == 1
+    assert not (tmp_path / "tl" / "TIMELINE.md").exists()
+    assert "logged" not in capsys.readouterr().out
+
+
+def test_63_timeout_is_ambiguous_no_local_write(monkeypatch, tmp_path, capsys):
+    """TimeoutError is caught in _log_via_gateway, not _post_json.
+
+    A 10s client timeout against a gateway that commits then pushes is
+    AMBIGUOUS — fallback here would duplicate a line that likely landed.
+    """
+    monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")
+    monkeypatch.setenv("SWARPH_CELL", "c")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setenv("SWARPH_TIMELINE_DIR", str(tmp_path / "tl"))
+
+    def _boom(*_a, **_k):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(hl, "_post_json", _boom)
+    rc = hl.run_highlight(["x", "--when", "2026-09-07T21:00Z", "--no-push"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "AMBIGUOUS" in err
+    assert "2026-09-07T21:00Z" in err
+    assert not (tmp_path / "tl" / "TIMELINE.md").exists()
+
+
+def test_63_status_0_fallback_when_matches_post(monkeypatch, tmp_path, capsys):
+    """Closed port (status 0): local write, LOCAL FALLBACK, ts == posted when.
+
+    SWARPH_TIMELINE_DIR is the reader too — must NOT claim timeline will
+    not show this. No origin on a fresh init — must say so.
+    """
+    cap = {}
+    monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")
+    monkeypatch.setenv("SWARPH_CELL", "c")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setenv("SWARPH_TIMELINE_DIR", str(tmp_path / "tl"))
+    monkeypatch.setattr(hl, "_post_json",
+                        _fake_post(cap, status=0, resp={"detail": "down"}))
+    rc = hl.run_highlight(["marooned", "--when", "2026-09-07T21:00Z", "--no-push"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "LOCAL FALLBACK" in out
     assert "via gateway" not in out
-    body = (tmp_path / "tl" / "TIMELINE.md").read_text(encoding="utf-8")
-    assert "marooned" in body
+    assert "will NOT show this" not in out
+    assert "no origin remote" in out
+    assert cap["body"]["when"] == "2026-09-07T21:00Z"
+    entries = [l for l in (tmp_path / "tl" / "TIMELINE.md").read_text(encoding="utf-8").splitlines()
+               if l.startswith("- ")]
+    assert len(entries) == 1
+    assert entries[0].startswith("- 2026-09-07T21:00Z")
+    assert "marooned" in entries[0]
+
+
+def test_63_status_0_refuses_the_gateway_clone(monkeypatch, tmp_path, capsys):
+    """Status 0 against GATEWAY_TIMELINE_DIR must not write into that tree."""
+    d = tmp_path / "gw-clone"
+    monkeypatch.setenv("SWARPH_BRAIN_GATEWAY", "http://gw:8788")
+    monkeypatch.setenv("SWARPH_CELL", "c")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setenv("SWARPH_TIMELINE_DIR", str(d))
+    monkeypatch.setenv("GATEWAY_TIMELINE_DIR", str(d))
+    monkeypatch.setattr(hl, "_post_json",
+                        _fake_post({}, status=0, resp={"detail": "down"}))
+    rc = hl.run_highlight(["x", "--no-push"])
+    assert rc == 1
+    assert "not writing into the gateway's clone" in capsys.readouterr().err
+    assert not (d / "TIMELINE.md").exists()
 
 
 def test_local_flag_forces_git_even_with_gateway(tmp_path, monkeypatch):
