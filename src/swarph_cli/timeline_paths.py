@@ -10,16 +10,21 @@ Both verbs import *functions* from this module, not a bound Path.
 A test that points ``DEFAULT_TIMELINE_DIR`` at a temp dir must see
 BOTH verbs follow. If only one moves, this is not the single definition.
 
+``DEFAULT_TIMELINE_DIR`` is the override hook (``None`` until a test or
+caller sets a Path). The default itself is resolved at call time —
+binding ``Path.home()`` at import is what pointed a sandboxed probe at
+the live gateway clone (#775).
+
 Env: ``SWARPH_TIMELINE`` is the file. ``SWARPH_TIMELINE_DIR`` is the
-repo dir (same default, one layer up). Two names, one constant.
+repo dir (same default, one layer up). Two names, one definition.
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
-# The mesh log. Not ~/.swarph/timeline — that is the hole #716 names.
-DEFAULT_TIMELINE_DIR = Path.home() / "swarph-timeline"
+# Override hook, not the default. ``None`` means "call Path.home() now".
+DEFAULT_TIMELINE_DIR = None
 TIMELINE_FILENAME = "TIMELINE.md"
 
 ENV_TIMELINE = "SWARPH_TIMELINE"
@@ -27,7 +32,9 @@ ENV_TIMELINE_DIR = "SWARPH_TIMELINE_DIR"
 
 
 def default_timeline_dir() -> Path:
-    return Path(DEFAULT_TIMELINE_DIR)
+    if DEFAULT_TIMELINE_DIR is not None:
+        return Path(DEFAULT_TIMELINE_DIR)
+    return Path.home() / "swarph-timeline"
 
 
 def default_timeline_file() -> Path:

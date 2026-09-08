@@ -1,6 +1,9 @@
 """#716: one constant, both verbs, loud local fallback."""
 from __future__ import annotations
 
+import os
+import sys
+
 from swarph_cli.commands import highlight as hl
 from swarph_cli.commands import timeline as tl
 from swarph_cli import timeline_paths as tp
@@ -20,11 +23,38 @@ def test_716_one_constant_both_verbs_follow(tmp_path, monkeypatch):
 
 
 def test_716_constant_is_the_shared_repo_not_the_hole():
-    # DEFAULT_TIMELINE_DIR is bound at import; hermetic $HOME must not
-    # be compared to it. The name of the hole vs the shared repo is the pin.
-    assert tp.DEFAULT_TIMELINE_DIR.name == "swarph-timeline"
-    assert ".swarph" not in tp.DEFAULT_TIMELINE_DIR.parts
+    # Pin the resolved default, not the override hook (None until pointed).
+    resolved = tp.default_timeline_dir()
+    assert resolved.name == "swarph-timeline"
+    assert ".swarph" not in resolved.parts
     assert tp.default_timeline_file().name == "TIMELINE.md"
+
+
+def _rehome(monkeypatch, home):
+    """Windows Path.home() reads USERPROFILE / HOMEDRIVE+HOMEPATH, never HOME."""
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    if sys.platform == "win32":
+        drive, tail = os.path.splitdrive(os.path.abspath(str(home)))
+        monkeypatch.setenv("HOMEDRIVE", drive or "C:")
+        monkeypatch.setenv("HOMEPATH", tail or "\\")
+
+
+def test_775_home_after_import_reaches_both_verbs(tmp_path, monkeypatch):
+    """#775 can-fail: module already imported; HOME set now must move both verbs.
+
+    Fails at 25e737b because Path.home() was bound at import. Windows must
+    set USERPROFILE (ntpath.expanduser never reads HOME).
+    """
+    monkeypatch.delenv("SWARPH_TIMELINE", raising=False)
+    monkeypatch.delenv("SWARPH_TIMELINE_DIR", raising=False)
+    home = tmp_path / "new-home"
+    _rehome(monkeypatch, home)
+    want = home / "swarph-timeline"
+    assert tp.default_timeline_dir() == want
+    assert hl._resolve_dir(None) == want
+    assert tl._timeline_path() == str(want / "TIMELINE.md")
 
 
 def _unwrap_help(s: str) -> str:
