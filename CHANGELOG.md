@@ -12,6 +12,7 @@
 - docs: `--tag` is not inert — the caveat was measured with a TYPE value no page carries. README corrected here too.
 
 ## Unreleased
+- monitor (#807): the reexec control survives the reinstall that triggers it — `ExecCondition=` skips the run while `swarph_cli` is mid-swap (no failure, no restart budget spent; the .path re-fires when `__init__.py` is rewritten) and the budget can no longer latch `unit-start-limit-hit` inside one window; `install-reexec` resolves the watched tree from the swarph binary's OWN interpreter (the tree the monitors load), watches a second install tree if present, and `--on-failure UNIT` writes the OnFailure drop-in for both units. `scripts/probe_807_reexec.sh` is the can-fail.
 - board (#740): `cards edit --project ID|SLUG` re-homes a mis-filed card without losing its id, thread or links; the gateway gates it (orchestrator owning BOTH projects) and its 403 now names the caller's failing predicate (mesh-gateway PR for #740). Empty-edit refusal mentions `--project`.
 - board (#591 card step graph, contract v0.4.1): `cards ask` gains `--step/--needs/--hours/--holder P|me/--done` (holder optional: omitted = `requested`, another peer = `offered`, `me` = taken) and prints the gateway's §2 line, `warn` and `still missing`; new `cards graph <id>`; new `obligations take/decline/amend`; `obligations close --outcome skipped`; `cards move` prints the §4 gate's `warn`. Server side: mesh-gateway #148/#150/#152/#155/#157.
 
