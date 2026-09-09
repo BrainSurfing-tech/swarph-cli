@@ -638,10 +638,11 @@ def _confirm_flow_payload(actor: str, holders, what=None) -> dict:
     if holders:
         out = {}
         for h in holders:
-            if "=" not in h or not h.split("=", 1)[0] or not h.split("=", 1)[1]:
+            step, _, peer = h.partition("=")
+            step, peer = step.strip(), peer.strip()      # strip FIRST: "build= " is not a holder
+            if not step or not peer:
                 raise ValueError(f"--holder wants STEP=PEER, got {h!r}")
-            step, peer = h.split("=", 1)
-            out[step.strip()] = peer.strip()
+            out[step] = peer
         body["holders"] = out
     if what:
         body["what"] = what

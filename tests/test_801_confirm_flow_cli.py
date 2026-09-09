@@ -11,9 +11,16 @@ def test_payload_carries_actor_and_parsed_overrides():
     assert board._confirm_flow_payload("lab-ovh", None) == {"actor": "lab-ovh"}
 
 
-def test_a_malformed_override_is_refused_naming_the_form():
+@pytest.mark.parametrize("bad", ["plan-review", "build=", "=drop", "build=   ", "  =drop", " = "])
+def test_a_malformed_override_is_refused_naming_the_form(bad):
+    """lab-ovh's review table on #399: whitespace-only STEP or PEER must not reach the
+    gateway as an empty holder — strip first, then check."""
     with pytest.raises(ValueError, match="STEP=PEER"):
-        board._confirm_flow_payload("lab-ovh", ["plan-review"])
+        board._confirm_flow_payload("lab-ovh", [bad])
+
+
+def test_a_padded_but_real_override_is_accepted_stripped():
+    assert board._confirm_flow_payload("lab-ovh", [" build = drop-on-meta-edge "]) == {"actor": "lab-ovh", "holders": {"build": "drop-on-meta-edge"}}
 
 
 def test_parser_accepts_confirm_flow_with_repeated_holders():
