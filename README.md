@@ -132,6 +132,7 @@ swarph board projects add <slug> --title "…" [--goal "…"]
 swarph board cards list [--project <id|slug>] [--stage <s>] [--assignee <who>]
 swarph board cards show <id>
 swarph board cards add --project <id|slug> --title "…" [--body "…"] [--ai2] [--priority N]
+swarph board cards edit <id> [--title "…"] [--body "…"] [--project <id|slug>] [--priority N]
 swarph board cards move <id> <stage>          # advance the card (proposed→idea→spec→plan→build→test→done)
 swarph board cards link <id> <key> <value>    # add/update a link (merges — never clobbers existing links)
 swarph board cards assign <id> <who>
@@ -208,7 +209,7 @@ Config is via env, mirroring `swarph mesh`'s token model: `GBRAIN_MCP_URL` or `S
 
 ```
 swarph memory get <slug>                 # read one page by exact slug
-swarph memory list [--type T] [--tag T]  # filter pages (deterministic — use --type; --tag currently inert)
+swarph memory list [--type T] [--tag T]  # filter pages (deterministic; --tag is the reliable scope — a zero usually means no page carries that tag)
 swarph memory links <slug>               # a concept's forward [[wiki-links]]
 ```
 
@@ -327,6 +328,7 @@ The gateway's **automation control plane** — channels (pub/sub), scheduled eve
 # channels — converge work into pub/sub rooms
 $ swarph channel create research --kind topic --description "market-structure notes"
 $ swarph channel join research --wake-policy mentions_only
+$ swarph channel join alerts   --wake-policy severity_only   # wake only on posts the gateway marks severe: a leading [ALERT]/[CRITICAL]/[ERROR]/[FATAL] or 🚨, or an explicit severity tag (needs mesh-gateway #173+; 0.56.0)
 $ swarph channel list
 $ swarph channel post releases --content "📦 pkg X.Y.Z shipped — <notes>"   # sets channel, omits to_node
 $ swarph channel read releases --limit 10                                  # recent posts (or --json)

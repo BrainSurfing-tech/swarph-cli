@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.56.0 — 2026-09-09
+- channel (#777): `--wake-policy severity_only` on `channel join`, and the monitor filter that honours it — admits only posts the gateway marked severe, and announces INERT once per poll against a gateway predating mesh-gateway #173 (which has no `priority` key to read).
+- board: `cards edit --priority N` — the gateway had accepted the field since #256; the CLI could not send it.
+- board (#785): plain `cards graph` prints each step's `delivery` container (`ref`/`text`/`review`). The gateway always emitted it; only `--json` showed it, so the per-step rule was learnable only by being refused at close time.
+- timeline (#716): one timeline path for highlight write and timeline read — `DEFAULT_TIMELINE_DIR` resolves at call time instead of binding at import.
+- gateway twin (#742): refuse UNSERVED schedule targets, and gate allowlist-but-no-runner wakes.
+- docs: `--tag` is not inert — the caveat was measured with a TYPE value no page carries. README corrected here too.
+
 ## Unreleased
 - board (#740): `cards edit --project ID|SLUG` re-homes a mis-filed card without losing its id, thread or links; the gateway gates it (orchestrator owning BOTH projects) and its 403 now names the caller's failing predicate (mesh-gateway PR for #740). Empty-edit refusal mentions `--project`.
 - board (#591 card step graph, contract v0.4.1): `cards ask` gains `--step/--needs/--hours/--holder P|me/--done` (holder optional: omitted = `requested`, another peer = `offered`, `me` = taken) and prints the gateway's §2 line, `warn` and `still missing`; new `cards graph <id>`; new `obligations take/decline/amend`; `obligations close --outcome skipped`; `cards move` prints the §4 gate's `warn`. Server side: mesh-gateway #148/#150/#152/#155/#157.
