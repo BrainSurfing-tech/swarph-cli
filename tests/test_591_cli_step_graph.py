@@ -247,7 +247,9 @@ def test_format_graph_renders_every_state_string():
 
 def test_format_graph_mandatory_marker_and_eligible_only_when_present():
     lines = board._format_graph(_graph()).splitlines()
-    assert lines[1].startswith("  s0 [M] missing holder=- due=- needs=- eligible=cursor-win, drop-on-meta-edge")
+    assert lines[1].startswith(
+        "  s0 [M] missing holder=- due=- delivery=text needs=- "
+        "eligible=cursor-win, drop-on-meta-edge")
     assert lines[2].startswith("  s1 [opt] ")
     assert sum("eligible=" in ln for ln in lines) == 1, (
         "eligible is computed for missing steps only — printing `eligible=-` on a "
@@ -258,7 +260,28 @@ def test_format_graph_needs_render_ok_state_and_no_row():
     lines = board._format_graph(_graph()).splitlines()
     blocked = next(ln for ln in lines if ln.startswith("  s10 "))
     assert "holder=cursor-win due=2026-09-03T10:00:00Z" in blocked
+    assert "delivery=text" in blocked
     assert "needs=build #34 ok, spec-review — no row, plan-review #35 open" in blocked
+
+
+def test_785_format_graph_prints_delivery_and_discriminates_containers():
+    """#785: plain graph must show delivery= on every step line, and the values
+    must be able to differ — otherwise the check cannot tell ref from text."""
+    g = _graph()
+    g["steps"][0]["delivery"] = "ref"
+    g["steps"][1]["delivery"] = "text"
+    g["steps"][2]["delivery"] = "review"
+    del g["steps"][3]["delivery"]  # absent key → delivery=-
+    out = board._format_graph(g)
+    step_lines = [ln for ln in out.splitlines() if ln.startswith("  s")]
+    assert step_lines, "expected step lines"
+    assert all("delivery=" in ln for ln in step_lines)
+    assert "delivery=ref" in step_lines[0]
+    assert "delivery=text" in step_lines[1]
+    assert "delivery=review" in step_lines[2]
+    assert "delivery=-" in step_lines[3]
+    vals = {ln.split("delivery=", 1)[1].split()[0] for ln in step_lines[:3]}
+    assert vals == {"ref", "text", "review"}
 
 
 def test_format_graph_unstepped_section_only_when_non_empty():

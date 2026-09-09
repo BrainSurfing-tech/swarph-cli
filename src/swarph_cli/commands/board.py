@@ -609,9 +609,15 @@ def _format_graph(g) -> str:
              f"{_s(n.get('step'))} #{n.get('row_id')} "
              f"{'ok' if n.get('satisfied') else _s(n.get('state')) or '-'}")
             for n in s.get("needs") or []) or "-"
+        # #785: delivery (ref|text|review) is what distinguishes the steps.
+        # Gateway already emits it; dropping it from the default render taught
+        # readers the wrong rule (validate takes prose; build needs a URL) until
+        # a close refusal. Always print the key — absent → `-` — so a missing
+        # field cannot look like "this step has no container".
         line = (f"  {_s(s.get('step'))} [{'M' if s.get('mandatory') else 'opt'}] "
                 f"{_s(s.get('state'))} holder={_s(s.get('holder')) or '-'} "
-                f"due={_s(s.get('due')) or '-'} needs={needs}")
+                f"due={_s(s.get('due')) or '-'} "
+                f"delivery={_s(s.get('delivery')) or '-'} needs={needs}")
         if s.get("eligible") is not None:
             line += f" eligible={', '.join(_s(e) for e in s['eligible']) or '(nobody)'}"
         lines.append(line)
@@ -804,8 +810,9 @@ def _build_parser() -> argparse.ArgumentParser:
                          "container the step names — a ref, >=40 words, or a verdict")
     ck.add_argument("--json", action="store_true"); _add_common(ck)
 
-    cg = cards.add_parser("graph", help="read the card's step graph (#591): every menu "
-                                        "step, its state, holder, due, edges, eligible set")
+    cg = cards.add_parser("graph", help="read the card's step graph (#591/#785): every menu "
+                                        "step, its state, holder, due, delivery container, "
+                                        "edges, eligible set")
     cg.add_argument("id", type=int)
     cg.add_argument("--json", action="store_true"); _add_common(cg)
 
