@@ -138,7 +138,8 @@ def _format_obligations(data: dict) -> str:
     return "\n".join(lines)
 
 
-def _card_edit_payload(actor, title, body, *, due_at=_SENTINEL, project_id=None) -> dict:
+def _card_edit_payload(actor, title, body, *, due_at=_SENTINEL, project_id=None,
+                       priority=None) -> dict:
     """#191: the edit patch — title and/or body, the two fields that made a
     card's text write-once until the gateway grew them (BoardCardPatch).
 
@@ -150,6 +151,13 @@ def _card_edit_payload(actor, title, body, *, due_at=_SENTINEL, project_id=None)
 
     ``due_at=_SENTINEL`` means the caller did not pass ``--due``; an explicit
     empty string clears the due date (#145).
+
+    ``priority`` needs no sentinel: there is no "clear" for it (the column is
+    NOT NULL DEFAULT 0), so None unambiguously means "not mentioned". THE RANGE
+    IS NOT CHECKED HERE ON PURPOSE — `_validate_priority` on the gateway is the
+    single definition, applied at every write path, and #256b is the card about
+    what happens when that range lives on one of two paths while a comment
+    claims otherwise. A second copy here could drift; the 400 is the answer.
     """
     patch = {"actor": actor}
     if title is not None:
@@ -160,8 +168,11 @@ def _card_edit_payload(actor, title, body, *, due_at=_SENTINEL, project_id=None)
         patch["due_at"] = _normalize_due_at(due_at) if due_at else None
     if project_id is not None:
         patch["project_id"] = int(project_id)   # #740: re-home; the gateway gates it (orchestrator + both owners)
+    if priority is not None:
+        patch["priority"] = int(priority)
     if len(patch) == 1:
-        raise ValueError("nothing to edit — pass --title, --body, --due and/or --project")
+        raise ValueError(
+            "nothing to edit — pass --title, --body, --due, --project and/or --priority")
     return patch
 
 
@@ -803,8 +814,9 @@ def _build_parser() -> argparse.ArgumentParser:
     cr.add_argument("--json", action="store_true"); _add_common(cr)
 
     ce = cards.add_parser(
-        "edit", help="edit a card's title and/or body (#191: a correction "
-                     "belongs ON the card, not only in its thread)")
+        "edit", help="edit a card's title, body, due date, project and/or "
+                     "priority (#191: a correction belongs ON the card, not "
+                     "only in its thread)")
     ce.add_argument("id", type=int)
     add_content_args(ce, "--title", required=False,
                      noun="card title", noun_plural="titles")
@@ -814,6 +826,12 @@ def _build_parser() -> argparse.ArgumentParser:
                          "the gateway refuses anyone else). Keeps the card's id, thread and links.")
     ce.add_argument("--due", default=_SENTINEL, metavar="DATE",
                     help="set due date (YYYY-MM-DD or ISO); pass empty string to clear")
+    ce.add_argument("--priority", type=int, default=None, metavar="N",
+                    help="re-prioritise the card. `add` has taken --priority since "
+                         "#256 and `edit` did not, so a card filed at the wrong "
+                         "priority could not be repriced from the CLI — the gateway "
+                         "has accepted it on PATCH the whole time. Range is the "
+                         "gateway's to enforce (0..13); it answers 400.")
     ce.add_argument("--json", action="store_true"); _add_common(ce)
 
     obl = top.add_parser(
@@ -1068,7 +1086,8 @@ def run_board(argv: list[str]) -> int:
                     return 1
             try:
                 patch = _card_edit_payload(
-                    self_name, title_text, body_text, due_at=args.due, project_id=project_id)
+                    self_name, title_text, body_text, due_at=args.due,
+                    project_id=project_id, priority=args.priority)
             except ValueError as exc:
                 print(f"swarph board cards edit: {exc}", file=sys.stderr)
                 return 2
