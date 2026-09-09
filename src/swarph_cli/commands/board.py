@@ -327,6 +327,47 @@ def _format_card(card: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_stage_history(card: dict) -> str:
+    """GET /board/cards/{id} already carries ``stage_history``; #802 is the
+    default render. Each entry is ``stage / by / at``; a ``gate`` object is
+    printed only when the gateway stamped one — absent is not ``gate=-``.
+    Dumping the JSON blob would pass a naive check and hide the stamp."""
+    cid = card.get("id")
+    if "stage_history" not in card:
+        return (f"card #{cid} stage={_s(card.get('stage')) or '-'} "
+                f"stage_history ABSENT (gateway predates the column, or this "
+                f"payload is not a card)")
+    hist = card.get("stage_history")
+    if not isinstance(hist, list):
+        return (f"card #{cid} stage={_s(card.get('stage')) or '-'} "
+                f"stage_history unreadable (not a list)")
+    lines = [f"card #{cid} stage={_s(card.get('stage')) or '-'} "
+             f"{len(hist)} transition(s)"]
+    if not hist:
+        lines.append("  (empty)")
+        return "\n".join(lines)
+    for e in hist:
+        if not isinstance(e, dict):
+            lines.append(f"  {_s(e)}")
+            continue
+        line = (f"  {_s(e.get('stage')) or '-'}  by={_s(e.get('by')) or '-'}  "
+                f"at={_s(e.get('at')) or '-'}")
+        gate = e.get("gate")
+        if isinstance(gate, dict):
+            missing = ", ".join(_s(m) for m in (gate.get("missing") or [])) or "none"
+            not_passed = ", ".join(_s(m) for m in (gate.get("not_passed") or [])) or "none"
+            labels = ", ".join(_s(lb) for lb in (gate.get("labels") or [])) or "-"
+            gf = gate.get("grandfathered")
+            line += (f"  gate={_s(gate.get('mode')) or '-'} "
+                     f"flip_at={_s(gate.get('flip_at')) or '-'} "
+                     f"menu_v={gate.get('menu_version') if gate.get('menu_version') is not None else '-'} "
+                     f"labels={labels} missing={missing} not_passed={not_passed}")
+            if gf is not None:
+                line += f" grandfathered={gf}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _format_projects(data) -> str:
     rows = data.get("projects", []) if isinstance(data, dict) else (data or [])
     if not rows:
@@ -816,6 +857,13 @@ def _build_parser() -> argparse.ArgumentParser:
     cg.add_argument("id", type=int)
     cg.add_argument("--json", action="store_true"); _add_common(cg)
 
+    ch = cards.add_parser(
+        "history",
+        help="read a card's stage_history (#802): every stage transition with "
+             "at/by, and the gate stamp where the gateway wrote one")
+    ch.add_argument("id", type=int)
+    ch.add_argument("--json", action="store_true"); _add_common(ch)
+
     cr = cards.add_parser("ready", help="flag a card ready-to-advance (move_ready) for the orchestrator")
     cr.add_argument("id", type=int); cr.add_argument("--clear", action="store_true", help="unset move_ready")
     cr.add_argument("--json", action="store_true"); _add_common(cr)
@@ -1146,6 +1194,9 @@ def run_board(argv: list[str]) -> int:
         if args.command == "graph":
             st, d = _http_get_json(f"{gw}/board/cards/{args.id}/graph", token)
             return _out(st, d, _format_graph, aj)
+        if args.command == "history":
+            st, d = _http_get_json(f"{gw}/board/cards/{args.id}", token)
+            return _out(st, d, _format_stage_history, aj)
         if args.command == "say":
             try:
                 content = resolve_content(args.content, getattr(args, "content_file", None))
