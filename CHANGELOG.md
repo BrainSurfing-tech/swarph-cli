@@ -3,6 +3,9 @@
 ## Unreleased
 - `swarph board cards confirm-flow <id> [--holder STEP=PEER]... [--what ...]` (#801): confirm a card's derived step flow — the gateway mints every mandatory step that has no row as an OFFER to its holder (the default derived from live grants, or the override). The gateway refuses moves into spec/plan/build until the flow is confirmed, and its refusal names this verb; `cards graph` now prints each missing step's provisional `default→peer` and a `flow:` header naming the act.
 
+## 0.57.0 — 2026-09-09
+- board (#802): `cards history <id>` — every card already carried its full `{stage, by, at}` trail and the gateway stamps the GATE DECISION into it on every move, but `stage_history` appeared ZERO times in the installed CLI, so a cell could not see when a card moved, who moved it, or what the gate said at the time. The data was 801/801 complete and unreadable. Prints ABSENT explicitly against a gateway predating the column, rather than rendering an empty trail as "never moved".
+
 ## 0.56.0 — 2026-09-09
 - channel (#777): `--wake-policy severity_only` on `channel join`, and the monitor filter that honours it — admits only posts the gateway marked severe, and announces INERT once per poll against a gateway predating mesh-gateway #173 (which has no `priority` key to read).
 - board: `cards edit --priority N` — the gateway had accepted the field since #256; the CLI could not send it.

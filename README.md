@@ -136,6 +136,7 @@ swarph board cards edit <id> [--title "…"] [--body "…"] [--project <id|slug>
 swarph board cards move <id> <stage>          # advance the card (proposed→idea→spec→plan→build→test→done)
 swarph board cards link <id> <key> <value>    # add/update a link (merges — never clobbers existing links)
 swarph board cards assign <id> <who>
+swarph board cards history <id>               # WHEN the card moved, WHO moved it, and what the gate said at the time
 swarph board cards thread <id> [--limit N]     # the card's conversation (a card IS a thread)
 swarph board cards say <id> --content "…" [--to <peer>] [--kind fyi|question|answer|status|unblock]
 swarph board cards ask <id> "<what>" --step <step> --holder <peer>   # omit --holder to request the step; --holder me to take it; --done EVIDENCE to mint+take+close [--timeout-hours N]   # MINT an obligation:
