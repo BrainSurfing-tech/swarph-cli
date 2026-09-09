@@ -405,3 +405,28 @@ def test_four_clauses_all_true_is_reapable(tmp_path):
     assert all(d.clauses[k] for k in (
         "origin_or_fork", "ppid_init", "not_live_pane", "childless_or_stale"))
     assert "→ REAPABLE" in format_report(result)
+
+
+def test_still_running_with_fresh_heartbeat_is_still_reapable(tmp_path):
+    """lab-ovh 36742: 15-day orphan still writing drain_heartbeat.json one
+    minute before the kill. A reaper keyed on 'is it running' spares that
+    forever. Four-clause must not grow a liveness/heartbeat spare."""
+    cmd = (
+        "/home/u/.local/bin/claude daemon run --origin transient "
+        f"--spawned-by {json.dumps({'label': 'claude', 'pid': 700337})}"
+    )
+    _write_proc(tmp_path, 5000, cmdline=cmd, ppid=1,
+                cgroup="0::/user.slice/tmux-spawn-dead.scope")
+    (tmp_path / "5000" / "cwd").mkdir(exist_ok=True)
+    (tmp_path / "5000" / "cwd" / "drain_heartbeat.json").write_text(
+        '{"ts": "2026-09-09T21:23:00Z"}'
+    )
+    result = scan_orphan_daemons(
+        proc_root=tmp_path, caller_pid=99999, run=_tmux_one_pane("42"),
+    )
+    d = result.daemons[0]
+    assert d.reapable is True
+    assert "heartbeat" not in (d.spared_by or "")
+    assert "alive" not in (d.reason or "").lower() or d.reapable
+    assert "liveness" not in d.clauses
+
