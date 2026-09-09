@@ -22,6 +22,7 @@ import argparse
 import difflib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -2023,16 +2024,27 @@ def _wake_policy_admits(policy, msg: dict, self_name: str) -> bool:
 
     `muted` is handled by the caller (it skips the fetch entirely). Here:
       · mentions_only -> only posts that name this cell
+      · severity_only -> only a row whose stored `priority` is `high` (#777 / #80)
       · all / anything else / None -> admit
 
-    >>> FAIL OPEN, DELIBERATELY. <<< An unknown policy value, or a gateway that
-    does not send one at all, admits the post. Failing CLOSED would drop channel
-    posts silently — which is card #125's ORIGINAL DEFECT, not a safe default:
-    seventeen cells set a policy, nothing honoured it, and nobody could tell
-    because the absence looked exactly like "no posts". A filter that errs toward
-    delivering is recoverable by the reader; one that errs toward silence is not.
-    The inert case is announced by the caller so it cannot pass for enforcement.
+    Severity is ONE stored value, written by the gateway `_fan_out` and
+    echoed by GET /messages. This reader does not re-infer from content
+    or from a request-only `severity` tag — those two producers disagreed
+    by construction on a tag-only-severe post.
+
+    >>> FAIL OPEN, DELIBERATELY (unknown policy). <<< An unknown policy
+    value, or a gateway that does not send one at all, admits the post.
+    Failing CLOSED would drop channel posts silently — which is card
+    #125's ORIGINAL DEFECT, not a safe default. `severity_only` is a
+    named filter: missing/`normal` priority is not high, so it does not
+    admit. The two inert cases are announced by the caller
+    (`_poll_channel_subscriptions_inner`) so they cannot pass for
+    enforcement: wake_policy absent from GET /channels, and
+    severity_only against a GET /messages that sends no `priority` key
+    (gateway predates #173).
     """
+    if policy == "severity_only":
+        return (msg.get("priority") or "").strip().lower() == "high"
     if policy != "mentions_only":
         return True
     raw = msg.get("mentions")
@@ -2101,6 +2113,7 @@ def _poll_channel_subscriptions_inner(state: MonitorState) -> None:
               f"channel filtering INERT, surfacing all posts (gateway predates #125 C1)",
               file=sys.stderr, flush=True)
 
+    priority_inert_announced = False
     for channel in subscribed:
         policy = policies.get(channel)
         if policy == "muted":
@@ -2111,8 +2124,21 @@ def _poll_channel_subscriptions_inner(state: MonitorState) -> None:
         cstatus, cbody = _http_get_json(curl, state.token)
         if cstatus != 200:
             continue
+        fetched = cbody.get("messages", [])
+        # Mixed-version: a live gateway predating #173 accepts no
+        # severity_only join, but a rollback / partial deploy can leave
+        # a holder against a GET that sends no `priority` key. Then
+        # every post is silently dropped. Announce once per poll so
+        # that silence cannot pass for enforcement (#777 / #80).
+        if (policy == "severity_only" and fetched
+                and not any("priority" in m for m in fetched)
+                and not priority_inert_announced):
+            print(f"{state.log_prefix} priority absent from GET /messages — "
+                  f"severity_only filter INERT (gateway predates #173)",
+                  file=sys.stderr, flush=True)
+            priority_inert_announced = True
         new_posts = [
-            m for m in cbody.get("messages", [])
+            m for m in fetched
             if int(m.get("id", 0)) > last_id and m.get("from_node") != state.self_name
             and int(m.get("id", 0)) not in existing_ids
             and _wake_policy_admits(policy, m, state.self_name)

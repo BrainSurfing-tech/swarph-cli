@@ -65,6 +65,23 @@ def test_mentions_only_EXCLUDES_when_not_named():
     assert mesh._wake_policy_admits("mentions_only", {"mentions": '["other"]'}, "cellA") is False
 
 
+def test_777_severity_only_reads_stored_priority_not_content():
+    """#80: the client is a reader, not a second producer. A tag-only-severe
+    post stores priority=high with plain words; a leading marker that was
+    never stored must not be re-inferred here."""
+    assert mesh._wake_policy_admits(
+        "severity_only", {"content": "plain words", "priority": "high"},
+        "cellA") is True
+    assert mesh._wake_policy_admits(
+        "severity_only", {"content": "[CRITICAL] disk", "priority": "normal"},
+        "cellA") is False
+    assert mesh._wake_policy_admits(
+        "severity_only", {"content": "plain", "severity": "critical"},
+        "cellA") is False
+    assert mesh._wake_policy_admits(
+        "severity_only", {"content": "[CRITICAL] disk"}, "cellA") is False
+
+
 def test_mentions_arrives_as_a_JSON_STRING_not_a_list():
     """Measured against the live gateway: mentions is '[]', a STRING. A build that
     assumed a list would treat every post as unmentioned and silently mute the cell."""
@@ -121,6 +138,34 @@ def test_absent_wake_policy_admits_AND_SAYS_SO(monkeypatch, tmp_path, capsys):
     assert [m["id"] for m in state.pending_channel_posts] == [5], "must fail OPEN"
     err = capsys.readouterr().err
     assert "wake_policy absent" in err and "INERT" in err
+
+
+def test_777_severity_only_without_priority_key_announces_INERT(
+        monkeypatch, tmp_path, capsys):
+    """#80 finding: severity_only against a GET that sends no `priority`
+    key admits nothing AND must say so. Silence that looks like
+    filtering is the mixed-version hazard."""
+    state = _State(tmp_path)
+    _wire(monkeypatch,
+          [{"name": "ops", "is_member": True, "wake_policy": "severity_only"}],
+          {"ops": [{"id": 7, "from_node": "other", "content": "[CRITICAL] x"}]})
+    mesh._poll_channel_subscriptions(state)
+    assert state.pending_channel_posts == []
+    err = capsys.readouterr().err
+    assert "priority absent from GET /messages" in err
+    assert "severity_only filter INERT" in err
+    assert "predates #173" in err
+
+
+def test_777_severity_only_with_priority_does_NOT_announce(monkeypatch, tmp_path, capsys):
+    state = _State(tmp_path)
+    _wire(monkeypatch,
+          [{"name": "ops", "is_member": True, "wake_policy": "severity_only"}],
+          {"ops": [{"id": 8, "from_node": "other", "content": "plain",
+                    "priority": "high"}]})
+    mesh._poll_channel_subscriptions(state)
+    assert [m["id"] for m in state.pending_channel_posts] == [8]
+    assert "severity_only filter INERT" not in capsys.readouterr().err
 
 
 def test_the_inert_warning_does_NOT_fire_when_a_policy_is_present(monkeypatch, tmp_path, capsys):
