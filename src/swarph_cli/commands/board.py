@@ -631,6 +631,39 @@ def _ask_line(d) -> str:
     return line
 
 
+def _confirm_flow_payload(actor: str, holders, what=None) -> dict:
+    """#801: {actor, holders: {step: peer}, what}. `--holder STEP=PEER` is parsed here so a
+    malformed override is refused before the request, naming the form."""
+    body = {"actor": actor}
+    if holders:
+        out = {}
+        for h in holders:
+            step, _, peer = h.partition("=")
+            step, peer = step.strip(), peer.strip()      # strip FIRST: "build= " is not a holder
+            if not step or not peer:
+                raise ValueError(f"--holder wants STEP=PEER, got {h!r}")
+            out[step] = peer
+        body["holders"] = out
+    if what:
+        body["what"] = what
+    return body
+
+
+def _confirm_flow_line(d) -> str:
+    """One line per minted row, then the flow state. A confirm that minted nothing
+    says so rather than printing an empty list."""
+    minted = d.get("minted") or []
+    flow = d.get("flow") or {}
+    lines = [f"card #{d.get('card_id')}: flow {'CONFIRMED' if flow.get('confirmed') else 'still unconfirmed'} "
+             f"by {_s(d.get('by'))} — {len(minted)} row(s) minted"]
+    for m in minted:
+        lines.append(f"  {_s(m.get('step'))} -> #{m.get('id')} holder={_s(m.get('holder'))} "
+                     f"state={_s(m.get('state'))}")
+    if not minted:
+        lines.append("  nothing to mint: every mandatory step already has a row")
+    return "\n".join(lines)
+
+
 def _format_graph(g) -> str:
     """GET /board/cards/{id}/graph: one header, one line per menu step (every
     step at every stage — the read renders the menu, not only the rows), then
@@ -640,10 +673,19 @@ def _format_graph(g) -> str:
     menu = g.get("menu") or {}
     gate = g.get("gate") or {}
     missing = ", ".join(_s(m) for m in g.get("missing") or []) or "none"
+    flow = g.get("flow") or {}
+    # #801: the flow is DERIVED and provisional until confirmed at spec/plan/build.
+    # Say so in the header, with the act that confirms it — the gateway refuses
+    # those moves until then, and a refusal whose remedy is not printed is a stall.
+    flow_txt = ("" if not flow else
+                (" · flow: confirmed" if flow.get("confirmed") else
+                 f" · flow: UNCONFIRMED ({len(flow.get('unconfirmed') or [])} step(s) — "
+                 f"swarph board cards confirm-flow {g.get('card_id')})"))
     lines = [f"card #{g.get('card_id')} stage={_s(g.get('stage')) or '-'} "
              f"implied={_s(g.get('stage_implied')) or '-'} "
              f"gate={_s(gate.get('mode')) or '-'} flip_at={_s(gate.get('flip_at')) or '-'} "
-             f"menu {_s(menu.get('source')) or '?'} v{menu.get('version') or '-'} · missing: {missing}"]
+             f"menu {_s(menu.get('source')) or '?'} v{menu.get('version') or '-'} · missing: {missing}"
+             + flow_txt]
     for s in g.get("steps") or []:
         needs = ", ".join(
             (f"{_s(n.get('step'))} — no row" if n.get("row_id") is None else
@@ -661,6 +703,8 @@ def _format_graph(g) -> str:
                 f"delivery={_s(s.get('delivery')) or '-'} needs={needs}")
         if s.get("eligible") is not None:
             line += f" eligible={', '.join(_s(e) for e in s['eligible']) or '(nobody)'}"
+        if s.get("default"):            # #801: derived from live grants, not a row
+            line += f" default→{_s(s['default'].get('holder')) or 'NOBODY (unstaffable)'} (provisional)"
         lines.append(line)
     if g.get("unstepped"):
         lines.append("unstepped:")
@@ -850,6 +894,17 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="mint + take + close in ONE act (needs --holder me); the "
                          "container the step names — a ref, >=40 words, or a verdict")
     ck.add_argument("--json", action="store_true"); _add_common(ck)
+
+    cf = cards.add_parser(
+        "confirm-flow",
+        help="#801: CONFIRM the card's derived step flow — mint every mandatory step that has "
+             "no row as an OFFER to its holder (the derived default from live grants, or "
+             "--holder step=peer). The gateway refuses moves into spec/plan/build until then")
+    cf.add_argument("id", type=int)
+    cf.add_argument("--holder", action="append", default=None, metavar="STEP=PEER",
+                    help="override the derived default for one step; repeatable")
+    cf.add_argument("--what", default=None, help="one line used as every minted row's `what`")
+    cf.add_argument("--json", action="store_true"); _add_common(cf)
 
     cg = cards.add_parser("graph", help="read the card's step graph (#591/#785): every menu "
                                         "step, its state, holder, due, delivery container, "
@@ -1191,6 +1246,14 @@ def run_board(argv: list[str]) -> int:
                                 timeout_hours=args.timeout_hours)
             st, d = _post_json(f"{gw}/board/cards/{args.id}/ask", body, token)
             return _out(st, d, _ask_line, args.json)
+        if args.command == "confirm-flow":
+            try:
+                body = _confirm_flow_payload(self_name, args.holder, args.what)
+            except ValueError as e:
+                print(f"swarph board cards confirm-flow: {e}", file=sys.stderr)
+                return 2
+            st, d = _post_json(f"{gw}/board/cards/{args.id}/flow/confirm", body, token)
+            return _out(st, d, _confirm_flow_line, args.json)
         if args.command == "graph":
             st, d = _http_get_json(f"{gw}/board/cards/{args.id}/graph", token)
             return _out(st, d, _format_graph, aj)

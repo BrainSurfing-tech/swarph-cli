@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+- monitor (#807): the reexec control survives the reinstall that triggers it — `ExecCondition=` skips the run while `swarph_cli` is mid-swap (no failure, no restart budget spent; the .path re-fires when `__init__.py` is rewritten) and the budget can no longer latch `unit-start-limit-hit` inside one window; `install-reexec` resolves the watched tree from the swarph binary's OWN interpreter (the tree the monitors load), watches a second install tree if present, and `--on-failure UNIT` writes the OnFailure drop-in for both units. `scripts/probe_807_reexec.sh` is the can-fail.
+- `swarph board cards confirm-flow <id> [--holder STEP=PEER]... [--what ...]` (#801): confirm a card's derived step flow — the gateway mints every mandatory step that has no row as an OFFER to its holder (the default derived from live grants, or the override). The gateway refuses moves into spec/plan/build until the flow is confirmed, and its refusal names this verb; `cards graph` now prints each missing step's provisional `default→peer` and a `flow:` header naming the act.
+
 ## 0.57.0 — 2026-09-09
 - board (#802): `cards history <id>` — every card already carried its full `{stage, by, at}` trail and the gateway stamps the GATE DECISION into it on every move, but `stage_history` appeared ZERO times in the installed CLI, so a cell could not see when a card moved, who moved it, or what the gate said at the time. The data was 801/801 complete and unreadable. Prints ABSENT explicitly against a gateway predating the column, rather than rendering an empty trail as "never moved".
 
@@ -11,8 +15,16 @@
 - gateway twin (#742): refuse UNSERVED schedule targets, and gate allowlist-but-no-runner wakes.
 - docs: `--tag` is not inert — the caveat was measured with a TYPE value no page carries. README corrected here too.
 
-## Unreleased
-- monitor (#807): the reexec control survives the reinstall that triggers it — `ExecCondition=` skips the run while `swarph_cli` is mid-swap (no failure, no restart budget spent; the .path re-fires when `__init__.py` is rewritten) and the budget can no longer latch `unit-start-limit-hit` inside one window; `install-reexec` resolves the watched tree from the swarph binary's OWN interpreter (the tree the monitors load), watches a second install tree if present, and `--on-failure UNIT` writes the OnFailure drop-in for both units. `scripts/probe_807_reexec.sh` is the can-fail.
+## Shipped, released 0.50.0–0.55.0 — backfilled heading
+
+> These entries sat under `## Unreleased` until 2026-09-10 and every one is present in the
+> published 0.57.0 wheel (verified by installing it into a clean venv and running the verbs:
+> `cards edit --project`, `cards ask --step`, `cards graph`, `watchdog --orphan-daemons --reap`).
+> The label was false. #740 and the #591 step graph first appear in **v0.55.0**
+> (`git tag --contains`); the remaining entries were NOT dated individually, so this heading
+> states the range rather than inventing a per-entry split. Sections for 0.50.0–0.55.0 were
+> never written at all — the file jumps 0.56.0 → 0.49.1. That gap is real and is not
+> reconstructed here.
 - board (#740): `cards edit --project ID|SLUG` re-homes a mis-filed card without losing its id, thread or links; the gateway gates it (orchestrator owning BOTH projects) and its 403 now names the caller's failing predicate (mesh-gateway PR for #740). Empty-edit refusal mentions `--project`.
 - board (#591 card step graph, contract v0.4.1): `cards ask` gains `--step/--needs/--hours/--holder P|me/--done` (holder optional: omitted = `requested`, another peer = `offered`, `me` = taken) and prints the gateway's §2 line, `warn` and `still missing`; new `cards graph <id>`; new `obligations take/decline/amend`; `obligations close --outcome skipped`; `cards move` prints the §4 gate's `warn`. Server side: mesh-gateway #148/#150/#152/#155/#157.
 
