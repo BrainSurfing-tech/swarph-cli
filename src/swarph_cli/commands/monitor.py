@@ -271,9 +271,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="target directory for --write (default /etc/systemd/system)",
     )
     install_reexec.add_argument(
+        "--on-failure", default=None, metavar="UNIT",
+        help="#807: write an OnFailure=UNIT drop-in for BOTH units (e.g. "
+             "mercury-alert@%%n.service). Box-local, so never baked into the template.",
+    )
+    install_reexec.add_argument(
         "--swarph-bin", default=None,
-        help="swarph executable for the oneshot (default: <home>/.local/bin/"
-             "swarph)",
+        help="swarph executable for the oneshot AND the binary whose interpreter "
+             "resolves the watched tree (default: <home>/.local/bin/swarph)",
     )
     install_reexec.add_argument(
         "--state-root", default=None,
@@ -1698,6 +1703,51 @@ def _cmd_clear_reexec_hold(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_consumed_tree(swarph_bin: str) -> tuple:
+    """#807: (interpreter, init_path, how) for the tree the swarph BINARY loads.
+    Reads the shim's shebang, asks that interpreter where swarph_cli lives. The
+    installer's own interpreter is the wrong witness (a pipx-run installer watched
+    the pipx tree while the monitors loaded the pip --user tree). Returns
+    (interpreter, None, why) when the shim or its interpreter cannot answer."""
+    import subprocess
+    try:
+        first = Path(swarph_bin).read_text(encoding="utf-8", errors="replace").splitlines()[0]
+    except (OSError, IndexError) as e:
+        return None, None, f"shim {swarph_bin} unreadable ({type(e).__name__})"
+    if not first.startswith("#!"):
+        return None, None, f"shim {swarph_bin} has no shebang"
+    parts = first[2:].strip().split()
+    interp = parts[-1] if parts and parts[0].endswith("/env") else parts[0]
+    # The child must see what the MONITORS see: no PYTHONPATH / PYTHONHOME from
+    # whoever runs the installer (a dev shell's PYTHONPATH=src would otherwise be
+    # reported as "the tree the monitors load" — the exact misreading this fixes).
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSAFEPATH")}
+    try:
+        r = subprocess.run([interp, "-c", "import swarph_cli, sys; print(swarph_cli.__file__)"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=20, env=env)
+    except (OSError, subprocess.SubprocessError) as e:
+        return interp, None, f"{interp} could not be asked ({type(e).__name__})"
+    if r.returncode != 0 or not r.stdout.strip():
+        return interp, None, f"{interp} cannot import swarph_cli (rc={r.returncode})"
+    return interp, r.stdout.strip().replace("\\", "/"), f"resolved from {swarph_bin} -> {interp}"
+
+
+def _live_tree():
+    """The tree the INSTALLER's own interpreter loads (a pipx-run installer reports the
+    pipx venv), asked through the same scrubbed child as the consumed tree, so a dev
+    shell's PYTHONPATH cannot leak in as a phantom install tree."""
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSAFEPATH")}
+    try:
+        r = subprocess.run([sys.executable, "-c", "import swarph_cli; print(swarph_cli.__file__)"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=20, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip().replace("\\", "/") if r.returncode == 0 and r.stdout.strip() else None
+
+
 def _cmd_install_reexec(args: argparse.Namespace) -> int:
     """Print or install the reexec .path/.service pair.
 
@@ -1715,22 +1765,31 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
             print(resources.files("swarph_cli").joinpath(*rel))
         return 0
 
-    spec = util.find_spec("swarph_cli")
-    if spec is None or not spec.origin:
-        raise RuntimeError("cannot resolve the installed swarph_cli package "
-                           "path — is this a broken install?")
-    init_path = spec.origin.replace("\\", "/")
     home = str(Path.home())
     swarph_bin = args.swarph_bin or f"{home}/.local/bin/swarph"
     state_root = args.state_root or f"{home}/swarph_state"
-
+    # #807: the watched tree is the one the MONITORS load — ask the shim's own
+    # interpreter, not the interpreter running this verb.
+    interpreter, init_path, how = _resolve_consumed_tree(swarph_bin)
+    live_init = _live_tree()
+    if init_path is None:
+        if live_init is None:
+            raise RuntimeError("cannot resolve the installed swarph_cli package "
+                               "path — is this a broken install?")
+        init_path, how = live_init, f"{how}; fell back to the LIVE interpreter"
+    extra_trees = [t for t in {live_init} if t and t != init_path]
     rendered = {}
     for name, rel in _REEXEC_TEMPLATES.items():
         text = _read_packaged(rel)
         out = (text
                .replace("<SITE_PACKAGES_INIT>", init_path)
+               .replace("<INTERPRETER>", interpreter or sys.executable)
                .replace("<SWARPH_BIN>", swarph_bin)
                .replace("<STATE_ROOT>", state_root))
+        if name.endswith(".path") and extra_trees:
+            out = out.replace(f"PathChanged={init_path}\n",
+                              f"PathChanged={init_path}\n"
+                              + "".join(f"PathChanged={t}\n" for t in extra_trees))
         left = sorted(set(re.findall(r"<[A-Z_]+>", out)))
         if left:
             raise RuntimeError(
@@ -1738,11 +1797,23 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
                 f"{', '.join(left)} — refusing to emit it")
         rendered[name] = out
 
+    dropins = {}
+    if args.on_failure:
+        for name in _REEXEC_TEMPLATES:
+            dropins[f"{name}.d/10-onfailure.conf"] = (
+                f"# #807: written by `swarph monitor install-reexec --on-failure`; box-local.\n"
+                f"[Unit]\nOnFailure={args.on_failure}\n")
     if not args.write:
         for name, text in rendered.items():
             print(f"# ── {name} ──")
             print(text, end="")
-        print(f"# watching: {init_path}")
+        for name, text in dropins.items():
+            print(f"# ── {name} ──")
+            print(text, end="")
+        print(f"# watching: {init_path} ({how})")
+        for t in extra_trees:
+            print(f"# also watching: {t} (a second install tree; the monitors do not load it)")
+        print(f"# import check: {interpreter or sys.executable} -c 'import swarph_cli'")
         print("# interpreter bump moves site-packages — re-run "
               "`swarph monitor install-reexec --write` after one")
         return 0
@@ -1760,7 +1831,15 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
     for name, text in rendered.items():
         (target_dir / name).write_text(text, encoding="utf-8")
         print(f"wrote {target_dir / name}")
-    print(f"watching: {init_path}")
+    for name, text in dropins.items():
+        (target_dir / name).parent.mkdir(parents=True, exist_ok=True)
+        (target_dir / name).write_text(text, encoding="utf-8")
+        print(f"wrote {target_dir / name}")
+    print(f"watching: {init_path} ({how})")
+    for t in extra_trees:
+        print(f"also watching: {t}")
+    print("next: systemctl daemon-reload && systemctl reset-failed swarph-monitor-reexec.path "
+          "swarph-monitor-reexec.service && systemctl enable --now swarph-monitor-reexec.path")
     print("next: systemctl enable --now swarph-monitor-reexec.path")
     print("NOTE: an interpreter bump moves site-packages — re-run this verb "
           "after one, or the watch goes silently dead (R2).")
