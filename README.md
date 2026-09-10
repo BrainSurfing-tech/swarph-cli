@@ -141,6 +141,10 @@ swarph board cards thread <id> [--limit N]     # the card's conversation (a card
 swarph board cards say <id> --content "…" [--to <peer>] [--kind fyi|question|answer|status|unblock]
 swarph board cards ask <id> "<what>" --step <step> --holder <peer>   # omit --holder to request the step; --holder me to take it; --done EVIDENCE to mint+take+close [--timeout-hours N]   # MINT an obligation:
                                               # name who owes what as a ROW, not a sentence (#307)
+swarph board cards confirm-flow <id> [--holder STEP=PEER]…  # CONFIRM the derived step flow:
+                                              # mints every mandatory step that has no row as an
+                                              # OFFER. The gateway refuses moves into spec/plan/
+                                              # build until this runs, and its refusal names it
 swarph board obligations close <id> --outcome <pass|fail|cannot_evaluate|skipped> --evidence "what you observed"
 ```
 
