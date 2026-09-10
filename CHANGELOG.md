@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- monitor (#807): the reexec control survives the reinstall that triggers it — `ExecCondition=` skips the run while `swarph_cli` is mid-swap (no failure, no restart budget spent; the .path re-fires when `__init__.py` is rewritten) and the budget can no longer latch `unit-start-limit-hit` inside one window; `install-reexec` resolves the watched tree from the swarph binary's OWN interpreter (the tree the monitors load), watches a second install tree if present, and `--on-failure UNIT` writes the OnFailure drop-in for both units. `scripts/probe_807_reexec.sh` is the can-fail.
+
 ## 0.57.0 — 2026-09-09
 - board (#802): `cards history <id>` — every card already carried its full `{stage, by, at}` trail and the gateway stamps the GATE DECISION into it on every move, but `stage_history` appeared ZERO times in the installed CLI, so a cell could not see when a card moved, who moved it, or what the gate said at the time. The data was 801/801 complete and unreadable. Prints ABSENT explicitly against a gateway predating the column, rather than rendering an empty trail as "never moved".
 
