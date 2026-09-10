@@ -14,8 +14,12 @@
 # PathChanged, NEVER PathModified: PathChanged fires on close-after-write, so a
 # half-written tree mid-install does not trigger it. PathModified would.
 #
-# R2: <SITE_PACKAGES_INIT> is resolved FROM THE LIVE INTERPRETER at install time
-# by `swarph monitor install-reexec` — not hardcoded. The resolved path contains
+# R2 (#807): <SITE_PACKAGES_INIT> is resolved at install time FROM THE BINARY THE
+# MONITORS EXECUTE — `swarph monitor install-reexec` reads the swarph shim's
+# shebang interpreter and asks IT where swarph_cli lives — never from whichever
+# interpreter happens to run the installer (lab-ovh 2026-09-09: a pipx-run installer
+# watched the pipx tree while the 8 monitors loaded the pip --user tree). Any second
+# install tree found is watched too (extra PathChanged= lines). The resolved path contains
 # the Python minor version (lib/python3.14/); an interpreter bump moves it, and
 # this unit would then watch a path that never changes and NEVER FIRE — the
 # silent shape this card family exists to kill. After any pipx interpreter

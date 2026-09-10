@@ -120,49 +120,26 @@ def test_oneshot_timeout_outlasts_a_full_fleet_stagger():
     assert seconds >= 180, f"{raw!r} is still shorter than a full-fleet stagger"
 
 
-def test_oneshot_retries_through_the_pipx_shim_race():
-    """R7: PathChanged fires when pipx closes __init__.py, BEFORE the
-    ~/.local/bin/swarph shim is restored. Without Restart=on-failure the
-    oneshot dies 203/EXEC once and the .path unit stays green while the
-    fleet stays stale (lab-ovh 2026-08-30). Restart=always is refused for
-    Type=oneshot — on-failure is the legal retry.
-
-    A 203/EXEC fails instantly, so coverage is (Burst-1)*RestartSec. The
-    measured shim gap on lab-ovh was ~120s; drop's review pins coverage
-    >= 240s (2x floor) and Interval > that span so the limit is not reset
-    mid-gap. Presence of the keys alone is not enough — arithmetic must hold.
-    """
+def test_oneshot_survives_the_reinstall_window_by_condition_not_by_budget():
+    """R7 rewritten by #807. The old answer was a retry budget: 17 x 15 s inside a
+    300 s window = 255 s of retries by construction, so ONE reinstall latched the
+    unit `unit-start-limit-hit` (lab-ovh 2026-09-07 04:40:00Z, 18 min after v0.55.0).
+    The new answer: ExecCondition= imports the package with the shim's interpreter —
+    mid-swap the unit is SKIPPED, not failed — and the budget cannot be spent inside
+    one window: at most two starts per StartLimitIntervalSec."""
     text = monitor._read_packaged(("systemd", "swarph-monitor-reexec.service"))
     assert "Type=oneshot" in text
-    restarts = [ln for ln in text.splitlines() if ln.startswith("Restart=")]
-    assert restarts == ["Restart=on-failure"], restarts
-
-    def _sec(key: str) -> float:
-        lines = [ln for ln in text.splitlines() if ln.startswith(f"{key}=")]
-        assert lines, f"{key}= missing"
-        raw = lines[0].split("=", 1)[1].strip().lower()
-        if raw.endswith("min"):
-            return float(raw[:-3]) * 60
-        return float(raw.rstrip("s"))
-
-    restart_sec = _sec("RestartSec")
-    burst_lines = [ln for ln in text.splitlines() if ln.startswith("StartLimitBurst=")]
-    assert burst_lines, "StartLimitBurst= missing"
-    burst = int(burst_lines[0].split("=", 1)[1].strip())
-    interval = _sec("StartLimitIntervalSec")
-    coverage = (burst - 1) * restart_sec
-    assert coverage >= 240, (
-        f"retry coverage {coverage}s = ({burst}-1)*{restart_sec}s is shorter "
-        f"than the 240s floor (2x the measured 120s shim gap)")
-    assert interval > coverage, (
-        f"StartLimitIntervalSec={interval} must exceed coverage span {coverage} "
-        f"or the burst resets mid-gap and never terminates")
-    # Box-local alerters (mercury-alert@) must NOT be baked into the template
-    # as a live directive (a comment naming the drop-in pattern is fine).
-    live = [ln for ln in text.splitlines()
-            if ln.startswith("OnFailure=")]
-    assert not live, (
-        f"OnFailure= couples every install to one box's alerter — use a drop-in: {live}")
+    assert [ln for ln in text.splitlines() if ln.startswith("Restart=")] == ["Restart=on-failure"]
+    cond = [ln for ln in text.splitlines() if ln.startswith("ExecCondition=")]
+    assert cond == ['ExecCondition=<INTERPRETER> -c "import swarph_cli"'], cond
+    def _sec(key):
+        raw = [ln for ln in text.splitlines() if ln.startswith(f"{key}=")][0].split("=", 1)[1].strip().lower()
+        return float(raw[:-3]) * 60 if raw.endswith("min") else float(raw.rstrip("s"))
+    restart_sec, interval = _sec("RestartSec"), _sec("StartLimitIntervalSec")
+    burst = int([ln for ln in text.splitlines() if ln.startswith("StartLimitBurst=")][0].split("=", 1)[1])
+    assert burst >= 2 and interval <= 2 * restart_sec, (
+        f"latchable: {burst} starts at RestartSec={restart_sec}s fit inside {interval}s")
+    assert not [ln for ln in text.splitlines() if ln.startswith("OnFailure=")]   # drop-in, never baked in
 
 
 def test_path_unit_uses_pathchanged_never_pathmodified():
@@ -175,20 +152,60 @@ def test_path_unit_uses_pathchanged_never_pathmodified():
     assert "Unit=swarph-monitor-reexec.service" in directives
 
 
-def test_watched_path_is_resolved_not_hardcoded(monkeypatch, capsys):
-    """R2: the rendered unit carries whatever the LIVE interpreter reports —
-    the test substitutes a different python version's path and the unit must
-    follow it. A hardcoded path cannot pass this."""
-    class _Spec:
-        origin = "/other/lib/python3.99/site-packages/swarph_cli/__init__.py"
-    # the verb imports importlib.util inside the call — patch the source module
-    import importlib.util as iu
-    monkeypatch.setattr(iu, "find_spec", lambda name: _Spec())
-    rc = monitor.run_monitor(["install-reexec"])
+def _fake_shim(tmp_path: Path, reported: str) -> Path:
+    """A swarph shim whose shebang names a fake interpreter that reports `reported`
+    as the swarph_cli __init__ — the tree THAT binary would load."""
+    interp = tmp_path / "fake-python"
+    interp.write_text(f"#!/bin/sh\necho '{reported}'\n")
+    interp.chmod(0o755)
+    shim = tmp_path / "swarph"
+    shim.write_text(f"#!{interp}\n# fake shim\n")
+    shim.chmod(0o755)
+    return shim
+
+
+@pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
+def test_807_watched_tree_comes_from_the_binary_the_monitors_execute(tmp_path, capsys, monkeypatch):
+    """The installer's own interpreter is the wrong witness: on lab-ovh a pipx-run
+    installer watched the pipx tree while the 8 monitors loaded the pip --user tree.
+    The shim's shebang interpreter is asked; a differing live tree is watched too."""
+    shim = _fake_shim(tmp_path, "/consumed/site-packages/swarph_cli/__init__.py")
+    # the INSTALLER's interpreter reports a different tree (the pipx venv)
+    monkeypatch.setattr(monitor, "_live_tree", lambda: "/pipx/venv/site-packages/swarph_cli/__init__.py")
+    rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "PathChanged=/other/lib/python3.99/site-packages/swarph_cli/__init__.py" in out
+    assert "PathChanged=/consumed/site-packages/swarph_cli/__init__.py" in out
+    assert "PathChanged=/pipx/venv/site-packages/swarph_cli/__init__.py" in out
+    assert f'ExecCondition={tmp_path}/fake-python -c "import swarph_cli"' in out
+    assert "resolved from" in out and "also watching" in out
 
+
+@pytest.mark.skipif(os.name == "nt", reason="drop-ins are systemd")
+def test_807_on_failure_writes_a_dropin_for_both_units(tmp_path, capsys):
+    shim = _fake_shim(tmp_path, "/consumed/swarph_cli/__init__.py")
+    target = tmp_path / "units"; target.mkdir()
+    rc = monitor.run_monitor(["install-reexec", "--write", "--dir", str(target), "--swarph-bin", str(shim),
+                              "--on-failure", "mercury-alert@%n.service"])
+    assert rc == 0, capsys.readouterr()
+    for unit in ("swarph-monitor-reexec.path", "swarph-monitor-reexec.service"):
+        conf = (target / f"{unit}.d" / "10-onfailure.conf").read_text()
+        assert "[Unit]\nOnFailure=mercury-alert@%n.service" in conf
+    assert "next: systemctl daemon-reload && systemctl reset-failed" in capsys.readouterr().out
+
+
+def test_watched_path_is_resolved_not_hardcoded(tmp_path, monkeypatch, capsys):
+    """R2 (#654, tightened by #807): the rendered unit carries whatever the swarph
+    BINARY's interpreter reports — never a literal baked into the template."""
+    if os.name == "nt":
+        pytest.skip("shebang resolution is POSIX")
+    shim = _fake_shim(tmp_path, "/fake/live/site-packages/swarph_cli/__init__.py")
+    monkeypatch.setattr(monitor, "_live_tree", lambda: None)
+    rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "PathChanged=/fake/live/site-packages/swarph_cli/__init__.py" in out
+    assert "<SITE_PACKAGES_INIT>" not in out and "<INTERPRETER>" not in out
 
 def test_install_reexec_names_the_interpreter_bump_caveat(capsys):
     rc = monitor.run_monitor(["install-reexec"])
@@ -397,3 +414,14 @@ def test_hold_requires_a_reason(capsys):
     rc = monitor.run_monitor(["hold-reexec", "--reason", "  "])
     assert rc == 2
     assert "reason" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
+def test_807_resolver_ignores_the_installers_pythonpath(tmp_path, monkeypatch):
+    """A dev shell's PYTHONPATH must not be reported as the tree the monitors load."""
+    interp = tmp_path / "fake-python"
+    interp.write_text("#!/bin/sh\necho \"pythonpath=${PYTHONPATH:-unset}\"\n"); interp.chmod(0o755)
+    shim = tmp_path / "swarph"; shim.write_text(f"#!{interp}\n"); shim.chmod(0o755)
+    monkeypatch.setenv("PYTHONPATH", "/dev/shell/src")
+    interp_out, init_path, how = monitor._resolve_consumed_tree(str(shim))
+    assert init_path == "pythonpath=unset", (init_path, how)
