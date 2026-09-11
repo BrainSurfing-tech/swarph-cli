@@ -62,3 +62,24 @@ def test_outcome_labels_turn_window(monkeypatch, tmp_path):
         .read_text(encoding="utf-8").splitlines()[0])
     assert row["subsequent_window"] == "turn"
     assert "per-turn" in row["subsequent_means"]
+
+
+def test_pending_compacts_when_closed_exceed_threshold(monkeypatch, tmp_path):
+    """Lab #829 follow-up: closed rows are dead weight; rewrite to opens, never a tail bound."""
+    home = _home(monkeypatch, tmp_path)
+    monkeypatch.setattr(ch, "_PENDING_CLOSED_COMPACT", 5)
+    for i in range(6):
+        ch._append_pending("cursor-win", {
+            "kind": "closed",
+            "firing_id": f"dead-{i}",
+            "subsequent": "neither",
+            "session_id": "s1",
+        })
+    ch.register_pending_firing("cursor-win", "still-open", "s2")
+    live = ch._open_pendings("cursor-win")
+    assert {o["firing_id"] for o in live} == {"still-open"}
+    path = Path(home) / "swarph_state" / "cursor-win" / "codegraph-hook-pending.jsonl"
+    lines = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert all(r["kind"] == "open" for r in lines)
+    assert len(lines) == 1
+    assert lines[0]["firing_id"] == "still-open"

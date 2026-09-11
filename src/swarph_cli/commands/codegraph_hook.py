@@ -164,6 +164,12 @@ def _pending_path(self_name: str) -> Path:
     return Path.home() / "swarph_state" / self_name / "codegraph-hook-pending.jsonl"
 
 
+# Compact when this many closed rows have accumulated (#829 follow-up from lab):
+# Stop re-scans the whole file every turn; dead closed lines are unbounded otherwise.
+# Rewrite to open rows only — never a tail bound (that was the lossy shape we removed).
+_PENDING_CLOSED_COMPACT = 200
+
+
 def write_audit(self_name: str, record: dict) -> None:
     if not self_name:
         return
@@ -190,11 +196,40 @@ def _append_pending(self_name: str, record: dict) -> None:
         pass
 
 
+def _rewrite_pending_opens(self_name: str, opens: list) -> None:
+    """Drop closed dead weight — keep only still-open rows (append-only safe)."""
+    path = _pending_path(self_name)
+    tmp = path.with_suffix(".jsonl.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", encoding="utf-8") as f:
+            for r in opens:
+                row = {
+                    "ts": r.get("ts") or datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"),
+                    "kind": "open",
+                    "firing_id": r.get("firing_id"),
+                    "session_id": r.get("session_id") or "",
+                }
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _open_pendings(self_name: str) -> list:
-    """Open firings not yet closed — scan append-only JSONL (#829)."""
+    """Open firings not yet closed — scan append-only JSONL (#829).
+
+    When closed entries exceed ``_PENDING_CLOSED_COMPACT``, rewrite the file to
+    its live open rows so Stop's per-turn scan stays O(open), not O(history).
+    """
     path = _pending_path(self_name)
     closed: set = set()
     opens: list = []
+    n_closed = 0
     try:
         with path.open(encoding="utf-8") as f:
             for line in f:
@@ -207,12 +242,16 @@ def _open_pendings(self_name: str) -> list:
                     continue
                 kind = r.get("kind")
                 if kind == "closed":
+                    n_closed += 1
                     closed.add(r.get("firing_id"))
                 elif kind == "open":
                     opens.append(r)
     except OSError:
         return []
-    return [o for o in opens if o.get("firing_id") not in closed]
+    live = [o for o in opens if o.get("firing_id") not in closed]
+    if n_closed >= _PENDING_CLOSED_COMPACT:
+        _rewrite_pending_opens(self_name, live)
+    return live
 
 
 def register_pending_firing(self_name: str, firing_id: str, session_id: str) -> None:
