@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- codegraph-hook (#829): when closed pending rows exceed 200, rewrite the JSONL to its still-open rows — Stop re-scans every turn; unbounded closed dead weight was the trade the append-only fix introduced. No tail bound (that was the lossy shape).
 - codegraph-hook (#829): empty `session_id` resolves nothing (not every pending row); pendings are append-only JSONL (no unlocked RMW); outcome rows label `subsequent_window=turn` so `neither` is not read as "session never used the graph".
 - codegraph-hook (#825): UserPromptSubmit on coding keywords (steers tool choice — PostToolUse can only annotate); keep PostToolUse/Bash initially for a shared audit series. Audit JSONL records every firing plus the counterfactual outcome (subsequent grep / codegraph / neither). Relevance floor suppresses blocks with no name hit; Bash shred-skip kept for regex debris. The 60% retention guess is deleted for prompts.
 
