@@ -597,6 +597,8 @@ def _probe_path_handler_events() -> frozenset | None:
             ["swarph", "codegraph-hook", "--supported-events"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             stdin=subprocess.DEVNULL,
         )
