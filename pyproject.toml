@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "swarph-cli"
-version = "0.58.0"
+version = "0.59.0"
 description = "The `swarph` binary — a multi-LLM CLI and mesh-gateway client + bundled server (`swarph gateway`): one-shot prompts across providers, interactive `chat`, multi-provider `spawn` (claude/codex/antigravity via a ProviderMembrane with subprocess billing-scrub), `mesh` send/inbox/register, `brain-ask` over the swarph-brain (gbrain) semantic memory, git-backed `assisted_memory`, per-invocation `gh` identity routing, a silent DM-wake hook, session `import`, and a stranded-session `watchdog`."
 readme = "README.md"
 license = { text = "MIT" }
@@ -64,7 +64,11 @@ dependencies = [
     # 0.7.0 adds the provider-extension API used to enable Muse alongside its
     # matching membrane. The upper bound is load-bearing: it turns an unknown
     # future shared API into a resolver conflict before startup.
-    "swarph-shared>=0.7.0,<0.8",
+    #
+    # >>> RAISED TO <0.9 ON 2026-09-11. <<< swarph-shared 0.8.1 is on PyPI
+    # (llm_cost price-base honesty) and <0.8 excluded it EXACTLY — same trap
+    # as the mesh pin above. Lower bound stays 0.7.0 (the Muse extension API).
+    "swarph-shared>=0.7.0,<0.9",
     # Phase 7 spawn — cell.yaml parser. PyYAML 6.x is the standard.
     # Stays a swarph-cli dep since file I/O is operator-tooling-layer
     # concern; swarph-shared cell module is pure-stdlib.
