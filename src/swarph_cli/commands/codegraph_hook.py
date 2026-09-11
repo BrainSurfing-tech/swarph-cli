@@ -452,8 +452,19 @@ def supported_hook_events() -> frozenset:
 
 
 def run_codegraph_hook(argv: Optional[list] = None) -> int:
-    """ALWAYS exits 0 — must never fail a turn."""
+    """ALWAYS exits 0 on hook stdin — must never fail a turn.
+
+    ``--supported-events`` is the out-of-process advertise path for
+    ``swarph hooks add`` (#830): prints one event name per line and exits 0
+    without reading stdin. Installers MUST invoke this via PATH ``swarph``,
+    not an in-process import — same late binding as the generated hook script.
+    """
     argv = list(argv or [])
+    if "--supported-events" in argv:
+        for name in sorted(supported_hook_events()):
+            print(name)
+        return 0
+
     self_name = os.environ.get("SWARPH_SELF", "").strip()
     gateway = env_gateway()
     for i, a in enumerate(argv):

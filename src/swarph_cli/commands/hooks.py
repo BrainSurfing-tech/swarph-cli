@@ -42,6 +42,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -583,16 +584,40 @@ def _read_script_bundle_version(script_path: Path) -> str | None:
     return m.group(1) if m else None
 
 
-def _handler_missing_events(required: tuple) -> tuple[frozenset, frozenset]:
-    """Return (advertised, missing) for the late-bound codegraph handler (#830).
+def _probe_path_handler_events() -> frozenset | None:
+    """Ask PATH's ``swarph codegraph-hook --supported-events`` (#830).
 
-    Bundles with empty ``handler_events`` skip this gate. Today only
-    ``codegraph-on-grep`` advertises; the import is the running package on
-    PATH's peer — i.e. the same interpreter that will execute the hook.
+    Same late-bound name the generated script ``exec``s. An in-process import
+    cannot see install-vs-PATH skew — measured on lab-ovh after #408. Returns
+    ``None`` when the probe cannot run; empty frozenset when the handler
+    answers with no lines (old binary that ignores the flag and prints nothing).
     """
-    from swarph_cli.commands.codegraph_hook import supported_hook_events
+    try:
+        proc = subprocess.run(
+            ["swarph", "codegraph-hook", "--supported-events"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return frozenset(
+        ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()
+    )
 
-    advertised = supported_hook_events()
+
+def _handler_missing_events(required: tuple) -> tuple[frozenset, frozenset]:
+    """Return (advertised, missing) via PATH probe — not an in-process import.
+
+    Bundles with empty ``handler_events`` skip this gate. A failed probe is
+    treated as advertising nothing so install fails closed.
+    """
+    advertised = _probe_path_handler_events()
+    if advertised is None:
+        return frozenset(), frozenset(required)
     return advertised, frozenset(required) - advertised
 
 
@@ -650,16 +675,18 @@ def install_hook(
         out("  Install Git for Windows, then re-run — nothing was written.")
         return 1
 
-    # #830: refuse bindings the RUNNING handler cannot advertise. Code must
-    # land before or with bindings — never after.
+    # #830: refuse bindings PATH's handler cannot advertise. Probe out of
+    # process (same ``swarph`` name the script will exec) — an in-process
+    # import is inert against install/PATH skew. Code must land before or
+    # with bindings, never after.
     if bundle.handler_events:
         advertised, missing = _handler_missing_events(bundle.handler_events)
         if missing:
-            out(f"cannot install {bundle.name}: running handler does not "
-                f"advertise events {sorted(missing)}.")
+            out(f"cannot install {bundle.name}: PATH's swarph codegraph-hook "
+                f"does not advertise events {sorted(missing)}.")
             out(f"  handler advertises: {sorted(advertised) or '(none)'}")
-            out("  Upgrade swarph-cli so the handler supports these events, "
-                "then re-run — nothing was written (#830).")
+            out("  Upgrade the swarph on PATH so the handler supports these "
+                "events, then re-run — nothing was written (#830).")
             return 1
 
     command = _hook_command_path(script_dst)

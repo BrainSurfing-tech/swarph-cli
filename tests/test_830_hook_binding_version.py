@@ -63,6 +63,11 @@ def test_known_posttooluse_still_takes_bash_path(monkeypatch, capsys):
 def test_install_stamps_bundle_version(tmp_path, monkeypatch):
     if hooks.sys.platform == "win32":
         monkeypatch.setattr(hooks, "_find_windows_bash", lambda: Path("C:/Git/bash.exe"))
+    # PATH may still be an older wheel; do not let that fail this unit.
+    monkeypatch.setattr(
+        hooks, "_probe_path_handler_events",
+        lambda: frozenset(hooks.resolve_builtin("codegraph-on-grep").handler_events),
+    )
     settings = tmp_path / "settings.json"
     settings.write_text("{}", encoding="utf-8")
     home = tmp_path / "hooks"
@@ -82,6 +87,10 @@ def test_install_stamps_bundle_version(tmp_path, monkeypatch):
 def test_list_reports_version_mismatch(tmp_path, monkeypatch):
     if hooks.sys.platform == "win32":
         monkeypatch.setattr(hooks, "_find_windows_bash", lambda: Path("C:/Git/bash.exe"))
+    monkeypatch.setattr(
+        hooks, "_probe_path_handler_events",
+        lambda: frozenset(hooks.resolve_builtin("codegraph-on-grep").handler_events),
+    )
     settings = tmp_path / "settings.json"
     settings.write_text("{}", encoding="utf-8")
     home = tmp_path / "hooks"
@@ -108,11 +117,18 @@ def test_list_reports_version_mismatch(tmp_path, monkeypatch):
     assert "0.0.0-stale" in blob
 
 
+def test_supported_events_flag_prints_one_per_line(capsys):
+    assert ch.run_codegraph_hook(["--supported-events"]) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert set(lines) == set(ch.supported_hook_events())
+
+
 def test_install_refuses_when_handler_missing_events(tmp_path, monkeypatch):
     if hooks.sys.platform == "win32":
         monkeypatch.setattr(hooks, "_find_windows_bash", lambda: Path("C:/Git/bash.exe"))
+    # Probe PATH's swarph — not an in-process import (#830 follow-up / lab 38094).
     monkeypatch.setattr(
-        "swarph_cli.commands.codegraph_hook.supported_hook_events",
+        hooks, "_probe_path_handler_events",
         lambda: frozenset({"PostToolUse"}),  # missing UserPromptSubmit/Stop*
     )
     settings = tmp_path / "settings.json"
@@ -129,3 +145,25 @@ def test_install_refuses_when_handler_missing_events(tmp_path, monkeypatch):
     blob = "\n".join(lines)
     assert "does not advertise" in blob
     assert "UserPromptSubmit" in blob
+
+
+def test_probe_invokes_path_swarph_not_import(monkeypatch):
+    """>>> THE LOAD-BEARING SHAPE. <<< In-process import is inert against PATH skew."""
+    calls: list = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "PostToolUse\nStop\n"
+        stderr = ""
+
+    def _run(argv, **kwargs):
+        calls.append((list(argv), kwargs.get("stdin")))
+        return _Proc()
+
+    monkeypatch.setattr(hooks.subprocess, "run", _run)
+    advertised, missing = hooks._handler_missing_events(
+        ("UserPromptSubmit", "PostToolUse", "Stop"),
+    )
+    assert calls and calls[0][0][:3] == ["swarph", "codegraph-hook", "--supported-events"]
+    assert advertised == frozenset({"PostToolUse", "Stop"})
+    assert missing == frozenset({"UserPromptSubmit"})
