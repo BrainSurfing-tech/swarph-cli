@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- codegraph-hook (#825): UserPromptSubmit on coding keywords (steers tool choice — PostToolUse can only annotate); keep PostToolUse/Bash initially for a shared audit series. Audit JSONL records every firing plus the counterfactual outcome (subsequent grep / codegraph / neither). Relevance floor suppresses blocks with no name hit; Bash shred-skip kept for regex debris. The 60% retention guess is deleted for prompts.
+
 ## 0.58.0 — 2026-09-10
 - monitor (#807): the reexec control survives the reinstall that triggers it — `ExecCondition=` skips the run while `swarph_cli` is mid-swap (no failure, no restart budget spent; the .path re-fires when `__init__.py` is rewritten) and the budget can no longer latch `unit-start-limit-hit` inside one window; `install-reexec` resolves the watched tree from the swarph binary's OWN interpreter (the tree the monitors load), watches a second install tree if present, and `--on-failure UNIT` writes the OnFailure drop-in for both units. `scripts/probe_807_reexec.sh` is the can-fail.
 - `swarph board cards confirm-flow <id> [--holder STEP=PEER]... [--what ...]` (#801): confirm a card's derived step flow — the gateway mints every mandatory step that has no row as an OFFER to its holder (the default derived from live grants, or the override). The gateway refuses moves into spec/plan/build until the flow is confirmed, and its refusal names this verb; `cards graph` now prints each missing step's provisional `default→peer` and a `flow:` header naming the act.

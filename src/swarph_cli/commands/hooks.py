@@ -176,23 +176,19 @@ exit 0
 """
 
 
-# The bundled codegraph-on-grep script (card #194). Deliberately a THIN WRAPPER
-# around `swarph codegraph-hook` rather than fat inline shell: the trigger
-# heuristics are the hard-won part — each guard in that module exists because a
-# LOOSER version misfired in production (a heredoc delimiter extracted as the
-# search term; a quoted string lifted out of unrelated prose) — and heuristics
-# that specific must be unit-testable, which inline sh is not. Same pattern as
-# `install-hook`, which points at `swarph hook-output`.
+# The bundled codegraph hook (cards #194 + #825). Thin wrapper around
+# `swarph codegraph-hook` so heuristics stay unit-testable.
 #
-# `exec` so the hook process IS the handler, and the verb always exits 0: a
-# PostToolUse hook must never fail a turn.
+# #825: UserPromptSubmit is the load-bearing binding — fires while tool choice
+# is still open. PostToolUse/Bash is kept initially for a shared audit series
+# (drop later if audit shows zero influence). Stop/StopFailure close the
+# counterfactual (subsequent=neither).
 _CODEGRAPH_ON_GREP_SH = r"""#!/bin/sh
-# codegraph-on-grep.sh — swarph bundled Claude Code hook (PostToolUse/Bash).
+# codegraph-on-grep.sh — swarph bundled Claude Code hook (#194 + #825).
 #
-# When a grep/rg searches CODE, also ask the gateway's structural codegraph and
-# hand the symbol-level answer back as context. Supplements grep, never blocks it.
-# All logic lives in `swarph codegraph-hook` so it can be tested; see that module
-# for why each trigger guard exists.
+# UserPromptSubmit: coding keywords in the prompt → structural codegraph context
+# before a tool is chosen. PostToolUse/Bash: annotate code greps (shared audit).
+# Stop/StopFailure: record whether the session grepped, called codegraph, or neither.
 exec swarph codegraph-hook "$@"
 """
 
@@ -200,9 +196,10 @@ BUILTIN_HOOKS: dict = {
     "codegraph-on-grep": HookBundle(
         name="codegraph-on-grep",
         description=(
-            "When a grep/rg searches code, also queries the gateway's structural "
-            "codegraph and injects the symbol-level answer (definitions, file:line, "
-            "caller counts) as context. Supplements grep; never blocks it. Reports "
+            "On UserPromptSubmit (coding keywords) and PostToolUse/Bash (code "
+            "grep), queries the gateway's structural codegraph and injects "
+            "symbol-level answers. Prompt path steers tool choice; Bash path "
+            "annotates. Audits counterfactual outcomes. Never blocks. Reports "
             "an unavailable index LOUDLY rather than as 'no matches'."
         ),
         publisher="swarph-builtin",
@@ -210,7 +207,10 @@ BUILTIN_HOOKS: dict = {
         script_name="codegraph-on-grep.sh",
         script_body=_CODEGRAPH_ON_GREP_SH,
         bindings=(
+            HookBinding("UserPromptSubmit", ""),
             HookBinding("PostToolUse", "Bash"),
+            HookBinding("Stop", ""),
+            HookBinding("StopFailure", ""),
         ),
     ),
     "cell-resilience": HookBundle(
