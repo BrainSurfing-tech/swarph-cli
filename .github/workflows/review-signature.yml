@@ -1,0 +1,141 @@
+# review-signature.yml — a shared-credential approval must name the cell behind it.
+#
+# Board card #668; PORTED FROM lab-orchestrator 2026-09-11 under card #831.
+#
+# WHY HERE, AND WHY NOW: 79% of this repo's reviews are submitted through the shared
+# `reviewers-pixel` login (2026-09-02 sweep of 484 merged PRs across mesh-gateway and
+# swarph-cli), and one box alone holds four gh logins including it — so an approval's
+# login does not identify the actor. The incident that forced this port sits in the
+# sibling repo: swarph-mesh#37 was built by drop-on-meta-edge and verified
+# independently by lab-ovh, and GitHub could record neither fact — one shared
+# credential, so the second party's approval was refused as self-approval and the
+# merge shows one identity doing everything (card #831).
+#
+# UNLIKE ITS SIBLINGS, THIS REPO ALREADY HAS TEETH — but not these. main is protected
+# (measured 2026-09-11): `required_approving_review_count: 1`,
+# `require_last_push_approval: true`, and five required checks (4x pytest + the
+# secrets scan). `require_last_push_approval` enforces "the approver is not the same
+# LOGIN as the pusher" — it cannot enforce "not the same ACTOR" while one credential
+# is shared by several cells. That is the half GitHub cannot see and the half this
+# gate is for.
+#
+# >>> THIS FILE ALONE ENFORCES NOTHING YET. <<< `review-signature` is not in
+# `required_status_checks`, so it will go red on an unsigned approval and the merge
+# button will stay green. Making it binding is one admin act — adding the check to
+# the required contexts — which changes every cell's merge path and is not bundled
+# into this PR. Card #831 names it as the commander's decision.
+#
+# WHAT IT ENFORCES: the PRESENCE of attribution, not its TRUTH. The trailer is
+# self-declared and forgeable by anyone holding the credential. It turns "unknowable"
+# into "claimed" — an unsigned approval leaves nobody to ask, a signed one does not.
+# Do not cite a green check here as proof a particular cell reviewed anything.
+#
+# GREEN WITH ZERO APPROVALS IS CORRECT, not a hole: `required_approving_review_count`
+# is what requires an approval to exist. If this gate also went red on an unreviewed
+# PR, every fresh PR would carry a red that means nothing, and a red that always means
+# nothing is how a gate becomes decoration (see parity.yml's header for what that
+# costs — an expected-red outlived its reason by a fortnight and six divergences
+# landed behind it).
+#
+# NO CHECKOUT ON PURPOSE. The config is read from the BASE REF via the contents API.
+# A `pull_request` run checks out the MERGE COMMIT, which carries the PR's own copy of
+# .github/mesh-review-signing.json — a PR that widened its own allowlist would be
+# graded against the widened list. A gate must consult a source the thing under test
+# cannot write. (Residual, shared with every required check including pytest: the
+# workflow FILE itself comes from the PR on `pull_request` runs. Accepted, named here
+# so it is not a surprise later.)
+#
+# Never `pull_request_target` (that would run PR-authored code with base secrets), no
+# `continue-on-error`, no `|| true`. A softened gate is the non-gate this replaces.
+name: review-signature
+
+on:
+  # Both triggers are load-bearing. `pull_request` puts the check on every head SHA so
+  # the required-context machinery can see it; `pull_request_review` re-evaluates when
+  # an approval lands, is EDITED (that is the documented way to clear a failure without
+  # a new commit), or is dismissed.
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  signature:
+    name: shared-credential approvals name a cell
+    runs-on: ubuntu-latest
+    steps:
+      # BOOTSTRAP WINDOW. Reading the checker from the base ref is the whole security
+      # property (a PR must not grade itself), but it means the PR that INTRODUCES this
+      # gate cannot find it on the base ref — the gate's first run 404'd on exactly
+      # that, which is how this step came to exist. A new control is a new precondition.
+      #
+      # Absent-on-base is therefore split into two states, and only one of them passes:
+      #   · this PR ADDS the checker  -> bootstrap, pass once, loudly
+      #   · it does not              -> FAIL. The gate was deleted, moved, or renamed on
+      #                                 the base branch, and a missing gate that passes
+      #                                 is fail-open — the exact failure this repo's
+      #                                 parity.yml header exists to warn about.
+      - name: Resolve the checker from the base ref
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$REPO/contents/tools/check_review_signature.py?ref=$BASE_REF" \
+               -q .content 2>/dev/null | base64 -d > /tmp/check_review_signature.py \
+             && test -s /tmp/check_review_signature.py; then
+            echo "checker read from base ref '$BASE_REF'"
+            echo "bootstrap=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "tools/check_review_signature.py is ABSENT on base ref '$BASE_REF'."
+          # Absent is not one state. A gate that has NEVER existed on this ref is a
+          # genuine bootstrap and happens exactly once in the repo's life. A gate that
+          # existed and was REMOVED is the standing re-introduction path drop-on-meta-edge
+          # named on #145: delete the gate in one signed merge, re-add it weakened in a
+          # second, and the second is graded by nobody — precisely the "PR grades itself"
+          # this workflow's header forbids. The path's commit history tells them apart.
+          # NO `|| echo 0` HERE. This lookup is the only thing separating a genuine
+          # bootstrap from a deleted gate, and mapping an API failure onto "never
+          # existed" would make the backstop's ERROR MODE the exact state it refuses —
+          # a transient 5xx would hand back the bypass. drop-on-meta-edge, #145 item 4.
+          if ! history=$(gh api "repos/$REPO/commits?path=tools/check_review_signature.py&sha=$BASE_REF&per_page=1" -q 'length'); then
+            echo "FAILING: could not read the checker's history on '$BASE_REF'."
+            echo "An unreadable answer is not 'never existed'. Re-run when the API is healthy."
+            exit 1
+          fi
+          if [ "${history:-1}" -ne 0 ]; then
+            echo "FAILING: the checker HAS history on '$BASE_REF' ($history commit(s) touched it)"
+            echo "and is absent now. It was deleted, moved, or renamed. This is not a bootstrap;"
+            echo "restore it on '$BASE_REF' — a removed gate must never re-enter ungraded."
+            exit 1
+          fi
+          added=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate -q '.[].filename' \
+                  | grep -cx -e 'tools/check_review_signature.py' -e '.github/mesh-review-signing.json' || true)
+          if [ "$added" -ge 2 ]; then
+            echo "BOOTSTRAP: the checker has NEVER existed on '$BASE_REF' and this PR"
+            echo "introduces it with its config. Passing once, and only once ever."
+            echo "Every later PR is graded against the copy on '$BASE_REF'."
+            echo "bootstrap=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "FAILING: the checker is missing on '$BASE_REF' and this PR does not add it"
+          echo "(found $added of the 2 required paths). The gate has been deleted, moved,"
+          echo "or renamed on the base branch. A missing gate must not pass."
+          exit 1
+
+      - name: Check
+        if: steps.resolve.outputs.bootstrap != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: python3 /tmp/check_review_signature.py
