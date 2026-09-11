@@ -591,6 +591,14 @@ def _probe_path_handler_events() -> frozenset | None:
     cannot see install-vs-PATH skew — measured on lab-ovh after #408. Returns
     ``None`` when the probe cannot run; empty frozenset when the handler
     answers with no lines (old binary that ignores the flag and prints nothing).
+
+    Empty is NOT "handler was asked and supports nothing" as distinct evidence:
+    an old handler silently ignores the unknown flag, reads stdin, finds no
+    tool_input, and exits 0 with blank stdout — #830's own silent-success defect
+    answering this probe. That empty, a genuine empty advertise, and a failed
+    probe (``None`` → treated as empty below) all fail the gate closed; the
+    operator message names the likely cause. Do not read empty as a successful
+    negotiation.
     """
     try:
         proc = subprocess.run(
