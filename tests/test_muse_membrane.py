@@ -86,4 +86,4 @@ def test_muse_release_requires_the_shared_compatibility_boundary():
     text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
         encoding="utf-8"
     )
-    assert '"swarph-shared>=0.7.0,<0.8"' in text
+    assert '"swarph-shared>=0.7.0,<0.9"' in text
