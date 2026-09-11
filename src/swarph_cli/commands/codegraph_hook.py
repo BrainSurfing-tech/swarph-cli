@@ -160,7 +160,8 @@ def _audit_path(self_name: str) -> Path:
 
 
 def _pending_path(self_name: str) -> Path:
-    return Path.home() / "swarph_state" / self_name / "codegraph-hook-pending.json"
+    """Append-only JSONL (#829) — unlocked RMW on a shared JSON file lost rows."""
+    return Path.home() / "swarph_state" / self_name / "codegraph-hook-pending.jsonl"
 
 
 def write_audit(self_name: str, record: dict) -> None:
@@ -177,29 +178,51 @@ def write_audit(self_name: str, record: dict) -> None:
         pass
 
 
-def _load_pending(self_name: str) -> list:
-    path = _pending_path(self_name)
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-
-
-def _save_pending(self_name: str, rows: list) -> None:
+def _append_pending(self_name: str, record: dict) -> None:
     path = _pending_path(self_name)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(rows), encoding="utf-8")
+        row = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               **record}
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
     except OSError:
         pass
+
+
+def _open_pendings(self_name: str) -> list:
+    """Open firings not yet closed — scan append-only JSONL (#829)."""
+    path = _pending_path(self_name)
+    closed: set = set()
+    opens: list = []
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                kind = r.get("kind")
+                if kind == "closed":
+                    closed.add(r.get("firing_id"))
+                elif kind == "open":
+                    opens.append(r)
+    except OSError:
+        return []
+    return [o for o in opens if o.get("firing_id") not in closed]
 
 
 def register_pending_firing(self_name: str, firing_id: str, session_id: str) -> None:
     if not self_name:
         return
-    rows = _load_pending(self_name)
-    rows.append({"firing_id": firing_id, "session_id": session_id or ""})
-    _save_pending(self_name, rows[-50:])  # bound growth
+    _append_pending(self_name, {
+        "kind": "open",
+        "firing_id": firing_id,
+        "session_id": session_id or "",
+    })
 
 
 def resolve_pending_outcome(self_name: str, subsequent: str,
@@ -207,29 +230,41 @@ def resolve_pending_outcome(self_name: str, subsequent: str,
     """Append outcome rows for open prompt firings (#825 counterfactual).
 
     subsequent: grep | codegraph | neither
+
+    #829: an empty incoming session_id must match NOTHING (not every row).
+    Outcomes are labelled ``subsequent_window=turn`` because Stop fires per
+    assistant turn — ``neither`` means no grep/codegraph before end of THAT
+    turn, not "the session never used the graph".
     """
     if not self_name:
         return
-    rows = _load_pending(self_name)
-    if not rows:
+    if not (session_id or "").strip():
         return
-    left: list = []
     wrote: set = set()
-    for r in rows:
-        if session_id and r.get("session_id") and r["session_id"] != session_id:
-            left.append(r)
+    for r in _open_pendings(self_name):
+        if r.get("session_id") != session_id:
             continue
         fid = r.get("firing_id")
-        if fid in wrote:
+        if not fid or fid in wrote:
             continue
         wrote.add(fid)
         write_audit(self_name, {
             "kind": "outcome",
             "firing_id": fid,
             "subsequent": subsequent,
-            "session_id": r.get("session_id") or session_id,
+            "subsequent_window": "turn",
+            "subsequent_means": (
+                "no grep/codegraph before end of this assistant turn "
+                "(Stop is per-turn, not per-session)"
+            ),
+            "session_id": session_id,
         })
-    _save_pending(self_name, left)
+        _append_pending(self_name, {
+            "kind": "closed",
+            "firing_id": fid,
+            "subsequent": subsequent,
+            "session_id": session_id,
+        })
 
 
 # ── gateway query ─────────────────────────────────────────────────────────

@@ -109,10 +109,10 @@ def test_prompt_with_symbol_query_emits_and_registers_pending(
     out = json.loads(capsys.readouterr().out)
     assert out["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
     assert "_firejail_argv" in out["hookSpecificOutput"]["additionalContext"]
-    pending = json.loads(
-        (Path(home) / "swarph_state" / "cursor-win" / "codegraph-hook-pending.json")
-        .read_text(encoding="utf-8"))
-    assert len(pending) == 1
+    pending_path = Path(home) / "swarph_state" / "cursor-win" / "codegraph-hook-pending.jsonl"
+    opens = [json.loads(x) for x in pending_path.read_text(encoding="utf-8").splitlines()
+             if x.strip() and json.loads(x).get("kind") == "open"]
+    assert len(opens) == 1
 
 
 def test_counterfactual_grep_closes_pending(monkeypatch, tmp_path):
@@ -141,10 +141,8 @@ def test_counterfactual_grep_closes_pending(monkeypatch, tmp_path):
     ]
     outcomes = [r for r in lines if r.get("kind") == "outcome"]
     assert outcomes and outcomes[0]["subsequent"] == "grep"
-    pending = json.loads(
-        (Path(home) / "swarph_state" / "cursor-win" / "codegraph-hook-pending.json")
-        .read_text(encoding="utf-8"))
-    assert pending == []
+    assert outcomes[0]["subsequent_window"] == "turn"
+    assert ch._open_pendings("cursor-win") == []
 
 
 def test_stop_marks_neither(monkeypatch, tmp_path):
@@ -170,7 +168,8 @@ def test_stop_marks_neither(monkeypatch, tmp_path):
         (Path(home) / "swarph_state" / "cursor-win" / "codegraph-hook-audit.jsonl")
         .read_text(encoding="utf-8").splitlines() if x.strip()
     ]
-    assert any(r.get("subsequent") == "neither" for r in lines)
+    assert any(r.get("subsequent") == "neither" and r.get("subsequent_window") == "turn"
+               for r in lines)
 
 
 def test_fuzzy_prompt_result_suppressed(monkeypatch, capsys, tmp_path):
