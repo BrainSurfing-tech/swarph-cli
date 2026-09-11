@@ -436,6 +436,21 @@ def _query_and_emit(self_name: str, gateway: str, term: str, *,
 
 # ── entry ─────────────────────────────────────────────────────────────────
 
+# Events this handler knows how to process. Anything else must be LOUD (#830):
+# a silent fallthrough to the Bash path made binding-ahead-of-code invisible.
+_SUPPORTED_HOOK_EVENTS = frozenset({
+    "UserPromptSubmit",
+    "PostToolUse",
+    "Stop",
+    "StopFailure",
+})
+
+
+def supported_hook_events() -> frozenset:
+    """Advertise the event set this handler can process (#830 install gate)."""
+    return _SUPPORTED_HOOK_EVENTS
+
+
 def run_codegraph_hook(argv: Optional[list] = None) -> int:
     """ALWAYS exits 0 — must never fail a turn."""
     argv = list(argv or [])
@@ -457,6 +472,19 @@ def run_codegraph_hook(argv: Optional[list] = None) -> int:
              or "")
     session_id = str(payload.get("session_id") or payload.get("sessionId") or "")
 
+    # #830: unknown non-empty event → report, never silent default to Bash.
+    supported = supported_hook_events()
+    if event and event not in supported:
+        known = ", ".join(sorted(supported))
+        _emit(
+            f"CODEGRAPH HOOK: unknown hook_event_name={event!r} — this running "
+            f"swarph does not handle it (known: {known}). Likely a settings "
+            f"binding ahead of its code (#830). Re-install after upgrading "
+            f"swarph-cli, or remove the stale binding.",
+            event,
+        )
+        return 0
+
     if event in ("Stop", "StopFailure"):
         resolve_pending_outcome(self_name or "_unknown", "neither", session_id)
         return 0
@@ -465,7 +493,7 @@ def run_codegraph_hook(argv: Optional[list] = None) -> int:
             not event and (payload.get("prompt") or payload.get("user_prompt"))):
         return _run_prompt_path(payload, self_name, gateway, session_id)
 
-    # Default / PostToolUse: Bash annotate path (#194), kept for shared audit.
+    # PostToolUse (or empty event with tool_input): Bash annotate path (#194).
     return _run_bash_path(payload, self_name, gateway, session_id)
 
 

@@ -47,6 +47,13 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from swarph_cli import __version__ as _SWARPH_CLI_VERSION
+
+# Placeholder substituted at install time into generated scripts (#830).
+_BUNDLE_VERSION_PLACEHOLDER = "__SWARPH_CLI_VERSION__"
+_BUNDLE_VERSION_RE = re.compile(
+    r"^#\s*swarph-cli-bundle-version:\s*(\S+)\s*$", re.MULTILINE
+)
 
 # --------------------------------------------------------------------------- #
 # HookBundle model (T2)
@@ -73,6 +80,9 @@ class HookBundle:
     ``script_body`` is carried INLINE (no package-data plumbing in v1) so the
     installer can write it under ``~/.swarph/hooks/<script_name>`` and then
     ``_merge_hook`` each binding into settings.json pointing at that path.
+
+    ``handler_events`` (#830): events the RUNNING handler must advertise before
+    install writes bindings. Empty = no capability check (legacy bundles).
     """
 
     name: str
@@ -82,6 +92,7 @@ class HookBundle:
     script_name: str  # filename under ~/.swarph/hooks/, e.g. "cell-resilience.sh"
     script_body: str  # full shell-script content (inline)
     bindings: tuple  # tuple[HookBinding, ...]
+    handler_events: tuple = ()  # events the late-bound handler must support (#830)
 
 
 # The bundled cell-resilience script. POSIX sh. Observational only: it
@@ -185,10 +196,13 @@ exit 0
 # counterfactual (subsequent=neither).
 _CODEGRAPH_ON_GREP_SH = r"""#!/bin/sh
 # codegraph-on-grep.sh — swarph bundled Claude Code hook (#194 + #825).
+# swarph-cli-bundle-version: __SWARPH_CLI_VERSION__
 #
 # UserPromptSubmit: coding keywords in the prompt → structural codegraph context
 # before a tool is chosen. PostToolUse/Bash: annotate code greps (shared audit).
 # Stop/StopFailure: record whether the session grepped, called codegraph, or neither.
+# #830: version stamp is substituted at install time — hooks list compares it to
+# the running swarph --version so a binding/code skew is reportable.
 exec swarph codegraph-hook "$@"
 """
 
@@ -211,6 +225,9 @@ BUILTIN_HOOKS: dict = {
             HookBinding("PostToolUse", "Bash"),
             HookBinding("Stop", ""),
             HookBinding("StopFailure", ""),
+        ),
+        handler_events=(
+            "UserPromptSubmit", "PostToolUse", "Stop", "StopFailure",
         ),
     ),
     "cell-resilience": HookBundle(
@@ -551,6 +568,34 @@ def resolve_local(path) -> HookBundle:
 # --------------------------------------------------------------------------- #
 
 
+def _stamp_script_body(script_body: str) -> str:
+    """Substitute the install-time swarph-cli version into a generated script."""
+    return script_body.replace(_BUNDLE_VERSION_PLACEHOLDER, _SWARPH_CLI_VERSION)
+
+
+def _read_script_bundle_version(script_path: Path) -> str | None:
+    """Parse ``# swarph-cli-bundle-version: X`` from an installed script, if any."""
+    try:
+        text = script_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = _BUNDLE_VERSION_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _handler_missing_events(required: tuple) -> tuple[frozenset, frozenset]:
+    """Return (advertised, missing) for the late-bound codegraph handler (#830).
+
+    Bundles with empty ``handler_events`` skip this gate. Today only
+    ``codegraph-on-grep`` advertises; the import is the running package on
+    PATH's peer — i.e. the same interpreter that will execute the hook.
+    """
+    from swarph_cli.commands.codegraph_hook import supported_hook_events
+
+    advertised = supported_hook_events()
+    return advertised, frozenset(required) - advertised
+
+
 def install_hook(
     bundle: HookBundle,
     *,
@@ -605,14 +650,27 @@ def install_hook(
         out("  Install Git for Windows, then re-run — nothing was written.")
         return 1
 
+    # #830: refuse bindings the RUNNING handler cannot advertise. Code must
+    # land before or with bindings — never after.
+    if bundle.handler_events:
+        advertised, missing = _handler_missing_events(bundle.handler_events)
+        if missing:
+            out(f"cannot install {bundle.name}: running handler does not "
+                f"advertise events {sorted(missing)}.")
+            out(f"  handler advertises: {sorted(advertised) or '(none)'}")
+            out("  Upgrade swarph-cli so the handler supports these events, "
+                "then re-run — nothing was written (#830).")
+            return 1
+
     command = _hook_command_path(script_dst)
+    stamped_body = _stamp_script_body(bundle.script_body)
 
     # ---- show-before-write preview ----
     out(f"hook: {bundle.name}  (trust={bundle.trust}, publisher={bundle.publisher})")
     if bundle.description:
         out(f"  {bundle.description}")
     out(f"script → {script_dst}")
-    body_lines = bundle.script_body.splitlines()
+    body_lines = stamped_body.splitlines()
     head = body_lines[:12]
     out("  --- script (head) ---")
     for line in head:
@@ -642,9 +700,9 @@ def install_hook(
     for b in bundle.bindings:
         settings = _merge_hook(settings, b.event, b.matcher, command)
 
-    # ---- write the script, then atomic-save settings ----
+    # ---- write the script (version-stamped), then atomic-save settings ----
     hooks_home_p.mkdir(parents=True, exist_ok=True)
-    script_dst.write_text(bundle.script_body, encoding="utf-8")
+    script_dst.write_text(stamped_body, encoding="utf-8")
     os.chmod(script_dst, 0o755)
     try:
         _save_settings(settings_path, settings)
@@ -988,8 +1046,12 @@ def list_hooks(
     """List builtin hooks with install status. One greppable line per builtin::
 
         name  [installed|available]  trust=builtin  — description
+
+    When installed and the script carries a ``swarph-cli-bundle-version`` stamp
+    (#830), a second line reports match / mismatch vs the running package.
     """
     settings = _load_settings(settings_path)
+    hooks_home_p = Path(hooks_home).expanduser()
     for name in sorted(BUILTIN_HOOKS):
         bundle = BUILTIN_HOOKS[name]
         command = _installed_command(bundle, hooks_home)
@@ -1000,6 +1062,20 @@ def list_hooks(
                          for c in _installed_command_variants(bundle, hooks_home))
                   else "available")
         out(f"{name}  [{status}]  trust=builtin  — {bundle.description}")
+        if status != "installed":
+            continue
+        script = (hooks_home_p / bundle.script_name).expanduser()
+        stamped = _read_script_bundle_version(script)
+        if stamped is None:
+            if _BUNDLE_VERSION_PLACEHOLDER in bundle.script_body:
+                out(f"  version: (no stamp in installed script)  "
+                    f"running={_SWARPH_CLI_VERSION}  "
+                    f"— re-run: swarph hooks add {name}  (#830)")
+        elif stamped == _SWARPH_CLI_VERSION:
+            out(f"  version: stamped={stamped}  running={_SWARPH_CLI_VERSION}  OK")
+        else:
+            out(f"  version: stamped={stamped}  running={_SWARPH_CLI_VERSION}  "
+                f"MISMATCH — re-run: swarph hooks add {name}  (#830)")
     return 0
 
 
@@ -1284,6 +1360,11 @@ def run_hooks(
     )
 
     sub.add_parser("list", help="list builtin hooks and their install status")
+    sub.add_parser(
+        "status",
+        help="alias of list — also reports bundle-version stamp vs running "
+        "swarph-cli (#830)",
+    )
 
     sub.add_parser(
         "verify",
@@ -1339,7 +1420,7 @@ def run_hooks(
             print(f"swarph hooks: {exc}", file=sys.stderr)
             return 2
 
-    if args.action == "list":
+    if args.action in ("list", "status"):
         return list_hooks(settings_path=settings_path, hooks_home=hooks_home)
 
     if args.action == "verify":
