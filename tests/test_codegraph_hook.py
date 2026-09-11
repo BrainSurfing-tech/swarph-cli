@@ -147,14 +147,9 @@ def test_the_verb_is_registered():
 
 # ── the non-empty answer must be as honest as the empty one ───────────────
 
-def test_a_FUZZY_match_is_labelled_not_served_as_an_answer():
-    """>>> a peer's first-hand receipt, 2026-08-01: the defect this closes. <<<
-
-    He grepped a private-repo file for `def command_beta_executor` and got six
-    swarph-cli symbols WITH CALLER COUNTS — the sanitiser OR-joins tokens, so it
-    matched "command". His diagnosis: "the failure mode you engineered out of the
-    empty case walked back in through the non-empty one." An empty answer said
-    "REAL negative"; a wrong answer said nothing at all.
+def test_a_FUZZY_match_is_SUPPRESSED_not_bannered():
+    """#825 supersedes the FUZZY MATCH banner: silence beats noise the reader
+    must skim. Same 2026-08-01 coincidence rows — now emit NOTHING.
     """
     env = {"results": [
         {"repo": "swarph-cli", "file_path": "src/x.py", "start_line": 46,
@@ -163,10 +158,8 @@ def test_a_FUZZY_match_is_labelled_not_served_as_an_answer():
          "kind": "function", "name": "provider_command", "callers": 1},
     ], "freshness": [{"index_age_hours": 1.6}]}
     out = ch.render("def command_beta_executor", env)
-    assert "FUZZY MATCH" in out
-    assert "NOT AN ANSWER TO YOUR QUERY" in out
-    assert "command_beta_executor" in out
-    assert "swarph-cli" in out          # names the repo the strays came from
+    assert out == ""
+    assert "FUZZY MATCH" not in out
 
 
 def test_a_GENUINE_match_carries_no_fuzzy_warning():

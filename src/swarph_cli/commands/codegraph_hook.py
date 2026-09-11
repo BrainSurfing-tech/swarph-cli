@@ -24,6 +24,10 @@ PEER MODE. Unlike lab-ovh's original local hook, a peer has no local index — i
 asks the gateway's ``POST /codegraph`` proxy, which applies the A8 visibility
 gate to rows AND to caller counts (swarph-cli PR #165). The caller identity comes
 from the bearer token, never from a field, so it cannot be self-asserted.
+
+#825 — noise filter (gbrain-hook shape): audit every firing, skip shredded
+regex terms before querying, and suppress the whole block when no returned
+symbol name contains the query (no FUZZY MATCH banner — silence beats noise).
 """
 
 from __future__ import annotations
@@ -34,12 +38,18 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from swarph_cli.gateway_default import env_gateway
 
 TIMEOUT_S = 6
 MAX_ROWS = 6
+
+# #825 skip-guard guesses — audit JSONL is what settles them. Do not treat as
+# a fixed product contract.
+_KEEP_RATIO = 0.60
+_IDENT_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # ── trigger heuristics ────────────────────────────────────────────────────
 # Ported from the hook that ran on lab-ovh for a day. Every one of these three
@@ -69,11 +79,17 @@ def _looks_like_code_search(cmd: str) -> bool:
 
 
 def extract_term(cmd: str) -> Optional[str]:
-    """The search term ADJACENT to grep — not the first quoted string anywhere.
+    """The cleaned search term ADJACENT to grep — not the first quoted string.
 
     A `gh pr close --comment "...'dead'..." && grep foo bar` fired a query for
     'dead', lifted out of unrelated prose. So the scan starts AT the grep token.
     """
+    pair = extract_raw_and_cleaned(cmd)
+    return pair[1] if pair else None
+
+
+def extract_raw_and_cleaned(cmd: str) -> Optional[tuple[str, str]]:
+    """Return (raw_pattern, cleaned_for_index) or None if no pattern found."""
     m = _AT_COMMAND_POS.search(cmd)
     if not m:
         return None
@@ -82,11 +98,28 @@ def extract_term(cmd: str) -> Optional[str]:
     for tok in _tokenize(tail):
         if tok.startswith("-"):
             continue
-        term = tok.strip("'\"")
+        raw = tok.strip("'\"")
         # A regex-metachar soup is not a useful symbol query.
-        cleaned = re.sub(r"[^\w\s.]", " ", term).strip()
-        return cleaned or None
+        cleaned = re.sub(r"[^\w\s.]", " ", raw).strip()
+        if not cleaned:
+            return None
+        return (raw, cleaned)
     return None
+
+
+def term_is_shredded(raw: str, cleaned: str) -> bool:
+    """#825 skip guard — candidate thresholds; audit settles the numbers.
+
+    Skip when the non-space cleaned length keeps <60% of the raw pattern, OR
+    when no token >=3 chars matches ``[A-Za-z_][A-Za-z0-9_]*``.
+    """
+    if not (raw or "").strip():
+        return True
+    kept = len(re.sub(r"\s+", "", cleaned or ""))
+    if kept / len(raw) < _KEEP_RATIO:
+        return True
+    toks = [t for t in _IDENT_TOKEN.findall(cleaned or "") if len(t) >= 3]
+    return not toks
 
 
 def _tokenize(s: str) -> list:
@@ -123,6 +156,26 @@ def _tokenize(s: str) -> list:
 
 def _token_path(self_name: str) -> Path:
     return Path.home() / ".config" / "swarph" / f"{self_name}.peer_token"
+
+
+def _audit_path(self_name: str) -> Path:
+    """Per-cell JSONL — same state root the monitor already uses."""
+    return Path.home() / "swarph_state" / self_name / "codegraph-hook-audit.jsonl"
+
+
+def write_audit(self_name: str, record: dict) -> None:
+    """Append one firing. Never raise — audit must not fail a turn (#194 contract)."""
+    if not self_name:
+        return
+    path = _audit_path(self_name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               **record}
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def query_gateway(term: str, gateway: str, token: str, limit: int = MAX_ROWS) -> dict:
@@ -189,8 +242,22 @@ def _match_quality(term: str, rows: list) -> tuple:
     return (key, hits)
 
 
+def any_symbol_name_contains_term(term: str, rows: list) -> bool:
+    """Relevance floor (#825): at least one returned name contains the distinctive token."""
+    key, hits = _match_quality(term, rows)
+    if not key:
+        # No distinctive token to require — treat as non-floor (don't suppress on this alone).
+        return bool(rows)
+    return hits > 0
+
+
 def render(term: str, env: dict) -> str:
-    """Format the envelope for injection. Errors are LOUD and named."""
+    """Format the envelope for injection. Errors are LOUD and named.
+
+    #825: when rows exist but NONE of their names contain the query's distinctive
+    token, return "" — suppress the whole block. The old FUZZY MATCH banner was
+    honest and still noise the reader had to read.
+    """
     if "error" in env:
         return (f"CODEGRAPH UNAVAILABLE for '{term}' — {env['error']}\n"
                 f"  >>> THIS IS NOT 'no matches'. The structural index could not be "
@@ -207,6 +274,9 @@ def render(term: str, env: dict) -> str:
         if stale:
             age += " ⚠ STALE — verify line numbers against the file"
 
+    if rows and not any_symbol_name_contains_term(term, rows):
+        return ""
+
     if not rows:
         body = ("  no structural matches (the index IS present and answered — "
                 "a REAL negative)")
@@ -216,18 +286,8 @@ def render(term: str, env: dict) -> str:
             f"{r.get('kind')} {r.get('name')}  callers={r.get('callers')}"
             for r in rows[:MAX_ROWS]
         )
-    warn = ""
-    if rows:
-        key, hits = _match_quality(term, rows)
-        if key and hits == 0:
-            repos = sorted({str(r.get("repo")) for r in rows})
-            warn = (f"\n  >>> FUZZY MATCH — NOT AN ANSWER TO YOUR QUERY. No returned symbol's "
-                    f"name contains {key!r}. These matched a COMMON TOKEN only"
-                    + (f", and all are from: {', '.join(repos)}" if repos else "")
-                    + f". Treat them as unrelated: the symbol you grepped for is NOT in "
-                    f"what this index can see. <<<")
     return (f"CODEGRAPH (structural{age}) for '{term}' — grep found text; this is "
-            f"the symbol graph, incl. CALLER COUNTS grep cannot see:\n{body}{warn}\n\n"
+            f"the symbol graph, incl. CALLER COUNTS grep cannot see:\n{body}\n\n"
             f"Use this for definitions/callers/blast-radius. grep remains correct "
             f"for config, logs and string literals the codegraph does not index.")
 
@@ -250,8 +310,21 @@ def run_codegraph_hook(argv: Optional[list] = None) -> int:
     cmd = ((payload.get("tool_input") or {}).get("command") or "").strip()
     if not cmd or not _looks_like_code_search(cmd):
         return 0
-    term = extract_term(cmd)
-    if not term:
+    pair = extract_raw_and_cleaned(cmd)
+    if not pair:
+        return 0
+    raw, term = pair
+
+    if term_is_shredded(raw, term):
+        write_audit(self_name or "_unknown", {
+            "raw_command": cmd,
+            "extracted_term": term,
+            "raw_term": raw,
+            "skipped": True,
+            "skip_reason": "shredded_term",
+            "match_count": 0,
+            "any_name_contains_term": False,
+        })
         return 0
 
     if not self_name:
@@ -269,7 +342,21 @@ def run_codegraph_hook(argv: Optional[list] = None) -> int:
               f"{e}. Not a negative result: the graph was never asked.")
         return 0
 
-    _emit(render(term, query_gateway(term, gateway, token)))
+    env = query_gateway(term, gateway, token)
+    rows = env.get("results") or [] if "error" not in env else []
+    name_hit = any_symbol_name_contains_term(term, rows) if rows else False
+    write_audit(self_name, {
+        "raw_command": cmd,
+        "extracted_term": term,
+        "raw_term": raw,
+        "skipped": False,
+        "match_count": len(rows),
+        "any_name_contains_term": name_hit,
+        "error": env.get("error"),
+    })
+    text = render(term, env)
+    if text:
+        _emit(text)
     return 0
 
 
