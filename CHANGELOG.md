@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+
+## 0.59.0 — 2026-09-11
+- deps: raise `swarph-mesh` pin to `>=0.5.0,<0.10` (#412) — 0.9.0 was excluded exactly, so no installed CLI could take the published mesh release; 0.58.0 + 0.9.0 forced together measured 2988 passed.
+- deps: raise `swarph-shared` pin to `>=0.7.0,<0.9` — 0.8.1 was excluded exactly by `<0.8` (same trap as mesh).
+- hooks (#830): unknown `hook_event_name` is loud (no silent no-op); scripts stamp swarph-cli version for `hooks list/status`; `install_hook` refuses events the running handler does not advertise.
 - codegraph-hook (#829): when closed pending rows exceed 200, rewrite the JSONL to its still-open rows — Stop re-scans every turn; unbounded closed dead weight was the trade the append-only fix introduced. No tail bound (that was the lossy shape).
 - codegraph-hook (#829): empty `session_id` resolves nothing (not every pending row); pendings are append-only JSONL (no unlocked RMW); outcome rows label `subsequent_window=turn` so `neither` is not read as "session never used the graph".
 - codegraph-hook (#825): UserPromptSubmit on coding keywords (steers tool choice — PostToolUse can only annotate); keep PostToolUse/Bash initially for a shared audit series. Audit JSONL records every firing plus the counterfactual outcome (subsequent grep / codegraph / neither). Relevance floor suppresses blocks with no name hit; Bash shred-skip kept for regex debris. The 60% retention guess is deleted for prompts.
