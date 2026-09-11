@@ -1,7 +1,7 @@
 # Changelog
 
 ## Unreleased
-- codegraph-hook (#825): audit every firing to `~/swarph_state/<cell>/codegraph-hook-audit.jsonl`, skip shredded regex terms before querying, and suppress the whole block when no returned symbol name contains the query (silence instead of the FUZZY MATCH banner). Thresholds are guesses settled by the audit — same shape as the gbrain hook's measure-first defaults.
+- codegraph-hook (#825): UserPromptSubmit on coding keywords (steers tool choice — PostToolUse can only annotate); keep PostToolUse/Bash initially for a shared audit series. Audit JSONL records every firing plus the counterfactual outcome (subsequent grep / codegraph / neither). Relevance floor suppresses blocks with no name hit; Bash shred-skip kept for regex debris. The 60% retention guess is deleted for prompts.
 
 ## 0.58.0 — 2026-09-10
 - monitor (#807): the reexec control survives the reinstall that triggers it — `ExecCondition=` skips the run while `swarph_cli` is mid-swap (no failure, no restart budget spent; the .path re-fires when `__init__.py` is rewritten) and the budget can no longer latch `unit-start-limit-hit` inside one window; `install-reexec` resolves the watched tree from the swarph binary's OWN interpreter (the tree the monitors load), watches a second install tree if present, and `--on-failure UNIT` writes the OnFailure drop-in for both units. `scripts/probe_807_reexec.sh` is the can-fail.

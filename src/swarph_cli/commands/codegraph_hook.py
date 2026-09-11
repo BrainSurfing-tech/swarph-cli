@@ -1,33 +1,24 @@
-"""``swarph codegraph-hook`` — PostToolUse(Bash) structural-search companion.
+"""``swarph codegraph-hook`` — structural-search companion for Claude Code.
 
-WHEN A grep/rg SEARCHES CODE, ALSO ASK THE CODEGRAPH, and hand the structural
-answer back as context. Card #194.
-
-WHY IT EXISTS. Agents reach for grep where the symbol graph is the right
-instrument — lab-ovh was corrected three times in one session for exactly that,
-and the third correction landed INSIDE the fix for the first two. Instructions
-demonstrably do not hold at the moment of typing, so this is mechanical rather
-than a reminder. The token argument is the commander's: a grep that returns 200
-matching lines costs far more context than the six symbols that actually answer
-"where is this defined and who calls it".
+Card #194 (PostToolUse/Bash annotate) + card #825 (commander redirect 2026-09-11):
+UserPromptSubmit fires WHILE tool choice is still open — PostToolUse can only
+comment on a decision already made. Lab measured ~20 greps annotated and 0
+redirects in one session; the trigger move is the load-bearing half of
+"work more like gbrain hook".
 
 >>> IT SUPPLEMENTS, IT NEVER BLOCKS. <<< grep is genuinely correct for config,
-logs, /etc and string literals; the codegraph indexes SYMBOLS. The failure this
-guards is "I only ever saw grep's answer", not "grep was used".
+logs, /etc and string literals; the codegraph indexes SYMBOLS.
 
 >>> AND IT MUST NEVER DEGRADE SILENTLY. <<< A missing index makes a structural
-query return `[]` — indistinguishable from a real negative, which is the exact
-shape of the (gbrain unreachable) incident and of card #200's drain. So an
-unavailable backend is reported LOUDLY as an incident, never as "no matches".
+query return `[]` — indistinguishable from a real negative. An unavailable
+backend is reported LOUDLY as an incident, never as "no matches".
 
-PEER MODE. Unlike lab-ovh's original local hook, a peer has no local index — it
-asks the gateway's ``POST /codegraph`` proxy, which applies the A8 visibility
-gate to rows AND to caller counts (swarph-cli PR #165). The caller identity comes
-from the bearer token, never from a field, so it cannot be self-asserted.
-
-#825 — noise filter (gbrain-hook shape): audit every firing, skip shredded
-regex terms before querying, and suppress the whole block when no returned
-symbol name contains the query (no FUZZY MATCH banner — silence beats noise).
+#825 order: (0) UserPromptSubmit on coding keywords, (1) audit JSONL including
+the counterfactual (did the session later grep / call codegraph / neither),
+(2/3) skip + relevance floor on prompt-derived terms — the 60% regex-retention
+rule is DELETED for prompts (kept only for the PostToolUse shred path),
+(4) no score constant. PostToolUse/Bash stays initially so both triggers share
+one audit series; drop it later if audit shows zero influence.
 """
 
 from __future__ import annotations
@@ -36,6 +27,7 @@ import json
 import os
 import re
 import sys
+import uuid
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -46,25 +38,30 @@ from swarph_cli.gateway_default import env_gateway
 TIMEOUT_S = 6
 MAX_ROWS = 6
 
-# #825 skip-guard guesses — audit JSONL is what settles them. Do not treat as
-# a fixed product contract.
-_KEEP_RATIO = 0.60
+# Identifier token — used for prompt terms and for the Bash shred skip (no
+# useful symbol-shaped token left after cleaning).
 _IDENT_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
-# ── trigger heuristics ────────────────────────────────────────────────────
-# Ported from the hook that ran on lab-ovh for a day. Every one of these three
-# patterns exists because a LOOSER version misfired in production.
+# Coding-keyword gate for UserPromptSubmit (#825 NEW 0). Deliberately broad;
+# audit settles whether it over/under-fires.
+_CODING_KW = re.compile(
+    r"(?i)\b("
+    r"def|class|function|method|caller|callers|symbol|implement|refactor|"
+    r"bug|stack|traceback|exception|import|module|interface|struct|typedef|"
+    r"codegraph|blast[- ]?radius|who\s+calls|where\s+is|src/|\.py\b"
+    r")\b"
+)
 
-# 1. grep/rg must be at COMMAND POSITION — line start, or right after a pipe /
-#    ; / && / $( . Matching "grep" after arbitrary whitespace fires on any command
-#    whose text merely MENTIONS the word, including a heredoc body: the first live
-#    firing did exactly that and extracted the heredoc delimiter as the search term.
+_PROMPT_STOP = {
+    "def", "class", "async", "the", "for", "and", "with", "from", "this",
+    "that", "what", "where", "when", "how", "who", "why", "please", "need",
+    "want", "just", "into", "about", "have", "does", "code", "file", "line",
+}
+
+# ── PostToolUse/Bash trigger heuristics (#194) ────────────────────────────
+
 _AT_COMMAND_POS = re.compile(r"(?:^|[|;&]|\$\()\s*(?:sudo\s+)?(?:grep|rg)\s")
-
-# 2. A heredoc means most of the command is DATA, not shell — too noisy to parse.
 _HEREDOC = re.compile(r"<<-?['\"]?\w*(?:EOF|PY)")
-
-# 3. It should look like a CODE search, not a config/log one.
 _CODEISH = re.compile(
     r"\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|c|h|cpp)\b|--include|(?:^|\s)-r\s|src/"
 )
@@ -79,27 +76,19 @@ def _looks_like_code_search(cmd: str) -> bool:
 
 
 def extract_term(cmd: str) -> Optional[str]:
-    """The cleaned search term ADJACENT to grep — not the first quoted string.
-
-    A `gh pr close --comment "...'dead'..." && grep foo bar` fired a query for
-    'dead', lifted out of unrelated prose. So the scan starts AT the grep token.
-    """
     pair = extract_raw_and_cleaned(cmd)
     return pair[1] if pair else None
 
 
 def extract_raw_and_cleaned(cmd: str) -> Optional[tuple[str, str]]:
-    """Return (raw_pattern, cleaned_for_index) or None if no pattern found."""
     m = _AT_COMMAND_POS.search(cmd)
     if not m:
         return None
     tail = cmd[m.end():]
-    # Skip flags (-n, -R, --include=*.py, …) to reach the pattern itself.
     for tok in _tokenize(tail):
         if tok.startswith("-"):
             continue
         raw = tok.strip("'\"")
-        # A regex-metachar soup is not a useful symbol query.
         cleaned = re.sub(r"[^\w\s.]", " ", raw).strip()
         if not cleaned:
             return None
@@ -108,29 +97,37 @@ def extract_raw_and_cleaned(cmd: str) -> Optional[tuple[str, str]]:
 
 
 def term_is_shredded(raw: str, cleaned: str) -> bool:
-    """#825 skip guard — candidate thresholds; audit settles the numbers.
+    """PostToolUse shred skip — regex debris with no identifier-shaped token.
 
-    Skip when the non-space cleaned length keeps <60% of the raw pattern, OR
-    when no token >=3 chars matches ``[A-Za-z_][A-Za-z0-9_]*``.
+    The 60%-retention guess from the pre-redirect spec is NOT used here either
+    for prompts (#825: deleted unless audit says otherwise). Bash path skips
+    when no token >=3 matches ``[A-Za-z_][A-Za-z0-9_]*``.
     """
     if not (raw or "").strip():
-        return True
-    kept = len(re.sub(r"\s+", "", cleaned or ""))
-    if kept / len(raw) < _KEEP_RATIO:
         return True
     toks = [t for t in _IDENT_TOKEN.findall(cleaned or "") if len(t) >= 3]
     return not toks
 
 
-def _tokenize(s: str) -> list:
-    """Shell-ish split that keeps quoted strings together.
+def prompt_has_coding_keywords(prompt: str) -> bool:
+    return bool(_CODING_KW.search(prompt or ""))
 
-    NOTE: no early break. An earlier version stopped after the FIRST completed
-    token, so a command whose first argument is a flag (`grep -rn 'pat' src/`)
-    yielded only `-rn`, the caller skipped it as a flag, and extraction returned
-    None — the hook silently never fired on the most common grep shape there is.
-    Caught by test_skips_flags_to_reach_the_pattern.
-    """
+
+def extract_prompt_terms(prompt: str, limit: int = 3) -> list[str]:
+    """Identifier-shaped tokens from the prompt, longest first — no score constant."""
+    found = []
+    seen = set()
+    for t in _IDENT_TOKEN.findall(prompt or ""):
+        low = t.lower()
+        if len(t) < 3 or low in _PROMPT_STOP or low in seen:
+            continue
+        seen.add(low)
+        found.append(t)
+    found.sort(key=len, reverse=True)
+    return found[:limit]
+
+
+def _tokenize(s: str) -> list:
     out, cur, quote, started = [], "", None, False
     for ch in s:
         if quote:
@@ -152,19 +149,21 @@ def _tokenize(s: str) -> list:
     return out
 
 
-# ── gateway query ─────────────────────────────────────────────────────────
+# ── paths / audit / pending counterfactual ────────────────────────────────
 
 def _token_path(self_name: str) -> Path:
     return Path.home() / ".config" / "swarph" / f"{self_name}.peer_token"
 
 
 def _audit_path(self_name: str) -> Path:
-    """Per-cell JSONL — same state root the monitor already uses."""
     return Path.home() / "swarph_state" / self_name / "codegraph-hook-audit.jsonl"
 
 
+def _pending_path(self_name: str) -> Path:
+    return Path.home() / "swarph_state" / self_name / "codegraph-hook-pending.json"
+
+
 def write_audit(self_name: str, record: dict) -> None:
-    """Append one firing. Never raise — audit must not fail a turn (#194 contract)."""
     if not self_name:
         return
     path = _audit_path(self_name)
@@ -178,17 +177,64 @@ def write_audit(self_name: str, record: dict) -> None:
         pass
 
 
-def query_gateway(term: str, gateway: str, token: str, limit: int = MAX_ROWS) -> dict:
-    """POST /codegraph. Returns the envelope, or {"error": "..."} — NEVER {}.
+def _load_pending(self_name: str) -> list:
+    path = _pending_path(self_name)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
 
-    >>> AN UNREACHABLE OR REFUSING BACKEND IS AN ERROR, NOT AN EMPTY RESULT. <<<
-    Collapsing them is the defect this hook exists to avoid teaching.
+
+def _save_pending(self_name: str, rows: list) -> None:
+    path = _pending_path(self_name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(rows), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def register_pending_firing(self_name: str, firing_id: str, session_id: str) -> None:
+    if not self_name:
+        return
+    rows = _load_pending(self_name)
+    rows.append({"firing_id": firing_id, "session_id": session_id or ""})
+    _save_pending(self_name, rows[-50:])  # bound growth
+
+
+def resolve_pending_outcome(self_name: str, subsequent: str,
+                            session_id: str = "") -> None:
+    """Append outcome rows for open prompt firings (#825 counterfactual).
+
+    subsequent: grep | codegraph | neither
     """
-    # #578: with no baked-in host, `gateway` can be "". Request() rejects a
-    # relative URL at CONSTRUCTION (below, outside the try), so an unconfigured
-    # backend would raise ValueError and take the whole turn down — against this
-    # entry point's "ALWAYS exits 0, must never fail a turn" contract.
-    # UNCONFIGURED is the same class as UNREACHABLE: an error, not empty.
+    if not self_name:
+        return
+    rows = _load_pending(self_name)
+    if not rows:
+        return
+    left: list = []
+    wrote: set = set()
+    for r in rows:
+        if session_id and r.get("session_id") and r["session_id"] != session_id:
+            left.append(r)
+            continue
+        fid = r.get("firing_id")
+        if fid in wrote:
+            continue
+        wrote.add(fid)
+        write_audit(self_name, {
+            "kind": "outcome",
+            "firing_id": fid,
+            "subsequent": subsequent,
+            "session_id": r.get("session_id") or session_id,
+        })
+    _save_pending(self_name, left)
+
+
+# ── gateway query ─────────────────────────────────────────────────────────
+
+def query_gateway(term: str, gateway: str, token: str, limit: int = MAX_ROWS) -> dict:
     if not (gateway or "").strip():
         return {"error": "MESH_GATEWAY_URL is not set and swarph ships no default "
                          "gateway host (#578) — the graph was never asked"}
@@ -209,30 +255,11 @@ def query_gateway(term: str, gateway: str, token: str, limit: int = MAX_ROWS) ->
         except Exception:  # noqa: BLE001
             pass
         return {"error": f"HTTP {e.code}: {detail or e.reason}"}
-    except Exception as e:  # noqa: BLE001 — transport/parse
+    except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
 
 
 def _match_quality(term: str, rows: list) -> tuple:
-    """Did the results actually match what was ASKED, or only a common token?
-
-    >>> THE EMPTY ANSWER WAS MADE HONEST; THE NON-EMPTY ONE WAS NOT. <<<
-    (Reported first-hand by a peer, 2026-08-01.) The index's query sanitiser
-    OR-JOINS tokens, so `def command_beta_executor` matches anything containing
-    "command". He grepped a private-repo file and got six confident-looking
-    swarph-cli symbols WITH CALLER COUNTS — plausible structure from the wrong
-    repository, and caller counts make it read authoritative. His words: "the
-    failure mode you engineered out of the empty case walked back in through the
-    non-empty one."
-
-    So: find the query's DISTINCTIVE token — the longest content token, which is
-    the one carrying the intent (`command_beta_executor`, not `def`) — and check
-    whether ANY returned symbol name actually contains it. If none does, every
-    row is a common-token coincidence and must be labelled as such rather than
-    served as an answer.
-
-    Returns (distinctive_token, n_rows_matching_it).
-    """
     toks = [t for t in re.findall(r"[A-Za-z0-9_]+", (term or "").lower())
             if len(t) > 2 and t not in {"def", "class", "async", "the", "for"}]
     if not toks:
@@ -243,21 +270,13 @@ def _match_quality(term: str, rows: list) -> tuple:
 
 
 def any_symbol_name_contains_term(term: str, rows: list) -> bool:
-    """Relevance floor (#825): at least one returned name contains the distinctive token."""
     key, hits = _match_quality(term, rows)
     if not key:
-        # No distinctive token to require — treat as non-floor (don't suppress on this alone).
         return bool(rows)
     return hits > 0
 
 
 def render(term: str, env: dict) -> str:
-    """Format the envelope for injection. Errors are LOUD and named.
-
-    #825: when rows exist but NONE of their names contain the query's distinctive
-    token, return "" — suppress the whole block. The old FUZZY MATCH banner was
-    honest and still noise the reader had to read.
-    """
     if "error" in env:
         return (f"CODEGRAPH UNAVAILABLE for '{term}' — {env['error']}\n"
                 f"  >>> THIS IS NOT 'no matches'. The structural index could not be "
@@ -288,12 +307,63 @@ def render(term: str, env: dict) -> str:
         )
     return (f"CODEGRAPH (structural{age}) for '{term}' — grep found text; this is "
             f"the symbol graph, incl. CALLER COUNTS grep cannot see:\n{body}\n\n"
-            f"Use this for definitions/callers/blast-radius. grep remains correct "
-            f"for config, logs and string literals the codegraph does not index.")
+            f"Use this for definitions/callers/blast-radius BEFORE reaching for "
+            f"grep when the question is structural. grep remains correct for "
+            f"config, logs and string literals the codegraph does not index.")
 
+
+def _read_token(self_name: str, term: str, event_name: str) -> Optional[str]:
+    if not self_name:
+        _emit(f"CODEGRAPH SKIPPED for '{term}' — no cell identity (set SWARPH_SELF "
+              f"or pass --as). Not a negative result: the graph was never asked.",
+              event_name)
+        return None
+    tp = _token_path(self_name)
+    try:
+        return tp.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        _emit(f"CODEGRAPH UNAVAILABLE for '{term}' — peer token unreadable at {tp}: "
+              f"{e}. Not a negative result: the graph was never asked.",
+              event_name)
+        return None
+
+
+def _query_and_emit(self_name: str, gateway: str, term: str, *,
+                    trigger: str, event_name: str, raw_command: str = "",
+                    raw_term: str = "", prompt: str = "",
+                    session_id: str = "", firing_id: str = "") -> None:
+    token = _read_token(self_name, term, event_name)
+    if token is None:
+        return
+    env = query_gateway(term, gateway, token)
+    rows = env.get("results") or [] if "error" not in env else []
+    name_hit = any_symbol_name_contains_term(term, rows) if rows else False
+    fid = firing_id or str(uuid.uuid4())
+    write_audit(self_name, {
+        "kind": "fire",
+        "firing_id": fid,
+        "trigger": trigger,
+        "session_id": session_id,
+        "raw_command": raw_command,
+        "prompt_excerpt": (prompt or "")[:240],
+        "extracted_term": term,
+        "raw_term": raw_term or term,
+        "skipped": False,
+        "match_count": len(rows),
+        "any_name_contains_term": name_hit,
+        "error": env.get("error"),
+    })
+    if trigger == "prompt":
+        register_pending_firing(self_name, fid, session_id)
+    text = render(term, env)
+    if text:
+        _emit(text, event_name)
+
+
+# ── entry ─────────────────────────────────────────────────────────────────
 
 def run_codegraph_hook(argv: Optional[list] = None) -> int:
-    """PostToolUse(Bash) entry point. ALWAYS exits 0 — it must never fail a turn."""
+    """ALWAYS exits 0 — must never fail a turn."""
     argv = list(argv or [])
     self_name = os.environ.get("SWARPH_SELF", "").strip()
     gateway = env_gateway()
@@ -307,8 +377,81 @@ def run_codegraph_hook(argv: Optional[list] = None) -> int:
         payload = json.loads(sys.stdin.read() or "{}")
     except Exception:  # noqa: BLE001
         return 0
+
+    event = (payload.get("hook_event_name")
+             or payload.get("hookEventName")
+             or "")
+    session_id = str(payload.get("session_id") or payload.get("sessionId") or "")
+
+    if event in ("Stop", "StopFailure"):
+        resolve_pending_outcome(self_name or "_unknown", "neither", session_id)
+        return 0
+
+    if event == "UserPromptSubmit" or (
+            not event and (payload.get("prompt") or payload.get("user_prompt"))):
+        return _run_prompt_path(payload, self_name, gateway, session_id)
+
+    # Default / PostToolUse: Bash annotate path (#194), kept for shared audit.
+    return _run_bash_path(payload, self_name, gateway, session_id)
+
+
+def _run_prompt_path(payload: dict, self_name: str, gateway: str,
+                     session_id: str) -> int:
+    prompt = (payload.get("prompt")
+              or payload.get("user_prompt")
+              or payload.get("userPrompt")
+              or "").strip()
+    if not prompt:
+        return 0
+    if not prompt_has_coding_keywords(prompt):
+        write_audit(self_name or "_unknown", {
+            "kind": "fire",
+            "trigger": "prompt",
+            "session_id": session_id,
+            "skipped": True,
+            "skip_reason": "no_coding_keywords",
+            "prompt_excerpt": prompt[:240],
+            "match_count": 0,
+            "any_name_contains_term": False,
+        })
+        return 0
+    terms = extract_prompt_terms(prompt)
+    if not terms:
+        write_audit(self_name or "_unknown", {
+            "kind": "fire",
+            "trigger": "prompt",
+            "session_id": session_id,
+            "skipped": True,
+            "skip_reason": "no_identifier_term",
+            "prompt_excerpt": prompt[:240],
+            "match_count": 0,
+            "any_name_contains_term": False,
+        })
+        return 0
+    # One query — longest identifier. No score constant; walk stays source order.
+    term = terms[0]
+    _query_and_emit(
+        self_name, gateway, term,
+        trigger="prompt", event_name="UserPromptSubmit",
+        prompt=prompt, session_id=session_id,
+    )
+    return 0
+
+
+def _run_bash_path(payload: dict, self_name: str, gateway: str,
+                   session_id: str) -> int:
     cmd = ((payload.get("tool_input") or {}).get("command") or "").strip()
-    if not cmd or not _looks_like_code_search(cmd):
+    if not cmd:
+        return 0
+
+    # Counterfactual: a later grep / codegraph call closes open prompt firings.
+    low = cmd.lower()
+    if "codegraph" in low and "swarph" in low:
+        resolve_pending_outcome(self_name or "_unknown", "codegraph", session_id)
+    elif _AT_COMMAND_POS.search(cmd):
+        resolve_pending_outcome(self_name or "_unknown", "grep", session_id)
+
+    if not _looks_like_code_search(cmd):
         return 0
     pair = extract_raw_and_cleaned(cmd)
     if not pair:
@@ -317,6 +460,9 @@ def run_codegraph_hook(argv: Optional[list] = None) -> int:
 
     if term_is_shredded(raw, term):
         write_audit(self_name or "_unknown", {
+            "kind": "fire",
+            "trigger": "bash",
+            "session_id": session_id,
             "raw_command": cmd,
             "extracted_term": term,
             "raw_term": raw,
@@ -327,44 +473,18 @@ def run_codegraph_hook(argv: Optional[list] = None) -> int:
         })
         return 0
 
-    if not self_name:
-        _emit(f"CODEGRAPH SKIPPED for '{term}' — no cell identity (set SWARPH_SELF "
-              f"or pass --as). Not a negative result: the graph was never asked.")
-        return 0
-    tp = _token_path(self_name)
-    try:
-        # encoding="utf-8": on Windows a bare read_text() uses the locale codec, and a
-        # non-ASCII byte in the token file crashes the hook with a charmap traceback
-        # that names a credential path.
-        token = tp.read_text(encoding="utf-8").strip()
-    except OSError as e:
-        _emit(f"CODEGRAPH UNAVAILABLE for '{term}' — peer token unreadable at {tp}: "
-              f"{e}. Not a negative result: the graph was never asked.")
-        return 0
-
-    env = query_gateway(term, gateway, token)
-    rows = env.get("results") or [] if "error" not in env else []
-    name_hit = any_symbol_name_contains_term(term, rows) if rows else False
-    write_audit(self_name, {
-        "raw_command": cmd,
-        "extracted_term": term,
-        "raw_term": raw,
-        "skipped": False,
-        "match_count": len(rows),
-        "any_name_contains_term": name_hit,
-        "error": env.get("error"),
-    })
-    text = render(term, env)
-    if text:
-        _emit(text)
+    _query_and_emit(
+        self_name, gateway, term,
+        trigger="bash", event_name="PostToolUse",
+        raw_command=cmd, raw_term=raw, session_id=session_id,
+    )
     return 0
 
 
-def _emit(text: str) -> None:
-    """Hand context back to the model via the documented hook JSON shape."""
+def _emit(text: str, event_name: str = "PostToolUse") -> None:
     print(json.dumps({
         "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
+            "hookEventName": event_name,
             "additionalContext": text,
         }
     }))

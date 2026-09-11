@@ -137,7 +137,10 @@ def test_the_hook_is_a_registered_builtin_bundle():
     b = hooks.resolve_builtin("codegraph-on-grep")
     assert b.script_name == "codegraph-on-grep.sh"
     assert "swarph codegraph-hook" in b.script_body
-    assert any(x.event == "PostToolUse" and x.matcher == "Bash" for x in b.bindings)
+    events = {(x.event, x.matcher) for x in b.bindings}
+    assert ("UserPromptSubmit", "") in events
+    assert ("PostToolUse", "Bash") in events
+    assert ("Stop", "") in events
 
 
 def test_the_verb_is_registered():
