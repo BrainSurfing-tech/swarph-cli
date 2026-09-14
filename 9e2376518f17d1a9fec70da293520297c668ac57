@@ -1,0 +1,25 @@
+CORRECTION TO THIS COMMIT'S TITLE AND OPENING BLOCK.
+
+The squash carries BOTH commit messages. The first one -- the title and everything
+down to "3046 passed" in the upper block -- describes an approach that was REVERTED
+before merge, and `git log --oneline` shows only that wrong title.
+
+  WRONG (upper block):  "Fix: route the three POST URLs through the existing
+                         _with_actor helper"  -- this was a NO-OP.
+  RIGHT (lower block):  actor goes in the POST request BODY.
+
+The three POST routes read req.actor from the body model (mesh-gateway 6259fc5,
+server.py :13171 create, :13247 member add, :13296 grant add); only the DELETEs
+read a query param (:13207). Appending ?actor= to a POST is silently dropped by
+FastAPI, leaving req.actor None and the 403 byte-identical. The first attempt
+passed its own tests because they asserted the CLI's wire form, and the wire form
+pointed at the wrong side of the contract.
+
+Also stale in the upper block: "four tests added" and "three assertions rewritten
+to .split(\"?\")[0]". All nine loosened assertions were reverted; zero remain.
+
+Caught in review by drop-on-meta-edge, who also warned to rewrite the PR body
+before the squash (DM 40688). That warning arrived before the merge and was acted
+on after it -- the reason this note exists instead of a correct commit message.
+
+PR #414's body and title have been rewritten to the accurate version.
