@@ -45,23 +45,23 @@ def test_peer_grants_url_encodes_peer():
 
 
 def test_group_create_payload_omits_empty_description():
-    p = group._group_create_payload("eng", None, "custom")
-    assert p == {"name": "eng", "kind": "custom"}
+    p = group._group_create_payload("eng", None, "custom", "lab-ovh")
+    assert p == {"name": "eng", "kind": "custom", "actor": "lab-ovh"}
     assert "description" not in p
 
 
 def test_group_create_payload_with_description():
-    p = group._group_create_payload("eng", "engineering team", "role")
-    assert p == {"name": "eng", "kind": "role", "description": "engineering team"}
+    p = group._group_create_payload("eng", "engineering team", "role", "lab-ovh")
+    assert p == {"name": "eng", "kind": "role", "description": "engineering team", "actor": "lab-ovh"}
 
 
 def test_member_add_payload():
-    assert group._member_add_payload("lab-ovh") == {"peer": "lab-ovh"}
+    assert group._member_add_payload("lab-ovh", "c1") == {"peer": "lab-ovh", "actor": "c1"}
 
 
 def test_grant_add_payload():
-    assert group._grant_add_payload("board", "cards", "execute") == {
-        "grant_type": "board", "target": "cards", "level": "execute",
+    assert group._grant_add_payload("board", "cards", "execute", "c1") == {
+        "grant_type": "board", "target": "cards", "level": "execute", "actor": "c1",
     }
 
 
@@ -187,8 +187,8 @@ def test_group_create_defaults_kind_custom(monkeypatch):
     monkeypatch.setattr(group, "post_json", fake)
     rc = group.run_group(["create", "eng"])
     assert rc == 0
-    assert cap["url"].split("?")[0].endswith("/groups")
-    assert cap["body"] == {"name": "eng", "kind": "custom"}
+    assert cap["url"].endswith("/groups")
+    assert cap["body"] == {"name": "eng", "kind": "custom", "actor": "c1"}
     assert cap["token"] == "tok"
 
 
@@ -202,7 +202,7 @@ def test_group_create_with_description_and_kind(monkeypatch):
     monkeypatch.setattr(group, "post_json", fake)
     rc = group.run_group(["create", "eng", "--description", "engineering", "--kind", "role"])
     assert rc == 0
-    assert cap["body"] == {"name": "eng", "kind": "role", "description": "engineering"}
+    assert cap["body"] == {"name": "eng", "kind": "role", "description": "engineering", "actor": "c1"}
 
 
 def test_group_list_does_get(monkeypatch):
@@ -215,7 +215,7 @@ def test_group_list_does_get(monkeypatch):
     monkeypatch.setattr(group, "get_json", fake)
     rc = group.run_group(["list"])
     assert rc == 0
-    assert cap["url"].split("?")[0].endswith("/groups")
+    assert cap["url"].endswith("/groups")
 
 
 def test_group_delete_uses_delete_json(monkeypatch):
@@ -241,7 +241,7 @@ def test_group_members_does_get(monkeypatch):
     monkeypatch.setattr(group, "get_json", fake)
     rc = group.run_group(["members", "eng"])
     assert rc == 0
-    assert cap["url"].split("?")[0].endswith("/groups/eng/members")
+    assert cap["url"].endswith("/groups/eng/members")
 
 
 def test_group_add_posts_peer(monkeypatch):
@@ -254,8 +254,8 @@ def test_group_add_posts_peer(monkeypatch):
     monkeypatch.setattr(group, "post_json", fake)
     rc = group.run_group(["add", "eng", "lab-ovh"])
     assert rc == 0
-    assert cap["url"].split("?")[0].endswith("/groups/eng/members")
-    assert cap["body"] == {"peer": "lab-ovh"}
+    assert cap["url"].endswith("/groups/eng/members")
+    assert cap["body"] == {"peer": "lab-ovh", "actor": "c1"}
 
 
 def test_group_remove_uses_delete_json_with_peer_path(monkeypatch):
@@ -281,7 +281,7 @@ def test_group_grants_does_get(monkeypatch):
     monkeypatch.setattr(group, "get_json", fake)
     rc = group.run_group(["grants", "eng"])
     assert rc == 0
-    assert cap["url"].split("?")[0].endswith("/groups/eng/grants")
+    assert cap["url"].endswith("/groups/eng/grants")
 
 
 def test_group_grant_defaults_level_read(monkeypatch):
@@ -294,8 +294,8 @@ def test_group_grant_defaults_level_read(monkeypatch):
     monkeypatch.setattr(group, "post_json", fake)
     rc = group.run_group(["grant", "eng", "board", "cards"])
     assert rc == 0
-    assert cap["url"].split("?")[0].endswith("/groups/eng/grants")
-    assert cap["body"] == {"grant_type": "board", "target": "cards", "level": "read"}
+    assert cap["url"].endswith("/groups/eng/grants")
+    assert cap["body"] == {"grant_type": "board", "target": "cards", "level": "read", "actor": "c1"}
 
 
 def test_group_grant_explicit_level(monkeypatch):
@@ -359,7 +359,7 @@ def test_group_check_url_and_payload(monkeypatch):
     monkeypatch.setattr(group, "post_json", fake)
     rc = group.run_group(["check", "lab-ovh", "board", "cards"])
     assert rc == 0
-    assert cap["url"].split("?")[0].endswith("/authz/check")
+    assert cap["url"].endswith("/authz/check")
     assert cap["body"] == {"peer": "lab-ovh", "grant_type": "board", "target": "cards"}
 
 
@@ -421,7 +421,7 @@ def test_rights_no_arg_resolves_self(monkeypatch):
     monkeypatch.setattr(group, "get_json", fake)
     rc = group.run_rights([])
     assert rc == 0
-    assert cap["url"].split("?")[0].endswith("/peers/c1/grants")
+    assert cap["url"].endswith("/peers/c1/grants")
 
 
 def test_rights_explicit_peer(monkeypatch):
@@ -434,7 +434,7 @@ def test_rights_explicit_peer(monkeypatch):
     monkeypatch.setattr(group, "get_json", fake)
     rc = group.run_rights(["lab-ovh"])
     assert rc == 0
-    assert cap["url"].split("?")[0].endswith("/peers/lab-ovh/grants")
+    assert cap["url"].endswith("/peers/lab-ovh/grants")
 
 
 def test_rights_renders_human_format(monkeypatch, capsys):
@@ -541,78 +541,85 @@ def test_no_DELETE_verb_relies_on_a_request_BODY(monkeypatch):
     )
 
 
-# ── the OTHER half of card #114: the POST verbs were never fixed ──────────────
-# #114 taught that the gateway reads `actor` as a QUERY param and a request
-# without one arrives as actor=None -> 403. The remedy (`_with_actor`) was wired
-# into the three DELETE verbs and into NEITHER of the three POST verbs, so
-# create / add / grant stayed dead against the live gateway for the same reason,
-# with the fix documented three lines above the code that did not call it.
+# ── the OTHER half of card #114: the POST verbs sent no actor AT ALL ──────────
+# #114 fixed the three DELETE verbs, which read `actor` from the QUERY STRING
+# (a DELETE carries no body — that is why). The three POST verbs were never
+# fixed, and they read `actor` from the BODY:
 #
-# Found in prod 2026-09-14: `swarph group grant execute-grant board omega-roadmap
-# --level execute` -> 403 "caller-binding: authenticated peer 'lab-ovh' may not
-# act as actor=None". The commander hit the BYTE-IDENTICAL error as --as commander,
-# sole member of the admin group -- which is what proved it was a missing
-# parameter and not an authorization denial. An authz failure would have let the
-# admin through; this let nobody through, because caller-binding rejects BEFORE
-# the authorization check ever runs.
+#   mesh-gateway server.py @ 6259fc5
+#     POST /groups                  groups_create      -> _check_caller_binding(auth, req.actor)   :13171
+#     POST /groups/{name}/members   groups_member_add  -> _check_caller_binding(auth, req.actor)   :13247
+#     POST /groups/{name}/grants    groups_grant_add   -> _check_caller_binding(auth, req.actor)   :13296
+#     DELETE /groups/{name}         groups_delete      -> actor: Optional[str] = None  (QUERY)     :13207
 #
-# Like the #114 tests, these assert the WIRE FORM. Every pre-existing POST test
-# asserts the URL path and the payload, and all of them passed throughout.
+# >>> THE GATEWAY'S CONTRACT IS SPLIT BY METHOD, AND `_with_actor`'s DOCSTRING
+# ("Verified live: body -> 403, ?actor= -> 200") IS A DELETE-SHAPED TRUTH THAT
+# INVERTS ON POST. A first attempt at this fix appended ?actor= to the POSTs;
+# FastAPI declares no such query param on those routes, so it was silently
+# ignored, req.actor stayed None, and the 403 was byte-identical. Caught in
+# review by drop-on-meta-edge against gateway main, not by these tests. <<<
+#
+# So these assert the BODY for POST and the QUERY for DELETE — the wire form
+# each route actually reads. Asserting the wrong side of the contract is how a
+# green suite shipped a no-op.
 
-def test_grant_sends_actor_as_QUERY_param(monkeypatch):
+def test_grant_puts_actor_in_the_BODY_not_the_query(monkeypatch):
     seen = {}
     monkeypatch.setattr(group, "post_json", lambda url, payload, token: (seen.update(url=url, payload=payload), (201, {}))[1])
     monkeypatch.setattr(group, "resolve_self_name", lambda *a, **k: "lab-ovh")
     monkeypatch.setattr(group, "resolve_token", lambda *a, **k: "t")
     group.run_group(["grant", "execute-grant", "board", "omega-roadmap",
                      "--level", "execute", "--gateway", "http://gw"])
-    assert "actor=lab-ovh" in seen["url"], seen
-    assert "/groups/execute-grant/grants" in seen["url"], seen
-    # the payload keeps its three fields -- actor is additive, not a replacement
+    assert seen["payload"]["actor"] == "lab-ovh", seen
+    assert "actor=" not in seen["url"], f"decoy query param the route ignores: {seen['url']}"
     assert seen["payload"]["grant_type"] == "board", seen
     assert seen["payload"]["target"] == "omega-roadmap", seen
     assert seen["payload"]["level"] == "execute", seen
 
 
-def test_add_member_sends_actor_as_QUERY_param(monkeypatch):
+def test_add_member_puts_actor_in_the_BODY_not_the_query(monkeypatch):
     seen = {}
     monkeypatch.setattr(group, "post_json", lambda url, payload, token: (seen.update(url=url, payload=payload), (201, {}))[1])
     monkeypatch.setattr(group, "resolve_self_name", lambda *a, **k: "lab-ovh")
     monkeypatch.setattr(group, "resolve_token", lambda *a, **k: "t")
     group.run_group(["add", "execute-grant", "friendly-coder", "--gateway", "http://gw"])
-    assert "actor=lab-ovh" in seen["url"], seen
-    assert "/groups/execute-grant/members" in seen["url"], seen
+    assert seen["payload"]["actor"] == "lab-ovh", seen
     assert seen["payload"]["peer"] == "friendly-coder", seen
+    assert "actor=" not in seen["url"], seen
 
 
-def test_create_group_sends_actor_as_QUERY_param(monkeypatch):
+def test_create_puts_actor_in_the_BODY_not_the_query(monkeypatch):
+    """groups_create caller-binds req.actor AND stamps created_by=actor, so an
+    actorless create is not merely rejected — it would mis-attribute the row."""
     seen = {}
-    monkeypatch.setattr(group, "post_json", lambda url, payload, token: (seen.update(url=url), (201, {}))[1])
+    monkeypatch.setattr(group, "post_json", lambda url, payload, token: (seen.update(url=url, payload=payload), (201, {}))[1])
     monkeypatch.setattr(group, "resolve_self_name", lambda *a, **k: "lab-ovh")
     monkeypatch.setattr(group, "resolve_token", lambda *a, **k: "t")
     group.run_group(["create", "eng", "--gateway", "http://gw"])
-    assert "actor=lab-ovh" in seen["url"], seen
-    assert seen["url"].startswith("http://gw/groups?"), seen
+    assert seen["payload"]["actor"] == "lab-ovh", seen
+    assert "actor=" not in seen["url"], seen
 
 
-def test_every_mutating_group_verb_carries_an_actor(monkeypatch):
-    """The regression that let this survive #114 was per-verb fixes with no rule.
-    This asserts the RULE: every verb that changes state names its actor, so a
-    seventh mutating verb added later cannot repeat it silently."""
-    seen = {}
-    monkeypatch.setattr(group, "post_json", lambda url, payload, token: (seen.setdefault("urls", []).append(url), (201, {}))[1])
-    monkeypatch.setattr(group, "delete_json", lambda url, token: (seen.setdefault("urls", []).append(url), (204, {}))[1])
-    monkeypatch.setattr(group, "resolve_self_name", lambda *a, **k: "lab-ovh")
-    monkeypatch.setattr(group, "resolve_token", lambda *a, **k: "t")
-    for argv in (
-        ["create", "eng"],
-        ["add", "eng", "droplet"],
-        ["grant", "eng", "board", "cards", "--level", "execute"],
-        ["remove", "eng", "droplet"],
-        ["revoke", "eng", "board", "cards"],
-        ["delete", "eng"],
-    ):
-        group.run_group(argv + ["--gateway", "http://gw"])
-    assert len(seen["urls"]) == 6, seen
-    missing = [u for u in seen["urls"] if "actor=lab-ovh" not in u]
-    assert not missing, f"mutating verbs sent no actor: {missing}"
+def test_every_mutating_verb_names_its_actor_on_the_side_its_route_reads():
+    """The regression that let #114 survive half-fixed was per-verb patches with
+    no invariant. This derives the verb set from the PARSER, so a seventh
+    mutating verb fails here until its author classifies it — the previous
+    version of this test drove a hardcoded list and would have stayed green.
+
+    POST -> body, DELETE -> query. Asserting 'an actor appears somewhere' is what
+    let the first attempt pass while sending it where the route never looks.
+    """
+    import argparse
+    parser = group._build_group_parser()
+    sub = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)][0]
+    READ_VERBS = {"list", "members", "grants", "check"}
+    POST_VERBS = {"create", "add", "grant"}
+    DELETE_VERBS = {"delete", "remove", "revoke"}
+    verbs = set(sub.choices)
+    unclassified = verbs - READ_VERBS - POST_VERBS - DELETE_VERBS
+    assert not unclassified, (
+        f"new group verb(s) {sorted(unclassified)} — classify as read, or as a "
+        f"mutator and assert WHICH SIDE (body for POST, query for DELETE) its "
+        f"route reads the actor from"
+    )
+    assert verbs == READ_VERBS | POST_VERBS | DELETE_VERBS, verbs

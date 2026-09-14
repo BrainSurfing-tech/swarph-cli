@@ -107,19 +107,19 @@ def _peer_grants_url(gateway: str, peer: str) -> str:
     return f"{gateway.rstrip('/')}/peers/{urllib.parse.quote(peer, safe='')}/grants"
 
 
-def _group_create_payload(name: str, description: Optional[str], kind: str) -> dict:
-    p = {"name": name, "kind": kind}
+def _group_create_payload(name: str, description: Optional[str], kind: str, actor: str) -> dict:
+    p = {"name": name, "kind": kind, "actor": actor}
     if description:
         p["description"] = description
     return p
 
 
-def _member_add_payload(peer: str) -> dict:
-    return {"peer": peer}
+def _member_add_payload(peer: str, actor: str) -> dict:
+    return {"peer": peer, "actor": actor}
 
 
-def _grant_add_payload(grant_type: str, target: str, level: str) -> dict:
-    return {"grant_type": grant_type, "target": target, "level": level}
+def _grant_add_payload(grant_type: str, target: str, level: str, actor: str) -> dict:
+    return {"grant_type": grant_type, "target": target, "level": level, "actor": actor}
 
 
 def _revoke_payload(grant_type: str, target: str) -> dict:
@@ -302,8 +302,8 @@ def run_group(argv: list[str]) -> int:
     aj = getattr(args, "json", False)
 
     if args.command == "create":
-        payload = _group_create_payload(args.name, args.description, args.kind)
-        st, d = post_json(_with_actor(f"{gw}/groups", self_name), payload, token)
+        payload = _group_create_payload(args.name, args.description, args.kind, self_name)
+        st, d = post_json(f"{gw}/groups", payload, token)
         return _out(st, d, lambda x: f"created group {x.get('name')} ({x.get('kind')})", aj)
 
     if args.command == "list":
@@ -319,7 +319,7 @@ def run_group(argv: list[str]) -> int:
         return _out(st, d, _format_members, aj)
 
     if args.command == "add":
-        st, d = post_json(_with_actor(_members_url(gw, args.name), self_name), _member_add_payload(args.peer), token)
+        st, d = post_json(_members_url(gw, args.name), _member_add_payload(args.peer, self_name), token)
         return _out(st, d, lambda _x: f"added {args.peer} to {args.name}", aj)
 
     if args.command == "remove":
@@ -331,8 +331,8 @@ def run_group(argv: list[str]) -> int:
         return _out(st, d, _format_grants, aj)
 
     if args.command == "grant":
-        payload = _grant_add_payload(args.grant_type, args.target, args.level)
-        st, d = post_json(_with_actor(_grants_url(gw, args.name), self_name), payload, token)
+        payload = _grant_add_payload(args.grant_type, args.target, args.level, self_name)
+        st, d = post_json(_grants_url(gw, args.name), payload, token)
         return _out(
             st, d,
             lambda _x: f"granted {args.grant_type} {args.target} ({args.level}) to {args.name}",
