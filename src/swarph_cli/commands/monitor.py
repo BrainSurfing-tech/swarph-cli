@@ -1845,6 +1845,17 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
     # nothing (its interpreter owns its site) and gets no Environment= line.
     pythonpath = _user_site_of(init_path)
     env_line = f"Environment=PYTHONPATH={pythonpath}\n" if pythonpath else ""
+    # Provenance (2026-09-15): a unit on disk could not say what produced it, so a
+    # render from an unreleased checkout was indistinguishable from a release.
+    # The PACKAGE PATH is the field that tells a release apart from a checkout: an
+    # unreleased tree reports the last release's __version__ until the bump, and
+    # the interpreter is the same either way (lab-ovh, #420 review, measured).
+    import swarph_cli as _pkg
+    from swarph_cli import __version__ as _ver
+    from datetime import datetime, timezone
+    rendered_by = (f"swarph-cli {_ver} ({str(_pkg.__file__).replace(chr(92), '/')}) "
+                   f"install-reexec, {sys.executable}, "
+                   f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}")
     rendered = {}
     for name, rel in _REEXEC_TEMPLATES.items():
         text = _read_packaged(rel)
@@ -1853,7 +1864,8 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
                .replace("<INTERPRETER>", interpreter or sys.executable)
                .replace("<SWARPH_BIN>", swarph_bin)
                .replace("<STATE_ROOT>", state_root)
-               .replace("<ENV_PYTHONPATH>\n", env_line))
+               .replace("<ENV_PYTHONPATH>\n", env_line)
+               .replace("<RENDERED_BY>", rendered_by))
         if name.endswith(".path") and extra_trees:
             out = out.replace(f"PathChanged={init_path}\n",
                               f"PathChanged={init_path}\n"

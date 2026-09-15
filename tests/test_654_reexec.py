@@ -496,3 +496,19 @@ def test_807b_user_site_regex_matches_only_user_sites():
         == "/home/ubuntu/.local/lib/python3.14/site-packages"
     assert monitor._user_site_of("/home/u/.local/share/pipx/venvs/x/lib/python3.14/site-packages/swarph_cli/__init__.py") is None
     assert monitor._user_site_of("/usr/lib/python3/dist-packages/swarph_cli/__init__.py") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
+def test_807c_rendered_units_carry_their_producer(tmp_path, capsys, monkeypatch):
+    """A unit on disk must say what produced it: package version, interpreter, UTC time.
+    Without it a render from an unreleased checkout is indistinguishable from a release."""
+    import swarph_cli
+    shim = _fake_shim(tmp_path, "/home/ubuntu/.local/lib/python3.14/site-packages/swarph_cli/__init__.py")
+    monkeypatch.setattr(monitor, "_live_tree", lambda: None)
+    monkeypatch.setattr(monitor, "_condition_probe", lambda i, p=None: (True, "OK"))
+    rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    pkg = str(swarph_cli.__file__).replace("\\", "/")
+    assert out.count(f"# rendered-by: swarph-cli {swarph_cli.__version__} ({pkg}) install-reexec, ") == 2
+    assert "<RENDERED_BY>" not in out
