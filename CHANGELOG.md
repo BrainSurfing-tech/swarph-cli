@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+
+## 0.61.0 — 2026-09-15
+- reexec (#807/#419): `swarph-monitor-reexec.service` runs as **root**, and a `pip --user` install lives under the owner's `~/.local`, which root's interpreter never searches — so both `ExecCondition=` and `ExecStart=` raised `ModuleNotFoundError` on **every** fire, not only mid-install. `install-reexec` now derives the shim owner's user site and renders `Environment=PYTHONPATH=` when the consumed tree is one, and **refuses `--write`** when the condition it would install fails right now for the writing user. The earlier diagnosis (pip's mid-install window) was wrong and is corrected in the unit's own header: both causes predict identical journals, because a `.path` unit only ever fires at an install — firing the trigger alone, with no install running, is what told them apart.
+- reexec (#807/#420): rendered units carry a `# rendered-by: swarph-cli <version> (<package path>) install-reexec, <interpreter>, <UTC>` first line. The **package path** is load-bearing, not decoration: an unreleased tree reports the last release's version, so version alone cannot distinguish a unit rendered from a checkout (`.../src/...`) from one rendered from the published install (`.../site-packages/...`).
+- Known limit, recorded rather than implied: the `--write` refusal path is pinned by a unit test but **not exercised live** — on a single-user box the owner's-user-site fallback always recovers, so no import failure survives the rendered `PYTHONPATH`. It needs a box with a second user or a container.
 - monitor (#807): rendered reexec units carry a `# rendered-by:` first line — package version, package path (a checkout and a release report the same version; the path tells them apart), interpreter, UTC time — so a unit on disk says what produced it
 - monitor (#807 follow-up): `install-reexec` renders `Environment=PYTHONPATH=<user site>` when the watched tree is a pip `--user` install (the unit runs as root, whose interpreter never searches it — measured 2026-09-15: the condition failed on every fire and the unit was skipped silently), resolves the tree through the shim owner's user site when run as root, and REFUSES `--write` when the rendered ExecCondition fails for the writing user
 
