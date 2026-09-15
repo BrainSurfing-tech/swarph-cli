@@ -38,6 +38,13 @@
 # of the reexec itself, with a budget that cannot be exhausted inside one window
 # (StartLimitIntervalSec <= 2 x RestartSec => at most two starts per interval).
 #
+# KNOWN ALERT FAN-OUT (measured 2026-09-15 drill, lab-ovh): one genuine ExecStart
+# failure produces 2-3 pages, not 1 — the .service pages on the failure, pages
+# again when Restart=on-failure's retry fails and the budget latches, and the
+# .path pages when IT latches (its own OnFailure drop-in). That is by design:
+# the .path latch is the thing that sat silent for 8 days and now has a voice.
+# Expect it; do not "fix" it by removing the .path drop-in.
+#
 # LOUD FAILURE (R5 extended): a permanently failed oneshot must reach an
 # operator. Do NOT bake a box-local alerter into this template — mercury-alert@
 # exists on lab-ovh and not everywhere. Add a drop-in, e.g.
