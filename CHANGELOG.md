@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- monitor (#807 follow-up): `install-reexec` renders `Environment=PYTHONPATH=<user site>` when the watched tree is a pip `--user` install (the unit runs as root, whose interpreter never searches it — measured 2026-09-15: the condition failed on every fire and the unit was skipped silently), resolves the tree through the shim owner's user site when run as root, and REFUSES `--write` when the rendered ExecCondition fails for the writing user
 
 ## 0.60.0 — 2026-09-15
 - schedule (#183b): `card` joins the durable anchor kinds, and the `--context card=<id>` shorthand emits the integer id the gateway expects — a scheduled event can now anchor to a board card without hand-writing the anchor dict. Mirrors mesh-gateway `_DURABLE_ANCHOR_KEYS`; `test_schedule_create_contract.py` fails if the two drift.

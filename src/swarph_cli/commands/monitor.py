@@ -1703,7 +1703,7 @@ def _cmd_clear_reexec_hold(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_consumed_tree(swarph_bin: str) -> tuple:
+def _resolve_consumed_tree(swarph_bin: str, pythonpath: str = None) -> tuple:
     """#807: (interpreter, init_path, how) for the tree the swarph BINARY loads.
     Reads the shim's shebang, asks that interpreter where swarph_cli lives. The
     installer's own interpreter is the wrong witness (a pipx-run installer watched
@@ -1722,6 +1722,8 @@ def _resolve_consumed_tree(swarph_bin: str) -> tuple:
     # whoever runs the installer (a dev shell's PYTHONPATH=src would otherwise be
     # reported as "the tree the monitors load" — the exact misreading this fixes).
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSAFEPATH")}
+    if pythonpath:
+        env["PYTHONPATH"] = pythonpath
     try:
         r = subprocess.run([interp, "-c", "import swarph_cli, sys; print(swarph_cli.__file__)"],
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -1731,6 +1733,55 @@ def _resolve_consumed_tree(swarph_bin: str) -> tuple:
     if r.returncode != 0 or not r.stdout.strip():
         return interp, None, f"{interp} cannot import swarph_cli (rc={r.returncode})"
     return interp, r.stdout.strip().replace("\\", "/"), f"resolved from {swarph_bin} -> {interp}"
+
+
+_USER_SITE_RE = re.compile(r"^(.*/\.local/lib/python[0-9]+\.[0-9]+/site-packages)/swarph_cli/__init__\.py$")
+
+
+def _user_site_of(init_path: str):
+    """The user-site dir a swarph_cli __init__ lives in, or None (pipx venv, system)."""
+    m = _USER_SITE_RE.match((init_path or "").replace("\\", "/"))
+    return m.group(1) if m else None
+
+
+def _owner_user_site(swarph_bin: str, interp: str):
+    """#807 (root cannot see the user site): the pip --user tree of the SHIM'S OWNER for
+    the shim's interpreter — ~owner/.local/lib/pythonX.Y/site-packages — if swarph_cli
+    is there. The unit runs as root and root's interpreter never searches another
+    user's site, so the installer must find it by construction, not by import."""
+    import pwd, subprocess
+    try:
+        home = pwd.getpwuid(Path(swarph_bin).stat().st_uid).pw_dir
+        r = subprocess.run([interp, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=20)
+    except (OSError, KeyError, subprocess.SubprocessError):
+        return None
+    ver = r.stdout.strip()
+    if r.returncode != 0 or not re.fullmatch(r"[0-9]+\.[0-9]+", ver):
+        return None
+    cand = f"{home}/.local/lib/python{ver}/site-packages"
+    return cand if Path(cand, "swarph_cli", "__init__.py").exists() else None
+
+
+def _condition_probe(interpreter: str, pythonpath: str = None) -> tuple:
+    """Run the unit's ExecCondition NOW, as the user running this verb, with the env the
+    unit will have. (ok, detail). The 2026-09-15 lesson: a condition that fails on every
+    fire is a SKIP (Result=success) — OnFailure never fires, and the unit is quieter than
+    the failed state it replaced. So the writer checks it before it writes."""
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSAFEPATH")}
+    if pythonpath:
+        env["PYTHONPATH"] = pythonpath
+    try:
+        r = subprocess.run([interpreter, "-c", "import swarph_cli"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=20, env=env)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"{interpreter} could not be run ({type(e).__name__})"
+    if r.returncode == 0:
+        return True, "OK"
+    last = (r.stderr.strip().splitlines() or ["(no stderr)"])[-1]
+    return False, f"rc={r.returncode}: {last}"
 
 
 def _live_tree():
@@ -1772,12 +1823,28 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
     # interpreter, not the interpreter running this verb.
     interpreter, init_path, how = _resolve_consumed_tree(swarph_bin)
     live_init = _live_tree()
+    pythonpath = None
+    if init_path is None and interpreter:
+        # #807 (2026-09-15): run as root, the shim's interpreter cannot import a pip
+        # --user install at all — the same ModuleNotFoundError as a mid-install
+        # window, on EVERY fire. Find the owner's user site by construction.
+        us = _owner_user_site(swarph_bin, interpreter)
+        if us:
+            _i, init2, how2 = _resolve_consumed_tree(swarph_bin, pythonpath=us)
+            if init2:
+                init_path, how = init2, (f"{how2} via the shim owner's user site — {interpreter} "
+                                         f"alone cannot import it (this user is not the owner, e.g. root)")
     if init_path is None:
         if live_init is None:
             raise RuntimeError("cannot resolve the installed swarph_cli package "
                                "path — is this a broken install?")
         init_path, how = live_init, f"{how}; fell back to the LIVE interpreter"
     extra_trees = [t for t in {live_init} if t and t != init_path]
+    # A user-site tree is invisible to root's interpreter: the unit runs as root, so
+    # the site the monitors load is handed to it explicitly. A pipx/venv tree needs
+    # nothing (its interpreter owns its site) and gets no Environment= line.
+    pythonpath = _user_site_of(init_path)
+    env_line = f"Environment=PYTHONPATH={pythonpath}\n" if pythonpath else ""
     rendered = {}
     for name, rel in _REEXEC_TEMPLATES.items():
         text = _read_packaged(rel)
@@ -1785,7 +1852,8 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
                .replace("<SITE_PACKAGES_INIT>", init_path)
                .replace("<INTERPRETER>", interpreter or sys.executable)
                .replace("<SWARPH_BIN>", swarph_bin)
-               .replace("<STATE_ROOT>", state_root))
+               .replace("<STATE_ROOT>", state_root)
+               .replace("<ENV_PYTHONPATH>\n", env_line))
         if name.endswith(".path") and extra_trees:
             out = out.replace(f"PathChanged={init_path}\n",
                               f"PathChanged={init_path}\n"
@@ -1803,6 +1871,9 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
             dropins[f"{name}.d/10-onfailure.conf"] = (
                 f"# #807: written by `swarph monitor install-reexec --on-failure`; box-local.\n"
                 f"[Unit]\nOnFailure={args.on_failure}\n")
+    import getpass
+    cond_ok, cond_detail = _condition_probe(interpreter or sys.executable, pythonpath)
+    who = getpass.getuser()
     if not args.write:
         for name, text in rendered.items():
             print(f"# ── {name} ──")
@@ -1811,6 +1882,8 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
             print(f"# ── {name} ──")
             print(text, end="")
         print(f"# watching: {init_path} ({how})")
+        print(f"# condition check as {who}: {'OK' if cond_ok else 'FAILS — ' + cond_detail}"
+              + ("" if cond_ok else " (the unit would be SKIPPED on every fire; --write will refuse)"))
         for t in extra_trees:
             print(f"# also watching: {t} (a second install tree; the monitors do not load it)")
         print(f"# import check: {interpreter or sys.executable} -c 'import swarph_cli'")
@@ -1820,6 +1893,13 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
 
     if os.name == "nt":
         print("swarph monitor install-reexec --write: Linux-only.",
+              file=sys.stderr)
+        return 2
+    if not cond_ok:
+        print(f"swarph monitor install-reexec --write: REFUSED — the ExecCondition this unit would "
+              f"carry fails right now for {who}: {interpreter or sys.executable} -c 'import swarph_cli' "
+              f"→ {cond_detail}. Installed, it would be SKIPPED on every fire (Result=success, no "
+              f"OnFailure) — a control quieter than the failed state it replaces. Nothing written.",
               file=sys.stderr)
         return 2
     target_dir = Path(args.dir)
@@ -1836,6 +1916,7 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
         (target_dir / name).write_text(text, encoding="utf-8")
         print(f"wrote {target_dir / name}")
     print(f"watching: {init_path} ({how})")
+    print(f"condition check as {who}: OK" + (f" (PYTHONPATH={pythonpath})" if pythonpath else ""))
     for t in extra_trees:
         print(f"also watching: {t}")
     print("next: systemctl daemon-reload && systemctl reset-failed swarph-monitor-reexec.path "

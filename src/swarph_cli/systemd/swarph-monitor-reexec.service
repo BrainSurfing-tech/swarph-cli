@@ -19,7 +19,22 @@
 # The new answer is systemd's own: ExecCondition= runs the shim's interpreter and
 # imports the package. While the tree is mid-swap the condition fails, the unit is
 # SKIPPED (Result=success, no failure, no budget spent), and the .path fires again
-# when __init__.py is rewritten. Restart=on-failure remains for a GENUINE failure
+# when __init__.py is rewritten.
+#
+# CORRECTION (2026-09-15, lab-ovh): the 09-07 ModuleNotFoundError was NOT the
+# mid-install window. This unit runs as ROOT; a pip --user install lives under the
+# owner's ~/.local, which root's interpreter never searches — so the command
+# failed on EVERY fire, latch or no latch, and the journal cannot tell the two
+# causes apart (the .path only ever fires at an install). Measured by firing the
+# trigger alone: a touch of __init__.py with no install running still failed.
+# Hence Environment=PYTHONPATH= below when the tree is a user site, and the
+# installer REFUSES --write when this condition fails for the writing user.
+#
+# >>> A CONDITION THAT FAILS ON EVERY FIRE IS SILENT. <<< Result=exec-condition is
+# a skip, not a failure: OnFailure= does not fire. A permanently failing condition
+# is quieter than the failed state it replaced. The render-time check above is the
+# guard at install; a staleness instrument (process start vs package mtime) is the
+# detector after. Restart=on-failure remains for a GENUINE failure
 # of the reexec itself, with a budget that cannot be exhausted inside one window
 # (StartLimitIntervalSec <= 2 x RestartSec => at most two starts per interval).
 #
@@ -49,6 +64,8 @@ TimeoutStartSec=5min
 # Restart=on-failure is accepted (verified systemd-analyze verify on 259).
 Restart=on-failure
 RestartSec=30
+# #807: rendered only for a pip --user tree — root's interpreter cannot see it (R7).
+<ENV_PYTHONPATH>
 # #807: skip cleanly (not fail) while the package is mid-reinstall — see R7.
 ExecCondition=<INTERPRETER> -c "import swarph_cli"
 ExecStart=<SWARPH_BIN> monitor reexec-on-change --apply --state-root <STATE_ROOT>

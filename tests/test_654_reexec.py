@@ -425,3 +425,74 @@ def test_807_resolver_ignores_the_installers_pythonpath(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", "/dev/shell/src")
     interp_out, init_path, how = monitor._resolve_consumed_tree(str(shim))
     assert init_path == "pythonpath=unset", (init_path, how)
+
+
+# ── #807 follow-up (2026-09-15): root cannot see a pip --user tree ────────────────
+
+@pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
+def test_807b_user_site_tree_renders_the_pythonpath_root_needs(tmp_path, capsys, monkeypatch):
+    """The unit runs as root; a pip --user tree under ~owner/.local is invisible to
+    root's interpreter. Measured 2026-09-15: ExecCondition failed on EVERY fire and the
+    unit was SKIPPED silently. The render hands the site to the unit explicitly."""
+    shim = _fake_shim(tmp_path, "/home/ubuntu/.local/lib/python3.14/site-packages/swarph_cli/__init__.py")
+    monkeypatch.setattr(monitor, "_live_tree", lambda: None)
+    monkeypatch.setattr(monitor, "_condition_probe", lambda i, p=None: (True, "OK"))
+    rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Environment=PYTHONPATH=/home/ubuntu/.local/lib/python3.14/site-packages\n" in out
+    assert "<ENV_PYTHONPATH>" not in out
+
+
+@pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
+def test_807b_a_venv_tree_renders_no_pythonpath_line(tmp_path, capsys, monkeypatch):
+    shim = _fake_shim(tmp_path, "/home/u/.local/share/pipx/venvs/swarph-cli/lib/python3.14/site-packages/swarph_cli/__init__.py")
+    monkeypatch.setattr(monitor, "_live_tree", lambda: None)
+    monkeypatch.setattr(monitor, "_condition_probe", lambda i, p=None: (True, "OK"))
+    rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
+    out = capsys.readouterr().out
+    assert rc == 0 and "\nEnvironment=PYTHONPATH" not in out and "<ENV_PYTHONPATH>" not in out
+
+
+@pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
+def test_807b_write_refuses_a_condition_that_fails_for_the_writing_user(tmp_path, capsys, monkeypatch):
+    """lab-ovh's discriminator as a gate: if `<interp> -c 'import swarph_cli'` fails NOW
+    for whoever runs --write (root), the unit would be skipped on every fire with no
+    OnFailure — so nothing is written and the reason names the command."""
+    shim = _fake_shim(tmp_path, "/home/ubuntu/.local/lib/python3.14/site-packages/swarph_cli/__init__.py")
+    monkeypatch.setattr(monitor, "_live_tree", lambda: None)
+    monkeypatch.setattr(monitor, "_condition_probe",
+                        lambda i, p=None: (False, "rc=1: ModuleNotFoundError: No module named 'swarph_cli'"))
+    target = tmp_path / "units"; target.mkdir()
+    rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim), "--write", "--dir", str(target)])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "REFUSED" in err and "import swarph_cli" in err and "ModuleNotFoundError" in err
+    assert list(target.iterdir()) == [], "nothing may be written when the condition fails"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
+def test_807b_root_resolves_the_tree_through_the_owners_user_site(tmp_path, capsys, monkeypatch):
+    """As root the bare import fails, so the resolver finds the shim owner's user site by
+    construction and asks again with PYTHONPATH — the tree the monitors load."""
+    site = tmp_path / "site"; (site / "swarph_cli").mkdir(parents=True)
+    (site / "swarph_cli" / "__init__.py").write_text("")
+    interp = tmp_path / "fake-python"
+    interp.write_text('#!/bin/sh\n[ -n "$PYTHONPATH" ] || exit 1\necho "$PYTHONPATH/swarph_cli/__init__.py"\n')
+    interp.chmod(0o755)
+    shim = tmp_path / "swarph"; shim.write_text(f"#!{interp}\n"); shim.chmod(0o755)
+    monkeypatch.setattr(monitor, "_live_tree", lambda: None)
+    monkeypatch.setattr(monitor, "_owner_user_site", lambda b, i: str(site))
+    monkeypatch.setattr(monitor, "_condition_probe", lambda i, p=None: (True, "OK"))
+    rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"PathChanged={site}/swarph_cli/__init__.py" in out
+    assert "via the shim owner's user site" in out
+
+
+def test_807b_user_site_regex_matches_only_user_sites():
+    assert monitor._user_site_of("/home/ubuntu/.local/lib/python3.14/site-packages/swarph_cli/__init__.py") \
+        == "/home/ubuntu/.local/lib/python3.14/site-packages"
+    assert monitor._user_site_of("/home/u/.local/share/pipx/venvs/x/lib/python3.14/site-packages/swarph_cli/__init__.py") is None
+    assert monitor._user_site_of("/usr/lib/python3/dist-packages/swarph_cli/__init__.py") is None
