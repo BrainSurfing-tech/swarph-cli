@@ -131,7 +131,9 @@ def test_oneshot_survives_the_reinstall_window_by_condition_not_by_budget():
     assert "Type=oneshot" in text
     assert [ln for ln in text.splitlines() if ln.startswith("Restart=")] == ["Restart=on-failure"]
     cond = [ln for ln in text.splitlines() if ln.startswith("ExecCondition=")]
-    assert cond == ['ExecCondition=<INTERPRETER> -c "import swarph_cli"'], cond
+    assert cond == ['ExecCondition=/usr/bin/test -x <SWARPH_BIN>',
+                     'ExecCondition=<INTERPRETER> -c "import swarph_cli"'], (
+        "both artifacts pip rewrites are conditions, the shim FIRST (fourth defect, 2026-09-15)")
     def _sec(key):
         raw = [ln for ln in text.splitlines() if ln.startswith(f"{key}=")][0].split("=", 1)[1].strip().lower()
         return float(raw[:-3]) * 60 if raw.endswith("min") else float(raw.rstrip("s"))
@@ -607,3 +609,22 @@ def test_807d_no_shim_and_no_readable_resident_refuses_loudly(tmp_path, capsys, 
     err = capsys.readouterr().err
     assert rc == 2
     assert "no-such-shim" in err and "no resident" in err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
+def test_807e_the_condition_tests_the_shim_the_command_runs_before_the_module(tmp_path, capsys, monkeypatch):
+    """Fourth defect (2026-09-15, first real install after the repair): pip rewrote
+    site-packages before the console script, the import condition passed, and
+    ExecStart 203/EXEC'd on the missing shim — one spurious page per upgrade. Both
+    artifacts are now conditions, shim first, and systemd requires all to pass."""
+    shim = _fake_shim(tmp_path, "/consumed/site-packages/swarph_cli/__init__.py")
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {"_unreadable": []})
+    monkeypatch.setattr(monitor, "_condition_probe", lambda i, p=None: (True, "OK"))
+    rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    conds = [l for l in out.splitlines() if l.startswith("ExecCondition=")]
+    assert conds == [f"ExecCondition=/usr/bin/test -x {shim}",
+                     f'ExecCondition={tmp_path / "fake-python"} -c "import swarph_cli"'], conds
+    start = [l for l in out.splitlines() if l.startswith("ExecStart=")]
+    assert start and start[0].startswith(f"ExecStart={shim} "), "the condition must test the artifact ExecStart runs"
