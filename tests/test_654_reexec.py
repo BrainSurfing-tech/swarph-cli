@@ -166,19 +166,19 @@ def _fake_shim(tmp_path: Path, reported: str) -> Path:
 
 @pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
 def test_807_watched_tree_comes_from_the_binary_the_monitors_execute(tmp_path, capsys, monkeypatch):
-    """The installer's own interpreter is the wrong witness: on lab-ovh a pipx-run
-    installer watched the pipx tree while the 8 monitors loaded the pip --user tree.
-    The shim's shebang interpreter is asked; a differing live tree is watched too."""
+    """The installer's own interpreter is the wrong witness (a pipx-run installer watched
+    the pipx tree while the 8 monitors loaded the pip --user tree). The shim's interpreter
+    is asked for the ExecStart tree; the RESIDENTS' trees are watched as well."""
     shim = _fake_shim(tmp_path, "/consumed/site-packages/swarph_cli/__init__.py")
-    # the INSTALLER's interpreter reports a different tree (the pipx venv)
-    monkeypatch.setattr(monitor, "_live_tree", lambda: "/pipx/venv/site-packages/swarph_cli/__init__.py")
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {
+        "/consumed/site-packages/swarph_cli/__init__.py": {"cells": ["cell-a"], "interpreter": "/usr/bin/python3"},
+        "_unreadable": []})
     rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
     out = capsys.readouterr().out
     assert rc == 0
     assert "PathChanged=/consumed/site-packages/swarph_cli/__init__.py" in out
-    assert "PathChanged=/pipx/venv/site-packages/swarph_cli/__init__.py" in out
-    assert f'ExecCondition={tmp_path}/fake-python -c "import swarph_cli"' in out
-    assert "resolved from" in out and "also watching" in out
+    assert "loaded by: cell-a; the shim's tree (ExecStart runs it)" in out
+    assert "/pipx/venv/" not in out and "the monitors do not load it" not in out
 
 
 @pytest.mark.skipif(os.name == "nt", reason="drop-ins are systemd")
@@ -200,22 +200,34 @@ def test_watched_path_is_resolved_not_hardcoded(tmp_path, monkeypatch, capsys):
     if os.name == "nt":
         pytest.skip("shebang resolution is POSIX")
     shim = _fake_shim(tmp_path, "/fake/live/site-packages/swarph_cli/__init__.py")
-    monkeypatch.setattr(monitor, "_live_tree", lambda: None)
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {"_unreadable": []})
     rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
     out = capsys.readouterr().out
     assert rc == 0
     assert "PathChanged=/fake/live/site-packages/swarph_cli/__init__.py" in out
     assert "<SITE_PACKAGES_INIT>" not in out and "<INTERPRETER>" not in out
 
-def test_install_reexec_names_the_interpreter_bump_caveat(capsys):
-    rc = monitor.run_monitor(["install-reexec"])
+@pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
+def test_install_reexec_names_the_interpreter_bump_caveat(tmp_path, capsys, monkeypatch):
+    shim = _fake_shim(tmp_path, "/consumed/site-packages/swarph_cli/__init__.py")
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {"_unreadable": []})
+    rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
     out = capsys.readouterr().out
     assert rc == 0
     assert "interpreter bump" in out, "the R2 expiry must be printed, not implied"
 
 
-def test_install_reexec_write_lands_both_units(tmp_path, capsys):
-    rc = monitor.run_monitor(["install-reexec", "--write", "--dir", str(tmp_path)])
+def test_install_reexec_write_lands_both_units(tmp_path, capsys, monkeypatch):
+    units = tmp_path / "units"; units.mkdir()
+    if os.name != "nt":
+        shim = _fake_shim(tmp_path, "/consumed/site-packages/swarph_cli/__init__.py")
+        monkeypatch.setattr(monitor, "_resident_trees", lambda root: {"_unreadable": []})
+        monkeypatch.setattr(monitor, "_condition_probe", lambda i, p=None: (True, "OK"))
+        argv = ["install-reexec", "--write", "--dir", str(units), "--swarph-bin", str(shim)]
+    else:
+        argv = ["install-reexec", "--write", "--dir", str(units)]
+    tmp_path = units
+    rc = monitor.run_monitor(argv)
     if os.name == "nt":
         assert rc == 2
         assert "Linux-only" in capsys.readouterr().err
@@ -435,7 +447,7 @@ def test_807b_user_site_tree_renders_the_pythonpath_root_needs(tmp_path, capsys,
     root's interpreter. Measured 2026-09-15: ExecCondition failed on EVERY fire and the
     unit was SKIPPED silently. The render hands the site to the unit explicitly."""
     shim = _fake_shim(tmp_path, "/home/ubuntu/.local/lib/python3.14/site-packages/swarph_cli/__init__.py")
-    monkeypatch.setattr(monitor, "_live_tree", lambda: None)
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {"_unreadable": []})
     monkeypatch.setattr(monitor, "_condition_probe", lambda i, p=None: (True, "OK"))
     rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
     out = capsys.readouterr().out
@@ -447,7 +459,7 @@ def test_807b_user_site_tree_renders_the_pythonpath_root_needs(tmp_path, capsys,
 @pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
 def test_807b_a_venv_tree_renders_no_pythonpath_line(tmp_path, capsys, monkeypatch):
     shim = _fake_shim(tmp_path, "/home/u/.local/share/pipx/venvs/swarph-cli/lib/python3.14/site-packages/swarph_cli/__init__.py")
-    monkeypatch.setattr(monitor, "_live_tree", lambda: None)
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {"_unreadable": []})
     monkeypatch.setattr(monitor, "_condition_probe", lambda i, p=None: (True, "OK"))
     rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
     out = capsys.readouterr().out
@@ -460,7 +472,7 @@ def test_807b_write_refuses_a_condition_that_fails_for_the_writing_user(tmp_path
     for whoever runs --write (root), the unit would be skipped on every fire with no
     OnFailure — so nothing is written and the reason names the command."""
     shim = _fake_shim(tmp_path, "/home/ubuntu/.local/lib/python3.14/site-packages/swarph_cli/__init__.py")
-    monkeypatch.setattr(monitor, "_live_tree", lambda: None)
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {"_unreadable": []})
     monkeypatch.setattr(monitor, "_condition_probe",
                         lambda i, p=None: (False, "rc=1: ModuleNotFoundError: No module named 'swarph_cli'"))
     target = tmp_path / "units"; target.mkdir()
@@ -481,7 +493,7 @@ def test_807b_root_resolves_the_tree_through_the_owners_user_site(tmp_path, caps
     interp.write_text('#!/bin/sh\n[ -n "$PYTHONPATH" ] || exit 1\necho "$PYTHONPATH/swarph_cli/__init__.py"\n')
     interp.chmod(0o755)
     shim = tmp_path / "swarph"; shim.write_text(f"#!{interp}\n"); shim.chmod(0o755)
-    monkeypatch.setattr(monitor, "_live_tree", lambda: None)
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {"_unreadable": []})
     monkeypatch.setattr(monitor, "_owner_user_site", lambda b, i: str(site))
     monkeypatch.setattr(monitor, "_condition_probe", lambda i, p=None: (True, "OK"))
     rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
@@ -504,7 +516,7 @@ def test_807c_rendered_units_carry_their_producer(tmp_path, capsys, monkeypatch)
     Without it a render from an unreleased checkout is indistinguishable from a release."""
     import swarph_cli
     shim = _fake_shim(tmp_path, "/home/ubuntu/.local/lib/python3.14/site-packages/swarph_cli/__init__.py")
-    monkeypatch.setattr(monitor, "_live_tree", lambda: None)
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {"_unreadable": []})
     monkeypatch.setattr(monitor, "_condition_probe", lambda i, p=None: (True, "OK"))
     rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
     out = capsys.readouterr().out
@@ -512,3 +524,86 @@ def test_807c_rendered_units_carry_their_producer(tmp_path, capsys, monkeypatch)
     pkg = str(swarph_cli.__file__).replace("\\", "/")
     assert out.count(f"# rendered-by: swarph-cli {swarph_cli.__version__} ({pkg}) install-reexec, ") == 2
     assert "<RENDERED_BY>" not in out
+
+
+# ── #807 third defect (droplet, 2026-09-15): watch what the RESIDENTS load ──────────
+
+@pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
+def test_807d_droplet_shape_residents_system_tree_is_watched_and_the_shim_tree_is_labelled(tmp_path, capsys, monkeypatch):
+    """droplet: the shim is pipx, the three residents run /usr/bin/python3.10 on the SYSTEM
+    tree. Before: only the pipx tree was watched — a system-only upgrade never fired.
+    Now: one PathChanged per distinct tree the residents load, each labelled, and the
+    shim's tree is labelled as loaded by NO resident rather than asserted either way."""
+    shim = _fake_shim(tmp_path, "/root/.local/pipx/venvs/swarph-cli/lib/python3.10/site-packages/swarph_cli/__init__.py")
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {
+        "/usr/local/lib/python3.10/dist-packages/swarph_cli/__init__.py": {
+            "cells": ["cell-x", "cell-y", "cell-z"], "interpreter": "/usr/bin/python3.10"},
+        "_unreadable": []})
+    monkeypatch.setattr(monitor, "_condition_probe", lambda i, p=None: (True, "OK"))
+    rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "PathChanged=/usr/local/lib/python3.10/dist-packages/swarph_cli/__init__.py" in out
+    assert "PathChanged=/root/.local/pipx/venvs/swarph-cli/lib/python3.10/site-packages/swarph_cli/__init__.py" in out
+    assert "loaded by: cell-x, cell-y, cell-z" in out
+    assert "NO resident loads it; the shim's tree (ExecStart runs it)" in out
+    assert "the monitors do not load it" not in out
+
+
+@pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
+def test_807d_the_installers_own_import_is_never_a_watch_source(tmp_path, capsys, monkeypatch):
+    """R2's rule, now on BOTH paths: nothing the installer's interpreter imports enters
+    the watched set unless a resident loads it."""
+    import swarph_cli
+    shim = _fake_shim(tmp_path, "/consumed/site-packages/swarph_cli/__init__.py")
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {"_unreadable": []})
+    monkeypatch.setattr(monitor, "_condition_probe", lambda i, p=None: (True, "OK"))
+    rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    mine = str(swarph_cli.__file__).replace("\\", "/")
+    assert f"PathChanged={mine}" not in out
+    import re as _re
+    assert len(_re.findall(r"^PathChanged=", out, _re.M)) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="shebang resolution is POSIX")
+def test_807d_unreadable_residents_are_named_not_skipped(tmp_path, capsys, monkeypatch):
+    shim = _fake_shim(tmp_path, "/consumed/site-packages/swarph_cli/__init__.py")
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {
+        "_unreadable": [("cell-q", "pid 4242: /proc/4242/exe unreadable (PermissionError) — run as root to read it")]})
+    monkeypatch.setattr(monitor, "_condition_probe", lambda i, p=None: (True, "OK"))
+    rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
+    out = capsys.readouterr().out
+    assert rc == 0 and "resident NOT inspected: cell-q" in out and "run as root" in out
+
+
+def test_807d_resident_trees_reads_exe_and_environ_of_each_live_resident(tmp_path, monkeypatch):
+    """Real mechanics with fake processes: the pid's /proc exe is the interpreter, its
+    PYTHONPATH is honoured, and cells sharing a tree are grouped."""
+    interp_a = tmp_path / "py-a"; interp_a.write_text('#!/bin/sh\necho "/tree-a/swarph_cli/__init__.py"\n'); interp_a.chmod(0o755)
+    interp_b = tmp_path / "py-b"; interp_b.write_text('#!/bin/sh\n[ "$PYTHONPATH" = "/pp" ] || exit 1\necho "/tree-b/swarph_cli/__init__.py"\n'); interp_b.chmod(0o755)
+    units = [("cell-a", "u-a.service"), ("cell-b", "u-b.service"), ("cell-c", "u-c.service"), ("cell-d", "u-d.service")]
+    monkeypatch.setattr(monitor, "_supervised_monitor_units", lambda: units)
+    pids = {"cell-a": 101, "cell-b": 102, "cell-c": 103, "cell-d": 104}
+    monkeypatch.setattr(monitor.mesh, "pidfile_status",
+                        lambda p: ("live_ours", {"pid": pids[p.parts[-3]]}) if p.parts[-3] != "cell-d" else ("stale", {"pid": 104}))
+    exes = {101: str(interp_a), 102: str(interp_b), 103: str(interp_a)}
+    monkeypatch.setattr(monitor.os, "readlink", lambda p: exes[int(p.split("/")[2])])
+    monkeypatch.setattr(monitor, "_proc_pythonpath", lambda pid: "/pp" if pid == 102 else None)
+    trees = monitor._resident_trees(tmp_path / "state")
+    assert trees.pop("_unreadable") == []
+    assert trees == {
+        "/tree-a/swarph_cli/__init__.py": {"cells": ["cell-a", "cell-c"], "interpreter": str(interp_a)},
+        "/tree-b/swarph_cli/__init__.py": {"cells": ["cell-b"], "interpreter": str(interp_b)},
+    }
+
+
+def test_807d_no_shim_and_no_readable_resident_refuses_loudly(tmp_path, capsys, monkeypatch):
+    """The old fallback — watch whatever the INSTALLER imports — is gone: a render with
+    no attested tree names both failures instead of guessing (R2, both paths)."""
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {"_unreadable": [("cell-q", "pid 7: unreadable")]})
+    rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(tmp_path / "no-such-shim")])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "no-such-shim" in err and "no resident" in err

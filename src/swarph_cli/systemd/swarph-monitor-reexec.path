@@ -29,6 +29,11 @@ Description=Re-exec supervised swarph monitors when the installed package change
 Documentation=https://github.com/BrainSurfing-tech/swarph-cli
 
 [Path]
+# #807 (third defect, droplet 2026-09-15): the watched set is what the RESIDENTS load,
+# read from each supervised monitor's own process (/proc/<pid>/exe + its PYTHONPATH),
+# one line per distinct tree, plus the shim's tree because ExecStart runs the shim.
+# Never the installer's own import — a pipx shim over system-tree residents watched
+# a tree nobody ran and missed the one everybody did.
 PathChanged=<SITE_PACKAGES_INIT>
 Unit=swarph-monitor-reexec.service
 

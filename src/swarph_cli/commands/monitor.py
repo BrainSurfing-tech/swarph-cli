@@ -1784,19 +1784,56 @@ def _condition_probe(interpreter: str, pythonpath: str = None) -> tuple:
     return False, f"rc={r.returncode}: {last}"
 
 
-def _live_tree():
-    """The tree the INSTALLER's own interpreter loads (a pipx-run installer reports the
-    pipx venv), asked through the same scrubbed child as the consumed tree, so a dev
-    shell's PYTHONPATH cannot leak in as a phantom install tree."""
-    import subprocess
-    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSAFEPATH")}
+def _proc_pythonpath(pid: int):
+    """PYTHONPATH of a running process (from /proc/<pid>/environ), or None."""
     try:
-        r = subprocess.run([sys.executable, "-c", "import swarph_cli; print(swarph_cli.__file__)"],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=20, env=env)
-    except (OSError, subprocess.SubprocessError):
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
         return None
-    return r.stdout.strip().replace("\\", "/") if r.returncode == 0 and r.stdout.strip() else None
+    for item in raw.split(b"\0"):
+        if item.startswith(b"PYTHONPATH="):
+            return item[len(b"PYTHONPATH="):].decode("utf-8", "replace") or None
+    return None
+
+
+def _resident_trees(state_root: Path) -> dict:
+    """#807 (third defect, droplet 2026-09-15): the trees the RESIDENTS load, read from
+    each supervised monitor's OWN process — /proc/<pid>/exe is its interpreter, and that
+    interpreter, with the process's own PYTHONPATH, reports swarph_cli.__file__.
+    Neither the shim nor the installer's interpreter can be the reference: droplet's
+    residents ran the system tree while the shim was pipx. Returns
+    {init_path: {"cells": [...], "interpreter": ...}} plus an "_unreadable" list of
+    (peer, why) for residents whose process this user cannot inspect."""
+    import subprocess
+    out, unreadable = {}, []
+    for peer, unit in _supervised_monitor_units():
+        pstatus, rec = mesh.pidfile_status(state_root / peer / "mesh-sidecar" / mesh._MONITOR_PIDFILE)
+        if not str(pstatus).startswith("live") or not rec or not rec.get("pid"):
+            continue
+        pid = int(rec["pid"])
+        try:
+            exe = os.readlink(f"/proc/{pid}/exe")
+        except OSError as e:
+            unreadable.append((peer, f"pid {pid}: /proc/{pid}/exe unreadable ({type(e).__name__}) — run as root to read it"))
+            continue
+        env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSAFEPATH")}
+        pp = _proc_pythonpath(pid)
+        if pp:
+            env["PYTHONPATH"] = pp
+        try:
+            r = subprocess.run([exe, "-c", "import swarph_cli; print(swarph_cli.__file__)"],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               timeout=20, env=env)
+        except (OSError, subprocess.SubprocessError) as e:
+            unreadable.append((peer, f"pid {pid}: {exe} could not be asked ({type(e).__name__})"))
+            continue
+        if r.returncode != 0 or not r.stdout.strip():
+            unreadable.append((peer, f"pid {pid}: {exe} cannot import swarph_cli (rc={r.returncode})"))
+            continue
+        init = r.stdout.strip().replace("\\", "/")
+        out.setdefault(init, {"cells": [], "interpreter": exe})["cells"].append(peer)
+    out["_unreadable"] = unreadable
+    return out
 
 
 def _cmd_install_reexec(args: argparse.Namespace) -> int:
@@ -1822,7 +1859,8 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
     # #807: the watched tree is the one the MONITORS load — ask the shim's own
     # interpreter, not the interpreter running this verb.
     interpreter, init_path, how = _resolve_consumed_tree(swarph_bin)
-    live_init = _live_tree()
+    residents = _resident_trees(Path(state_root))
+    unreadable = residents.pop("_unreadable", [])
     pythonpath = None
     if init_path is None and interpreter:
         # #807 (2026-09-15): run as root, the shim's interpreter cannot import a pip
@@ -1835,11 +1873,26 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
                 init_path, how = init2, (f"{how2} via the shim owner's user site — {interpreter} "
                                          f"alone cannot import it (this user is not the owner, e.g. root)")
     if init_path is None:
-        if live_init is None:
-            raise RuntimeError("cannot resolve the installed swarph_cli package "
-                               "path — is this a broken install?")
-        init_path, how = live_init, f"{how}; fell back to the LIVE interpreter"
-    extra_trees = [t for t in {live_init} if t and t != init_path]
+        if not residents:
+            raise RuntimeError("cannot resolve the installed swarph_cli package path from the "
+                               f"shim ({how}) and no resident's process could be read — is this "
+                               "a broken install?")
+        # the tree most residents load is the best-attested one
+        init_path = max(residents, key=lambda t: len(residents[t]["cells"]))
+        interpreter = interpreter or residents[init_path]["interpreter"]
+        how = f"{how}; taken from the residents' processes instead"
+    # The WATCHED set is what the residents load (one line per distinct tree), plus
+    # the shim's tree because the ExecStart runs the shim. Never the installer's own
+    # import: that was the third #807 defect (droplet — shim pipx, residents system).
+    watched = {init_path: {"cells": [], "shim": True}}
+    for t, info in residents.items():
+        watched.setdefault(t, {"cells": [], "shim": False})["cells"].extend(info["cells"])
+    extra_trees = [t for t in watched if t != init_path]
+
+    def _label(t):
+        cells = sorted(watched[t]["cells"])
+        who = f"loaded by: {', '.join(cells)}" if cells else "NO resident loads it"
+        return (f"{who}; the shim's tree (ExecStart runs it)" if watched[t]["shim"] else who)
     # A user-site tree is invisible to root's interpreter: the unit runs as root, so
     # the site the monitors load is handed to it explicitly. A pipx/venv tree needs
     # nothing (its interpreter owns its site) and gets no Environment= line.
@@ -1893,11 +1946,13 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
         for name, text in dropins.items():
             print(f"# ── {name} ──")
             print(text, end="")
-        print(f"# watching: {init_path} ({how})")
+        print(f"# watching: {init_path} ({how}) — {_label(init_path)}")
         print(f"# condition check as {who}: {'OK' if cond_ok else 'FAILS — ' + cond_detail}"
               + ("" if cond_ok else " (the unit would be SKIPPED on every fire; --write will refuse)"))
         for t in extra_trees:
-            print(f"# also watching: {t} (a second install tree; the monitors do not load it)")
+            print(f"# also watching: {t} — {_label(t)}")
+        for peer, why in unreadable:
+            print(f"# resident NOT inspected: {peer} — {why}")
         print(f"# import check: {interpreter or sys.executable} -c 'import swarph_cli'")
         print("# interpreter bump moves site-packages — re-run "
               "`swarph monitor install-reexec --write` after one")
@@ -1927,10 +1982,12 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
         (target_dir / name).parent.mkdir(parents=True, exist_ok=True)
         (target_dir / name).write_text(text, encoding="utf-8")
         print(f"wrote {target_dir / name}")
-    print(f"watching: {init_path} ({how})")
+    print(f"watching: {init_path} ({how}) — {_label(init_path)}")
     print(f"condition check as {who}: OK" + (f" (PYTHONPATH={pythonpath})" if pythonpath else ""))
     for t in extra_trees:
-        print(f"also watching: {t}")
+        print(f"also watching: {t} — {_label(t)}")
+    for peer, why in unreadable:
+        print(f"resident NOT inspected: {peer} — {why}")
     print("next: systemctl daemon-reload && systemctl reset-failed swarph-monitor-reexec.path "
           "swarph-monitor-reexec.service && systemctl enable --now swarph-monitor-reexec.path")
     print("next: systemctl enable --now swarph-monitor-reexec.path")

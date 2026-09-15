@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- monitor (#807, third defect — droplet): `install-reexec` watches the trees the RESIDENTS load, read from each supervised monitor's own process (`/proc/<pid>/exe` and its `PYTHONPATH`), one `PathChanged=` per distinct tree labelled with the cells that load it, plus the shim's tree for the ExecStart; the installer's own import is no longer a watch source (a pipx shim over system-tree residents watched a tree nobody ran); residents this user cannot inspect are named in the report
 
 ## 0.61.0 — 2026-09-15
 - reexec (#807/#419): `swarph-monitor-reexec.service` runs as **root**, and a `pip --user` install lives under the owner's `~/.local`, which root's interpreter never searches — so both `ExecCondition=` and `ExecStart=` raised `ModuleNotFoundError` on **every** fire, not only mid-install. `install-reexec` now derives the shim owner's user site and renders `Environment=PYTHONPATH=` when the consumed tree is one, and **refuses `--write`** when the condition it would install fails right now for the writing user. The earlier diagnosis (pip's mid-install window) was wrong and is corrected in the unit's own header: both causes predict identical journals, because a `.path` unit only ever fires at an install — firing the trigger alone, with no install running, is what told them apart.
