@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- monitor (#807): rendered reexec units carry a `# rendered-by:` first line — package version, interpreter, UTC time — so a unit on disk says what produced it
 - monitor (#807 follow-up): `install-reexec` renders `Environment=PYTHONPATH=<user site>` when the watched tree is a pip `--user` install (the unit runs as root, whose interpreter never searches it — measured 2026-09-15: the condition failed on every fire and the unit was skipped silently), resolves the tree through the shim owner's user site when run as root, and REFUSES `--write` when the rendered ExecCondition fails for the writing user
 
 ## 0.60.0 — 2026-09-15

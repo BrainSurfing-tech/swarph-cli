@@ -1,3 +1,4 @@
+# rendered-by: <RENDERED_BY>
 [Unit]
 # #654: close the gap between INSTALLED and RUNNING on one box.
 #
