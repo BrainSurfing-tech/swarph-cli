@@ -509,5 +509,6 @@ def test_807c_rendered_units_carry_their_producer(tmp_path, capsys, monkeypatch)
     rc = monitor.run_monitor(["install-reexec", "--swarph-bin", str(shim)])
     out = capsys.readouterr().out
     assert rc == 0
-    assert out.count(f"# rendered-by: swarph-cli {swarph_cli.__version__} install-reexec, ") == 2
+    pkg = str(swarph_cli.__file__).replace("\\", "/")
+    assert out.count(f"# rendered-by: swarph-cli {swarph_cli.__version__} ({pkg}) install-reexec, ") == 2
     assert "<RENDERED_BY>" not in out

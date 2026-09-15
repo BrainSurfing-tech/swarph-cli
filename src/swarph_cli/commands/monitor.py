@@ -1847,9 +1847,14 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
     env_line = f"Environment=PYTHONPATH={pythonpath}\n" if pythonpath else ""
     # Provenance (2026-09-15): a unit on disk could not say what produced it, so a
     # render from an unreleased checkout was indistinguishable from a release.
+    # The PACKAGE PATH is the field that tells a release apart from a checkout: an
+    # unreleased tree reports the last release's __version__ until the bump, and
+    # the interpreter is the same either way (lab-ovh, #420 review, measured).
+    import swarph_cli as _pkg
     from swarph_cli import __version__ as _ver
     from datetime import datetime, timezone
-    rendered_by = (f"swarph-cli {_ver} install-reexec, {sys.executable}, "
+    rendered_by = (f"swarph-cli {_ver} ({str(_pkg.__file__).replace(chr(92), '/')}) "
+                   f"install-reexec, {sys.executable}, "
                    f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}")
     rendered = {}
     for name, rel in _REEXEC_TEMPLATES.items():
