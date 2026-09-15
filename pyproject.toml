@@ -127,6 +127,9 @@ service = [
 
 [project.scripts]
 swarph = "swarph_cli.main:main"
+# #660: operator surface — separate entrypoint so identity cannot inherit
+# $SWARPH_SELF from the cell CLI helpers (see swarph_cli.operator + its tests).
+swarph-me = "swarph_cli.operator:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

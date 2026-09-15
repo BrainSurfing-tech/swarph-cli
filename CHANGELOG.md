@@ -8,6 +8,11 @@
 - schedule (#183b): `card` joins the durable anchor kinds, and the `--context card=<id>` shorthand emits the integer id the gateway expects — a scheduled event can now anchor to a board card without hand-writing the anchor dict. Mirrors mesh-gateway `_DURABLE_ANCHOR_KEYS`; `test_schedule_create_contract.py` fails if the two drift.
 - group (#114 follow-up): the three `group` POST verbs (`create`, `member add`, `grant add`) sent no `actor` at all — the original fix reached only the DELETEs, so every POST was rejected as `actor=None` even with `--as`. The actor now travels in the request BODY, which is where these routes read it; an earlier patch appending `?actor=` to the query string was a verified no-op.
 
+- operator (#660): ship `swarph-me` as a second console script in the same wheel —
+  pinned operator identity from `~/.config/swarph/operator.json`, never the cell
+  environment; `--as` consumed anywhere on the line; prose via `--content-file`
+  (#458); import-graph test forbids cell-identity modules from the operator package.
+
 ## 0.59.0 — 2026-09-11
 - deps: raise `swarph-mesh` pin to `>=0.5.0,<0.10` (#412) — 0.9.0 was excluded exactly, so no installed CLI could take the published mesh release; 0.58.0 + 0.9.0 forced together measured 2988 passed.
 - deps: raise `swarph-shared` pin to `>=0.7.0,<0.9` — 0.8.1 was excluded exactly by `<0.8` (same trap as mesh).
