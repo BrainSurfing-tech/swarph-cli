@@ -341,6 +341,8 @@ $ swarph channel read releases --limit 10                                  # rec
 # scheduled events — operator-gated recurring/ conditional fires (a 403 is surfaced verbatim)
 $ swarph schedule create nightly-digest --trigger time --cron "0 7 * * *" \
     --target lab-ovh --task "compile the overnight digest" --context "[[some-anchor]]"
+$ swarph schedule create card-183-review --trigger time --cron "0 9 * * 1" \
+    --target lab-ovh --task "review the card" --context card=183   # anchor kinds: repo memory channel feature file card (0.60.0)
 $ swarph schedule enable nightly-digest
 $ swarph schedule fire-now nightly-digest
 
