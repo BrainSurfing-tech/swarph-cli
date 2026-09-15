@@ -2740,7 +2740,7 @@ VALID_PREDICATE_KINDS = frozenset(
     {"on_channel_post", "on_pr_merged", "on_event_complete", "on_peer_stale"})
 # context_ref anchor kinds that are DURABLE (survive compaction). A /tmp path
 # or a session-id is the opposite of durable → rejected (spec §4).
-_DURABLE_ANCHOR_KEYS = frozenset({"repo", "memory", "channel", "feature", "file"})
+_DURABLE_ANCHOR_KEYS = frozenset({"repo", "memory", "channel", "feature", "file", "card"})  # card: #183b
 
 # Injection-safe charset: reject C0 control chars minus \t \n \r (benign —
 # cell_wake collapses them to a space at send), plus DEL (0x7f) and C1 (0x80-0x9f).

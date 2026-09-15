@@ -104,7 +104,7 @@ def _ctx(args: argparse.Namespace) -> tuple[str, str, str]:
 # test_schedule_create_contract.py, which fails if this drifts from the value the
 # gateway actually enforces — a duplicated constant nobody checks is how the two
 # sides diverged in the first place.
-DURABLE_ANCHOR_KEYS = frozenset({"repo", "memory", "channel", "feature", "file"})
+DURABLE_ANCHOR_KEYS = frozenset({"repo", "memory", "channel", "feature", "file", "card"})  # card: #183b
 
 
 def parse_context_anchor(raw: str) -> dict:
@@ -151,6 +151,12 @@ def parse_context_anchor(raw: str) -> dict:
             f"--context key {key!r} is not durable; use one of {sorted(DURABLE_ANCHOR_KEYS)}. "
             f"An anchor must name something that survives compaction — a /tmp path or a "
             f"session id is exactly what the gateway rejects.")
+    if key == "card":
+        # #183b: a card anchor is a CARD ID. The gateway accepts int or digit-string;
+        # the CLI emits the int so consumers can query by it without coercing.
+        if not value.isdigit():
+            raise ValueError(f"--context card={value!r} must be a card id (digits), e.g. card=183")
+        return {"card": int(value)}
     return {key: value}
 
 
