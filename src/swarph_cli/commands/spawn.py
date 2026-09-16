@@ -2738,13 +2738,12 @@ def _link_opencode_auth(dest: Path) -> None:
     linked in. Symlink, not copy: a copy is a second credential on disk that never
     rotates with the original.
 
-    Idempotency is judged by comparing RESOLVED paths (``os.path.realpath``), never
-    the raw ``readlink()`` target — a raw comparison is False against a home
-    symlink, a relative target, or a Windows path whose spelling/case differs, so
-    the link would be torn down and re-created on every spawn (#423 review). A
-    stale/foreign link is replaced; a real file is never clobbered; best-effort on
-    any failure (opencode reports unauthenticated itself if the link could not
-    land).
+    Idempotency is judged by comparing RESOLVED paths (``.resolve()``), never the
+    raw ``readlink()`` target — a raw comparison is False against a home symlink,
+    a relative target, or Windows' ``\\\\?\\`` extended-length form, so the link
+    would be torn down and re-created on every spawn (#423 review). A stale/foreign
+    link is replaced; a real file is never clobbered; best-effort on any failure
+    (opencode reports unauthenticated itself if the link could not land).
     """
     op_auth = Path.home() / ".local" / "share" / "opencode" / "auth.json"
     if not op_auth.exists():
@@ -2752,7 +2751,7 @@ def _link_opencode_auth(dest: Path) -> None:
     try:
         if dest.is_symlink():
             try:
-                if os.path.realpath(dest) == os.path.realpath(op_auth):
+                if dest.resolve() == op_auth.resolve():
                     return  # already correct
             except OSError:
                 pass

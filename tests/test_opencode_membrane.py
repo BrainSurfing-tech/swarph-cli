@@ -289,7 +289,10 @@ def test_HOME_is_NOT_relocated_it_would_BREAK_MESH_IDENTITY(tmp_path, monkeypatc
     monkeypatch.setenv("HOME", "/home/operator")
     env = _opencode_env(_cell(tmp_path))
     assert env.get("HOME") == "/home/operator"
-    assert env["XDG_DATA_HOME"].endswith(f"{_OPENCODE_CELL_SUBDIR}/data")
+    # Assert the LOCATION via path PARTS, not a string `.endswith("/.../data")`:
+    # the value's separator is an environment fact (\ on Windows), and a test that
+    # asserts the separator fails on exactly the box it most needs to pass.
+    assert Path(env["XDG_DATA_HOME"]).parts[-2:] == (_OPENCODE_CELL_SUBDIR, "data")
 
 
 def test_env_does_NOT_pop_the_gateway_token(tmp_path, monkeypatch):
@@ -313,7 +316,9 @@ def test_the_operator_credential_is_SYMLINKED_in_when_it_exists(tmp_path, monkey
     _opencode_env(_cell(tmp_path))
     link = tmp_path / _OPENCODE_CELL_SUBDIR / "data" / "opencode" / "auth.json"
     assert link.is_symlink()
-    assert link.readlink() == src
+    # .resolve(), not readlink(): Windows returns the \\?\ extended-length form,
+    # so a raw target comparison fails on the box where the assertion matters.
+    assert link.resolve() == src.resolve()
 
 
 def test_auth_link_is_IDEMPOTENT_second_spawn_does_NOT_relink(tmp_path, monkeypatch):
