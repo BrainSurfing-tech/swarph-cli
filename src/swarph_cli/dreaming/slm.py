@@ -37,7 +37,17 @@ import urllib.request
 
 ENDPOINT_ENV = "SWARPH_SLM_ENDPOINT"
 MODEL_ENV = "SWARPH_SLM_MODEL"
-KEY_ENV = "SWARPH_SLM_API_KEY"      # optional; omitted for local Ollama
+# NOT ``SWARPH_SLM_API_KEY``. The membranes' billing scrub
+# (swarph_shared.subprocess_env, FORBIDDEN_SUFFIXES) strips every key ending in
+# _API_KEY / _AUTH_TOKEN / _BASE_URL before a spawned cell inherits the env, so
+# that name would be deleted inside every cell and fail SILENTLY: available()
+# can read True off an unauthenticated /v1/models, then each generate() 401s into
+# the per-session except and the run reports zero proposals instead of an error.
+# Renaming beats exempting -- an exemption is a permanent hole in a billing
+# control that every future reader must re-justify; a name that does not match
+# the rule needs no mechanism at all. (drop-on-meta-edge, swarph-shared #26.)
+# Pinned by test_env_names_survive_the_billing_scrub.
+KEY_ENV = "SWARPH_SLM_TOKEN"        # optional; omitted for local Ollama
 TIMEOUT_ENV = "SWARPH_SLM_TIMEOUT"  # optional, seconds
 
 

@@ -161,3 +161,24 @@ def _no_private_workers() -> bool:
         return False
     except ImportError:
         return True
+
+
+def test_env_names_survive_the_billing_scrub():
+    """No SLM env name may match the membranes' billing-scrub suffix rule.
+
+    Asserts against the LIVE rule imported from swarph_shared, not a copied
+    string list — if a suffix is ever added there, this fails here rather than
+    silently deleting the SLM config inside every spawned cell.
+
+    If KEY_ENV goes back to SWARPH_SLM_API_KEY this reads FAIL, which is the
+    whole point: the alternative fix was an exemption in the billing denylist,
+    and a name that does not match the rule needs no exemption.
+    """
+    from swarph_shared.subprocess_env import FORBIDDEN_SUFFIXES
+
+    from swarph_cli.dreaming import slm
+
+    for name in (slm.ENDPOINT_ENV, slm.MODEL_ENV, slm.KEY_ENV, slm.TIMEOUT_ENV):
+        assert not name.endswith(FORBIDDEN_SUFFIXES), (
+            f"{name} is stripped by the billing scrub before a cell sees it"
+        )
