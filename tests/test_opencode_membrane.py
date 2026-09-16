@@ -61,8 +61,21 @@ def _session_row(directory, sid="ses_abc", updated=1789308075000):
     return {"id": sid, "directory": directory, "updated": updated, "projectId": "global"}
 
 
-def _fake_session_list(monkeypatch, rows):
-    """Mock the `opencode session list` subprocess to return the given rows."""
+def _fake_session_list(monkeypatch, rows, binary="/usr/bin/opencode"):
+    """Mock the `opencode session list` subprocess to return the given rows.
+
+    ALSO PINS THE BINARY LOOKUP, and that is the load-bearing half.
+    `_opencode_prior_session` resolves the binary BEFORE it shells out and
+    returns None when it cannot find one — so on a runner WITHOUT opencode
+    installed the function short-circuits and this subprocess stub is never
+    reached. Stubbing only `subprocess.run` made the verdict depend on the
+    RUNNER'S SOFTWARE INVENTORY: green on lab-ovh (opencode present), red on
+    GitHub's ubuntu image (absent). A test whose result tracks the host rather
+    than the code is not testing the code.
+    """
+    monkeypatch.setattr("swarph_cli.commands.spawn._opencode_binary",
+                        lambda: binary)
+
     def fake_run(cmd, **kwargs):
         return types.SimpleNamespace(
             returncode=0, stdout=json.dumps(rows), stderr=""
