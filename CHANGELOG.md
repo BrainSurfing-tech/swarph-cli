@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.62.0 — 2026-09-16
+- opencode (#423): `OpencodeMembrane` — opencode as a durable swarph CELL. Isolation is `XDG_DATA_HOME` + `XDG_CONFIG_HOME` relocation (not `$HOME`, not a single data-dir knob) because opencode scopes its session DB **and** its plugin dir on those two, and keeps auth in the data dir. Sessions are opencode-owned: the cell carries no swarph-pinned UUID and resumes by per-directory discovery via `--session=<id>`. Ships a swarph hook plugin.
+- dreaming (#424): a swarph-**owned** OpenAI-shape SLM client (`dreaming/slm.py`, stdlib only, no host default per #578). **This is what lets `dreaming --enrich` run on an installed wheel at all** — `enrich` previously imported `workers.slm_client`, which exists in no wheel, so every installed consumer ran `--no-enrich` by necessity rather than by choice.
+- dreaming (#425): the SLM key env var is `SWARPH_SLM_TOKEN`. It was `SWARPH_SLM_API_KEY` for 30 minutes on `main` and **in no release** — see the note below.
+- memory (#417): a memory's snippet must not be its frontmatter delimiter — the cause of 21 `memory cached: ---` entries on the shared timeline between 2026-08-25 and 2026-09-15.
+
+### Note on the `SWARPH_SLM_TOKEN` name — narrower than a rename, and worth reading
+
+**No released swarph-cli ever read `SWARPH_SLM_API_KEY`.** `dreaming/slm.py` did not exist at v0.61.0; verified back to v0.54.0, no tag carries the string in `src/`. The old name lived on `main` only, between `abed88d` (2026-09-16 02:06:55Z) and `1090450` (02:36:43Z) — **30 minutes**. The only way to be affected is to have configured against a `main` checkout inside that window.
+
+Belt-and-braces, because the failure would be silent if it did happen: an absent env var is indistinguishable from an unconfigured one, so a stale `SWARPH_SLM_API_KEY` would produce zero enrichment proposals and no error. Swept before cutting — 0 occurrences across 539 live process environs, all systemd units and drop-ins, `/etc/default`, 23 `.env` files and the shell rc files on lab-ovh; droplet reports clean. Both sweeps carried a positive control (227 `PATH=` hits; 129 files mentioning `MESH_GATEWAY_URL`) so the zeros are not a probe that failed to run. **Not** verified on cells whose config neither box can read.
+
+Why renamed rather than exempted: the membranes' billing scrub strips `*_API_KEY` by suffix, so the old name could never have reached a spawned cell — and an exemption would have been a permanent hole in a billing control. The scrub keeps **zero** exemptions.
+
 ## 0.61.0 — 2026-09-15
 - reexec (#807/#419): `swarph-monitor-reexec.service` runs as **root**, and a `pip --user` install lives under the owner's `~/.local`, which root's interpreter never searches — so both `ExecCondition=` and `ExecStart=` raised `ModuleNotFoundError` on **every** fire, not only mid-install. `install-reexec` now derives the shim owner's user site and renders `Environment=PYTHONPATH=` when the consumed tree is one, and **refuses `--write`** when the condition it would install fails right now for the writing user. The earlier diagnosis (pip's mid-install window) was wrong and is corrected in the unit's own header: both causes predict identical journals, because a `.path` unit only ever fires at an install — firing the trigger alone, with no install running, is what told them apart.
 - reexec (#807/#420): rendered units carry a `# rendered-by: swarph-cli <version> (<package path>) install-reexec, <interpreter>, <UTC>` first line. The **package path** is load-bearing, not decoration: an unreleased tree reports the last release's version, so version alone cannot distinguish a unit rendered from a checkout (`.../src/...`) from one rendered from the published install (`.../site-packages/...`).
