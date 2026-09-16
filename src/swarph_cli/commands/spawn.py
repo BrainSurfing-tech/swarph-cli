@@ -2736,17 +2736,26 @@ def _link_opencode_auth(dest: Path) -> None:
     opencode resolves auth from the DATA dir, which this membrane relocates — so
     the cell starts UNAUTHENTICATED unless the operator's subscription credential is
     linked in. Symlink, not copy: a copy is a second credential on disk that never
-    rotates with the original. Mirror of ``_link_grok_auth``: robust/idempotent,
-    replaces a stale/foreign link, never clobbers a real file, best-effort on any
-    failure (opencode reports unauthenticated itself if the link could not land).
+    rotates with the original.
+
+    Idempotency is judged by comparing RESOLVED paths (``os.path.realpath``), never
+    the raw ``readlink()`` target — a raw comparison is False against a home
+    symlink, a relative target, or a Windows path whose spelling/case differs, so
+    the link would be torn down and re-created on every spawn (#423 review). A
+    stale/foreign link is replaced; a real file is never clobbered; best-effort on
+    any failure (opencode reports unauthenticated itself if the link could not
+    land).
     """
     op_auth = Path.home() / ".local" / "share" / "opencode" / "auth.json"
     if not op_auth.exists():
         return  # intended: no operator credential to share
     try:
         if dest.is_symlink():
-            if dest.readlink() == op_auth:
-                return  # already correct
+            try:
+                if os.path.realpath(dest) == os.path.realpath(op_auth):
+                    return  # already correct
+            except OSError:
+                pass
             dest.unlink()  # stale/foreign/dangling link → replace
         elif dest.exists():
             return  # a real file is present — do not clobber

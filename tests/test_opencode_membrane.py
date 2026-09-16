@@ -316,6 +316,27 @@ def test_the_operator_credential_is_SYMLINKED_in_when_it_exists(tmp_path, monkey
     assert link.readlink() == src
 
 
+def test_auth_link_is_IDEMPOTENT_second_spawn_does_NOT_relink(tmp_path, monkeypatch):
+    """>>> #423 review. <<< A raw ``readlink() == op_auth`` comparison is False under
+    a home symlink, a relative target, or a Windows path spelling — so the correct
+    link would be torn down and re-created on EVERY spawn (and silently, by the
+    best-effort contract). The fixed check resolves both sides, so a correct link
+    must survive a second spawn untouched."""
+    from swarph_cli.commands import spawn
+
+    fake_home = tmp_path / "op"
+    src = fake_home / ".local" / "share" / "opencode" / "auth.json"
+    src.parent.mkdir(parents=True)
+    src.write_text("{}")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    _opencode_env(_cell(tmp_path))  # creates the link
+    unlinks = []
+    monkeypatch.setattr(spawn.Path, "unlink", lambda self, *a, **k: unlinks.append(str(self)))
+    _opencode_env(_cell(tmp_path))  # must NOT re-link a correct link
+    assert unlinks == [], f"auth link re-linked on 2nd spawn: {unlinks}"
+
+
 def test_NO_credential_symlink_when_the_operator_has_NO_auth(tmp_path, monkeypatch):
     """Absent operator auth is intended: the cell starts unauthenticated and
     opencode reports it itself — a better failure than a spawn refusing for a

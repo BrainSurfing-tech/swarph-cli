@@ -22,7 +22,7 @@
 // worst case is no injection, never a refused turn.
 import { execFileSync } from "node:child_process";
 
-const PY = "@PYTHON@";
+const PY = @PYTHON@;
 const TIMEOUT_MS = 15000;
 
 function run(verb, args = []) {

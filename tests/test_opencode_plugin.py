@@ -7,6 +7,8 @@ opencode binary in CI — the same posture as the codex/cursor tests).
 """
 from __future__ import annotations
 
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -14,11 +16,19 @@ from swarph_cli.commands import install_opencode_plugin as plugin
 from swarph_cli.commands.install_opencode_plugin import (
     _PLUGIN_NAME,
     _render,
+    _render_plugin,
     cell_plugin_path,
     ensure_cell_plugin,
     run_install_opencode_plugin,
 )
 from swarph_cli.commands.wake_hook_output import _ARM_HARNESSES, _arm_instruction
+
+
+def _py_literal(text):
+    """The exact path opencode would decode from `const PY = <literal>;`."""
+    m = re.search(r'const PY = ("(?:[^"\\]|\\.)*");', text)
+    assert m, "const PY = <literal>; not found in the rendered plugin"
+    return json.loads(m.group(1))
 
 
 def test_render_pins_the_interpreter_and_drops_the_placeholder():
@@ -27,6 +37,20 @@ def test_render_pins_the_interpreter_and_drops_the_placeholder():
     rendered = _render()
     assert "@PYTHON@" not in rendered
     assert Path(sys.executable).name in rendered
+
+
+def test_render_is_a_VALID_JS_string_for_spaces_and_backslashes():
+    """>>> shlex.quote WAS the shipped defect (#423 review). <<< ``@PYTHON@`` sits
+    inside ``const PY = "@PYTHON@";`` — a JS string literal, not shell text. The
+    embedded value must be a valid double-quoted, backslash-escaped JS string that
+    decodes back to the EXACT path, including Windows ``C:\\Program Files`` (whose
+    backslashes shlex.quote left raw, becoming invalid JS escapes)."""
+    for path in (
+        "/usr/bin/python3",
+        "/home/a b/python",
+        r"C:\Program Files\Python\python.exe",
+    ):
+        assert _py_literal(_render_plugin(path)) == path, path
 
 
 def test_plugin_payload_is_the_hook_factory():

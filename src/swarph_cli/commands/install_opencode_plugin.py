@@ -30,7 +30,7 @@ operator contract as every other hook installer (#527 task 3).
 from __future__ import annotations
 
 import argparse
-import shlex
+import json
 import sys
 from importlib import resources
 from pathlib import Path
@@ -48,10 +48,27 @@ def _payload_text() -> str:
     return resources.files(_PAYLOAD).joinpath("plugin.js").read_text(encoding="utf-8")
 
 
+def _render_plugin(interpreter: str) -> str:
+    r"""Render the plugin with @PYTHON@ replaced by ``interpreter`` AS A JS STRING.
+
+    >>> shlex.quote is WRONG here, and it was the shipped defect (#423 review).
+    The placeholder sits on the RHS of ``const PY = @PYTHON@;`` — a JavaScript
+    string literal position, NOT shell text. ``shlex.quote`` wraps in single
+    quotes and leaves backslashes raw, so on Windows
+    ``C:\Program Files\Python\python.exe`` became
+    ``const PY = "'C:\Program Files\Python\python.exe'";`` — invalid escapes, and
+    the single quotes land INSIDE the double quotes, so the value is a wrong path
+    even where it parses. json.dumps produces a valid JS string literal (double
+    quoted, backslashes escaped as ``\\``), which a JS parser accepts and decodes
+    back to the exact path. The template leaves the quotes to the substitution
+    (``const PY = @PYTHON@;``) so they are never doubled. <<<
+    """
+    return _payload_text().replace("@PYTHON@", json.dumps(interpreter))
+
+
 def _render() -> str:
     """The rendered plugin, with @PYTHON@ pinned to THIS interpreter."""
-    interpreter = str(Path(sys.executable).resolve())
-    return _payload_text().replace("@PYTHON@", shlex.quote(interpreter))
+    return _render_plugin(str(Path(sys.executable).resolve()))
 
 
 def _target(scope: str) -> Path:
