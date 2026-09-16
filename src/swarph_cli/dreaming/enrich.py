@@ -20,18 +20,40 @@ ENRICH_SKIPPED_NO_SLM = "enrich skipped: no SLM client"
 
 
 def slm_client_available() -> bool:
-    """True iff the private-layout SLM client imports. Installed wheels lack
-    `workers` — that must degrade, not crash as exit 1 (#734)."""
+    """True iff SOME SLM client is usable: the private-layout one, else the
+    swarph-owned OpenAI-shape client (dreaming.slm) when it is configured AND
+    its endpoint answers.
+
+    ORDER IS DELIBERATE: the private client wins where it exists, so the one box
+    that has `workers` keeps its exact prior behaviour (storage_hub endpoint
+    resolution included) and this change is a pure ADDITION for everyone else.
+
+    Installed wheels lack `workers` — that must degrade, not crash as exit 1
+    (#734). Both branches return a bool and neither raises.
+    """
     try:
         from workers.slm_client import SLMClient  # noqa: F401
+        return True
     except ImportError:
-        return False
-    return True
+        pass
+    from . import slm
+    return slm.available()
 
 
 def _client():
-    from workers.slm_client import SLMClient
-    return SLMClient()
+    """Resolve a client in the same order slm_client_available() checks.
+
+    Callers reach here only after that returned True; if the endpoint died in
+    between, SLMClient() raises and enrich's per-session `except Exception`
+    turns it into ZERO proposals rather than a crash — the same degrade the
+    private path already had.
+    """
+    try:
+        from workers.slm_client import SLMClient
+        return SLMClient()
+    except ImportError:
+        from .slm import SLMClient as OwnedSLMClient
+        return OwnedSLMClient()
 
 
 def enrich(clone: Path, records: list[dict], client=None) -> list[dict]:
