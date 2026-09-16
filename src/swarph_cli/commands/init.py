@@ -37,6 +37,7 @@ _LLM_BLURBS = {
     "grok": "xAI Grok — grok membrane",
     "muse": "Muse — muse membrane",
     "vibe": "Vibe — vibe membrane",
+    "opencode": "OpenCode — opencode membrane (XDG config+data isolation)",
 }
 
 

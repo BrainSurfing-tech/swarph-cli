@@ -212,3 +212,30 @@ not live opencode execution (no opencode binary in CI, same posture as codex/cur
   `main.py` (verb entry), `payloads/opencode/*`, plus tests.
 - Stdlib-only on the Python side; the opencode payload is vanilla ESM JS (no npm deps at the cell).
 - Changes live spawn + hook behavior → reviewed PR, **commander-gated** merge (live-spawn rule).
+
+## Probe findings (2026-09-16, MEASURED against opencode 1.18.30)
+
+Each `#P*` above is resolved where a probe ran; the rest carry their unresolved status.
+
+- **#P1 (resolved).** `opencode --pure session list --format json` rows carry `id` + `directory` +
+  `updated`. Residency is per-directory, so `_opencode_prior_session` discovers the newest matching
+  session and resumes by `--session <id>` — never global `--continue`. (The empty-store `--continue` rc
+  question is moot: `--continue` is not used.)
+- **#P2 (resolved).** `XDG_DATA_HOME=/tmp/x opencode --pure db path` → `/tmp/x/opencode/opencode.db`;
+  `XDG_CONFIG_HOME=/tmp/x opencode --pure debug config` → `"plugin": []`. Both XDG vars are honored, so
+  the cell isolates DB + auth via `XDG_DATA_HOME` and plugins via `XDG_CONFIG_HOME` — no fake `$HOME`,
+  and opencode auth (data-dir scoped) is untouched by the config relocation.
+- **#P4 (resolved).** A bare JS file in the config dir's plugin tree auto-loads with no `opencode.json`
+  `plugin` entry (the operator's own provider plugin loads against a config of only `$schema`, and the
+  probe plugin's `init` fired). The installer ships the file only; no config edit.
+- **#P5 (resolved for the load-bearing hook).** `experimental.chat.system.transform` FIRES and fires
+  WITHOUT `OPENCODE_EXPERIMENTAL=1` (observed 3× across one turn); `tool.execute.before` fires
+  (`hook:tool.before:bash`); the `event` hook fires (`session.created` / `session.idle`).
+  `experimental.session.compacting` was not triggered (a short turn never compacts) — typed-hook is
+  SUBJECT-to-first-compaction, not assumed.
+- **#P3 (open).** TUI idle/composer markers remain unrecorded; `PANE_PREDICATES["opencode"]` stays
+  empty (fail-closed: unknown ⇒ busy ⇒ defer) until a real TUI capture.
+- **Follow-up (deliberately out of scope of this PR):** emit-on-write (`memory-emit-hook`) needs a shape
+  adapter (opencode `tool.args` ≠ claude `tool_input.file_path`) and a memory-location decision; the
+  plugin ships starter + wake-arm + post-compact recall + touch-activity only.
+
