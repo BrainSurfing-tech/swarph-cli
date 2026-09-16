@@ -40,7 +40,7 @@ from swarph_cli.cell import (
     load_cell,
 )
 
-_ARM_HARNESSES = ("claude", "codex", "muse")
+_ARM_HARNESSES = ("claude", "codex", "muse", "opencode")
 _INJECT_HARNESSES = ("antigravity",)
 _VERIFY_HARNESSES = ("cursor",)
 _KNOWN_HARNESSES = _ARM_HARNESSES + _INJECT_HARNESSES + _VERIFY_HARNESSES

@@ -245,6 +245,7 @@ def _validate_routing(cell: Cell) -> None:
         "codex": "codex",
         "antigravity": "antigravity",
         "cursor": "cursor",
+        "opencode": "opencode",
     }.get(cell.provider)
     if provider_native is None:
         raise CellError(
@@ -2703,6 +2704,288 @@ class MuseMembrane(ClaudeMembrane):
         )
 
 
+#: Opencode cell subdir, created INSIDE the cell cwd, holding the relocated
+#: config (XDG_CONFIG_HOME) and data (XDG_DATA_HOME). Both relocations are
+#: grounded against real opencode 1.18.30 by execution: `XDG_DATA_HOME=/tmp/x
+#: opencode --pure db path` -> `/tmp/x/opencode/opencode.db`, and
+#: `XDG_CONFIG_HOME=/tmp/x opencode --pure debug config` -> `"plugin": []`.
+_OPENCODE_CELL_SUBDIR = ".opencode-cell"
+
+
+def _opencode_cell_dir(cell: Cell) -> Path:
+    """The cell's private opencode root (``<cwd>/.opencode-cell``)."""
+    return cell.cwd / _OPENCODE_CELL_SUBDIR
+
+
+def _scrub_opencode_namespace(env: dict[str, str]) -> None:
+    """DENY-BY-DEFAULT scrub of the ``OPENCODE_*`` namespace.
+
+    Every ``OPENCODE_*`` variable is a potential redirect — ``OPENCODE_CONFIG`` /
+    ``OPENCODE_CONFIG_DIR`` / ``OPENCODE_CONFIG_CONTENT`` point config at arbitrary
+    paths, and future ones will too. Enumerating them re-opens on the next release
+    (the whack-a-mole the grok/vibe/cursor scrubs all refuse), so deny the namespace
+    and let the cell set its own values below.
+    """
+    for key in [k for k in env if k.startswith("OPENCODE_")]:
+        env.pop(key, None)
+
+
+def _link_opencode_auth(dest: Path) -> None:
+    """Symlink the operator's ``~/.local/share/opencode/auth.json`` into the cell.
+
+    opencode resolves auth from the DATA dir, which this membrane relocates — so
+    the cell starts UNAUTHENTICATED unless the operator's subscription credential is
+    linked in. Symlink, not copy: a copy is a second credential on disk that never
+    rotates with the original.
+
+    Idempotency is judged by comparing RESOLVED paths (``.resolve()``), never the
+    raw ``readlink()`` target — a raw comparison is False against a home symlink,
+    a relative target, or Windows' ``\\\\?\\`` extended-length form, so the link
+    would be torn down and re-created on every spawn (#423 review). A stale/foreign
+    link is replaced; a real file is never clobbered; best-effort on any failure
+    (opencode reports unauthenticated itself if the link could not land).
+    """
+    op_auth = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+    if not op_auth.exists():
+        return  # intended: no operator credential to share
+    try:
+        if dest.is_symlink():
+            try:
+                if dest.resolve() == op_auth.resolve():
+                    return  # already correct
+            except OSError:
+                pass
+            dest.unlink()  # stale/foreign/dangling link → replace
+        elif dest.exists():
+            return  # a real file is present — do not clobber
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.symlink_to(op_auth)
+    except OSError:
+        pass
+
+
+def _opencode_env(cell: Cell) -> dict[str, str]:
+    """Subscription env for a local ``opencode`` CELL.
+
+    On top of the canonical billing scrub, the cell relocates opencode's CONFIG
+    (XDG_CONFIG_HOME) and DATA (XDG_DATA_HOME) into ``<cwd>/.opencode-cell``, and
+    links the operator's ``auth.json`` in, so the cell's sessions/plugins/auth
+    never mix with the operator's. ``$HOME`` is deliberately NOT relocated — the
+    vibe/cursor lesson: a fake $HOME costs the cell ``~/.config/swarph/<self>.
+    peer_token``, ``~/.swarph/secrets.toml`` and the codegraph hook, and opencode's
+    XDG-honoring knobs let us pay nothing to keep it.
+
+    Relocating XDG_CONFIG_HOME is what keeps the OPERATOR's plugins (e.g. a
+    provider plugin with side effects) OUT of the cell — opencode auto-loads
+    ``~/.config/opencode/plugins/``, and unlike cursor (whose config dir holds only
+    auth) opencode reads auth from the DATA dir, so the relocation costs auth
+    nothing.
+
+    MESH_GATEWAY_TOKEN is deliberately NOT popped — same as every other membrane:
+    the cell inherits the gateway token so its mesh DMs work out of the box.
+    """
+    env = _spawn_env_base(cell)
+    # ORDER IS LOAD-BEARING: the scrub removes an inherited OPENCODE_* var and this
+    # sets the cell's own AFTER, so the membrane's values are authoritative.
+    _scrub_opencode_namespace(env)
+    data_dir = _opencode_cell_dir(cell) / "data"
+    config_dir = _opencode_cell_dir(cell) / "config"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    _link_opencode_auth(data_dir / "opencode" / "auth.json")
+    # Wire the swarph hook plugin into the cell's isolated config dir, so the
+    # spawned cell gets the starter/wake/postcompact products without a separate
+    # onboarding step. Best-effort: a failed write never blocks the spawn.
+    try:
+        from swarph_cli.commands.install_opencode_plugin import ensure_cell_plugin
+        ensure_cell_plugin(cell.cwd)
+    except Exception:
+        pass
+    env["XDG_DATA_HOME"] = str(data_dir)
+    env["XDG_CONFIG_HOME"] = str(config_dir)
+    # A cell self-updating mid-run is a silent seat change. Pin it off explicitly.
+    env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+    # Keep the OPERATOR's global instructions out of the cell. $HOME is shared
+    # (deliberately, for mesh identity), so opencode would otherwise load the box
+    # owner's ~/.claude/CLAUDE.md and every auto-discovered external skill into a
+    # cell whose identity is THIS cell, not the box owner — the wrong-identity
+    # class #423 review caught. Set AFTER the scrub (the scrub pops OPENCODE_*, so
+    # an operator's own disable would otherwise be lost, not preserved).
+    env["OPENCODE_DISABLE_CLAUDE_CODE"] = "1"
+    env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
+    # NOTE (2026-09-16, probe): the plugin's `experimental.chat.system.transform`
+    # fires WITHOUT the OPENCODE_EXPERIMENTAL umbrella (measured on 1.18.30), so
+    # we do NOT set it — widening the experimental surface for a flag the hook
+    # does not need is the very posture this membrane otherwise refuses.
+    return env
+
+
+def _opencode_binary() -> Optional[str]:
+    """Resolve the opencode binary once, for BOTH the membrane and the discovery.
+
+    The curl installer drops the binary at ~/.opencode/bin/opencode; npm/bun/brew
+    installs resolve via PATH. Prefer the PATH name, then the std install locations
+    an operator's PATH may not carry. SHARED (not duplicated) because #423 taught
+    us that a divergence between "what we launch" and "what we discover with" is a
+    silent continuity loss: on the curl layout the discovery had run the literal
+    `opencode` from PATH, failed, and every spawn became a fresh session forever.
+    """
+    found = shutil.which("opencode")
+    if found:
+        return found
+    for rel in (".opencode/bin/opencode", ".local/bin/opencode"):
+        candidate = Path.home() / rel
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _opencode_prior_session(cell: Cell) -> Optional[str]:
+    """Newest opencode session id recorded for this cell's cwd, or None.
+
+    opencode keys sessions per ``directory`` (verified: `opencode --pure session
+    list --format json` rows carry `id` + `directory` + `updated`). `--continue`
+    resumes the LAST session GLOBALLY, which on a multi-cell box is the wrong
+    cell's session — so the membrane discovers per-directory and resumes a SPECIFIC
+    id. Never raises: fails toward fresh, because the failure DIRECTION is the
+    design (losing a resume is recoverable; emitting a resume the CLI cannot satisfy
+    may stop the cell).
+    """
+    binary = _opencode_binary()
+    if binary is None:
+        return None
+    env = dict(os.environ)
+    env["XDG_DATA_HOME"] = str(_opencode_cell_dir(cell) / "data")
+    env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+    try:
+        out = subprocess.run(
+            [binary, "--pure", "session", "list", "--format", "json"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=15, env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        rows = json.loads(out.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    # cell.cwd may be a logical path while opencode records a realpath-resolved
+    # cwd — accept either so a symlinked cwd still matches (codex does the same).
+    try:
+        targets = {str(cell.cwd), str(Path(cell.cwd).resolve())}
+    except OSError:
+        targets = {str(cell.cwd)}
+    best_id: Optional[str] = None
+    best_ts = -1
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("directory") not in targets:
+            continue
+        ts = row.get("updated")
+        rid = row.get("id")
+        if isinstance(ts, int) and isinstance(rid, str) and rid and ts > best_ts:
+            best_ts = ts
+            best_id = rid
+    return best_id
+
+
+def _build_opencode_argv(
+    cell: Cell,
+    no_starter: bool,
+    passthrough: list[str],
+) -> list[str]:
+    """Build the ``opencode`` cell argv. Grounded against real opencode 1.18.30.
+
+    - The bare ``opencode`` TUI, NOT ``opencode run`` (that is one-shot-and-exit;
+      a cell that exits after one turn is not a cell).
+    - ``--session=<id>`` (resume the newest session for THIS directory) only when a
+      prior session exists; the discovery is per-directory, so a multi-cell box
+      never resumes the wrong cell's session. The ``=`` form is load-bearing: a
+      dash-prefixed id would otherwise be parsed as a flag.
+    - ``--prompt=<starter>`` on a FRESH session only — the documented initial-prompt
+      flag, carrying the cell's identity. On resume it is skipped rather than
+      appending a duplicate turn. The ``=`` form is load-bearing here too: a
+      starter beginning with ``---`` or ``- `` (the usual YAML frontmatter) would
+      otherwise be EATEN as flags by opencode's yargs (#423 review, verified).
+    - NO ``--auto`` / ``--yolo``: widening tool approval is cell.yaml's to do
+      explicitly (via ``-- --auto`` passthrough), never the membrane's default.
+    """
+    argv = ["opencode"]
+    sid = _opencode_prior_session(cell)
+    if sid:
+        argv.append(f"--session={sid}")
+    elif not no_starter:
+        starter = read_starter_prompt(cell)
+        if starter:
+            argv.append(f"--prompt={starter}")
+    argv.extend(passthrough)
+    return argv
+
+
+class OpencodeMembrane(ProviderMembrane):
+    """Local ``opencode`` CLI as a durable swarph CELL (OpenCode plan).
+
+    Same shape as Grok/Vibe/Cursor — exec the local agent TUI in a named
+    multiplexer session via the BASE ``pre_launch`` (no override: that hoist is
+    what card #2 fixed) — with ONE divergence: the cell's isolation is
+    ``XDG_DATA_HOME`` + ``XDG_CONFIG_HOME`` relocation (not ``$HOME``, not a single
+    data-dir knob), because opencode scopes its session DB AND its plugin dir on
+    those two XDG variables (verified), and keeps auth in the DATA dir.
+
+    Session model (``uses_pinned_session`` False): opencode mints + owns session ids
+    in a sqlite DB; the cell carries no swarph-pinned UUID and resumes by
+    per-directory discovery via ``--session <id>``.
+    """
+
+    name = "opencode"
+
+    env_builder = staticmethod(_opencode_env)
+
+    def uses_pinned_session(self) -> bool:
+        return False
+
+    def build_argv(
+        self,
+        cell: Cell,
+        *,
+        session_id: Optional[str],
+        no_starter: bool,
+        passthrough: list[str],
+        effective_role: Optional[str],
+    ) -> list[str]:
+        # session_id is accepted and IGNORED: opencode cannot pin one at creation,
+        # and resume is per-directory discovery — same reasoning as muse's build_argv.
+        return _build_opencode_argv(cell, no_starter, passthrough)
+
+    def resolve_binary(self) -> Optional[str]:
+        return _opencode_binary()
+
+    def binary_not_found_message(self) -> str:
+        return (
+            "swarph spawn: 'opencode' binary not found on PATH. "
+            "Install OpenCode (curl -fsSL https://opencode.ai/install | bash) "
+            "or set PATH explicitly."
+        )
+
+    # NO launch/pre_launch OVERRIDE — base carries both (#318, #2). With the process
+    # cwd correct, _build_opencode_argv passes no path-shaped string across the exec
+    # boundary (#314), and opencode resolves its workspace from the cwd.
+
+    def memory_sync_files(self, cell) -> list:
+        files = []
+        if (cell.cwd / "AGENTS.md").exists():
+            files.append(("AGENTS.md", cell.cwd / "AGENTS.md"))
+        return files
+
+    def memory_guard_file(self, cell):
+        return cell.cwd / "AGENTS.md"
+
+
 MEMBRANES: dict[str, ProviderMembrane] = {
     "claude": ClaudeMembrane(),
     "codex": CodexMembrane(),
@@ -2722,6 +3005,10 @@ MEMBRANES: dict[str, ProviderMembrane] = {
     # shared whitelist is inert, while a whitelist ahead of the membrane raises AT
     # IMPORT and kills `swarph spawn` for every fresh install.
     "cursor": CursorMembrane(),
+    # The opencode lane. Registered here AND enabled via cell.CLI_ENABLED_PROVIDERS
+    # in the same release; `opencode` enters swarph_shared.VALID_PROVIDERS only in a
+    # LATER one — same #247 ordering as vibe/cursor.
+    "opencode": OpencodeMembrane(),
 }
 
 # Defensive coupling: every shared-whitelisted provider MUST have a membrane,
@@ -2848,7 +3135,7 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
             )
 
-    elif cell.provider in ("antigravity", "grok", "cursor"):
+    elif cell.provider in ("antigravity", "grok", "cursor", "opencode"):
         # Fresh-session providers (no swarph-pinned UUID): grok mints + owns its
         # own session ids (continuity via --continue + grok memory). Still want
         # the operator-typed slot-role as effective_role for the named tmux
