@@ -2805,11 +2805,39 @@ def _opencode_env(cell: Cell) -> dict[str, str]:
     env["XDG_CONFIG_HOME"] = str(config_dir)
     # A cell self-updating mid-run is a silent seat change. Pin it off explicitly.
     env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+    # Keep the OPERATOR's global instructions out of the cell. $HOME is shared
+    # (deliberately, for mesh identity), so opencode would otherwise load the box
+    # owner's ~/.claude/CLAUDE.md and every auto-discovered external skill into a
+    # cell whose identity is THIS cell, not the box owner — the wrong-identity
+    # class #423 review caught. Set AFTER the scrub (the scrub pops OPENCODE_*, so
+    # an operator's own disable would otherwise be lost, not preserved).
+    env["OPENCODE_DISABLE_CLAUDE_CODE"] = "1"
+    env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
     # NOTE (2026-09-16, probe): the plugin's `experimental.chat.system.transform`
     # fires WITHOUT the OPENCODE_EXPERIMENTAL umbrella (measured on 1.18.30), so
     # we do NOT set it — widening the experimental surface for a flag the hook
     # does not need is the very posture this membrane otherwise refuses.
     return env
+
+
+def _opencode_binary() -> Optional[str]:
+    """Resolve the opencode binary once, for BOTH the membrane and the discovery.
+
+    The curl installer drops the binary at ~/.opencode/bin/opencode; npm/bun/brew
+    installs resolve via PATH. Prefer the PATH name, then the std install locations
+    an operator's PATH may not carry. SHARED (not duplicated) because #423 taught
+    us that a divergence between "what we launch" and "what we discover with" is a
+    silent continuity loss: on the curl layout the discovery had run the literal
+    `opencode` from PATH, failed, and every spawn became a fresh session forever.
+    """
+    found = shutil.which("opencode")
+    if found:
+        return found
+    for rel in (".opencode/bin/opencode", ".local/bin/opencode"):
+        candidate = Path.home() / rel
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def _opencode_prior_session(cell: Cell) -> Optional[str]:
@@ -2823,12 +2851,15 @@ def _opencode_prior_session(cell: Cell) -> Optional[str]:
     design (losing a resume is recoverable; emitting a resume the CLI cannot satisfy
     may stop the cell).
     """
+    binary = _opencode_binary()
+    if binary is None:
+        return None
     env = dict(os.environ)
     env["XDG_DATA_HOME"] = str(_opencode_cell_dir(cell) / "data")
     env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
     try:
         out = subprocess.run(
-            ["opencode", "--pure", "session", "list", "--format", "json"],
+            [binary, "--pure", "session", "list", "--format", "json"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=15, env=env,
         )
@@ -2872,23 +2903,26 @@ def _build_opencode_argv(
 
     - The bare ``opencode`` TUI, NOT ``opencode run`` (that is one-shot-and-exit;
       a cell that exits after one turn is not a cell).
-    - ``--session <id>`` (resume the newest session for THIS directory) only when a
+    - ``--session=<id>`` (resume the newest session for THIS directory) only when a
       prior session exists; the discovery is per-directory, so a multi-cell box
-      never resumes the wrong cell's session.
-    - ``--prompt <starter>`` on a FRESH session only — the documented initial-prompt
+      never resumes the wrong cell's session. The ``=`` form is load-bearing: a
+      dash-prefixed id would otherwise be parsed as a flag.
+    - ``--prompt=<starter>`` on a FRESH session only — the documented initial-prompt
       flag, carrying the cell's identity. On resume it is skipped rather than
-      appending a duplicate turn.
+      appending a duplicate turn. The ``=`` form is load-bearing here too: a
+      starter beginning with ``---`` or ``- `` (the usual YAML frontmatter) would
+      otherwise be EATEN as flags by opencode's yargs (#423 review, verified).
     - NO ``--auto`` / ``--yolo``: widening tool approval is cell.yaml's to do
       explicitly (via ``-- --auto`` passthrough), never the membrane's default.
     """
     argv = ["opencode"]
     sid = _opencode_prior_session(cell)
     if sid:
-        argv.extend(["--session", sid])
+        argv.append(f"--session={sid}")
     elif not no_starter:
         starter = read_starter_prompt(cell)
         if starter:
-            argv.extend(["--prompt", starter])
+            argv.append(f"--prompt={starter}")
     argv.extend(passthrough)
     return argv
 
@@ -2929,17 +2963,7 @@ class OpencodeMembrane(ProviderMembrane):
         return _build_opencode_argv(cell, no_starter, passthrough)
 
     def resolve_binary(self) -> Optional[str]:
-        # The curl installer drops the binary at ~/.opencode/bin/opencode; npm/bun/
-        # brew installs resolve via PATH. Prefer the unambiguous PATH name, then the
-        # standard install locations an operator's PATH may not carry.
-        found = shutil.which("opencode")
-        if found:
-            return found
-        for rel in (".opencode/bin/opencode", ".local/bin/opencode"):
-            candidate = Path.home() / rel
-            if candidate.is_file():
-                return str(candidate)
-        return None
+        return _opencode_binary()
 
     def binary_not_found_message(self) -> str:
         return (

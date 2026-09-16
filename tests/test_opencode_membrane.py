@@ -151,7 +151,7 @@ def test_a_cell_WITH_a_prior_session_resumes_by_id(tmp_path, monkeypatch):
         "swarph_cli.commands.spawn._opencode_prior_session", lambda cell: "ses_abc"
     )
     argv = _build_opencode_argv(_cell(tmp_path), no_starter=True, passthrough=[])
-    assert argv[argv.index("--session") + 1] == "ses_abc"
+    assert "--session=ses_abc" in argv
 
 
 def test_prior_session_is_KEYED_ON_THE_CWD_not_any_session(tmp_path, monkeypatch):
@@ -181,6 +181,38 @@ def test_prior_session_probe_FAILS_TOWARD_FRESH_and_never_raises(tmp_path, monke
 
     monkeypatch.setattr("swarph_cli.commands.spawn.subprocess.run", boom)
     assert _opencode_prior_session(_cell(tmp_path)) is None
+
+
+def test_prior_session_runs_the_RESOLVED_binary_with_pure(tmp_path, monkeypatch):
+    """>>> #423. <<< Discovery must ``--pure``-run the SAME binary the membrane would
+    exec (``resolve_binary``), not the literal ``opencode`` from PATH — on the curl
+    layout ``opencode`` is off PATH, so the discovery would file-not-found and every
+    spawn would become a silent fresh session, forever. ``--pure`` keeps the probe
+    free of the operator's plugins (the pinned guarantee lab-ovh asked for)."""
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    monkeypatch.setattr("swarph_cli.commands.spawn._opencode_binary", lambda: "/fake/bin/opencode")
+    monkeypatch.setattr("swarph_cli.commands.spawn.subprocess.run", fake_run)
+
+    assert _opencode_prior_session(_cell(tmp_path)) is None
+    assert seen and seen[0][0] == "/fake/bin/opencode"
+    assert "--pure" in seen[0]
+
+
+def test_prior_session_returns_none_without_a_binary(tmp_path, monkeypatch):
+    """No binary, no discovery: the probe must not fall back to bare ``opencode``
+    and it must not call out at all."""
+    monkeypatch.setattr("swarph_cli.commands.spawn._opencode_binary", lambda: None)
+    called = []
+    monkeypatch.setattr(
+        "swarph_cli.commands.spawn.subprocess.run", lambda *a, **k: called.append(1)
+    )
+    assert _opencode_prior_session(_cell(tmp_path)) is None
+    assert called == []
 
 
 # ── THE SECURITY POSTURE THIS MEMBRANE DELIBERATELY DOES NOT WIDEN ──────────
@@ -220,7 +252,21 @@ def test_the_starter_uses_the_documented_prompt_flag_on_a_FRESH_session(tmp_path
     sp = tmp_path / "starter.md"
     sp.write_text("you are opencode-1, a swarph cell")
     argv = _build_opencode_argv(_cell(tmp_path, starter=sp), no_starter=False, passthrough=[])
-    assert argv[argv.index("--prompt") + 1] == "you are opencode-1, a swarph cell"
+    assert "--prompt=you are opencode-1, a swarph cell" in argv
+
+
+def test_starter_with_yaml_frontmatter_is_NOT_eaten_as_flags(tmp_path, monkeypatch):
+    """>>> --prompt=<starter>, not --prompt <starter>. <<< A cell starter routinely
+    opens with a YAML frontmatter (``---``), and opencode's yargs eats a following
+    ``---``/``- `` token as a flag (#423 review, verified against yargs-parser 22:
+    --prompt "---\\n…" parses to {prompt:true, "-":true} and the starter is lost).
+    The `=` form keeps the starter one argument, whatever it opens with."""
+    monkeypatch.setattr("swarph_cli.commands.spawn._opencode_prior_session", lambda cell: None)
+    sp = tmp_path / "starter.md"
+    starter = "---\nname: opencode-1\n---\nYou are a cell."
+    sp.write_text(starter)
+    argv = _build_opencode_argv(_cell(tmp_path, starter=sp), no_starter=False, passthrough=[])
+    assert f"--prompt={starter}" in argv
 
 
 def test_no_starter_suppresses_the_prompt_flag(tmp_path, monkeypatch):
@@ -357,6 +403,27 @@ def test_autoupdate_is_disabled_in_the_cell(tmp_path):
     """A cell self-updating mid-run is a silent seat change. Pin it off for the
     cell explicitly — the same reason every probe sets OPENCODE_DISABLE_AUTOUPDATE."""
     assert _opencode_env(_cell(tmp_path))["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
+
+
+def test_env_disables_claude_and_external_skills(tmp_path):
+    """>>> $HOME is shared by design, so opencode would load the box owner's
+    ``~/.claude/CLAUDE.md`` and auto-discovered external skills into a cell whose
+    identity is the CELL, not the owner — the wrong-identity class #423 caught. <<<
+    The disable knobs must be set, and set AFTER the scrub (which pops OPENCODE_*)."""
+    env = _opencode_env(_cell(tmp_path))
+    assert env["OPENCODE_DISABLE_CLAUDE_CODE"] == "1"
+    assert env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] == "1"
+
+
+def test_disable_knobs_survive_an_operator_value_because_they_are_set_after_the_scrub(
+    tmp_path, monkeypatch
+):
+    """The scrub is deny-by-default over OPENCODE_*, so an operator's own disable
+    would be lost — the cell re-sets its own AFTER, making the value authoritative
+    rather than inherited."""
+    monkeypatch.setenv("OPENCODE_DISABLE_CLAUDE_CODE", "0")
+    env = _opencode_env(_cell(tmp_path))
+    assert env["OPENCODE_DISABLE_CLAUDE_CODE"] == "1"
 
 
 def test_experimental_flag_is_NOT_set_because_the_probe_measured_it_UNNEEDED(tmp_path):
