@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- guide/onboard (#866): `swarph guide doctrine` -- bundled standard-of-evidence topic
+  (Law Zero, working set, membership axis, trichotomy, five intake fields, #864
+  durable-first). Approved extract is card #866 post 42503; pin test fails on silent
+  fork. `onboard` prints the command after mechanics so a new cell meets the standard,
+  not only the verbs.
+
 ## 0.62.0 — 2026-09-16
 - opencode (#423): `OpencodeMembrane` — opencode as a durable swarph CELL. Isolation is `XDG_DATA_HOME` + `XDG_CONFIG_HOME` relocation (not `$HOME`, not a single data-dir knob) because opencode scopes its session DB **and** its plugin dir on those two, and keeps auth in the data dir. Sessions are opencode-owned: the cell carries no swarph-pinned UUID and resumes by per-directory discovery via `--session=<id>`. Ships a swarph hook plugin.
 - dreaming (#424): a swarph-**owned** OpenAI-shape SLM client (`dreaming/slm.py`, stdlib only, no host default per #578). **This is what lets `dreaming --enrich` run on an installed wheel at all** — `enrich` previously imported `workers.slm_client`, which exists in no wheel, so every installed consumer ran `--no-enrich` by necessity rather than by choice.

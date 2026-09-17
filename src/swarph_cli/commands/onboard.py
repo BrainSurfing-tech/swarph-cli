@@ -1123,4 +1123,12 @@ def run_onboard(argv: list[str]) -> int:
         f"      swarph ratify {canonical} --reason \"<short text>\"\n"
         f"  to flip ratified=true.\n"
     )
+    # #866: mechanics without the standard of evidence is half an onboard.
+    # The doctrine topic is bundled; print the command, do not paste the body
+    # here (the guide is the record -- a paraphrase in this banner would drift).
+    print_safe(
+        "\n[doctrine] the standard of evidence ships in the guide, not only the verbs:\n"
+        "      swarph guide doctrine\n"
+        "  Authority: proven/docs/THE_TEN.md -- approved extract: card #866 post 42503.\n"
+    )
     return 0
