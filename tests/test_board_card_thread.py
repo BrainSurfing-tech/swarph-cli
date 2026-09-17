@@ -31,11 +31,22 @@ def test_thread_url_with_limit_and_trailing_slash():
 # ── _thread_recipient — the refusal is the point ──────────────────────────────
 
 def test_recipient_prefers_explicit_to_over_assignee():
-    assert board._thread_recipient({"id": 1, "assignee": "droplet"}, "gpt-ops") == "gpt-ops"
+    to, reason = board._thread_recipient({"id": 1, "assignee": "droplet"}, "gpt-ops")
+    assert (to, reason) == ("gpt-ops", "--to")
 
 
 def test_recipient_defaults_to_assignee():
-    assert board._thread_recipient({"id": 1, "assignee": "droplet"}, None) == "droplet"
+    to, reason = board._thread_recipient({"id": 1, "assignee": "droplet"}, None)
+    assert (to, reason) == ("droplet", "card assignee")
+
+
+def test_recipient_falls_back_to_project_owner_orchestrator():
+    """#864: unassigned card + no --to -> project owner, named as the reason."""
+    to, reason = board._thread_recipient(
+        {"id": 864, "assignee": None}, None, owner_orchestrator="lab-ovh",
+    )
+    assert to == "lab-ovh"
+    assert reason == "project owner_orchestrator"
 
 
 def test_recipient_RAISES_rather_than_inventing_a_sentinel():
@@ -50,6 +61,7 @@ def test_recipient_RAISES_rather_than_inventing_a_sentinel():
     msg = str(exc.value)
     assert "--to" in msg          # tells the caller how to proceed
     assert "42" in msg            # names the card rather than failing abstractly
+    assert "owner_orchestrator" in msg  # #864: names the fallback that failed
 
 
 @pytest.mark.parametrize("assignee", ["", None])
@@ -169,3 +181,47 @@ def test_say_posts_with_thread_id_and_defaults_to_assignee(monkeypatch, capsys):
     assert seen["body"]["thread_id"] == "uuid-7"     # the card binding
     assert seen["body"]["to_node"] == "droplet"      # defaulted, not invented
     assert "999" in capsys.readouterr().out
+
+
+def test_say_unassigned_defaults_to_project_owner_and_prints_why(monkeypatch, capsys):
+    """#864 accept: unassigned + no --to lands; response names recipient and why."""
+    seen = {}
+
+    def _get(url, tok, **k):
+        if url.rstrip("/").endswith("/board/cards/864"):
+            return 200, {"id": 864, "assignee": None, "project_id": 8,
+                         "thread_uuid": "uuid-864"}
+        if url.rstrip("/").endswith("/board/projects"):
+            return 200, {"projects": [
+                {"id": 8, "owner_orchestrator": "lab-ovh", "slug": "mesh-hygiene"},
+            ]}
+        return 500, {"detail": f"unexpected GET {url}"}
+
+    def _post(url, body, tok, **k):
+        seen["body"] = body
+        return 200, {"id": 42599}
+
+    rc = _run(monkeypatch, get=_get, post=_post,
+              argv=["cards", "say", "864", "--content", "finding"])
+    assert rc == 0
+    assert seen["body"]["to_node"] == "lab-ovh"
+    out = capsys.readouterr().out
+    assert "lab-ovh" in out
+    assert "project owner_orchestrator" in out
+
+
+def test_say_refuses_when_owner_unresolvable(monkeypatch, capsys):
+    def _get(url, tok, **k):
+        if "/board/cards/" in url:
+            return 200, {"id": 9, "assignee": None, "project_id": 99,
+                         "thread_uuid": "u"}
+        if url.rstrip("/").endswith("/board/projects"):
+            return 200, {"projects": [{"id": 8, "owner_orchestrator": "lab-ovh"}]}
+        return 500, {"detail": url}
+
+    rc = _run(monkeypatch, get=_get,
+              argv=["cards", "say", "9", "--content", "x"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "unresolvable" in err and "--to" in err
+

@@ -2,11 +2,18 @@
 
 ## Unreleased
 
+<<<<<<< HEAD
 - guide/onboard (#866): `swarph guide doctrine` -- bundled standard-of-evidence topic
   (Law Zero, working set, membership axis, trichotomy, five intake fields, #864
   durable-first). Approved extract is card #866 post 42503; pin test fails on silent
   fork. `onboard` prints the command after mechanics so a new cell meets the standard,
   not only the verbs.
+=======
+- board (#864): `cards say` on an unassigned card defaults `--to` to the project's
+  `owner_orchestrator` (second GET — the card payload does not carry the owner) and
+  prints the chosen recipient plus why. Loud refusal survives when the owner is
+  unresolvable; no silent placeholder peer (#259).
+>>>>>>> 62e14ae (feat(board): cards say falls back to project owner (#864))
 
 ## 0.62.0 — 2026-09-16
 - opencode (#423): `OpencodeMembrane` — opencode as a durable swarph CELL. Isolation is `XDG_DATA_HOME` + `XDG_CONFIG_HOME` relocation (not `$HOME`, not a single data-dir knob) because opencode scopes its session DB **and** its plugin dir on those two, and keeps auth in the data dir. Sessions are opencode-owned: the cell carries no swarph-pinned UUID and resumes by per-directory discovery via `--session=<id>`. Ships a swarph hook plugin.

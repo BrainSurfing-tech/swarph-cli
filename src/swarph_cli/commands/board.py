@@ -390,8 +390,38 @@ def _thread_url(gateway: str, card_id: int, *, limit: Optional[int] = None) -> s
     return f"{base}?limit={limit}" if limit else base
 
 
-def _thread_recipient(card: dict, explicit_to: Optional[str]) -> str:
-    """Who a card-thread post is addressed to. `--to` wins, else the assignee.
+def _project_owner_orchestrator(gw: str, token: str, project_id) -> Optional[str]:
+    """Resolve ``projects.owner_orchestrator`` for a card's project_id.
+
+    >>> THE CARD PAYLOAD DOES NOT CARRY THE OWNER (#864). <<< Measured
+    2026-09-17: GET /board/cards/{id} has assignee/project_id and no owner
+    field; GET /board/projects rows carry ``owner_orchestrator`` (NOT NULL on
+    the server). A second call is required — inventing a sentinel peer is the
+    #259 failure mode this helper exists to avoid.
+    """
+    if project_id is None:
+        return None
+    st, data = _http_get_json(f"{gw.rstrip('/')}/board/projects", token)
+    if st != 200:
+        return None
+    rows = data if isinstance(data, list) else (data or {}).get("projects", [])
+    for row in rows or []:
+        if row.get("id") == project_id or str(row.get("id")) == str(project_id):
+            owner = (row.get("owner_orchestrator") or "").strip()
+            return owner or None
+    return None
+
+
+def _thread_recipient(
+    card: dict,
+    explicit_to: Optional[str],
+    *,
+    owner_orchestrator: Optional[str] = None,
+) -> "tuple[str, str]":
+    """Who a card-thread post is addressed to, and why.
+
+    Order: ``--to`` > card assignee > project ``owner_orchestrator`` (#864).
+    Returns ``(to_node, reason)`` so the confirmation line can name the choice.
 
     >>> RAISES RATHER THAN INVENTING A SENTINEL. <<< POST /messages requires
     exactly one of {to_node, channel}, so a card post needs a real recipient. The
@@ -401,18 +431,21 @@ def _thread_recipient(card: dict, explicit_to: Optional[str]) -> str:
     A placeholder here would manufacture that defect once per card post.
     """
     if explicit_to:
-        return explicit_to
+        return explicit_to, "--to"
     assignee = card.get("assignee")
     if assignee:
-        return assignee
+        return assignee, "card assignee"
+    if owner_orchestrator:
+        return owner_orchestrator, "project owner_orchestrator"
     raise RuntimeError(
-        f"card #{card.get('id')} has no assignee, so there is no default recipient "
-        f"for a thread post — pass --to <peer>. (A card post is still a DM on the "
-        f"wire; it needs someone to be addressed to.)"
+        f"card #{card.get('id')} has no assignee and project owner_orchestrator "
+        f"is unresolvable, so there is no default recipient for a thread post — "
+        f"pass --to <peer>. (A card post is still a DM on the wire; it needs "
+        f"someone to be addressed to.)"
     )
 
 
-def _say_line(resp: dict, card_id, to_node: str) -> str:
+def _say_line(resp: dict, card_id, to_node: str, *, reason: Optional[str] = None) -> str:
     """The post confirmation — AND any obligation the post just DISCHARGED.
 
     >>> THE GATEWAY ALREADY SAID SO AND THIS CLI THREW IT AWAY. <<< POST
@@ -435,7 +468,11 @@ def _say_line(resp: dict, card_id, to_node: str) -> str:
     POLICY (that is #562's own question) -- it is the fix for the holder not
     being told, which is what made six hours of divergence possible.
     """
-    line = f"posted id={resp.get('id')} onto card #{card_id} (to {to_node})"
+    if reason:
+        line = (f"posted id={resp.get('id')} onto card #{card_id} "
+                f"(to {to_node}; {reason})")
+    else:
+        line = f"posted id={resp.get('id')} onto card #{card_id} (to {to_node})"
     closed = resp.get("closed_obligations") or []
     if closed:
         ids = ", ".join(f"#{i}" for i in closed)
@@ -855,7 +892,8 @@ def _build_parser() -> argparse.ArgumentParser:
     add_content_args(cy)
     cy.add_argument("--kind", default="fyi", help="status|question|answer|unblock|fyi")
     cy.add_argument("--to", dest="to_node", default=None,
-                    help="recipient peer (default: the card's assignee)")
+                    help="recipient peer (default: card assignee, else project "
+                         "owner_orchestrator; refused if neither resolves)")
     _add_common(cy)
 
     ck = cards.add_parser(
@@ -1278,8 +1316,15 @@ def run_board(argv: list[str]) -> int:
                       f"(it predates #181a). Run scripts/migrate_card_threads.py on "
                       f"the gateway host.", file=sys.stderr)
                 return 1
+            # #864: card GET has no owner field — only fetch projects when the
+            # cheaper defaults (explicit --to, card assignee) are absent.
+            owner = None
+            if not args.to_node and not card.get("assignee"):
+                owner = _project_owner_orchestrator(gw, token, card.get("project_id"))
             try:
-                to_node = _thread_recipient(card, args.to_node)
+                to_node, reason = _thread_recipient(
+                    card, args.to_node, owner_orchestrator=owner,
+                )
             except RuntimeError as exc:
                 print(f"swarph board cards say: {exc}", file=sys.stderr)
                 return 1
@@ -1293,7 +1338,9 @@ def run_board(argv: list[str]) -> int:
             # explicit `propose` grant. `_out` passes `detail` through whole; it does
             # not need help, and a second copy of that logic is a second thing to
             # keep in sync.
-            return _out(st, d, lambda x: _say_line(x, args.id, to_node), aj)
+            return _out(
+                st, d, lambda x: _say_line(x, args.id, to_node, reason=reason), aj,
+            )
         if args.command == "ready":
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "move_ready": not args.clear}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} move_ready -> {x.get('move_ready')}", aj)
