@@ -151,7 +151,8 @@ def _codegraph_query(query: str, *, limit: int = 8) -> list[dict]:
 
     Delegates to :func:`codegraph.structural_query` against the module-level
     ``_CODEGRAPH_INDEX`` path, using ``SWARPH_CELL`` (else
-    ``codegraph.DEFAULT_CALLER_CELL``) as the A8 caller identity and the
+    ``codegraph.require_caller_cell``, which REFUSES rather than defaulting) as
+    the A8 caller identity and the
     default operate-what-you-own allowlist (``allowlist=None``).
 
     NEVER raises — any exception (missing index, corrupt db, bad query, or
@@ -162,7 +163,13 @@ def _codegraph_query(query: str, *, limit: int = 8) -> list[dict]:
     to keep the tool output tight for the calling agent.
     """
     try:
-        caller_cell = os.environ.get("SWARPH_CELL", codegraph.DEFAULT_CALLER_CELL)
+        # NO DEFAULT IDENTITY (2026-09-18). `codegraph.DEFAULT_CALLER_CELL` is gone;
+        # an undeclared caller used to become lab-ovh and receive that cell's read
+        # authority. require_caller_cell raises IdentityNotDeclared, which the
+        # NEVER-RAISES contract below turns into an empty result — FAIL-CLOSED: the
+        # MCP host gets nothing rather than somebody else's answer.
+        caller_cell = codegraph.require_caller_cell(
+            os.environ.get("SWARPH_CELL"), verb="mcp codegraph_query")
         rows = codegraph.structural_query(
             query,
             index_path=_CODEGRAPH_INDEX,
