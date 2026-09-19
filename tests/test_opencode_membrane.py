@@ -368,6 +368,11 @@ def test_HOME_is_NOT_relocated_it_would_BREAK_MESH_IDENTITY(tmp_path, monkeypatc
     operator_home = tmp_path / "operator"
     operator_home.mkdir()
     monkeypatch.setenv("HOME", str(operator_home))
+    # Two different questions (#515 family, red on windows-latest at caeb834): the
+    # HOME *variable* is this test's subject (asserted below), while Path.home() is
+    # what _opencode_data_dir resolves -- and on Windows Path.home() reads
+    # USERPROFILE, never HOME. Pin Path.home() the way test_888 does; never skip.
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: operator_home))
     env = _opencode_env(_cell(tmp_path))
     assert env.get("HOME") == str(operator_home)
     # Assert the LOCATION via path PARTS, not a string `.endswith("/.../data")`:
