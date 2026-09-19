@@ -661,7 +661,8 @@ def _ppid(cur: int) -> int:
             raise
         r = subprocess.run(
             ["ps", "-o", "ppid=", "-p", str(cur)],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5,
         )
         if r.returncode != 0 or not r.stdout.strip():
             raise OSError(f"ps could not read ppid of {cur}")
