@@ -38,6 +38,7 @@ from swarph_cli.commands.spawn import (
     _OPENCODE_CELL_SUBDIR,
     _build_opencode_argv,
     _opencode_cell_dir,
+    _opencode_data_dir,
     _opencode_env,
     _opencode_prior_session,
     _scrub_opencode_namespace,
@@ -314,17 +315,35 @@ def test_the_whole_OPENCODE_namespace_goes():
     assert env == {"PATH": "/usr/bin"}, f"an opencode-namespace var survived: {env}"
 
 
-def test_env_isolates_CONFIG_and_DATA_into_the_cell(tmp_path):
+def test_env_isolates_CONFIG_and_DATA_into_the_cell(tmp_path, monkeypatch):
     """Grounded: XDG_DATA_HOME moves the DB (probe: `db path`), XDG_CONFIG_HOME
-    moves the plugin dir (probe: `debug config` -> `plugin: []`). Both relocations
-    keep $HOME intact, unlike grok's fake-$HOME shape."""
+    moves the plugin dir (probe: `debug config` -> `plugin: []`). $HOME stays
+    intact, unlike grok's fake-$HOME shape, and DATA lives OUTSIDE the work-tree."""
+    fake_home = tmp_path / "op"
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
     env = _opencode_env(_cell(tmp_path))
-    assert env["XDG_DATA_HOME"] == str(tmp_path / _OPENCODE_CELL_SUBDIR / "data")
     assert env["XDG_CONFIG_HOME"] == str(tmp_path / _OPENCODE_CELL_SUBDIR / "config")
-    assert (tmp_path / _OPENCODE_CELL_SUBDIR / "data").is_dir()
     assert (tmp_path / _OPENCODE_CELL_SUBDIR / "config").is_dir()
+    assert env["XDG_DATA_HOME"] == str(_opencode_data_dir(_cell(tmp_path)))
+    assert Path(env["XDG_DATA_HOME"]).is_dir()
     assert env.get("SWARPH_SPAWN") == "1"
     assert env.get("SWARPH_SELF") == "opencode-1"
+
+
+def test_DATA_is_NEVER_inside_the_work_tree(tmp_path, monkeypatch):
+    """>>> The regression guard. <<< opencode snapshots its work-tree with a git-dir
+    under XDG_DATA_HOME. If that data dir is inside the work-tree, the snapshot
+    repo snapshots its own object store: measured 2026-09-19 as a 9.1 GB objects
+    dir and a 319k-entry index, with every turn blocked at loop step=0. The data
+    dir must never resolve inside cell.cwd."""
+    fake_home = tmp_path.parent / f"{tmp_path.name}-home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    data = Path(_opencode_data_dir(_cell(tmp_path)))
+    assert not data.is_relative_to(tmp_path)
+    assert data.is_relative_to(fake_home)
+    env = _opencode_env(_cell(tmp_path))
+    assert not Path(env["XDG_DATA_HOME"]).is_relative_to(tmp_path)
 
 
 def test_an_inherited_XDG_override_cannot_win_over_the_cells_own(tmp_path, monkeypatch):
@@ -334,8 +353,9 @@ def test_an_inherited_XDG_override_cannot_win_over_the_cells_own(tmp_path, monke
     operator's DB."""
     monkeypatch.setenv("XDG_DATA_HOME", "/operator/data")
     monkeypatch.setenv("XDG_CONFIG_HOME", "/operator/config")
-    env = _opencode_env(_cell(tmp_path))
-    assert env["XDG_DATA_HOME"] == str(tmp_path / _OPENCODE_CELL_SUBDIR / "data")
+    cell = _cell(tmp_path)
+    env = _opencode_env(cell)
+    assert env["XDG_DATA_HOME"] == str(_opencode_data_dir(cell))
     assert env["XDG_CONFIG_HOME"] == str(tmp_path / _OPENCODE_CELL_SUBDIR / "config")
 
 
@@ -345,13 +365,16 @@ def test_HOME_is_NOT_relocated_it_would_BREAK_MESH_IDENTITY(tmp_path, monkeypatc
     cell ~/.config/swarph/<self>.peer_token, ~/.swarph/secrets.toml and the
     codegraph hook. opencode honors XDG_DATA_HOME / XDG_CONFIG_HOME (verified), so
     the cell pays nothing to keep $HOME."""
-    monkeypatch.setenv("HOME", "/home/operator")
+    operator_home = tmp_path / "operator"
+    operator_home.mkdir()
+    monkeypatch.setenv("HOME", str(operator_home))
     env = _opencode_env(_cell(tmp_path))
-    assert env.get("HOME") == "/home/operator"
+    assert env.get("HOME") == str(operator_home)
     # Assert the LOCATION via path PARTS, not a string `.endswith("/.../data")`:
     # the value's separator is an environment fact (\ on Windows), and a test that
     # asserts the separator fails on exactly the box it most needs to pass.
-    assert Path(env["XDG_DATA_HOME"]).parts[-2:] == (_OPENCODE_CELL_SUBDIR, "data")
+    assert Path(env["XDG_DATA_HOME"]).is_relative_to(operator_home)
+    assert Path(env["XDG_CONFIG_HOME"]).parts[-2:] == (_OPENCODE_CELL_SUBDIR, "config")
 
 
 def test_env_does_NOT_pop_the_gateway_token(tmp_path, monkeypatch):
@@ -372,8 +395,9 @@ def test_the_operator_credential_is_SYMLINKED_in_when_it_exists(tmp_path, monkey
     src.write_text("{}")
     monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
 
-    _opencode_env(_cell(tmp_path))
-    link = tmp_path / _OPENCODE_CELL_SUBDIR / "data" / "opencode" / "auth.json"
+    cell = _cell(tmp_path)
+    _opencode_env(cell)
+    link = _opencode_data_dir(cell) / "opencode" / "auth.json"
     assert link.is_symlink()
     # .resolve(), not readlink(): Windows returns the \\?\ extended-length form,
     # so a raw target comparison fails on the box where the assertion matters.
@@ -407,9 +431,10 @@ def test_NO_credential_symlink_when_the_operator_has_NO_auth(tmp_path, monkeypat
     reason the operator cannot see. Nothing to link, no link to fail silently."""
     fake_home = tmp_path / "op"  # no ~/.local/share/opencode/auth.json
     monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
-    _opencode_env(_cell(tmp_path))
-    cell_dir = tmp_path / _OPENCODE_CELL_SUBDIR
-    assert not [p for p in cell_dir.rglob("*") if p.is_symlink()]
+    cell = _cell(tmp_path)
+    _opencode_env(cell)
+    for root in (tmp_path / _OPENCODE_CELL_SUBDIR, _opencode_data_dir(cell)):
+        assert not [p for p in root.rglob("*") if p.is_symlink()]
 
 
 def test_autoupdate_is_disabled_in_the_cell(tmp_path):
