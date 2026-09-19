@@ -74,6 +74,13 @@ Restart=on-failure
 RestartSec=30
 # #807: rendered only for a pip --user tree — root's interpreter cannot see it (R7).
 <ENV_PYTHONPATH>
-# #807: skip cleanly (not fail) while the package is mid-reinstall — see R7.
+# #807 (fourth defect, first REAL install after the repair, 2026-09-15 19:07:03Z):
+# pip rewrites the MODULE and the SHIM at different moments. The import condition
+# passed while ~/.local/bin/swarph had been removed and not yet rewritten, so
+# ExecStart hit 203/EXEC and paged — one spurious page per upgrade, which is how
+# a pager gets ignored. A guard must test the artifact its command runs. systemd
+# requires EVERY ExecCondition= to pass: the shim first, then the module. Neither
+# can be reproduced by `touch` — only a real install deletes files.
+ExecCondition=/usr/bin/test -x <SWARPH_BIN>
 ExecCondition=<INTERPRETER> -c "import swarph_cli"
 ExecStart=<SWARPH_BIN> monitor reexec-on-change --apply --state-root <STATE_ROOT>
