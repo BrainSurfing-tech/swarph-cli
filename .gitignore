@@ -9,3 +9,6 @@ src/swarph_cli/gateway/*.db
 src/swarph_cli/bench/data/llm_prices.json
 .worktrees/
 .cursor/
+# opencode cell private state: it lives in the cell cwd, so opencode's own
+# snapshot git-dir would otherwise snapshot it (self-referential 9 GB explosion)
+.opencode-cell/

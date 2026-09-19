@@ -2704,17 +2704,68 @@ class MuseMembrane(ClaudeMembrane):
         )
 
 
-#: Opencode cell subdir, created INSIDE the cell cwd, holding the relocated
-#: config (XDG_CONFIG_HOME) and data (XDG_DATA_HOME). Both relocations are
-#: grounded against real opencode 1.18.30 by execution: `XDG_DATA_HOME=/tmp/x
-#: opencode --pure db path` -> `/tmp/x/opencode/opencode.db`, and
-#: `XDG_CONFIG_HOME=/tmp/x opencode --pure debug config` -> `"plugin": []`.
+#: Opencode cell CONFIG subdir, created INSIDE the cell cwd, holding the
+#: relocated config (XDG_CONFIG_HOME). Grounded against real opencode 1.18.30 by
+#: execution: `XDG_CONFIG_HOME=/tmp/x opencode --pure debug config` ->
+#: `"plugin": []`.
 _OPENCODE_CELL_SUBDIR = ".opencode-cell"
 
 
 def _opencode_cell_dir(cell: Cell) -> Path:
-    """The cell's private opencode root (``<cwd>/.opencode-cell``)."""
+    """The cell's private opencode CONFIG root (``<cwd>/.opencode-cell``)."""
     return cell.cwd / _OPENCODE_CELL_SUBDIR
+
+
+def _opencode_data_dir(cell: Cell) -> Path:
+    """The cell's private opencode DATA dir, OUTSIDE the cell cwd.
+
+    opencode snapshots its work-tree with a git-dir UNDER this data dir. If the
+    data dir sits inside the work-tree (the pre-fix shape, ``<cwd>/.opencode-cell/
+    data``), the snapshot repo snapshots its own object store — a self-referential
+    explosion measured 2026-09-19 at 9.1 GB of objects and a 319k-entry index,
+    with every turn blocked at ``loop step=0`` on the resulting ``git add``. Kept
+    under $HOME so no cell work-tree can ever contain it. Grounded:
+    ``XDG_DATA_HOME=/tmp/x opencode --pure db path`` -> ``/tmp/x/opencode/opencode.db``.
+    """
+    return Path.home() / ".local" / "share" / "swarph" / "opencode" / cell.name
+
+
+def _migrate_opencode_data(cell: Cell) -> None:
+    """Move a pre-fix in-tree data dir to the out-of-tree root, best-effort.
+
+    Session continuity: the ``opencode.db`` holds the cell's session, keyed by
+    directory, so relocating it preserves the resume. Never raises; the failure
+    direction is a lost resume, not a refused spawn.
+    """
+    old = _opencode_cell_dir(cell) / "data"
+    new = _opencode_data_dir(cell)
+    if not old.is_dir():
+        return
+    if new.exists():
+        # Measured 2026-09-19 11:2xZ on lab-ovh: a cell process spawned BEFORE the fix
+        # kept running with the in-tree env and wrote a second data dir there after
+        # the first migration. It is not merged (two opencode.db files cannot be);
+        # say so where the operator is looking instead of skipping in silence.
+        print(f"[spawn] opencode: legacy in-tree data at {old} left in place -- {new} "
+              f"already exists, sessions written in-tree after the first migration are "
+              f"NOT merged; respawn the cell so no process still writes there",
+              file=sys.stderr)
+        return
+    try:
+        new.parent.mkdir(parents=True, exist_ok=True)
+        # #888 half (2): the in-tree data dir may carry the SELF-REFERENTIAL snapshot
+        # repo (the specimen: 9.0 GB of objects, a 319,621-entry index). It is
+        # opencode's own work-tree snapshot cache, recreated on the next turn, so
+        # drop it rather than carry it out of the tree. The PROJECT index is never
+        # touched here -- on lab-ovh nothing was ever tracked (git ls-files
+        # .opencode-cell = 0), and a blind reset of the clone that backs the
+        # editable install would be a worse defect than this one.
+        snap = old / "opencode" / "snapshot"
+        if snap.is_dir():
+            shutil.rmtree(snap, ignore_errors=True)
+        shutil.move(str(old), str(new))
+    except OSError:
+        pass
 
 
 def _scrub_opencode_namespace(env: dict[str, str]) -> None:
@@ -2768,9 +2819,13 @@ def _opencode_env(cell: Cell) -> dict[str, str]:
     """Subscription env for a local ``opencode`` CELL.
 
     On top of the canonical billing scrub, the cell relocates opencode's CONFIG
-    (XDG_CONFIG_HOME) and DATA (XDG_DATA_HOME) into ``<cwd>/.opencode-cell``, and
-    links the operator's ``auth.json`` in, so the cell's sessions/plugins/auth
-    never mix with the operator's. ``$HOME`` is deliberately NOT relocated — the
+    (XDG_CONFIG_HOME) to ``<cwd>/.opencode-cell/config`` and its DATA
+    (XDG_DATA_HOME) to ``~/.local/share/swarph/opencode/<cell>`` — data OUTSIDE
+    the work-tree, because opencode's snapshot git-dir lives under the data dir
+    and would otherwise snapshot its own object store (the 2026-09-19 9 GB
+    self-referential explosion). It links the operator's ``auth.json`` in, so the
+    cell's sessions/plugins/auth never mix with the operator's. ``$HOME`` is
+    deliberately NOT relocated — the
     vibe/cursor lesson: a fake $HOME costs the cell ``~/.config/swarph/<self>.
     peer_token``, ``~/.swarph/secrets.toml`` and the codegraph hook, and opencode's
     XDG-honoring knobs let us pay nothing to keep it.
@@ -2788,7 +2843,8 @@ def _opencode_env(cell: Cell) -> dict[str, str]:
     # ORDER IS LOAD-BEARING: the scrub removes an inherited OPENCODE_* var and this
     # sets the cell's own AFTER, so the membrane's values are authoritative.
     _scrub_opencode_namespace(env)
-    data_dir = _opencode_cell_dir(cell) / "data"
+    _migrate_opencode_data(cell)
+    data_dir = _opencode_data_dir(cell)
     config_dir = _opencode_cell_dir(cell) / "config"
     data_dir.mkdir(parents=True, exist_ok=True)
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -2855,7 +2911,7 @@ def _opencode_prior_session(cell: Cell) -> Optional[str]:
     if binary is None:
         return None
     env = dict(os.environ)
-    env["XDG_DATA_HOME"] = str(_opencode_cell_dir(cell) / "data")
+    env["XDG_DATA_HOME"] = str(_opencode_data_dir(cell))
     env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
     try:
         out = subprocess.run(
