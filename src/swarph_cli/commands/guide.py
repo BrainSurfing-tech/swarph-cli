@@ -130,6 +130,38 @@ def _commands_in(section: str) -> "list[str]":
     return out
 
 
+def verbs_in_guide(topics: "dict[str, str] | None" = None) -> "set[str]":
+    """#547: the verbs the guide TEACHES, counted PER VERB (a topic count said 11 and
+    meant nothing). A verb is covered when some section's commands include it."""
+    topics = topics if topics is not None else _split_topics(_load_guide())
+    out: set[str] = set()
+    for body in topics.values():
+        for cmd in _commands_in(body):
+            parts = cmd.split()
+            if len(parts) >= 2:
+                out.add(parts[1])
+    return out
+
+
+def _registry() -> "list[str]":
+    # Lazy: main dispatches handlers by dotted path and does not import this module,
+    # but keep the direction one-way anyway.
+    from swarph_cli.main import registered_verbs
+    return registered_verbs()
+
+
+def _verb_entry(topics: "dict[str, str]", verb: str) -> "list[tuple[str, str]]":
+    """The line in each topic that teaches `swarph <verb>` -- one per topic, first hit."""
+    pat = re.compile(r"`swarph " + re.escape(verb) + r"(?:[ `])")
+    hits: list[tuple[str, str]] = []
+    for name, body in topics.items():
+        for raw in body.splitlines():
+            if pat.search(raw):
+                hits.append((name, raw.strip()))
+                break
+    return hits
+
+
 _TERM_RE = re.compile(r"\*\*(.+?)\*\*")
 
 
@@ -262,13 +294,21 @@ def run_guide(argv: "list[str]") -> int:
         # `apropos`: an LLM arrives with an INTENT ("subscribe to updates"), not the
         # topic's name ("channels"). Requiring the name is the #520 discovery defect
         # reproduced inside its own fix.
+        term = args.search.strip().lower()
+        # #547: a VERB name resolves to the verb's own entry first -- `--search highlight`
+        # used to answer with a topic list that did not contain it.
+        verb_hits = _verb_entry(topics, term) if term in _registry() else []
         hits = _search(topics, args.search)
-        if not hits:
+        if not hits and not verb_hits:
             print_safe(f"swarph guide: nothing matches {args.search!r}. "
                        f"Topics: {', '.join(topics)}", stream=sys.stderr)
             return 2
-        for name, line in hits:
+        for name, line in verb_hits:
             print_safe(f"{name:<22} {line}")
+        shown = {name for name, _ in verb_hits}
+        for name, line in hits:
+            if name not in shown:
+                print_safe(f"{name:<22} {line}")
         return 0
 
     if not args.topic:
@@ -278,6 +318,19 @@ def run_guide(argv: "list[str]") -> int:
     key = args.topic.strip().lower().replace(" ", "-").lstrip("#")
     if key in topics:
         print_safe(topics[key])
+        return 0
+    if key in _registry():
+        # #547: every registered verb resolves, per verb (tests/test_547 pins the set):
+        # the lines that teach it, then -- when the name is also a topic's substring
+        # (`channel` -> channels) -- that one topic, as before.
+        for name, line in _verb_entry(topics, key):
+            print_safe(f"{name:<22} {line}")
+        near = [k for k in topics if key in k]
+        if len(near) == 1:
+            print_safe("")
+            print_safe(topics[near[0]])
+        else:
+            print_safe(f"\n  more:  swarph {key} --help")
         return 0
 
     # Substring fallback before failing: `swarph guide channel` should find `channels`.
