@@ -29,6 +29,7 @@ import sys
 import time
 import urllib.error
 import urllib.parse
+import uuid
 
 import swarph_cli
 import urllib.request
@@ -78,6 +79,21 @@ def _build_parser() -> argparse.ArgumentParser:
     send = sub.add_parser("send", help="send a mesh DM")
     send.add_argument("to", help="recipient peer name")
     send.add_argument("--kind", required=True, help="message kind")
+    send.add_argument(
+        "--thread",
+        default=None,
+        metavar="HANDLE",
+        help="join HANDLE, or 'new' to originate a card-less thread (#623). "
+             "The printed handle is one pasteable token (the gateway UUID). "
+             "A post whose from_node equals to_node, or whose from_node is "
+             "in --cc, is refused (#185 / #409 — no self-wake).",
+    )
+    send.add_argument(
+        "--cc",
+        action="append",
+        default=[],
+        help="extra recipient (repeatable). from_node in this list is refused.",
+    )
     add_content_args(send)
     _add_common(send)
 
@@ -118,7 +134,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="show the inbox WITHOUT marking anything read (default: reading CONSUMES -- "
              "it marks every DM shown as read for the resolved identity)",
     )
+    inbox.add_argument(
+        "--thread",
+        default=None,
+        metavar="HANDLE",
+        help="read this thread's ordered set (GET /threads/{handle}) instead of "
+             "the inbox. Non-destructive. Handle is the one-token UUID.",
+    )
     _add_common(inbox)
+
+    threads = sub.add_parser(
+        "threads",
+        help="list threads this caller participates in (#623). "
+             "Peer identity tokens are scoped by the gateway (FM3); this "
+             "command does not widen that.",
+    )
+    threads.add_argument("--limit", type=int, default=50, help="max threads")
+    threads.add_argument("--json", action="store_true", help="print raw JSON")
+    _add_common(threads)
 
     register = sub.add_parser("register", help="self-register this peer")
     register.add_argument(
@@ -559,6 +592,56 @@ def _check_recipient(to: str, gateway: str, token: str) -> str | None:
     return msg
 
 
+def _self_wake_refusal(from_node: str, to_node: str, cc: list) -> Optional[str]:
+    """#185 / #409: a participant must not be woken by their own post.
+
+    One post, one to_node — the 226 self-wakes were the addressed peer BEING
+    the poster, not a fan-out. Refuse from_node == to_node and from_node in cc.
+    Returns a message or None.
+    """
+    if from_node and to_node and from_node == to_node:
+        return (
+            f"swarph mesh send: REFUSED — from_node {from_node!r} equals to_node. "
+            f"A post must not wake its own sender (#185 / #409)."
+        )
+    cc_hits = [c for c in (cc or []) if c == from_node]
+    if cc_hits:
+        return (
+            f"swarph mesh send: REFUSED — from_node {from_node!r} is in --cc. "
+            f"A post must not wake its own sender (#185 / #409)."
+        )
+    return None
+
+
+def _originate_thread(gateway: str, token: str, from_node: str, to_node: str) -> tuple:
+    """Mint a card-less thread via POST /threads. Returns (uuid, None) or (None, err).
+
+    A bare client UUID on POST /messages 500s — the row must exist in
+    claude_threads first. thread_name is an internal key (idempotent mint);
+    the HANDLE the caller pastes is the UUID, one token, no quoting.
+    """
+    stamp = uuid.uuid4().hex[:12]
+    # Gateway thread_name max 128. Peers are max 64 each; keep the name short.
+    name = f"{from_node}↔{to_node}:t{stamp}"
+    if len(name) > 128:
+        name = f"t{stamp}"
+    status, payload = _post_json(
+        f"{gateway.rstrip('/')}/threads",
+        {"thread_name": name},
+        token,
+    )
+    if status < 200 or status >= 300 or not isinstance(payload, dict):
+        detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
+        return None, f"gateway {status}: {detail}"
+    handle = payload.get("thread_uuid")
+    if not handle or not isinstance(handle, str):
+        return None, f"gateway minted no thread_uuid: {payload}"
+    # One token: no whitespace, no shell metacharacters.
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", handle):
+        return None, f"handle is not a pasteable UUID token: {handle!r}"
+    return handle, None
+
+
 def _run_send(args: argparse.Namespace) -> int:
     try:
         content = resolve_content(args.content, getattr(args, "content_file", None))
@@ -567,12 +650,36 @@ def _run_send(args: argparse.Namespace) -> int:
         return 1
     self_name = _resolve_self_name(args.self_name)
     token = _resolve_token(self_name, args.token_file)
+    cc = list(getattr(args, "cc", None) or [])
+    refusal = _self_wake_refusal(self_name, args.to, cc)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 1
     body = {
         "from_node": self_name,
         "to_node": args.to,
         "kind": args.kind,
         "content": content,
     }
+    if cc:
+        body["cc"] = cc
+    thread_arg = getattr(args, "thread", None)
+    if thread_arg:
+        if thread_arg == "new":
+            handle, err = _originate_thread(args.gateway, token, self_name, args.to)
+            if err:
+                print(f"swarph mesh send: cannot originate thread — {err}", file=sys.stderr)
+                return 1
+        else:
+            handle = thread_arg.strip()
+            if not re.fullmatch(r"[0-9a-fA-F-]{36}", handle):
+                print(
+                    f"swarph mesh send: REFUSED — thread handle {handle!r} is not "
+                    f"one pasteable UUID token (or 'new').",
+                    file=sys.stderr,
+                )
+                return 1
+        body["thread_id"] = handle
     refusal = _check_recipient(args.to, args.gateway, token)
     if refusal:
         print(refusal, file=sys.stderr)
@@ -587,10 +694,72 @@ def _run_send(args: argparse.Namespace) -> int:
         detail = payload.get("detail", "<gateway error>")
         print(f"swarph mesh send: gateway {status}: {detail}", file=sys.stderr)
         return 1
-    print(
+    line = (
         f"sent id={payload.get('id')} from={payload.get('from_node')} "
         f"to={payload.get('to_node')} kind={payload.get('kind')}"
     )
+    handle_out = payload.get("thread_id") or body.get("thread_id")
+    if handle_out:
+        line += f" thread={handle_out}"
+    print(line)
+    return 0
+
+
+def _run_inbox_thread(args: argparse.Namespace, self_name: str, handle: str) -> int:
+    """Ordered set for one thread. Non-destructive. FM3 scoping is the gateway's."""
+    handle = (handle or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", handle):
+        print(
+            f"swarph mesh inbox: REFUSED — thread handle {handle!r} is not "
+            f"one pasteable UUID token.",
+            file=sys.stderr,
+        )
+        return 1
+    token = _resolve_token(self_name, args.token_file)
+    url = f"{args.gateway.rstrip('/')}/threads/{handle}?limit={int(args.limit)}"
+    status, payload = _http_get_json(url, token)
+    if status < 200 or status >= 300:
+        detail = payload.get("detail", "<gateway error>") if isinstance(payload, dict) else payload
+        print(f"swarph mesh inbox: gateway {status}: {detail}", file=sys.stderr)
+        return 1
+    msgs = payload.get("messages") if isinstance(payload, dict) else None
+    if msgs is None:
+        print(f"swarph mesh inbox: unexpected /threads shape: {payload}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+    print(f"thread {handle} ({len(msgs)} message(s), identity {self_name})")
+    for dm in msgs:
+        print(_format_inbox_line(dm))
+    if not msgs:
+        print("  empty")
+    return 0
+
+
+def _run_threads(args: argparse.Namespace) -> int:
+    """List threads. Gateway scopes a peer-identity token to participants (FM3)."""
+    self_name = _resolve_self_name(args.self_name)
+    token = _resolve_token(self_name, args.token_file)
+    url = f"{args.gateway.rstrip('/')}/threads?limit={int(args.limit)}"
+    status, payload = _http_get_json(url, token)
+    if status < 200 or status >= 300:
+        detail = payload.get("detail", "<gateway error>") if isinstance(payload, dict) else payload
+        print(f"swarph mesh threads: gateway {status}: {detail}", file=sys.stderr)
+        return 1
+    rows = payload.get("threads") if isinstance(payload, dict) else None
+    if rows is None:
+        print(f"swarph mesh threads: unexpected shape: {payload}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+    print(f"threads {self_name} ({len(rows)})")
+    for r in rows:
+        uid = r.get("thread_uuid") or ""
+        topic = sanitize_terminal(r.get("topic") or "")
+        pair = sanitize_terminal(r.get("peer_pair") or "")
+        print(f"{uid}  {pair}  {topic}")
     return 0
 
 
@@ -796,6 +965,9 @@ def _mark_read(gateway: str, token: str, messages: list) -> None:
 
 def _run_inbox(args: argparse.Namespace) -> int:
     self_name, id_source = _resolve_self_with_source(args.self_name)
+    thread_handle = getattr(args, "thread", None)
+    if thread_handle:
+        return _run_inbox_thread(args, self_name, thread_handle)
 
     # >>> A DESTRUCTIVE READ UNDER AN UNNAMED IDENTITY IS REFUSED, NOT WARNED. <<<
     # Printing the identity was the first fix and it is not sufficient, for two
@@ -2724,6 +2896,8 @@ def run_mesh(argv: list[str]) -> int:
             return _run_reply(args)
         if args.command == "inbox":
             return _run_inbox(args)
+        if args.command == "threads":
+            return _run_threads(args)
         if args.command == "register":
             return _run_register(args)
         if args.command == "peers":
