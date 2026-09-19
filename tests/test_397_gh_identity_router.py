@@ -133,7 +133,10 @@ def test_injection_never_switches_the_box():
     "gh pr review 12",                       # simple
     "cd /tmp && gh pr list",                 # >>> THE ONE THAT WAS INERT <<<
     "echo 249 | xargs -I{} gh pr view {}",   # pipeline + xargs
-    "timeout 40 gh pr view 249",             # wrapper
+    # wrapper. GNU `timeout` is absent on macOS (no gtimeout either) — #515.
+    # `env` is the portable wrapper: the token must still reach `gh`, and the
+    # assertion still EXECUTES. A skipif(darwin) would be the leg not existing.
+    pytest.param("env gh pr view 249", id="wrapper-env-not-gnu-timeout"),
     "( gh pr list )",                        # subshell
     "bash -c 'gh pr merge 3'",               # nested shell
 ])
