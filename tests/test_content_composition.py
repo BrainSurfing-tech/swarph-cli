@@ -169,6 +169,12 @@ def test_cards_edit_title_file_strips_one_trailing_newline(tmp_path, monkeypatch
     monkeypatch.setattr(board, "_patch_json",
                         lambda url, body, *a, **k: (cap.update(body=body),
                                                    (200, {"id": 1, "body_version": 2}))[1])
+    # #596: edit READS the card first and captures the pre-image locally before
+    # it writes; both are stubbed so this test stays about the trailing newline.
+    monkeypatch.setattr(board, "_http_get_json",
+                        lambda *a, **k: (200, {"id": 1, "title": "old",
+                                               "body": "old", "body_version": 1}))
+    monkeypatch.setattr(board, "card_preimage_path", lambda: tmp_path / "pre.jsonl")
     p = tmp_path / "title.txt"
     p.write_text(HOSTILE, encoding="utf-8")
     assert board.run_board(["cards", "edit", "1", "--title-file", str(p)]) == 0
