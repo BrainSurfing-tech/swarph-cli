@@ -2739,7 +2739,17 @@ def _migrate_opencode_data(cell: Cell) -> None:
     """
     old = _opencode_cell_dir(cell) / "data"
     new = _opencode_data_dir(cell)
-    if new.exists() or not old.is_dir():
+    if not old.is_dir():
+        return
+    if new.exists():
+        # Measured 2026-09-19 11:2xZ on lab-ovh: a cell process spawned BEFORE the fix
+        # kept running with the in-tree env and wrote a second data dir there after
+        # the first migration. It is not merged (two opencode.db files cannot be);
+        # say so where the operator is looking instead of skipping in silence.
+        print(f"[spawn] opencode: legacy in-tree data at {old} left in place -- {new} "
+              f"already exists, sessions written in-tree after the first migration are "
+              f"NOT merged; respawn the cell so no process still writes there",
+              file=sys.stderr)
         return
     try:
         new.parent.mkdir(parents=True, exist_ok=True)

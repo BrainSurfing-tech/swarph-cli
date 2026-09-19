@@ -55,3 +55,17 @@ def test_migration_moves_sessions_out_and_drops_the_snapshot_repo(tmp_path, monk
     assert (new / "opencode" / "opencode.db").read_text() == "sessions"
     assert not (new / "opencode" / "snapshot").exists()
     assert not (cwd / ".opencode-cell" / "data").exists()
+
+
+def test_a_second_in_tree_data_dir_is_left_in_place_and_said_loudly(tmp_path, monkeypatch, capsys):
+    fake_home = tmp_path / "home"; fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    cwd = tmp_path / "repo"; cwd.mkdir()
+    cell = _cell(cwd)
+    (spawn._opencode_data_dir(cell) / "opencode").mkdir(parents=True)          # already migrated once
+    old = cwd / ".opencode-cell" / "data" / "opencode"; old.mkdir(parents=True)
+    (old / "opencode.db").write_text("sessions written by the pre-fix process")
+    spawn._migrate_opencode_data(cell)
+    assert (old / "opencode.db").exists(), "must not be merged or deleted"
+    err = capsys.readouterr().err
+    assert "left in place" in err and "NOT merged" in err and "respawn" in err
