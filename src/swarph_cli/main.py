@@ -133,6 +133,23 @@ _VERB_HANDLERS: dict[str, str] = {
 }
 
 
+def registered_verbs() -> list[str]:
+    """#547: THE registry, enumerated. The no-args banner and `swarph guide` derive
+    from this one source; tests/test_547 asserts banner == guide == registry as SETS,
+    so a verb added here without a guide entry is a red test, not a silent gap."""
+    return sorted(_VERB_HANDLERS)
+
+
+def _verbs_block(width: int = 78) -> str:
+    """#547: the banner lists what EXISTS. Before this it listed 8 of 52 verbs by hand
+    and a reader experienced a small tool, not a gap."""
+    import textwrap
+    verbs = registered_verbs()
+    head = f"Verbs ({len(verbs)}) -- each has --help and a guide entry (swarph guide <verb>):"
+    return head + "\n" + textwrap.fill(", ".join(verbs), width=width,
+                                       initial_indent="  ", subsequent_indent="  ") + "\n"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="swarph",
@@ -231,6 +248,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _print_banner() -> int:
     print(_BANNER.format(version=__version__), file=sys.stderr)
+    print(_verbs_block(), file=sys.stderr)
     return 0
 
 

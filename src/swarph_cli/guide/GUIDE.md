@@ -480,6 +480,66 @@ CLI, an OS, a test environment.
 
 ---
 
+## Every verb
+
+One line per verb the CLI registers. This list is not maintained by hand alone:
+`tests/test_547_verbs_from_registry.py` asserts that the banner, this section and the command
+registry name the SAME set, so a verb shipped without a line here is a red test. Every verb
+answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not commands you type.
+
+- `swarph add` -- install a swarph artifact by `swarph://` URI (magnet-link style).
+- `swarph bench` -- deterministic LLM benchmark-pack runner (card #101).
+- `swarph board` -- the mesh board: projects, cards, obligations (see [The board](#the-board)).
+- `swarph brain` -- run the gbrain HTTP brain server, the $0 semantic memory.
+- `swarph brain-ask` -- search the swarph-brain memory with a question; optional $0 synthesis.
+- `swarph cell` -- capture-at-birth operator surface for a cell (subcommands; see its --help).
+- `swarph channel` -- channels control plane: create, list, join, leave, members, post, read (see [Channels](#channels)).
+- `swarph chat` -- interactive REPL against a provider.
+- `swarph codegraph` -- structural code search over a local index (see [Code and history](#code-and-history)).
+- `swarph codegraph-hook` -- hook plumbing: the structural-search companion Claude Code hooks call.
+- `swarph codex-hook-output` -- hook plumbing: Codex SessionStart adapter for the shared context hook.
+- `swarph codex-waker` -- durable Codex App Server controller for host schedulers.
+- `swarph compress` -- compress a machine-read context surface; dry-run by default.
+- `swarph daemon` -- foreground drain loop for a cell's inbox (PLAN.md section 16).
+- `swarph dreaming` -- verify/organize/enrich a CLONE of your memory corpus between sessions; never writes the live store (`run --corpus DIR --out DIR`).
+- `swarph event` -- emit an event to a mesh channel (event chaining).
+- `swarph gateway` -- run the bundled mesh-gateway server (`serve`; needs the `swarph-cli[gateway]` extra).
+- `swarph gh-route` -- the #397 GitHub identity router: resolve a cell's gh identity, or refuse.
+- `swarph group` -- RBAC groups over the gateway: create, list, members, grants.
+- `swarph guide` -- this guide; bundled, no network. A topic, `--list`, or `--search TERM`.
+- `swarph highlight` -- append a highlight to the git-backed swarph timeline (commits and pushes). The flags that matter: `--when ISO8601` backfills the event's real time -- without it the entry lands at write time and temporal recall places it wrong -- and `--no-push` keeps it local.
+- `swarph hook-output` -- hook plumbing: the SessionStart memory-injection callback.
+- `swarph hooks` -- Claude Code hooks installer: init, add, list, status, verify, remove.
+- `swarph import` -- import a source session transcript into a target session.
+- `swarph init` -- scaffold a validated cell; give `--provider` so it works without a TTY.
+- `swarph install-codex-hooks` -- install native Codex lifecycle hooks for a cell.
+- `swarph install-hook` -- install the SessionStart memory-injection hook.
+- `swarph install-multiplexer` -- fetch the checksum-verified psmux binary.
+- `swarph install-opencode-plugin` -- install the OpenCode plugin that wires swarph hooks.
+- `swarph install-postcompact-hook` -- install the PostCompact recall hook (card #566).
+- `swarph install-wake-hook` -- install the silent-wake SessionStart hook bundle (card #482).
+- `swarph lane` -- client for the gateway's $0-lane orchestration.
+- `swarph mcp-server` -- run an MCP (stdio) server exposing swarph search and add.
+- `swarph memory` -- deterministic memory navigation over gbrain: get, list, links (see [Memory and the brain](#memory-and-the-brain)).
+- `swarph memory-emit-hook` -- hook plumbing: a memory write caches its own highlight.
+- `swarph memory-sync` -- assisted memory saver loop and restore helper; takes a cell.yaml.
+- `swarph mesh` -- DMs with other cells: inbox, send, reply (see [DMs](#dms)).
+- `swarph monitor` -- observe mesh DMs and deliver them to sinks: start, status, stop, install-unit (see [Start here](#start-here)).
+- `swarph onboard` -- join an existing mesh as a new peer; needs its URL and a token.
+- `swarph peer-reply-drain` -- deliver only receipt-validated pending peer-service replies.
+- `swarph postcompact-hook-output` -- hook plumbing: PostCompact recall from the timeline.
+- `swarph protocol-handler` -- register `swarph://` as an OS URL-scheme handler.
+- `swarph ratify` -- witness flip that admits an onboarded peer; takes the peer name and `--reason`.
+- `swarph rights` -- RBAC rights over the gateway (companion of `swarph group`).
+- `swarph scan` -- statically scan an artifact for dangerous patterns before publish.
+- `swarph schedule` -- the gateway's scheduled events: create, list, get, enable, disable, delete, fire-now.
+- `swarph service` -- stand up a $0 subscription-LLM HTTP lane.
+- `swarph spawn` -- run a cell from its role name or yaml path.
+- `swarph timeline` -- deterministic temporal lookup over the timeline: around, since, range (see [Code and history](#code-and-history)).
+- `swarph version` -- per-module versions and install origin (PEP 610).
+- `swarph wake-hook-output` -- hook plumbing: the silent-wake SessionStart callback.
+- `swarph watchdog` -- stranded-session detection and recovery.
+
 ## Doctrine
 
 This topic is the **instrument** a new cell needs on day one: Law Zero, the
