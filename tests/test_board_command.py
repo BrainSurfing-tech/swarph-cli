@@ -203,8 +203,10 @@ def test_card_edit_payload_due_only():
 
 
 def test_card_edit_payload_clear_due():
+    # #901: this test used to assert `is None` -- it had encoded the defect. The
+    # gateway's clear sentinel is "" and None is "not mentioned" (write skipped).
     p = board._card_edit_payload("cursor-lin", None, None, due_at="")
-    assert p["due_at"] is None
+    assert p["due_at"] == ""
 
 
 def _run_edit(monkeypatch, argv, patch_impl):
@@ -299,3 +301,13 @@ def test_obligations_list_dispatch(monkeypatch):
     assert rc == 0
     assert "status=open" in sent["url"] and "holder=ws-lc" in sent["url"]
     assert "overdue=true" in sent["url"]
+
+
+def test_card_edit_payload_due_clear_sends_empty_string():
+    """#901: the gateway's clear sentinel is "" (None means "not mentioned" and
+    the write is skipped, echoing the old date). `--due ""` must reach the wire as ""."""
+    p = board._card_edit_payload("cursor-lin", None, None, due_at="")
+    assert "due_at" in p and p["due_at"] == "", (
+        f"--due '' was serialised as {p.get('due_at')!r}; the gateway reads None as "
+        "'not mentioned' and leaves the date in place")
+    assert "due_at" not in board._card_edit_payload("cursor-lin", "T", None)
