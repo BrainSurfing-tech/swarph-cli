@@ -364,7 +364,9 @@ def run_verb(identity: str, gateway: str, token: str, argv: list[str]) -> int:
                 "|  swarph-me due <id> clear"
             )
         if rest[1] == "clear":
-            body = {"actor": identity, "due_at": None}
+            # "" CLEARS; None means "not mentioned" and the gateway skips the
+            # write while echoing the old date back (#901, server.py ~12884).
+            body = {"actor": identity, "due_at": ""}
         else:
             hhmm = rest[2] if len(rest) > 2 else "14:00"
             body = {
@@ -374,6 +376,14 @@ def run_verb(identity: str, gateway: str, token: str, argv: list[str]) -> int:
         c = _api("PATCH", gateway, token, f"/board/cards/{rest[0]}", body)
         if isinstance(c, dict) and "detail" in c:
             print(f"  refused: {c['detail']}")
+            return 1
+        if rest[1] == "clear" and c.get("due_at"):
+            # #901: the echo is not the intent. A 200 carrying the date you just
+            # tried to remove is a skipped write, not a success.
+            print(
+                f"  NOT CLEARED: the gateway still carries due_at {c.get('due_at')} "
+                f"on #{c.get('id')} -- the write was skipped"
+            )
             return 1
         print(
             f"  #{c.get('id')} [{c.get('stage')}] due: {c.get('due_at') or '(cleared)'}"

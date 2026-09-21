@@ -160,3 +160,59 @@ def test_main_config_and_help(tmp_path: Path, capsys: pytest.CaptureFixture[str]
     out = capsys.readouterr().out
     assert "swarph-me" in out
     assert "channels" in out
+
+
+# ── #901: `due <id> clear` must send "" (the gateway's CLEAR sentinel), never None ──
+# The gateway contract (mesh-gateway server.py ~12884): "" CLEARS, None means
+# "not mentioned" and skips the write. A client that sends None gets a 200 whose
+# echoed row still carries the old date. The fake below models exactly that.
+
+
+def _fake_gateway_patch(seen: dict):
+    def fake_api(method, gateway, token, path, body=None):
+        seen.update(method=method, path=path, body=dict(body or {}))
+        old = "2026-10-10T14:00:00+00:00"
+        due_at = body.get("due_at", None) if body else None
+        if due_at is None:          # not mentioned -> unchanged, echoed back
+            due = old
+        elif due_at == "":          # explicit clear
+            due = None
+        else:
+            due = due_at
+        return {"id": 916, "stage": "proposed", "title": "scratch", "due_at": due}
+    return fake_api
+
+
+def test_due_clear_sends_empty_string_not_none(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    from swarph_cli.operator import cli as op_cli
+
+    seen: dict = {}
+    monkeypatch.setattr(op_cli, "_api", _fake_gateway_patch(seen))
+    rc = op_cli.run_verb("drop-on-meta-edge", "http://gw", "tok", ["due", "916", "clear"])
+    assert seen["method"] == "PATCH" and seen["path"] == "/board/cards/916"
+    assert "due_at" in seen["body"] and seen["body"]["due_at"] == "", (
+        f"due clear sent due_at={seen['body'].get('due_at')!r}; the gateway reads None as "
+        "'not mentioned' and skips the write (#901)"
+    )
+    assert rc == 0
+    assert "(cleared)" in capsys.readouterr().out
+
+
+def test_due_clear_read_back_refuses_an_echoed_date(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """The defect's signature is a 200 that echoes the date you tried to remove.
+    The verb must compare the echo with the intent and fail loudly."""
+    from swarph_cli.operator import cli as op_cli
+
+    def stubborn_api(method, gateway, token, path, body=None):
+        return {"id": 916, "stage": "proposed", "title": "scratch",
+                "due_at": "2026-10-10T14:00:00+00:00"}   # write skipped, whatever was sent
+
+    monkeypatch.setattr(op_cli, "_api", stubborn_api)
+    rc = op_cli.run_verb("drop-on-meta-edge", "http://gw", "tok", ["due", "916", "clear"])
+    out = capsys.readouterr().out
+    assert rc == 1, f"a skipped clear returned rc={rc}; output was: {out!r}"
+    assert "NOT CLEARED" in out and "2026-10-10T14:00:00+00:00" in out
