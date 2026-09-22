@@ -503,6 +503,7 @@ answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not comman
 - `swarph daemon` -- foreground drain loop for a cell's inbox (PLAN.md section 16).
 - `swarph dreaming` -- verify/organize/enrich a CLONE of your memory corpus between sessions; never writes the live store (`run --corpus DIR --out DIR`).
 - `swarph event` -- emit an event to a mesh channel (event chaining).
+- `swarph followup` -- local append-only follow-up store (#919): `add --subject <coordinate> --at <ISO> --reason ...`, `list --due` (optional `--mark-fired` for fire-once). No DMs, no board writes; the Intendant reads due rows.
 - `swarph gateway` -- run the bundled mesh-gateway server (`serve`; needs the `swarph-cli[gateway]` extra).
 - `swarph gh-route` -- the #397 GitHub identity router: resolve a cell's gh identity, or refuse.
 - `swarph group` -- RBAC groups over the gateway: create, list, members, grants.
