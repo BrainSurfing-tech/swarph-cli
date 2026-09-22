@@ -1,19 +1,39 @@
 # Changelog
 
-## Unreleased
+## 0.63.0 -- 2026-09-22
 
-<<<<<<< HEAD
+- monitor (#126): `pending_from` is computed over EVERY inbox.log entry newer than
+  `last_delivered_id`, not over the 50-entry replay deque -- the deque bounds the
+  RETURNED LINES and the sender set was taken from it by convenience. Measured on a
+  live cell before the fix: `pending=177`, `pending_from` printed 4 peers, 12 distinct
+  senders were actually waiting, and the 8 it hid were by construction the ones who had
+  sent LEAST recently -- i.e. the longest waiters. The `pending` label now states what
+  the value counts: entries newer than a ledger that may never advance, which grows at
+  that cell's own DM rate for as long as the cursor is frozen. Two cells at the SAME
+  frozen cursor replayed 365 and 177 on identical code, so the number is not comparable
+  across cells and never was.
+- codegraph (#872): no caller identity => REFUSE. The package no longer guesses `lab-ovh`.
+- cli (#547): the verb list is derived from the registry, so banner, guide and registry
+  name one set instead of three disagreeing ones (8 / 15 / 46 before).
+- source_text (#874): the code-vs-prose splitter is lifted out of one pack into
+  `swarph_cli.source_text` -- a text search over source counts comments, docstrings and
+  string prose as executable code, and every such count is an upper bound presented as a
+  measurement.
+- ci (#831): `tools/check_review_signature.py` + `review-signature.yml` -- the
+  review-signature gate ported from lab-orchestrator/mesh-gateway.
+- spawn (#888): the opencode DATA dir moves out of the work-tree; the snapshot was
+  eating itself.
+- ci (#515): the macOS leg stops using GNU `timeout` and `/proc`, and the darwin `ps`
+  call decodes as utf-8 with replacement.
 - guide/onboard (#866): `swarph guide doctrine` -- bundled standard-of-evidence topic
   (Law Zero, working set, membership axis, trichotomy, five intake fields, #864
   durable-first). Approved extract is card #866 post 42503; pin test fails on silent
   fork. `onboard` prints the command after mechanics so a new cell meets the standard,
   not only the verbs.
-=======
 - board (#864): `cards say` on an unassigned card defaults `--to` to the project's
-  `owner_orchestrator` (second GET — the card payload does not carry the owner) and
+  `owner_orchestrator` (second GET -- the card payload does not carry the owner) and
   prints the chosen recipient plus why. Loud refusal survives when the owner is
   unresolvable; no silent placeholder peer (#259).
->>>>>>> 62e14ae (feat(board): cards say falls back to project owner (#864))
 
 ## 0.62.0 — 2026-09-16
 - opencode (#423): `OpencodeMembrane` — opencode as a durable swarph CELL. Isolation is `XDG_DATA_HOME` + `XDG_CONFIG_HOME` relocation (not `$HOME`, not a single data-dir knob) because opencode scopes its session DB **and** its plugin dir on those two, and keeps auth in the data dir. Sessions are opencode-owned: the cell carries no swarph-pinned UUID and resumes by per-directory discovery via `--session=<id>`. Ships a swarph hook plugin.

@@ -100,6 +100,7 @@ swarph guide                      # the whole guide
 swarph guide channels             # one topic
 swarph guide --list               # every topic, with the commands it teaches
 swarph guide --search subscribe   # find a topic by INTENT, not by its name
+swarph guide doctrine             # the standard of evidence a cell is held to (v0.63.0)
 ```
 
 Three ways in, because a new cell does not know which word it has:
