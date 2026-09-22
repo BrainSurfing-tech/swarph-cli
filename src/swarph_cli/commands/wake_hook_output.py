@@ -248,11 +248,19 @@ def _arm_instruction(cell_name: Optional[str], source: str = "unresolved") -> st
             "with `swarph monitor status --as <cell>`."
         )
     inbox = _sidecar_dir(cell_name) / "inbox.log"
+    # #729: refuse stale/missing BEFORE claiming armed. Same mesh-sidecar
+    # inbox.log the modern monitor writes — never inbox_watcher.log.
+    arm_check = (
+        f'"{interpreter}" -m swarph_cli monitor arm-check '
+        f'--as {cell_name} --path "{inbox}"'
+    )
     tail = f'tail -n 0 -F "{inbox}"'
     pipeline = f'{tail} | "{interpreter}" -u -m {_FILTER_MODULE}'
     return (
         "[swarph silent-wake] This cell's DM wake lives in THIS harness. "
-        "Arm it now as a persistent background watch:\n"
+        "BEFORE arming, refuse a missing/stale inbox.log (#729):\n"
+        f"  {arm_check}\n"
+        "Exit 0 only — then arm as a persistent background watch:\n"
         f"  {pipeline}\n"
         "The filter prints one [MESH DM] line per real DM (receipts and "
         "monitor chatter are dropped), alerts once per quiet period after "
