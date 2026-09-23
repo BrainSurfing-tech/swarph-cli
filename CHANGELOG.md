@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.65.0 -- 2026-09-23
+
+- dreaming organize (#938): checks the MEMORY.md LINE limit as well as bytes. The harness loads
+  MEMORY.md and truncates after line 200, and the old byte-only check read "clean" at 197 lines
+  (2026-09-23). New findings: LINES (vs the 200-line truncation, target <= 188), CUT (the line where
+  the harness drops pointers, min() of the line and byte cut points), DANGLING (pointer to a
+  missing file), DUP_TARGET (two pointers to one file). A same-line `SUPERSEDED <date>` note makes a
+  claim a mention, not a disagreement. `dreaming-report.md` now renders these findings and prints
+  lines beside bytes (they were collected but never shown). Reviewed by droplet (#324), who caught
+  a cut point of 249 instead of 201 when lines bind first. Fixed and pinned by a literal
+  cut_line=201 fixture that fails on the old code.
+- dreaming enrich (#764): one proposal row per normalised (file, link) with `supported_by` = the
+  number of DISTINCT sessions, never the proposal count; self-links dropped; `source_sha256`
+  populated or absent, never null. Before: one proposal could produce 26 rows, and one session
+  repeating a link counted as 2 supporters. Validated on a live model by drop-on-meta-edge (#325):
+  13 rows from 8 sessions, all keys distinct.
+- dreaming notify (#937): a clean organize status line is no longer a finding, and organize
+  findings are keyed by category + named file with no counts or member lists. In 0.64.0 every
+  memory edit changed a key and re-sent the DM (seen live on lab-ovh, msg 48779).
+
 ## 0.64.0 -- 2026-09-23
 
 - dreaming (#937): `swarph dreaming run --notify <cell>` sends ONE mesh DM to `<cell>` only
