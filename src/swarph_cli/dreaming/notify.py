@@ -19,6 +19,7 @@ _CLEAN = re.compile(r"(?:^|:)\s*clean\b", re.IGNORECASE)
 # Longest first so "MISSING INDEX" wins over a shorter prefix.
 _CATEGORY = (
     "MISSING INDEX",
+    "DUP_TARGET",
     "LINES",
     "CUT",
     "DANGLING",
@@ -42,24 +43,30 @@ def _category(text: str) -> str | None:
 
 
 def organize_keys(lines) -> list[str]:
-    """Category token, plus a named file when the line names one. No digits."""
+    """One key per category header. Member lines are not keys.
+
+    A header that names a file keys ``organize:CATEGORY:file``. Indented
+    children (CUT's lost pointers, ORPHANS' name window, a DUP_TARGET block)
+    stay out of the key, so they cannot attach to the previous category and
+    a count or a member list cannot change the set. Digits that are part of
+    a filename stay. Counts do not.
+    """
     keys: set[str] = set()
-    current: str | None = None
     for raw in lines or []:
         original = str(raw)
         text = original.strip()
         if not text or _CLEAN.search(text) or text.startswith("memory-index-check:"):
             continue
+        # A child line is not a finding of its own, and it must not inherit
+        # the category above it.
+        if original.startswith((" ", "\t")) or _FILE.fullmatch(text):
+            continue
         cat = _category(text)
-        if cat:
-            current = cat
-        elif original.startswith((" ", "\t")) or _FILE.fullmatch(text):
-            cat = current
         if not cat:
             continue
         files = _FILE.findall(text)
         if files:
-            keys.update(f"organize:{cat}:{name}" for name in files)
+            keys.add(f"organize:{cat}:{files[0]}")
         else:
             keys.add(f"organize:{cat}")
     return sorted(keys)

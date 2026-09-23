@@ -175,6 +175,49 @@ def test_lines_count_does_not_change_the_key_and_stays_in_the_dm(tmp_path, monke
     assert "198" in sent.bodies[0]
 
 
+def test_dup_target_keys_its_header_and_a_longer_index_changes_nothing(tmp_path, monkeypatch):
+    def block(lines, warn_bytes):
+        return [
+            f"LINES: MEMORY.md is {lines} lines (harness truncates after 200; "
+            f"target <= 188) — over target by {lines - 188}",
+            "DUP_TARGET: file2.md",
+            "    child-a.md",
+            "    child-b.md",
+            "ORPHANS: 2 memory file(s) in no index",
+            "    alpha.md",
+            "    beta.md",
+            "CUT: MEMORY.md lost pointers",
+            "    gone.md",
+            f"WARN: MEMORY.md is {warn_bytes} BYTES — under the ceiling",
+        ]
+
+    from swarph_cli.dreaming.notify import finding_keys, organize_keys
+    short = block(197, 19000)
+    long = block(198, 19040)
+    assert organize_keys(short) == organize_keys(long)
+    keys = organize_keys(short)
+    assert "organize:DUP_TARGET:file2.md" in keys
+    assert "organize:LINES:MEMORY.md" in keys
+    assert "organize:ORPHANS" in keys
+    assert "organize:CUT:MEMORY.md" in keys
+    assert "organize:WARN:MEMORY.md" in keys
+    assert not any("child-a" in k or "alpha.md" in k or "gone.md" in k for k in keys)
+    assert not any(k.startswith("organize:LINES:child") for k in keys)
+    # A filename may contain a digit. A count may not add a key.
+    assert any(ch.isdigit() for ch in "organize:DUP_TARGET:file2.md")
+
+    def organize(_out):
+        return {"findings": short, "index_bytes_before": 0,
+                "index_bytes_after": 0, "trimmed": []}
+
+    _patch(monkeypatch, [])
+    monkeypatch.setattr(dreaming_run, "organize", organize)
+    sent = _Sent()
+    assert _run(tmp_path, [], sent) == 3
+    assert "child-a.md" in sent.bodies[0]
+    assert finding_keys([], {"findings": short}) == finding_keys([], {"findings": long})
+
+
 def test_send_failure_exits_4_and_does_not_advance_state(tmp_path, monkeypatch):
     verdicts = [{"verdict": "surface_disagreement", "file": "a.md", "line": 9, "kind": "unit_bind"}]
     _patch(monkeypatch, verdicts)
