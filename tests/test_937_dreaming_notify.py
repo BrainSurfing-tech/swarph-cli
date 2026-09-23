@@ -141,9 +141,38 @@ def test_memory_byte_size_does_not_change_keys_or_send(tmp_path, monkeypatch):
     assert len(sent.bodies) == 1
     blob = " ".join(keys)
     assert "clean" not in blob
-    assert not __import__("re").search(r"\d[\d,]*(?:/\d[\d,]*)?\s*(?:bytes?|files?|lines?)", blob)
+    assert not any(ch.isdigit() for key in keys if key.startswith("organize:") for ch in key)
+    assert "98 files" in sent.bodies[0]
     state = tmp_path / "runs" / ".last-findings.json"
     assert json.loads(state.read_text(encoding="utf-8"))["keys"] == keys
+
+
+def test_lines_count_does_not_change_the_key_and_stays_in_the_dm(tmp_path, monkeypatch):
+    line = (
+        "LINES: MEMORY.md is {n} lines (harness truncates after 200; "
+        "target <= 188) — over target by {over}"
+    )
+    counts = {"n": 197}
+
+    def organize(_out):
+        return {
+            "findings": [line.format(n=counts["n"], over=counts["n"] - 188)],
+            "index_bytes_before": 0,
+            "index_bytes_after": 0,
+            "trimmed": [],
+        }
+
+    _patch(monkeypatch, [])
+    monkeypatch.setattr(dreaming_run, "organize", organize)
+    from swarph_cli.dreaming.notify import finding_keys
+    before = finding_keys([], organize(None))
+    counts["n"] = 198
+    after = finding_keys([], organize(None))
+    assert before == after == ["organize:LINES:MEMORY.md"]
+    assert not any(ch.isdigit() for key in before for ch in key)
+    sent = _Sent()
+    assert _run(tmp_path, [], sent) == 3
+    assert "198" in sent.bodies[0]
 
 
 def test_send_failure_exits_4_and_does_not_advance_state(tmp_path, monkeypatch):

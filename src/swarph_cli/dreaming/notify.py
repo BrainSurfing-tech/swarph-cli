@@ -1,11 +1,12 @@
 """Notify the owning cell when the dreaming finding set changes (#937).
 
 The finding set is disagree + surface_disagreement, keyed file:line:kind, plus
-each organize finding that is not a clean status line. A clean line is not a
-finding, and byte, line, and file counts are stripped from the key so a count
-change does not send a DM. State lives at <out-parent>/.last-findings.json
-and is written only after a successful send. An unchanged set sends nothing.
-A missing state file is a first run: send the full set once.
+each organize finding keyed by its category token and, where the line names
+one, the file. A clean status line is not a finding. Organize keys contain
+no digits: counts stay in the DM body, not in the key. State lives at
+<out-parent>/.last-findings.json and is written only after a successful send.
+An unchanged set sends nothing. A missing state file is a first run: send
+the full set once.
 """
 from __future__ import annotations
 
@@ -15,27 +16,53 @@ from pathlib import Path
 
 # "memory-index-check: clean — ..." is a status line. "not clean" is not.
 _CLEAN = re.compile(r"(?:^|:)\s*clean\b", re.IGNORECASE)
-_COUNT = re.compile(
-    r"\b\d[\d,]*(?:/\d[\d,]*)?\s*(?:bytes?|files?|lines?)\b"
-    r"|\btarget\s+\d[\d,]*\b"
-    r"|\b\d[\d,]*\s+more\b",
-    re.IGNORECASE,
+# Longest first so "MISSING INDEX" wins over a shorter prefix.
+_CATEGORY = (
+    "MISSING INDEX",
+    "LINES",
+    "CUT",
+    "DANGLING",
+    "ORPHANS",
+    "TRUNCATED",
+    "BUDGET",
+    "WARN",
 )
+_FILE = re.compile(r"[\w.-]+\.md\b")
 
 
 class NotifySendError(Exception):
     """The mesh send failed. Distinct from a findings exit."""
 
 
-def _organize_key(text: str) -> str | None:
-    if _CLEAN.search(text):
-        return None
-    stable = _COUNT.sub("", text)
-    stable = re.sub(r"\s{2,}", " ", stable)
-    stable = re.sub(r"\s+([,;])", r"\1", stable).strip(" -—;,")
-    if not stable:
-        return None
-    return f"organize:{stable}"
+def _category(text: str) -> str | None:
+    for name in _CATEGORY:
+        if text.startswith(name + ":") or text.startswith(name + " "):
+            return name
+    return None
+
+
+def organize_keys(lines) -> list[str]:
+    """Category token, plus a named file when the line names one. No digits."""
+    keys: set[str] = set()
+    current: str | None = None
+    for raw in lines or []:
+        original = str(raw)
+        text = original.strip()
+        if not text or _CLEAN.search(text) or text.startswith("memory-index-check:"):
+            continue
+        cat = _category(text)
+        if cat:
+            current = cat
+        elif original.startswith((" ", "\t")) or _FILE.fullmatch(text):
+            cat = current
+        if not cat:
+            continue
+        files = _FILE.findall(text)
+        if files:
+            keys.update(f"organize:{cat}:{name}" for name in files)
+        else:
+            keys.add(f"organize:{cat}")
+    return sorted(keys)
 
 
 def finding_keys(verdicts, organized) -> list[str]:
@@ -43,10 +70,7 @@ def finding_keys(verdicts, organized) -> list[str]:
     for v in verdicts or []:
         if v.get("verdict") in ("disagree", "surface_disagreement"):
             keys.add(f"{v.get('file')}:{v.get('line')}:{v.get('kind')}")
-    for line in (organized or {}).get("findings") or []:
-        key = _organize_key(str(line).strip())
-        if key:
-            keys.add(key)
+    keys.update(organize_keys((organized or {}).get("findings") or []))
     return sorted(keys)
 
 
@@ -57,21 +81,34 @@ def _load_previous(path: Path) -> list[str] | None:
     return list(data.get("keys") or [])
 
 
-def _body(keys: list[str], previous: list[str] | None) -> str:
+def _details(organized) -> list[str]:
+    """Original organize lines, counts included. Clean status is not a finding."""
+    out = []
+    for raw in (organized or {}).get("findings") or []:
+        text = str(raw).strip()
+        if text and not _CLEAN.search(text) and not text.startswith("memory-index-check:"):
+            out.append(text)
+    return out
+
+
+def _body(keys: list[str], previous: list[str] | None, details: list[str]) -> str:
     if previous is None:
         lines = ["dreaming findings first run", f"counts: {len(keys)}"]
         lines.extend(keys)
-        return "\n".join(lines)
-    prev = set(previous)
-    cur = set(keys)
-    new = sorted(cur - prev)
-    cleared = sorted(prev - cur)
-    lines = [
-        "dreaming findings changed",
-        "new: " + (", ".join(new) if new else "(none)"),
-        "cleared: " + (", ".join(cleared) if cleared else "(none)"),
-        f"counts: {len(keys)} was {len(previous)}",
-    ]
+    else:
+        prev = set(previous)
+        cur = set(keys)
+        new = sorted(cur - prev)
+        cleared = sorted(prev - cur)
+        lines = [
+            "dreaming findings changed",
+            "new: " + (", ".join(new) if new else "(none)"),
+            "cleared: " + (", ".join(cleared) if cleared else "(none)"),
+            f"counts: {len(keys)} was {len(previous)}",
+        ]
+    if details:
+        lines.append("details:")
+        lines.extend(details)
     return "\n".join(lines)
 
 
@@ -86,7 +123,7 @@ def apply(out: Path, verdicts, organized, cell: str, sender) -> bool:
     previous = _load_previous(state)
     if previous is not None and sorted(previous) == keys:
         return False
-    body = _body(keys, previous)
+    body = _body(keys, previous, _details(organized))
     try:
         sender(cell, body)
     except NotifySendError:
