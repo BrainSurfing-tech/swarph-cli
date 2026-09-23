@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.64.0 -- 2026-09-23
+
+- dreaming (#937): `swarph dreaming run --notify <cell>` sends ONE mesh DM to `<cell>` only
+  when the finding set changes (new and cleared findings named, with counts); an unchanged
+  set sends nothing. State is `.last-findings.json` beside the `--out` dir and advances only
+  after a successful send, so a failed send exits 4 and the next run retries the held
+  change. Before this, nightly dreaming wrote a report nobody read: the same 5 findings sat
+  for 7 nights (2026-09-17..23), two of them genuinely stale memory, fixed by hand a week
+  late. Validated on an installed build by drop-on-meta-edge (#321).
+- codegraph (#825): codegraph-on-grep flags a capped `match_count` instead of presenting a
+  truncated count as complete, extracts a recoverable symbol from a regex instead of
+  shredding it, and makes the hook install status legible (the bind was never partial; the
+  status readout was).
+
 ## 0.63.0 -- 2026-09-22
 
 - monitor (#126): `pending_from` is computed over EVERY inbox.log entry newer than
