@@ -7,7 +7,7 @@ thought / out, latency, text, whether tokens are ESTIMATED). ``system``
 threads to every backend (metered: ``system_instruction``; a CLI-shelling
 backend would prepend it — see :class:`SubscriptionBackend`).
 
-Ships two backends:
+Ships these backends:
 
 - :class:`MeteredGeminiBackend` — google-genai Developer API, DEFAULT for v1
   (real ``usage_metadata``: prompt/candidates/thoughts tokens). CRITICAL:
@@ -19,13 +19,21 @@ Ships two backends:
   NOT couple to any specific subscription lane map; a caller wires an actual
   $0 CLI/OIDC path in by passing ``call_fn``. Not exercised against a live
   provider anywhere in this package.
+- :class:`RuleBackend` — in-process ``rule:<module:callable>``. No credentials.
+- :class:`TypedHttpBackend` — POST to a Jev-compatible ``/v1/systemone``
+  (laya-serve). No credentials; per-item latency is the HTTP round trip.
 """
 from __future__ import annotations
 
+import importlib
+import inspect
+import json
 import os
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
-from typing import Callable, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol
 
 
 @dataclass
@@ -274,4 +282,158 @@ class SubscriptionBackend:
             tokens_out=estimate_tokens(text),
             latency_s=latency_s,
             estimated=True,
+        )
+
+
+def _load_rule(spec: str) -> Callable[..., Any]:
+    """``module:callable`` -> the callable. The module path uses dots; the
+    callable name is the segment after the last colon."""
+    mod_name, sep, fn_name = spec.rpartition(":")
+    if not sep or not mod_name or not fn_name:
+        raise ValueError(f"rule model id must be module:callable, got {spec!r}")
+    fn = getattr(importlib.import_module(mod_name), fn_name)
+    if not callable(fn):
+        raise TypeError(f"{spec} is not callable")
+    return fn
+
+
+def _call_rule(fn: Callable[..., Any], prompt: str, system: str) -> Any:
+    params = inspect.signature(fn).parameters
+    if len(params) >= 2:
+        return fn(prompt, system)
+    return fn(prompt)
+
+
+def _request_body(prompt: str, system: str) -> dict:
+    """The POST body for ``/v1/systemone``.
+
+    A prompt that is itself a JSON object with ``state`` and ``questions``
+    is sent unchanged. That is how a pack carries a pre-registered template
+    (question type, instructions, criteria) without this backend inventing
+    them. Anything else is wrapped as one choice question whose instructions
+    are the prompt. That wrapper has no criteria, so a live laya-serve
+    rejects it; the gold packs must send the JSON form.
+    """
+    try:
+        parsed = json.loads(prompt) if isinstance(prompt, str) else None
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict) and "state" in parsed and "questions" in parsed:
+        return parsed
+    return {
+        "state": {"system": system, "prompt": prompt},
+        "questions": {
+            "answer": {"type": "choice", "instructions": prompt},
+        },
+    }
+
+
+def _systemone_url(model_id: str) -> str:
+    url = (model_id or "").strip()
+    if not url:
+        raise ValueError("typed-http model id is empty")
+    if url.rstrip("/").endswith("/v1/systemone"):
+        return url.rstrip("/")
+    return url.rstrip("/") + "/v1/systemone"
+
+
+def _typed_value(payload: dict) -> Any:
+    """Pull the typed answer out of a Jev /v1/systemone response.
+
+    Prefers the question named ``answer``; otherwise the first question.
+    ``choice``, ``noul``, ``yes``, then ``score`` — the fields laya-serve
+    returns schema-identical to Jev.
+    """
+    answers = payload.get("answers")
+    if not isinstance(answers, dict) or not answers:
+        raise ValueError("systemone response has no answers")
+    block = answers.get("answer")
+    if not isinstance(block, dict):
+        block = next(iter(answers.values()))
+    if not isinstance(block, dict):
+        raise ValueError("systemone answer is not an object")
+    for key in ("choice", "noul", "yes", "score"):
+        if key in block and block[key] is not None:
+            return block[key]
+    raise ValueError("systemone answer has no choice, noul, yes, or score")
+
+
+class RuleBackend:
+    """In-process callable. ``model_id`` is ``module:callable``.
+
+    The callable receives ``(prompt, system)`` when it takes two arguments,
+    otherwise ``(prompt)``, and its return value is the categorical label.
+    No credentials. Latency is the call itself.
+    """
+
+    def missing_creds(self) -> list[str]:
+        return []
+
+    def generate(self, model_id: str, prompt: str, system: str = "") -> BackendResult:
+        t0 = time.perf_counter()
+        try:
+            label = _call_rule(_load_rule(model_id), prompt, system)
+            text = json.dumps({"answer": label})
+        except Exception as exc:
+            return BackendResult(
+                text="", tokens_in=0, tokens_thought=0, tokens_out=0,
+                latency_s=round(time.perf_counter() - t0, 6),
+                estimated=False, error=str(exc),
+            )
+        return BackendResult(
+            text=text,
+            tokens_in=0,
+            tokens_thought=0,
+            tokens_out=0,
+            latency_s=round(time.perf_counter() - t0, 6),
+            estimated=False,
+        )
+
+
+class TypedHttpBackend:
+    """POST a bench item to a Jev-compatible ``/v1/systemone`` server.
+
+    ``model_id`` is the server base (``http://127.0.0.1:<port>``) or a full
+    ``.../v1/systemone`` URL. A prompt that is a JSON object with ``state``
+    and ``questions`` is the POST body, unchanged — that is the pre-registered
+    template. No API key is read or sent. Latency is the round trip.
+    ``noul`` answers come back as P(true), not a YES/NO label; this backend
+    does not apply a threshold.
+    """
+
+    def missing_creds(self) -> list[str]:
+        return []
+
+    def generate(self, model_id: str, prompt: str, system: str = "") -> BackendResult:
+        t0 = time.perf_counter()
+        try:
+            endpoint = _systemone_url(model_id)
+            body = _request_body(prompt, system)
+            req = urllib.request.Request(
+                endpoint,
+                data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = resp.read()
+            payload = json.loads(raw.decode() or "{}")
+            if not isinstance(payload, dict):
+                raise ValueError("systemone response is not an object")
+            label = _typed_value(payload)
+            text = json.dumps({"answer": label})
+            usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        except Exception as exc:
+            return BackendResult(
+                text="", tokens_in=0, tokens_thought=0, tokens_out=0,
+                latency_s=round(time.perf_counter() - t0, 6),
+                estimated=False, error=str(exc),
+            )
+        return BackendResult(
+            text=text,
+            tokens_in=int(usage.get("input_tokens") or 0),
+            tokens_thought=0,
+            tokens_out=int(usage.get("output_tokens") or 0),
+            latency_s=round(time.perf_counter() - t0, 6),
+            estimated=False,
         )
