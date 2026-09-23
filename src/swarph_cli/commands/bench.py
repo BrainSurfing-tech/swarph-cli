@@ -26,7 +26,9 @@ from swarph_cli.bench.backends import (
     Backend,
     MeteredGeminiBackend,
     MeteredMistralBackend,
+    RuleBackend,
     SubscriptionBackend,
+    TypedHttpBackend,
 )
 from swarph_cli.bench.pack import PackError, load_pack, slugify_theme, validate_schema
 from swarph_cli.bench.runner import ModelSpec, parse_models, preflight, run_pack
@@ -53,6 +55,8 @@ def _default_backends() -> dict[str, Backend]:
         "metered": MeteredGeminiBackend(),
         "mistral": MeteredMistralBackend(),
         "subscription": SubscriptionBackend(),
+        "rule": RuleBackend(),
+        "typed-http": TypedHttpBackend(),
     }
 
 
