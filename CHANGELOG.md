@@ -11,8 +11,9 @@
   late. Validated on an installed build by drop-on-meta-edge (#321).
 - codegraph (#825): codegraph-on-grep flags a capped `match_count` instead of presenting a
   truncated count as complete, extracts a recoverable symbol from a regex instead of
-  shredding it, and makes the hook install status legible (the bind was never partial; the
-  status readout was).
+  shredding it, and makes a partial bind legible in `hooks list` (`[partial]`, with the
+  missing events named) — lab-ovh ran PostToolUse-only from 09-11 to 09-23 with no readout
+  saying so.
 
 ## 0.63.0 -- 2026-09-22
 
