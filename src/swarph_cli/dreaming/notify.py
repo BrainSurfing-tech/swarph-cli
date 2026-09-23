@@ -1,19 +1,41 @@
 """Notify the owning cell when the dreaming finding set changes (#937).
 
 The finding set is disagree + surface_disagreement, keyed file:line:kind, plus
-each non-empty organize finding keyed organize:<text>. State lives at
-<out-parent>/.last-findings.json and is written only after a successful send.
-An unchanged set sends nothing. A missing state file is a first run: send the
-full set once.
+each organize finding that is not a clean status line. A clean line is not a
+finding, and byte, line, and file counts are stripped from the key so a count
+change does not send a DM. State lives at <out-parent>/.last-findings.json
+and is written only after a successful send. An unchanged set sends nothing.
+A missing state file is a first run: send the full set once.
 """
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+
+# "memory-index-check: clean — ..." is a status line. "not clean" is not.
+_CLEAN = re.compile(r"(?:^|:)\s*clean\b", re.IGNORECASE)
+_COUNT = re.compile(
+    r"\b\d[\d,]*(?:/\d[\d,]*)?\s*(?:bytes?|files?|lines?)\b"
+    r"|\btarget\s+\d[\d,]*\b"
+    r"|\b\d[\d,]*\s+more\b",
+    re.IGNORECASE,
+)
 
 
 class NotifySendError(Exception):
     """The mesh send failed. Distinct from a findings exit."""
+
+
+def _organize_key(text: str) -> str | None:
+    if _CLEAN.search(text):
+        return None
+    stable = _COUNT.sub("", text)
+    stable = re.sub(r"\s{2,}", " ", stable)
+    stable = re.sub(r"\s+([,;])", r"\1", stable).strip(" -—;,")
+    if not stable:
+        return None
+    return f"organize:{stable}"
 
 
 def finding_keys(verdicts, organized) -> list[str]:
@@ -22,9 +44,9 @@ def finding_keys(verdicts, organized) -> list[str]:
         if v.get("verdict") in ("disagree", "surface_disagreement"):
             keys.add(f"{v.get('file')}:{v.get('line')}:{v.get('kind')}")
     for line in (organized or {}).get("findings") or []:
-        text = str(line).strip()
-        if text:
-            keys.add(f"organize:{text}")
+        key = _organize_key(str(line).strip())
+        if key:
+            keys.add(key)
     return sorted(keys)
 
 
