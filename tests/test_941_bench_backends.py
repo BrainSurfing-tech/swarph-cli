@@ -24,12 +24,12 @@ def yes_label(prompt: str, system: str = "") -> str:
 def test_parse_models_keeps_rule_and_typed_http_payloads():
     specs = parse_models(
         "gemini-2.5-flash:subscription:fast-gem,"
-        "rule:tests.test_941_bench_backends:yes_label,"
+        "rule:pkg.mod:fn,"
         "typed-http:http://127.0.0.1:9"
     )
     assert [(s.id, s.backend) for s in specs] == [
         ("gemini-2.5-flash", "subscription"),
-        ("tests.test_941_bench_backends:yes_label", "rule"),
+        ("pkg.mod:fn", "rule"),
         ("http://127.0.0.1:9", "typed-http"),
     ]
 
@@ -38,7 +38,7 @@ def test_rule_backend_returns_callable_label_and_scores():
     backend = RuleBackend()
     assert backend.missing_creds() == []
     result = backend.generate(
-        "tests.test_941_bench_backends:yes_label", "pick one", "be brief"
+        f"{__name__}:yes_label", "pick one", "be brief"
     )
     assert result.error is None
     assert result.latency_s >= 0
