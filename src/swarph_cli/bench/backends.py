@@ -297,7 +297,20 @@ def _load_rule(spec: str) -> Callable[..., Any]:
     return fn
 
 
-def _call_rule(fn: Callable[..., Any], prompt: str, system: str) -> Any:
+def _rule_subject(prompt: str) -> Any:
+    """A JSON bench prompt is the systemone template. The rule sees its
+    ``state`` (the item), not the question text. A plain prompt is unchanged.
+    """
+    try:
+        parsed = json.loads(prompt) if isinstance(prompt, str) else None
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict) and "state" in parsed:
+        return parsed["state"]
+    return prompt
+
+
+def _call_rule(fn: Callable[..., Any], prompt: Any, system: str) -> Any:
     params = inspect.signature(fn).parameters
     if len(params) >= 2:
         return fn(prompt, system)
@@ -337,12 +350,48 @@ def _systemone_url(model_id: str) -> str:
     return url.rstrip("/") + "/v1/systemone"
 
 
-def _typed_value(payload: dict) -> Any:
+# Frozen on card #941 (lab-ovh msg 48915): the verdict uses 0.50 only.
+_NOUL_THRESHOLD = 0.50
+
+
+def _noul_question(body: dict) -> Optional[dict]:
+    questions = body.get("questions") if isinstance(body, dict) else None
+    if not isinstance(questions, dict):
+        return None
+    named = questions.get("answer")
+    if isinstance(named, dict) and named.get("type") == "noul":
+        return named
+    for block in questions.values():
+        if isinstance(block, dict) and block.get("type") == "noul":
+            return block
+    return None
+
+
+def _noul_labels(question: Optional[dict]) -> tuple[str, str]:
+    """Positive and negative labels named on the template.
+
+    ``labels.true`` / ``labels.false`` when the pack set them. Otherwise the
+    frozen S1 pair YES / NO (msg 48915: P(true) >= 0.50 -> YES).
+    """
+    labels = {}
+    if isinstance(question, dict) and isinstance(question.get("labels"), dict):
+        labels = question["labels"]
+    pos = labels.get("true")
+    neg = labels.get("false")
+    return (
+        str(pos) if pos is not None else "YES",
+        str(neg) if neg is not None else "NO",
+    )
+
+
+def _typed_value(payload: dict, request: Optional[dict] = None) -> tuple[Any, Optional[float]]:
     """Pull the typed answer out of a Jev /v1/systemone response.
 
     Prefers the question named ``answer``; otherwise the first question.
-    ``choice``, ``noul``, ``yes``, then ``score`` — the fields laya-serve
-    returns schema-identical to Jev.
+    ``choice``, ``noul``, ``yes``, then ``score``. A ``noul`` value is
+    P(true): >= 0.50 maps to the template's positive label, below that to
+    the negative. The raw probability is returned alongside the label.
+    Choice and score are returned as the server sent them.
     """
     answers = payload.get("answers")
     if not isinstance(answers, dict) or not answers:
@@ -354,7 +403,12 @@ def _typed_value(payload: dict) -> Any:
         raise ValueError("systemone answer is not an object")
     for key in ("choice", "noul", "yes", "score"):
         if key in block and block[key] is not None:
-            return block[key]
+            if key == "noul":
+                p_true = float(block[key])
+                pos, neg = _noul_labels(_noul_question(request or {}))
+                label = pos if p_true >= _NOUL_THRESHOLD else neg
+                return label, p_true
+            return block[key], None
     raise ValueError("systemone answer has no choice, noul, yes, or score")
 
 
@@ -362,8 +416,9 @@ class RuleBackend:
     """In-process callable. ``model_id`` is ``module:callable``.
 
     The callable receives ``(prompt, system)`` when it takes two arguments,
-    otherwise ``(prompt)``, and its return value is the categorical label.
-    No credentials. Latency is the call itself.
+    otherwise ``(prompt)``. A JSON prompt with ``state`` is unwrapped first:
+    the callable sees that state, not the template. Its return value is the
+    categorical label. No credentials. Latency is the call itself.
     """
 
     def missing_creds(self) -> list[str]:
@@ -372,7 +427,7 @@ class RuleBackend:
     def generate(self, model_id: str, prompt: str, system: str = "") -> BackendResult:
         t0 = time.perf_counter()
         try:
-            label = _call_rule(_load_rule(model_id), prompt, system)
+            label = _call_rule(_load_rule(model_id), _rule_subject(prompt), system)
             text = json.dumps({"answer": label})
         except Exception as exc:
             return BackendResult(
@@ -397,8 +452,9 @@ class TypedHttpBackend:
     ``.../v1/systemone`` URL. A prompt that is a JSON object with ``state``
     and ``questions`` is the POST body, unchanged — that is the pre-registered
     template. No API key is read or sent. Latency is the round trip.
-    ``noul`` answers come back as P(true), not a YES/NO label; this backend
-    does not apply a threshold.
+    A ``noul`` answer is P(true): >= 0.50 becomes the template's positive
+    label and below 0.50 the negative. The raw P(true) stays in the result
+    text. Choice answers are the server's label, unthresholded.
     """
 
     def missing_creds(self) -> list[str]:
@@ -420,8 +476,11 @@ class TypedHttpBackend:
             payload = json.loads(raw.decode() or "{}")
             if not isinstance(payload, dict):
                 raise ValueError("systemone response is not an object")
-            label = _typed_value(payload)
-            text = json.dumps({"answer": label})
+            label, p_true = _typed_value(payload, body)
+            rendered = {"answer": label}
+            if p_true is not None:
+                rendered["p_true"] = p_true
+            text = json.dumps(rendered)
             usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
         except Exception as exc:
             return BackendResult(
