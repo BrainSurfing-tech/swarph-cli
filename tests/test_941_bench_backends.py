@@ -49,10 +49,12 @@ def test_rule_backend_returns_callable_label_and_scores():
 
 class _Stub(BaseHTTPRequestHandler):
     seen_auth = False
+    last_body = None
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(n) or b"{}")
+        _Stub.last_body = body
         if self.headers.get("Authorization"):
             _Stub.seen_auth = True
         assert self.path == "/v1/systemone"
@@ -74,11 +76,17 @@ class _Stub(BaseHTTPRequestHandler):
         return
 
 
-def test_typed_http_against_stub_returns_answer_and_latency():
+def _serve_stub():
     _Stub.seen_auth = False
+    _Stub.last_body = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Stub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    return server
+
+
+def test_typed_http_against_stub_returns_answer_and_latency():
+    server = _serve_stub()
     try:
         port = server.server_address[1]
         backend = TypedHttpBackend()
@@ -90,10 +98,36 @@ def test_typed_http_against_stub_returns_answer_and_latency():
     assert result.error is None, result.error
     assert result.latency_s > 0
     assert not _Stub.seen_auth
+    assert _Stub.last_body["questions"]["answer"]["instructions"] == "is it a claim?"
     label = parse_answer(result.text)
     assert label == "CLAIM"
     assert d_categorical(label, "CLAIM") == 0.0
     assert d_categorical(label, "YES") == 1.0
+
+
+def test_typed_http_posts_a_preregistered_systemone_body_unchanged():
+    template = {
+        "state": {"text": "fix the mesh inbox tail"},
+        "questions": {
+            "answer": {
+                "type": "noul",
+                "instructions": "is this a code question?",
+                "criteria": {"false": "not code", "true": "code"},
+            }
+        },
+    }
+    server = _serve_stub()
+    try:
+        port = server.server_address[1]
+        result = TypedHttpBackend().generate(
+            f"http://127.0.0.1:{port}/v1/systemone", json.dumps(template), ""
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert result.error is None, result.error
+    assert _Stub.last_body == template
+    assert d_categorical(parse_answer(result.text), "CLAIM") == 0.0
 
 
 def test_bench_validate_existing_pack_still_passes(capsys):

@@ -304,6 +304,30 @@ def _call_rule(fn: Callable[..., Any], prompt: str, system: str) -> Any:
     return fn(prompt)
 
 
+def _request_body(prompt: str, system: str) -> dict:
+    """The POST body for ``/v1/systemone``.
+
+    A prompt that is itself a JSON object with ``state`` and ``questions``
+    is sent unchanged. That is how a pack carries a pre-registered template
+    (question type, instructions, criteria) without this backend inventing
+    them. Anything else is wrapped as one choice question whose instructions
+    are the prompt. That wrapper has no criteria, so a live laya-serve
+    rejects it; the gold packs must send the JSON form.
+    """
+    try:
+        parsed = json.loads(prompt) if isinstance(prompt, str) else None
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict) and "state" in parsed and "questions" in parsed:
+        return parsed
+    return {
+        "state": {"system": system, "prompt": prompt},
+        "questions": {
+            "answer": {"type": "choice", "instructions": prompt},
+        },
+    }
+
+
 def _systemone_url(model_id: str) -> str:
     url = (model_id or "").strip()
     if not url:
@@ -370,8 +394,11 @@ class TypedHttpBackend:
     """POST a bench item to a Jev-compatible ``/v1/systemone`` server.
 
     ``model_id`` is the server base (``http://127.0.0.1:<port>``) or a full
-    ``.../v1/systemone`` URL. No API key is read or sent — a server that
-    requires a bearer is not this lane. Latency is the round trip.
+    ``.../v1/systemone`` URL. A prompt that is a JSON object with ``state``
+    and ``questions`` is the POST body, unchanged — that is the pre-registered
+    template. No API key is read or sent. Latency is the round trip.
+    ``noul`` answers come back as P(true), not a YES/NO label; this backend
+    does not apply a threshold.
     """
 
     def missing_creds(self) -> list[str]:
@@ -381,12 +408,7 @@ class TypedHttpBackend:
         t0 = time.perf_counter()
         try:
             endpoint = _systemone_url(model_id)
-            body = {
-                "state": {"system": system, "prompt": prompt},
-                "questions": {
-                    "answer": {"type": "choice", "instructions": prompt},
-                },
-            }
+            body = _request_body(prompt, system)
             req = urllib.request.Request(
                 endpoint,
                 data=json.dumps(body).encode(),
