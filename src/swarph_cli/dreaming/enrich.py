@@ -73,20 +73,34 @@ def _manifest_sha(manifest: dict, file_key: str) -> str | None:
     return None
 
 
+def _norm_key_part(s: str | None) -> str:
+    """Strip + casefold — drop's #333: 'b.md' and 'b.md ' must be one row."""
+    return (s or "").strip().casefold()
+
+
 def _collapse_proposals(proposals: list[dict]) -> list[dict]:
-    """One row per (file, proposed_link); supported_by = session count (#764).
+    """One row per normalised (file, proposed_link); supported_by = distinct sessions (#764/#333).
 
     Exact-match dedup would discard agreement evidence — N sessions converging
     on one link is the strongest signal. Collapse and COUNT; keep session ids.
+    supported_by is NEVER the proposal count: one session emitting the same
+    link twice still counts as 1 (#333).
     """
     groups: dict[tuple, dict] = {}
     order: list[tuple] = []
     for p in proposals:
-        key = (p.get("file"), p.get("proposed_link"))
+        file_raw = (p.get("file") or "").strip()
+        link_raw = (p.get("proposed_link") or "").strip()
+        if not file_raw or not link_raw:
+            continue
+        # Self-link: a file proposing itself is not enrichment (#333).
+        if _norm_key_part(file_raw) == _norm_key_part(link_raw):
+            continue
+        key = (_norm_key_part(file_raw), _norm_key_part(link_raw))
         if key not in groups:
             row = {
-                "file": p.get("file"),
-                "proposed_link": p.get("proposed_link"),
+                "file": file_raw,
+                "proposed_link": link_raw,
                 "rationale": p.get("rationale", ""),
                 "derived": True,
                 "supported_by": 0,
@@ -97,10 +111,10 @@ def _collapse_proposals(proposals: list[dict]) -> list[dict]:
             groups[key] = row
             order.append(key)
         g = groups[key]
-        g["supported_by"] += 1
         sid = p.get("session_id")
         if sid and sid not in g["sessions"]:
             g["sessions"].append(sid)
+        g["supported_by"] = len(g["sessions"])
         if "source_sha256" not in g and p.get("source_sha256"):
             g["source_sha256"] = p["source_sha256"]
         if not g.get("rationale") and p.get("rationale"):

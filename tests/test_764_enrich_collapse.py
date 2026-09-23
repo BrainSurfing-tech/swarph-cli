@@ -81,3 +81,37 @@ def test_764_manifest_sha_without_md_suffix(tmp_path):
     expected = json.loads((clone / "clone-manifest.json").read_text())["files"][
         "project_brain_dr.md"]["sha256"]
     assert rows[0]["source_sha256"] == expected
+
+
+def test_333_one_session_two_identical_proposals_supported_by_1():
+    """ONE session emitting the same link twice -> supported_by 1 (#333)."""
+    collapsed = _collapse_proposals([
+        {"file": "a.md", "proposed_link": "b.md", "rationale": "x", "session_id": "s1"},
+        {"file": "a.md", "proposed_link": "b.md", "rationale": "x", "session_id": "s1"},
+    ])
+    assert len(collapsed) == 1
+    assert collapsed[0]["supported_by"] == 1
+    assert collapsed[0]["sessions"] == ["s1"]
+    assert collapsed[0]["supported_by"] == len(collapsed[0]["sessions"])
+
+
+def test_333_normalised_link_key_collapses_whitespace():
+    """'b.md' and 'b.md ' -> one row (#333)."""
+    collapsed = _collapse_proposals([
+        {"file": "a.md", "proposed_link": "b.md", "rationale": "x", "session_id": "s1"},
+        {"file": "a.md", "proposed_link": "b.md ", "rationale": "x", "session_id": "s2"},
+    ])
+    assert len(collapsed) == 1
+    assert collapsed[0]["supported_by"] == 2
+    assert set(collapsed[0]["sessions"]) == {"s1", "s2"}
+
+
+def test_333_self_link_dropped():
+    """MEMORY.md -> MEMORY.md proposal -> no row (#333)."""
+    collapsed = _collapse_proposals([
+        {"file": "MEMORY.md", "proposed_link": "MEMORY.md", "rationale": "x",
+         "session_id": "s1"},
+        {"file": "memory.md", "proposed_link": "MEMORY.md", "rationale": "y",
+         "session_id": "s2"},
+    ])
+    assert collapsed == []
