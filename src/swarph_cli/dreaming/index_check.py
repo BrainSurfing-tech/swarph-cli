@@ -72,6 +72,8 @@ def cut_point(text: str) -> int:
     cum = 0
     lines = text.split("\n")
     for n, line in enumerate(lines, 1):
+        if n > LINE_LIMIT:
+            return LINE_LIMIT + 1
         # recreate file bytes: join with \n except we count each line's UTF-8
         # plus the newline that follows it (except possibly the last). Mirror
         # how the file is stored: "\n".join(lines).encode — so newlines between
@@ -80,7 +82,7 @@ def cut_point(text: str) -> int:
         cum += len(piece.encode("utf-8"))
         if cum > BUDGET:
             return n
-    return LINE_LIMIT + 1 if len(lines) > LINE_LIMIT else 0
+    return 0
 
 
 def pointer_titles_at_or_after(text: str, cut_line: int) -> list[str]:

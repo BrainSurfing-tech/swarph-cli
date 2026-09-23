@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from swarph_cli.dreaming.index_check import (
-    BUDGET, LINE_LIMIT, LINE_TARGET, TARGET, cut_point,
+    BUDGET, LINE_LIMIT, LINE_TARGET, TARGET,
 )
 from swarph_cli.dreaming.verify import verify
 
@@ -97,12 +97,32 @@ def test_938_over_both_names_first_cut(tmp_path):
     text = (mem / "MEMORY.md").read_text(encoding="utf-8")
     assert len(text.encode("utf-8")) > BUDGET
     assert len(rows) > LINE_LIMIT
-    cut = cut_point(text)
     rc, out = _run_check(mem)
     assert rc == 1
     assert "CUT:" in out
-    assert "cut_line=%d" % cut in out
-    assert ("BYTES binds first" in out) or ("LINES binds first" in out)
+    assert "BYTES binds first" in out
+
+
+def test_938_lines_cut_first_when_over_both(tmp_path):
+    """(e) 300 lines x ~100 bytes: the line ceiling binds first, at line 201."""
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    rows = []
+    for i in range(300):
+        name = "e%04d.md" % i
+        (mem / name).write_text("# x\n", encoding="utf-8")
+        title = "E" + ("Z" * 80)
+        rows.append("- [%s](%s)" % (title, name))
+    (mem / "MEMORY.md").write_text("\n".join(rows), encoding="utf-8")
+    text = (mem / "MEMORY.md").read_text(encoding="utf-8")
+    assert len(rows) == 300
+    assert len(text.encode("utf-8")) > BUDGET
+    # ~100 bytes a line, so the byte ceiling is past line 201.
+    assert 90 <= len(text.encode("utf-8")) // 300 <= 110
+    rc, out = _run_check(mem)
+    assert rc == 1
+    assert "cut_line=201" in out
+    assert "LINES binds first" in out
 
 
 def test_938_dangling_missing_target(tmp_path):
