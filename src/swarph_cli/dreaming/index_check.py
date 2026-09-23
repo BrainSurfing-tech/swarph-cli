@@ -15,7 +15,7 @@ The index's own header warns "over budget = SILENT partial load (18 lost
 was missing is the only thing that catches it: something that reads the index and
 asks whether it still points at what exists.
 
-FOUR CHECKS, each for a failure that produced real loss:
+FIVE CHECKS, each for a failure that produced real loss:
 
   1. ORPHANS      a memory file no index points at — invisible when gbrain is down
                   and dependent on semantic luck when it is up
@@ -24,6 +24,9 @@ FOUR CHECKS, each for a failure that produced real loss:
   4. BUDGET       MEMORY.md over 24985 BYTES (wc -c, NOT len(str) — ⭐/— are
                   multi-byte, so a character count reads ~600 low and says
                   "under" for a file that is over)
+  5. LINES        MEMORY.md over the harness's 200-line load (#938). Bytes and
+                  lines are independent limits — long lines hit bytes first;
+                  short ones hit lines first (droplet counter-specimen).
 
 Exit 0 = clean, 1 = findings. Read-only; it never edits the index.
 Run: python3 ~/tools/memory-index-check.py [--quiet]
@@ -49,10 +52,49 @@ BUDGET = 24985  # bytes, MEMORY.md only — stated in the file's own header comm
 # Write|Edit|Bash across several cells, and turning a healthy-but-tight file
 # into a non-zero exit would be a fleet change, not a check.
 TARGET = int(BUDGET * 0.94)  # 23485 bytes; the band is TARGET..BUDGET
+# Claude Code truncates MEMORY.md after line 200 at session start (#938).
+LINE_LIMIT = 200
+LINE_TARGET = int(LINE_LIMIT * 0.94)  # 188
 LINK = re.compile(r"\(([A-Za-z0-9_./-]+\.md)\)")
+TITLE_LINK = re.compile(r"\[([^\]]+)\]\(([A-Za-z0-9_./-]+\.md)\)")
 # A line is suspect when it opens a link it never closes. An explicit "…" means
 # the author elided on purpose, which is a different thing from a cut.
 TRUNC = re.compile(r"\([A-Za-z0-9_./-]*$")
+
+
+def cut_point(text: str) -> int:
+    """First 1-based line the harness drops: byte ceiling or line 201, whichever first.
+
+    cut_line = min(first line where cumulative bytes > BUDGET, LINE_LIMIT + 1).
+    Naming that line (and the pointers at/after it) is the finding payload —
+    "600 bytes over" does not say which memories went invisible (#938 droplet).
+    """
+    cum = 0
+    lines = text.split("\n")
+    for n, line in enumerate(lines, 1):
+        # recreate file bytes: join with \n except we count each line's UTF-8
+        # plus the newline that follows it (except possibly the last). Mirror
+        # how the file is stored: "\n".join(lines).encode — so newlines between
+        # lines, none after the final line if the file had no trailing \n.
+        piece = line if n == 1 else "\n" + line
+        cum += len(piece.encode("utf-8"))
+        if cum > BUDGET:
+            return n
+    return LINE_LIMIT + 1 if len(lines) > LINE_LIMIT else 0
+
+
+def pointer_titles_at_or_after(text: str, cut_line: int) -> list[str]:
+    """Pointer entries at or after cut_line — the names that go invisible."""
+    out: list[str] = []
+    for n, line in enumerate(text.split("\n"), 1):
+        if n < cut_line:
+            continue
+        m = TITLE_LINK.search(line)
+        if m:
+            out.append("%s -> %s" % (m.group(1), m.group(2)))
+        elif LINK.search(line):
+            out.append(LINK.search(line).group(1))
+    return out
 
 
 def links_in(name: str) -> set[str]:
@@ -174,19 +216,72 @@ def main() -> int:
         findings.append(f"DANGLING: {len(dangling)} pointer(s) to a file that does not exist")
         findings += [f"    {d}" for d in dangling[:20]]
 
+    # Duplicate-target pointers under different titles: allowed, but listed (#938).
     mm = MEM / "MEMORY.md"
+    if mm.exists():
+        by_target: dict[str, set[str]] = {}
+        for line in mm.read_text(encoding="utf-8").split("\n"):
+            for title, target in TITLE_LINK.findall(line):
+                by_target.setdefault(target, set()).add(title)
+        dupes = sorted((t, sorted(titles)) for t, titles in by_target.items()
+                       if len(titles) > 1)
+        if dupes:
+            findings.append(
+                "DUP_TARGET: %d file(s) pointed at under different titles (allowed, listed)"
+                % len(dupes))
+            for target, titles in dupes[:20]:
+                findings.append("    %s <- %s" % (target, " | ".join(titles)))
+
     warn = None
     if mm.exists():
+        text = mm.read_text(encoding="utf-8")
         size = len(mm.read_bytes())
-        if BUDGET >= size > TARGET:
+        nlines = len(text.split("\n"))
+        # Bytes keep the WARN band (TARGET..BUDGET, exit 0). Lines do not:
+        # over LINE_TARGET is a FINDING — lab specimen was 197/200 still "clean"
+        # on bytes while 3 more pointers would be cut (#938 accept).
+        if BUDGET >= size > TARGET and nlines <= LINE_TARGET:
             warn = ("WARN: MEMORY.md is %d BYTES — under the %d ceiling but inside the last %d "
                     "bytes of it. Not broken, not fine: %d bytes of headroom, so the next pointer "
                     "line breaches. Trim to <= %d." % (size, BUDGET, BUDGET - TARGET,
                                                        BUDGET - size, TARGET))
-        if size > BUDGET:
+
+        # Over byte ceiling, line ceiling, or line target: name the cut line.
+        over_bytes = size > BUDGET
+        over_lines = nlines > LINE_LIMIT
+        over_line_target = nlines > LINE_TARGET
+        if over_bytes or over_lines or over_line_target:
+            cut = cut_point(text)
+            if not cut and over_line_target:
+                cut = LINE_LIMIT + 1 if nlines > LINE_LIMIT else (LINE_TARGET + 1)
+            # Which limit binds first: byte cut before line 201, else line.
+            if over_bytes and (not over_lines or cut <= LINE_LIMIT):
+                binder = "BYTES"
+            elif over_lines or over_line_target:
+                binder = "LINES"
+            else:
+                binder = "BYTES"
             findings.append(
-                f"BUDGET: MEMORY.md is {size} BYTES, over {BUDGET} by {size - BUDGET} "
-                f"— over budget loads SILENTLY PARTIAL (its own header records 18 lost 2026-08-26)")
+                "CUT: MEMORY.md %d bytes / %d lines — %s binds first; "
+                "cut_line=%d (harness drops from here; byte ceiling %d, line ceiling %d, "
+                "line target %d)"
+                % (size, nlines, binder, cut or LINE_LIMIT + 1, BUDGET, LINE_LIMIT,
+                   LINE_TARGET))
+            dropped = pointer_titles_at_or_after(text, cut or (LINE_LIMIT + 1))
+            if dropped:
+                findings.append("    first lost pointers:")
+                findings += ["    %s" % d for d in dropped[:20]]
+                if len(dropped) > 20:
+                    findings.append("    … and %d more" % (len(dropped) - 20))
+            if over_bytes:
+                findings.append(
+                    f"BUDGET: MEMORY.md is {size} BYTES, over {BUDGET} by {size - BUDGET} "
+                    f"— over budget loads SILENTLY PARTIAL (its own header records 18 lost 2026-08-26)")
+            if over_lines or over_line_target:
+                findings.append(
+                    "LINES: MEMORY.md is %d lines (harness truncates after %d; "
+                    "target <= %d) — over target by %d"
+                    % (nlines, LINE_LIMIT, LINE_TARGET, max(0, nlines - LINE_TARGET)))
 
     if warn:
         print(warn)
@@ -198,8 +293,11 @@ def main() -> int:
         return 1
     if not quiet:
         mmsize = len((MEM / "MEMORY.md").read_bytes()) if mm.exists() else 0
+        mmlines = (len((MEM / "MEMORY.md").read_text(encoding="utf-8").split("\n"))
+                   if mm.exists() else 0)
         print("memory-index-check: clean — %d files, all indexed; MEMORY.md %d/%d bytes "
-              "(target %d)" % (len(files), mmsize, BUDGET, TARGET))
+              "(target %d), %d/%d lines (target %d)"
+              % (len(files), mmsize, BUDGET, TARGET, mmlines, LINE_LIMIT, LINE_TARGET))
     return 0
 
 
