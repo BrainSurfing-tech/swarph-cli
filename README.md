@@ -244,8 +244,11 @@ Between-sessions memory pass: **VERIFY · ORGANIZE · ENRICH** against a **CLONE
 ```
 $ swarph dreaming run --corpus ~/.claude/projects/.../memory --out /tmp/dreaming-out
 $ swarph dreaming run --corpus <dir> --out <dir> --verify-only
-$ echo $?   # 0 clean-and-adjudicated | 1 findings | 2 refused | 3 ran-but-adjudicated-nothing
+$ swarph dreaming run --corpus <dir> --out <dir> --notify <cell>
+$ echo $?   # 0 clean-and-adjudicated | 1 findings | 2 refused | 3 ran-but-adjudicated-nothing | 4 notify send failed
 ```
+
+`--notify <cell>` (#937) sends one mesh DM to `<cell>` **only when the finding set changes** (new and cleared findings named, with counts); an unchanged set sends nothing. State lives in `.last-findings.json` beside the `--out` dir and advances only after a successful send, so a failed send (exit 4) retries on the next run.
 
 **Scope is single-cell:** your corpus and your local transcripts. This is not the cross-agent multi-transcript dreaming from the Anthropic talk — that needs a shared transcript surface this release does not claim.
 
