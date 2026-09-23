@@ -9,6 +9,11 @@ BUDGET = 24985   # BYTES. GC6 -- never len(str).
 # organised anything; it has queued the same breach for tomorrow.
 TARGET = int(BUDGET * 0.94)   # ~1,500 bytes of headroom
 
+# Claude Code loads MEMORY.md at session start and TRUNCATES after line 200
+# (#938). Same headroom rule as bytes: land under the target, not the ceiling.
+LINE_LIMIT = 200   # harness truncation line
+LINE_TARGET = int(LINE_LIMIT * 0.94)  # 188
+
 
 def organize(clone: Path) -> dict:
     import subprocess, sys
@@ -21,17 +26,25 @@ def organize(clone: Path) -> dict:
     idx = clone / "MEMORY.md"
     if not idx.exists():
         return {"findings": findings, "index_bytes_before": 0,
-                "index_bytes_after": 0, "trimmed": []}
-    before = len(idx.read_bytes())
+                "index_bytes_after": 0, "trimmed": [],
+                "index_lines_before": 0, "index_lines_after": 0}
+    raw = idx.read_bytes()
+    before = len(raw)
+    lines = idx.read_text(encoding="utf-8").split("\n")
+    lines_before = len(lines)
     trimmed = []
-    if before > BUDGET:
-        lines = idx.read_text(encoding="utf-8").split("\n")
-        # Trim from the END: the index is roughly oldest-first, and the head
-        # carries the starred entries. ponytail: crude ordering, replace with a
-        # recency/star rank if trims start dropping things that matter.
-        while len("\n".join(lines).encode("utf-8")) > TARGET and lines:
+    # Two independent limits (#938 / droplet plan-review): bytes OR lines may
+    # bind first depending on line length. Trim when either ceiling is breached;
+    # land under BOTH targets.
+    if before > BUDGET or lines_before > LINE_LIMIT:
+        while lines and (
+                len("\n".join(lines).encode("utf-8")) > TARGET
+                or len(lines) > LINE_TARGET):
             trimmed.append(lines.pop())
         idx.write_text("\n".join(lines), encoding="utf-8")
+    after_text = idx.read_text(encoding="utf-8") if idx.exists() else ""
     return {"findings": findings, "index_bytes_before": before,
             "index_bytes_after": len(idx.read_bytes()),
+            "index_lines_before": lines_before,
+            "index_lines_after": len(after_text.split("\n")) if after_text or idx.exists() else 0,
             "trimmed": [t for t in trimmed if t.strip()]}
