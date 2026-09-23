@@ -56,6 +56,58 @@ def _client():
         return OwnedSLMClient()
 
 
+def _manifest_sha(manifest: dict, file_key: str) -> str | None:
+    """Resolve sha256; model may omit .md while the manifest keys include it."""
+    if not file_key:
+        return None
+    candidates = [file_key]
+    if file_key.endswith(".md"):
+        candidates.append(file_key[:-3])
+    else:
+        candidates.append(file_key + ".md")
+    for key in candidates:
+        hit = manifest.get(key) or {}
+        sha = hit.get("sha256")
+        if sha:
+            return sha
+    return None
+
+
+def _collapse_proposals(proposals: list[dict]) -> list[dict]:
+    """One row per (file, proposed_link); supported_by = session count (#764).
+
+    Exact-match dedup would discard agreement evidence — N sessions converging
+    on one link is the strongest signal. Collapse and COUNT; keep session ids.
+    """
+    groups: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for p in proposals:
+        key = (p.get("file"), p.get("proposed_link"))
+        if key not in groups:
+            row = {
+                "file": p.get("file"),
+                "proposed_link": p.get("proposed_link"),
+                "rationale": p.get("rationale", ""),
+                "derived": True,
+                "supported_by": 0,
+                "sessions": [],
+            }
+            if p.get("source_sha256"):
+                row["source_sha256"] = p["source_sha256"]
+            groups[key] = row
+            order.append(key)
+        g = groups[key]
+        g["supported_by"] += 1
+        sid = p.get("session_id")
+        if sid and sid not in g["sessions"]:
+            g["sessions"].append(sid)
+        if "source_sha256" not in g and p.get("source_sha256"):
+            g["source_sha256"] = p["source_sha256"]
+        if not g.get("rationale") and p.get("rationale"):
+            g["rationale"] = p["rationale"]
+    return [groups[k] for k in order]
+
+
 def enrich(clone: Path, records: list[dict], client=None) -> list[dict]:
     # `generate`, NOT `generate_json`. Both exist on SLMClient (lines 78 and 118,
     # read 2026-09-03). generate_json coerces its result to a DICT: given a JSON
@@ -101,18 +153,22 @@ def enrich(clone: Path, records: list[dict], client=None) -> list[dict]:
         for i in items:
             if not (isinstance(i, dict) and "file" in i and "link" in i):
                 continue
-            proposals.append({
+            row = {
                 "file": i["file"], "proposed_link": i["link"],
                 "rationale": i.get("why", ""), "derived": True,
                 # TWO COORDINATES, per GC2 and R2: source_sha256 says which FILE
                 # the proposal is against; session_id says which CONTEXT it came
                 # from. The hash alone answers only the first, and the talk's
                 # VERSIONING guardrail asks for both.
-                "source_sha256": manifest.get(i["file"], {}).get("sha256"),
                 "session_id": sid,
                 "transcript_range": s["range"],
-            })
-    return proposals
+            }
+            sha = _manifest_sha(manifest, i["file"])
+            if sha:
+                row["source_sha256"] = sha
+            # null source_sha256 is worse than absent (#764) — omit the key.
+            proposals.append(row)
+    return _collapse_proposals(proposals)
 
 
 def _sessions_from(records: list[dict]) -> dict:
