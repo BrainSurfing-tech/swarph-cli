@@ -1172,8 +1172,14 @@ class PullSink(Sink):
         return True
 
     def pending_label(self, count: int) -> str:
+        # #126: this is NOT gateway-unread. It is inbox.log entries newer than
+        # last_delivered_id — on a frozen ledger it grows at the cell's DM rate
+        # forever. Naming it "unread" taught cells to distrust status.
         plural = "s" if count != 1 else ""
-        return f"{count} unread DM{plural}"
+        return (
+            f"{count} DM{plural} newer than last delivery "
+            f"(inbox.log after ledger — not gateway unread)"
+        )
 
 
 class NoneSink(Sink):
@@ -1590,17 +1596,25 @@ def _write_ledgers_atomic(path: Path, ledgers: dict) -> None:
 
 def _replay_from_inbox_log(
     path: Path, after_id: int, limit: int
-) -> tuple[list, int]:
-    """Owed DMs newer than `after_id`, newest `limit` kept. Returns (dms, skipped).
+) -> tuple[list, int, list[str]]:
+    """Owed DMs newer than `after_id`, newest `limit` kept.
+
+    Returns ``(dms, skipped, pending_from)``.
+
+    ``pending_from`` is the distinct-sender set over EVERY matching log entry,
+    not over the capped ``dms`` list (#126). The deque bounds returned LINES;
+    the sender set was taken from it by convenience and understated who was
+    waiting (evicting the longest-waiting senders first).
 
     This is BOTH the restart-retry path and the late-attached-sink replay path.
     They are the same question — "what does this ledger still owe" — so they get
     one mechanism; two would drift.
     """
     if not path.exists():
-        return [], 0
+        return [], 0, []
     keep: deque = deque(maxlen=max(0, limit))
     total = 0
+    from_nodes: set[str] = set()
     try:
         with path.open("r", encoding="utf-8") as fp:
             for raw in fp:
@@ -1615,10 +1629,13 @@ def _replay_from_inbox_log(
                     continue
                 total += 1
                 keep.append(dm)
+                src = dm.get("from_node")
+                if src is not None and str(src):
+                    from_nodes.add(str(src))
     except OSError as exc:
         print(f"[monitor] cannot replay {path}: {exc}", file=sys.stderr, flush=True)
-        return [], 0
-    return list(keep), total - len(keep)
+        return [], 0, []
+    return list(keep), total - len(keep), sorted(from_nodes)
 
 
 class MonitorState:
@@ -2198,7 +2215,7 @@ def _monitor_deliver(state: MonitorState) -> None:
                       f"{sink.name} (cursor advanced; delivery still pending)",
                       flush=True)
                 continue
-            dms, skipped = _replay_from_inbox_log(
+            dms, skipped, _pending_from = _replay_from_inbox_log(
                 state.inbox_log_path, delivered, state.replay_limit
             )
             if skipped:

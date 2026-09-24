@@ -67,6 +67,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="require enrich; refuse (rc=2) if SLM client unavailable (#734)",
     )
     run.add_argument("--verify-only", action="store_true", help="verify only; skip organize/enrich")
+    run.add_argument(
+        "--notify",
+        default=None,
+        metavar="CELL",
+        help="DM CELL when the finding set changes; no DM when it is unchanged (#937)",
+    )
     return p
 
 
@@ -95,4 +101,6 @@ def run_dreaming(argv: list[str] | None = None) -> int:
         forwarded.append("--enrich")
     if args.verify_only:
         forwarded.append("--verify-only")
+    if getattr(args, "notify", None):
+        forwarded.extend(["--notify", args.notify])
     return dreaming_run.main(forwarded)
