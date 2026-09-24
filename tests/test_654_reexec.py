@@ -185,8 +185,11 @@ def test_807_watched_tree_comes_from_the_binary_the_monitors_execute(tmp_path, c
 
 
 @pytest.mark.skipif(os.name == "nt", reason="drop-ins are systemd")
-def test_807_on_failure_writes_a_dropin_for_both_units(tmp_path, capsys):
+def test_807_on_failure_writes_a_dropin_for_both_units(tmp_path, capsys, monkeypatch):
     shim = _fake_shim(tmp_path, "/consumed/swarph_cli/__init__.py")
+    # The unit listing needs systemctl; macOS has none and the verb abstains with
+    # rc 2. This test is about the OnFailure drop-ins, so stub the listing.
+    monkeypatch.setattr(monitor, "_resident_trees", lambda root: {"_unreadable": []})
     target = tmp_path / "units"; target.mkdir()
     rc = monitor.run_monitor(["install-reexec", "--write", "--dir", str(target), "--swarph-bin", str(shim),
                               "--on-failure", "mercury-alert@%n.service"])
