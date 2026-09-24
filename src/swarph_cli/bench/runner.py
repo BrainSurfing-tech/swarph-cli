@@ -40,11 +40,18 @@ def parse_models(arg: str) -> list[ModelSpec]:
         tok = tok.strip()
         if not tok:
             continue
-        parts = tok.split(":")
-        mid = parts[0]
-        backend = parts[1] if len(parts) > 1 and parts[1] else "metered"
-        label = parts[2] if len(parts) > 2 and parts[2] else mid
-        specs.append(ModelSpec(id=mid, backend=backend, label=label))
+        # rule:<module:callable> and typed-http:<url> carry colons in the
+        # payload, so they cannot go through the id:backend:label split.
+        for prefix, backend in (("typed-http:", "typed-http"), ("rule:", "rule")):
+            if tok.startswith(prefix):
+                specs.append(ModelSpec(id=tok[len(prefix):], backend=backend, label=tok))
+                break
+        else:
+            parts = tok.split(":")
+            mid = parts[0]
+            backend = parts[1] if len(parts) > 1 and parts[1] else "metered"
+            label = parts[2] if len(parts) > 2 and parts[2] else mid
+            specs.append(ModelSpec(id=mid, backend=backend, label=label))
     return specs
 
 

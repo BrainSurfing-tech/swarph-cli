@@ -678,7 +678,7 @@ def _collect(args: argparse.Namespace) -> dict:
             continue
         led = ledgers.get(sink.name)
         delivered = int(led["last_delivered_id"]) if led else 0
-        dms, skipped = mesh._replay_from_inbox_log(
+        dms, skipped, pending_from = mesh._replay_from_inbox_log(
             inbox_log, delivered, mesh._MONITOR_REPLAY_LIMIT
         )
         rows.append({
@@ -690,7 +690,9 @@ def _collect(args: argparse.Namespace) -> dict:
             "consecutive_failures": int(led["consecutive_failures"]) if led else 0,
             "ledger_missing": led is None,
             "pending": len(dms) + skipped,
-            "pending_from": sorted({str(d.get("from_node")) for d in dms}),
+            # #126: same set as `pending` — distinct senders across EVERY log
+            # entry newer than last_delivered_id, not over the 50-entry deque.
+            "pending_from": pending_from,
             "label": sink.pending_label(len(dms) + skipped),
         })
 

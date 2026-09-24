@@ -37,6 +37,10 @@ from swarph_cli.gateway_default import env_gateway
 
 TIMEOUT_S = 6
 MAX_ROWS = 6
+# Probe one past the display cap so audit can tell "exactly 6" from "hit the
+# clamp" (#825 / lab 48145: 90.5% of rows sat on match_count==6 because the
+# query limit WAS the count).
+_PROBE_LIMIT = MAX_ROWS + 1
 
 # Identifier token — used for prompt terms and for the Bash shred skip (no
 # useful symbol-shaped token left after cleaning).
@@ -89,6 +93,12 @@ def extract_raw_and_cleaned(cmd: str) -> Optional[tuple[str, str]]:
         if tok.startswith("-"):
             continue
         raw = tok.strip("'\"")
+        # Prefer the longest identifier STILL VISIBLE in the raw pattern
+        # before the shredding re.sub (#825). `foo_bar.*[0-9]+` must yield
+        # `foo_bar`, not skip-as-shredded or query regex debris.
+        idents = [t for t in _IDENT_TOKEN.findall(raw) if len(t) >= 3]
+        if idents:
+            return (raw, max(idents, key=len))
         cleaned = re.sub(r"[^\w\s.]", " ", raw).strip()
         if not cleaned:
             return None
@@ -308,7 +318,8 @@ def resolve_pending_outcome(self_name: str, subsequent: str,
 
 # ── gateway query ─────────────────────────────────────────────────────────
 
-def query_gateway(term: str, gateway: str, token: str, limit: int = MAX_ROWS) -> dict:
+def query_gateway(term: str, gateway: str, token: str,
+                   limit: int = _PROBE_LIMIT) -> dict:
     if not (gateway or "").strip():
         return {"error": "MESH_GATEWAY_URL is not set and swarph ships no default "
                          "gateway host (#578) — the graph was never asked"}
@@ -411,6 +422,9 @@ def _query_and_emit(self_name: str, gateway: str, term: str, *,
         return
     env = query_gateway(term, gateway, token)
     rows = env.get("results") or [] if "error" not in env else []
+    capped = len(rows) > MAX_ROWS
+    # Audit sees the probe length (MAX_ROWS+1 ⇒ at-least / capped). Display
+    # still truncates via render()'s rows[:MAX_ROWS].
     name_hit = any_symbol_name_contains_term(term, rows) if rows else False
     fid = firing_id or str(uuid.uuid4())
     write_audit(self_name, {
@@ -424,13 +438,22 @@ def _query_and_emit(self_name: str, gateway: str, term: str, *,
         "raw_term": raw_term or term,
         "skipped": False,
         "match_count": len(rows),
+        "match_count_capped": capped,
         "any_name_contains_term": name_hit,
         "error": env.get("error"),
     })
     if trigger == "prompt":
         register_pending_firing(self_name, fid, session_id)
+    # Render only the display window so the prompt is not flooded.
+    if capped and "error" not in env:
+        env = {**env, "results": rows[:MAX_ROWS], "match_count_capped": True}
     text = render(term, env)
     if text:
+        if capped:
+            text = text.rstrip() + (
+                f"\n  (display capped at {MAX_ROWS}; audit match_count="
+                f"{len(rows)} match_count_capped=true)"
+            )
         _emit(text, event_name)
 
 

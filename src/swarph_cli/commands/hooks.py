@@ -1005,36 +1005,47 @@ def uninstall_hook(
     return 0
 
 
-def _is_installed(settings: dict, command: str, bundle: HookBundle) -> bool:
-    """True when ALL of ``bundle``'s bindings' commands are present in settings."""
+def _event_binding_present(
+    settings: dict, command: str, binding: HookBinding,
+) -> bool:
+    """True when one specific event/matcher carries our command."""
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         return False
+    event_list = hooks.get(binding.event)
+    if not isinstance(event_list, list):
+        return False
+    _known = _command_variants_for(command)
+    for entry in event_list:
+        if entry.get("matcher", "") != binding.matcher:
+            continue
+        return any(a.get("command") in _known for a in entry.get("hooks", []))
+    return False
+
+
+def binding_coverage(
+    settings: dict, command: str, bundle: HookBundle,
+) -> tuple[list[str], list[str]]:
+    """Return (present_events, missing_events) for ``bundle``'s bindings (#825).
+
+    A PostToolUse-only install of codegraph-on-grep used to report as plain
+    ``available`` (not installed) while still firing 400 times — the steering
+    half unbound and invisible. Coverage makes PARTIAL legible.
+    """
+    present, missing = [], []
     for b in bundle.bindings:
-        event_list = hooks.get(b.event)
-        if not isinstance(event_list, list):
-            return False
-        found = False
-        for entry in event_list:
-            if entry.get("matcher", "") == b.matcher:
-                # #216 review (Copilot, 2nd pass): THE THIRD SITE. Exact
-                # matching here makes a LEGACY backslash binding read as NOT
-                # INSTALLED, so a Windows cell's real, working hooks list as
-                # "unavailable" — the operator is told nothing is installed
-                # while the bindings sit right there in settings.json.
-                # The previous commit said "one helper, BOTH callers". There
-                # were THREE. A rule applied at N-1 sites is the defect this
-                # class keeps producing, and it produced it again inside the
-                # fix for it.
-                _known = _command_variants_for(command)
-                if any(
-                    a.get("command") in _known for a in entry.get("hooks", [])
-                ):
-                    found = True
-                break
-        if not found:
-            return False
-    return True
+        label = b.event if not b.matcher else f"{b.event}:{b.matcher}"
+        if _event_binding_present(settings, command, b):
+            present.append(label)
+        else:
+            missing.append(label)
+    return present, missing
+
+
+def _is_installed(settings: dict, command: str, bundle: HookBundle) -> bool:
+    """True when ALL of ``bundle``'s bindings' commands are present in settings."""
+    present, missing = binding_coverage(settings, command, bundle)
+    return bool(present) and not missing
 
 
 def list_hooks(
@@ -1045,8 +1056,10 @@ def list_hooks(
 ) -> int:
     """List builtin hooks with install status. One greppable line per builtin::
 
-        name  [installed|available]  trust=builtin  — description
+        name  [installed|partial|available]  trust=builtin  — description
 
+    ``partial`` (#825): at least one binding present but not the full set —
+    the lab-ovh codegraph case (PostToolUse only, UserPromptSubmit/Stop absent).
     When installed and the script carries a ``swarph-cli-bundle-version`` stamp
     (#830), a second line reports match / mismatch vs the running package.
     """
@@ -1054,14 +1067,26 @@ def list_hooks(
     hooks_home_p = Path(hooks_home).expanduser()
     for name in sorted(BUILTIN_HOOKS):
         bundle = BUILTIN_HOOKS[name]
-        command = _installed_command(bundle, hooks_home)
-        # Read side of the same ladder: a legacy install reported as "available"
-        # invites the reinstall that produces a DUPLICATE binding.
-        status = ("installed"
-                  if any(_is_installed(settings, c, bundle)
-                         for c in _installed_command_variants(bundle, hooks_home))
-                  else "available")
+        variants = _installed_command_variants(bundle, hooks_home)
+        # Pick the first variant that has ANY binding coverage for reporting.
+        present: list[str] = []
+        missing: list[str] = [b.event for b in bundle.bindings]
+        for c in variants:
+            p, m = binding_coverage(settings, c, bundle)
+            if len(p) > len(present):
+                present, missing = p, m
+        if present and not missing:
+            status = "installed"
+        elif present and missing:
+            status = "partial"
+        else:
+            status = "available"
         out(f"{name}  [{status}]  trust=builtin  — {bundle.description}")
+        if status == "partial":
+            out(f"  bindings present: {', '.join(present) or '(none)'}")
+            out(f"  bindings MISSING: {', '.join(missing)}  "
+                f"— re-run: swarph hooks add {name}  (#825 fleet bind)")
+            continue
         if status != "installed":
             continue
         script = (hooks_home_p / bundle.script_name).expanduser()

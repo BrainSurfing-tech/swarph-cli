@@ -55,7 +55,7 @@ def test_extracts_the_term_ADJACENT_to_grep_not_the_first_quoted_string():
 
 
 def test_skips_flags_to_reach_the_pattern():
-    assert ch.extract_term("grep -rn --include=*.py 'def _board_grant' src/") == "def _board_grant"
+    assert ch.extract_term("grep -rn --include=*.py 'def _board_grant' src/") == "_board_grant"
 
 
 # ── the loud-failure contract ─────────────────────────────────────────────

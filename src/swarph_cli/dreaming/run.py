@@ -18,6 +18,12 @@ def main(argv=None) -> int:
         help="require enrich; refuse (rc=2) if SLM client is unavailable (#734)",
     )
     ap.add_argument("--verify-only", action="store_true")
+    ap.add_argument(
+        "--notify",
+        default=None,
+        metavar="CELL",
+        help="DM CELL when the finding set changes; unchanged set sends nothing (#937)",
+    )
     a = ap.parse_args(argv)
     if a.enrich and a.no_enrich:
         print("dreaming: refusing to run -- --enrich and --no-enrich conflict",
@@ -83,10 +89,18 @@ def main(argv=None) -> int:
     #   1  disagreements or surface_disagreements found — findings to read
     #   2  refused to run (dirty destination)
     #   3  RAN BUT ADJUDICATED NOTHING                  — not clean, not findings
+    #   4  notify send failed                          — instrument failure, not findings
     # `mention` is adjudicated (the artifact WAS compared to the world) but never
     # `bad`: the memory asserted nothing, so there is no finding to read.
     adjudicated = sum(1 for v in verdicts if v["verdict"] in ("agree", "disagree", "mention"))
     bad = [v for v in verdicts if v["verdict"] in ("disagree", "surface_disagreement")]
+    if getattr(a, "notify", None):
+        from swarph_cli.dreaming.notify import NotifySendError, apply, mesh_sender
+        try:
+            apply(out, verdicts, organized, a.notify, mesh_sender)
+        except NotifySendError as exc:
+            print("dreaming: notify failed -- %s" % exc, file=sys.stderr)
+            return 4
     if bad:
         return 1
     if adjudicated == 0:
