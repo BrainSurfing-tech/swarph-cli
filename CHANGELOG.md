@@ -1,19 +1,75 @@
 # Changelog
 
-## Unreleased
+## 0.65.0 -- 2026-09-23
 
-<<<<<<< HEAD
+- dreaming organize (#938): checks the MEMORY.md LINE limit as well as bytes. The harness loads
+  MEMORY.md and truncates after line 200, and the old byte-only check read "clean" at 197 lines
+  (2026-09-23). New findings: LINES (vs the 200-line truncation, target <= 188), CUT (the line where
+  the harness drops pointers: whichever of the line and byte cut points comes first) and DUP_TARGET
+  (two pointers to one file); DANGLING is unchanged. A same-line `SUPERSEDED <date>` note makes a
+  claim a mention, not a disagreement. `dreaming-report.md` now renders these findings and prints
+  lines beside bytes (they were collected but never shown). Reviewed by droplet (#324), who caught
+  a cut point of 249 instead of 201 when lines bind first. Fixed and pinned by a literal
+  cut_line=201 fixture that fails on the old code.
+- dreaming enrich (#764): one proposal row per normalised (file, link) with `supported_by` = the
+  number of DISTINCT sessions, never the proposal count; self-links dropped; `source_sha256`
+  populated or absent, never null. Before (0.64.0): N sessions proposing one link produced N rows;
+  an intermediate build counted proposals rather than sessions, fixed in #333 before merge.
+  Validated at 755529b on a live model by drop-on-meta-edge (#325); the #333 changes are covered
+  by tests.
+- dreaming notify (#937): a clean organize status line is no longer a finding, and organize
+  findings are keyed by category + named file with no counts or member lists. 0.64.0 would have
+  re-sent the DM on every memory edit (its key carried live byte counts; msg 48779).
+
+## 0.64.0 -- 2026-09-23
+
+- dreaming (#937): `swarph dreaming run --notify <cell>` sends ONE mesh DM to `<cell>` only
+  when the finding set changes (new and cleared findings named, with counts); an unchanged
+  set sends nothing. State is `.last-findings.json` beside the `--out` dir and advances only
+  after a successful send, so a failed send exits 4 and the next run retries the held
+  change. Before this, nightly dreaming wrote a report nobody read: the same 5 findings sat
+  for 7 nights (2026-09-17..23), two of them genuinely stale memory, fixed by hand a week
+  late. Validated on an installed build by drop-on-meta-edge (#321).
+- codegraph (#825): codegraph-on-grep flags a capped `match_count` instead of presenting a
+  truncated count as complete, extracts a recoverable symbol from a regex instead of
+  shredding it, and makes a partial bind legible in `hooks list` (`[partial]`, with the
+  missing events named) — lab-ovh ran PostToolUse-only from 09-11 to 09-23 with no readout
+  saying so.
+
+## 0.63.0 -- 2026-09-22
+
+- monitor (#126): `pending_from` is computed over EVERY inbox.log entry newer than
+  `last_delivered_id`, not over the 50-entry replay deque -- the deque bounds the
+  RETURNED LINES and the sender set was taken from it by convenience. Measured on a
+  live cell before the fix: `pending=177`, `pending_from` printed 4 peers, 12 distinct
+  senders were actually waiting, and the 8 it hid were by construction the ones who had
+  sent LEAST recently -- i.e. the longest waiters. The `pending` label now states what
+  the value counts: entries newer than a ledger that may never advance, which grows at
+  that cell's own DM rate for as long as the cursor is frozen. Two cells at the SAME
+  frozen cursor replayed 365 and 177 on identical code, so the number is not comparable
+  across cells and never was.
+- codegraph (#872): no caller identity => REFUSE. The package no longer guesses `lab-ovh`.
+- cli (#547): the verb list is derived from the registry, so banner, guide and registry
+  name one set instead of three disagreeing ones (8 / 15 / 46 before).
+- source_text (#874): the code-vs-prose splitter is lifted out of one pack into
+  `swarph_cli.source_text` -- a text search over source counts comments, docstrings and
+  string prose as executable code, and every such count is an upper bound presented as a
+  measurement.
+- ci (#831): `tools/check_review_signature.py` + `review-signature.yml` -- the
+  review-signature gate ported from lab-orchestrator/mesh-gateway.
+- spawn (#888): the opencode DATA dir moves out of the work-tree; the snapshot was
+  eating itself.
+- ci (#515): the macOS leg stops using GNU `timeout` and `/proc`, and the darwin `ps`
+  call decodes as utf-8 with replacement.
 - guide/onboard (#866): `swarph guide doctrine` -- bundled standard-of-evidence topic
   (Law Zero, working set, membership axis, trichotomy, five intake fields, #864
   durable-first). Approved extract is card #866 post 42503; pin test fails on silent
   fork. `onboard` prints the command after mechanics so a new cell meets the standard,
   not only the verbs.
-=======
 - board (#864): `cards say` on an unassigned card defaults `--to` to the project's
-  `owner_orchestrator` (second GET — the card payload does not carry the owner) and
+  `owner_orchestrator` (second GET -- the card payload does not carry the owner) and
   prints the chosen recipient plus why. Loud refusal survives when the owner is
   unresolvable; no silent placeholder peer (#259).
->>>>>>> 62e14ae (feat(board): cards say falls back to project owner (#864))
 
 ## 0.62.0 — 2026-09-16
 - opencode (#423): `OpencodeMembrane` — opencode as a durable swarph CELL. Isolation is `XDG_DATA_HOME` + `XDG_CONFIG_HOME` relocation (not `$HOME`, not a single data-dir knob) because opencode scopes its session DB **and** its plugin dir on those two, and keeps auth in the data dir. Sessions are opencode-owned: the cell carries no swarph-pinned UUID and resumes by per-directory discovery via `--session=<id>`. Ships a swarph hook plugin.

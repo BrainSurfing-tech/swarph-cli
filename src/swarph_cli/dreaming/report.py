@@ -48,10 +48,27 @@ def render(verdicts, organized, proposals, corpus, clone, enrich_note: str | Non
          "| verdict | n |", "|---|---|"]
     for k in ("disagree", "surface_disagreement", "mention", "unprobeable", "agree"):
         L.append("| %s | %d |" % (k, counts.get(k, 0)))
-    L += ["", "MEMORY.md: %d bytes before, %d bytes after (budget 24985)" % (
-        organized["index_bytes_before"], organized["index_bytes_after"])]
-    if organized["trimmed"]:
+    # Bytes AND lines (#938 / #332): the harness truncates on both; a byte-only
+    # line hid the line-budget findings that organize already collected.
+    lines_before = organized.get("index_lines_before")
+    lines_after = organized.get("index_lines_after")
+    if lines_before is None or lines_after is None:
+        L += ["", "MEMORY.md: %d bytes before, %d bytes after (budget 24985)" % (
+            organized["index_bytes_before"], organized["index_bytes_after"])]
+    else:
+        L += ["", "MEMORY.md: %d bytes / %d lines before, %d bytes / %d lines after "
+              "(budget 24985 bytes, harness line limit 200)" % (
+                  organized["index_bytes_before"], lines_before,
+                  organized["index_bytes_after"], lines_after)]
+    if organized.get("trimmed"):
         L.append("trimmed %d index line(s) to stay under budget" % len(organized["trimmed"]))
+    org_findings = [f for f in (organized.get("findings") or []) if f.strip()]
+    if org_findings:
+        # Verbatim — LINES, CUT, DANGLING, ORPHANS, DUP_TARGET, BUDGET, WARN…
+        # Drop's surface gap (#332): organize collected these and the report
+        # never printed them, so #REACH had nothing to deliver.
+        L += ["", "organize findings (%d):" % len(org_findings)]
+        L.extend(org_findings)
     L += ["", "enrichment proposals (all marked derived, none applied): %d" % len(proposals)]
     if enrich_note:
         L.append(enrich_note)
