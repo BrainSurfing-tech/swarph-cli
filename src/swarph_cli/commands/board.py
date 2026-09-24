@@ -165,7 +165,9 @@ def _card_edit_payload(actor, title, body, *, due_at=_SENTINEL, project_id=None,
     if body is not None:
         patch["body"] = body
     if due_at is not _SENTINEL:
-        patch["due_at"] = _normalize_due_at(due_at) if due_at else None
+        # "" is the gateway's CLEAR sentinel; None means "not mentioned" and the
+        # write is skipped while the old date is echoed back (#901).
+        patch["due_at"] = _normalize_due_at(due_at) if due_at else ""
     if project_id is not None:
         patch["project_id"] = int(project_id)   # #740: re-home; the gateway gates it (orchestrator + both owners)
     if priority is not None:
