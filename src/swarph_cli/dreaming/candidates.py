@@ -69,13 +69,25 @@ def _escalate_bindings(rows: list[dict]) -> list[dict]:  # noqa: D401 -- see doc
     # the file". All three were measured against the real corpus and all three
     # fabricate. See the docstring above for the specimens.
     out = list(rows)
-    by_line: dict[int, dict] = {}
+    by_line: dict[int, dict[str, list]] = {}
     for r in rows:
-        by_line.setdefault(r["line"], {})[r["kind"]] = r
+        by_line.setdefault(r["line"], {}).setdefault(r["kind"], []).append(r)
     for line, kinds in by_line.items():
-        u, a = kinds.get("unit_state"), kinds.get("listen_addr")
-        if not (u and a):
+        units = kinds.get("unit_state") or []
+        addrs = kinds.get("listen_addr") or []
+        if not (units and addrs):
             continue
+        # Two of the same kind on one line is last-wins if keyed by kind. Refuse
+        # instead of guessing which address or unit the line meant.
+        if len(addrs) > 1 or len(units) > 1:
+            if len(addrs) > 1:
+                out.append({**addrs[0], "kind": "unprobeable",
+                            "reason": "multiple_addresses"})
+            if len(units) > 1:
+                out.append({**units[0], "kind": "unprobeable",
+                            "reason": "multiple_units"})
+            continue
+        u, a = units[0], addrs[0]
         if _is_negated(a["context"]):
             # A memory that says "localhost is REFUSED" is a CORRECT negative
             # claim. Probing it finds nothing, which agrees with the memory --
@@ -90,7 +102,9 @@ def _escalate_bindings(rows: list[dict]) -> list[dict]:  # noqa: D401 -- see doc
     # The fallback must not fire when a pair EXISTED and was refused for another
     # reason -- "no unit_bind produced" cannot tell "never paired" from "paired
     # then refused", and reporting the wrong cause defeats the point of reasons.
-    paired = any(("unit_state" in k and "listen_addr" in k) for k in by_line.values())
+    paired = any(
+        (kinds.get("unit_state") and kinds.get("listen_addr"))
+        for kinds in by_line.values())
     if (not paired) and any(r["kind"] == "unit_state" for r in rows) and any(
             r["kind"] == "listen_addr" for r in rows):
         out.append({"file": rows[0]["file"], "line": 0, "kind": "unprobeable",
