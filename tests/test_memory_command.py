@@ -168,8 +168,10 @@ def test_memory_navigate_dispatches_and_is_failsafe(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("gbrain down")
     monkeypatch.setattr(mcp_server.memory, "list_pages", boom)
-    assert mcp_server._memory_navigate("list", tag="auth") == []
-    assert mcp_server._memory_navigate("bogus") == []
+    listed = mcp_server._memory_navigate("list", tag="auth")
+    assert listed.get("error", "").startswith("RuntimeError:")
+    bogus = mcp_server._memory_navigate("bogus")
+    assert bogus.get("status") == 422 and "bogus" in bogus.get("error", "")
 
 
 def test_memory_navigate_backlinks_op(monkeypatch):
@@ -199,7 +201,8 @@ def test_memory_navigate_unknown_op_is_empty(monkeypatch):
     from swarph_cli.commands import mcp_server
     monkeypatch.setattr(mcp_server.brain_ask, "_resolve_endpoint", lambda: "http://x/mcp")
     monkeypatch.setattr(mcp_server.brain_ask, "_resolve_token", lambda *a, **k: "tok")
-    assert mcp_server._memory_navigate("bogus", slug="a") == []
+    out = mcp_server._memory_navigate("bogus", slug="a")
+    assert out.get("status") == 422 and "bogus" in out.get("error", "")
 
 
 def _fake_corpus(monkeypatch, pages):

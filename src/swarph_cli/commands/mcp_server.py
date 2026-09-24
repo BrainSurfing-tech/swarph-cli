@@ -202,15 +202,16 @@ def _memory_navigate(op: str, slug: str | None = None, type: str | None = None,
     swarph_codegraph_query. Ops: 'get', 'list', 'links', 'backlinks' (incoming),
     'traverse' (multi-hop OKF edges via depth/direction). File-native graph.
 
-    Fail-safe: any backend/parse error, or an unrecognised op, resolves to [] or
-    {} — never raises."""
+    A zero list is ``{"result": []}``. A gateway 4xx/5xx is an error object
+    carrying the response body. Neither is silent empty output. Never raises."""
     try:
         url = brain_ask._resolve_endpoint()
         token = brain_ask._resolve_token(None, brain_ask._self_name())
         if op == "get" and slug:
             return memory.get_page(url, token, slug)
         if op == "list":
-            return memory.list_pages(url, token, type, tag, limit)
+            pages = memory.list_pages(url, token, type, tag, limit)
+            return pages if pages else {"result": []}
         if op == "links" and slug:
             return memory.links(url, token, slug)
         if op == "backlinks" and slug:
@@ -218,9 +219,15 @@ def _memory_navigate(op: str, slug: str | None = None, type: str | None = None,
         if op == "traverse" and slug:
             return [memory._as_okf_edge(f, t, d, h)
                     for (f, t, h, d) in memory.traverse(url, token, slug, depth, direction)]
-        return []
-    except Exception:
-        return []
+        # Unrecognised op: ask the gateway so its 422 is the answer, not silence.
+        memory._via_gateway(op, {"slug": slug, "type": type, "tag": tag, "limit": limit})
+        return {"error": f"unrecognised op {op!r}", "status": 422}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace") if exc.fp else ""
+        return {"error": raw or str(exc.reason), "status": exc.code}
+    except Exception as exc:
+        # `type` is a parameter of this function; do not call the builtin.
+        return {"error": f"{exc.__class__.__name__}: {exc}"}
 
 
 def _timeline_navigate(op: str, start: str = "", end: str = "", date: str = "",
