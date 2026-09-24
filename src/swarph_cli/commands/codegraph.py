@@ -37,12 +37,65 @@ import sys
 from swarph_cli.commands.codegraph_hook import _match_quality
 
 DEFAULT_INDEX = os.path.expanduser("~/.swarph/codegraph/index.db")
-# NOTE: named DEFAULT_CALLER_CELL, not "*_CALLER" — this is an A8 caller-CELL
-# identity (sensitivity-gate scoping), not a SwarphCall `role.subrole.specific`
-# caller tag, and must NOT trip the repo-wide caller-convention meta-guard
-# (tests/test_caller_meta_guard.py) which validates every `*_CALLER` constant
-# against that unrelated dotted-slug convention.
-DEFAULT_CALLER_CELL = "lab-ovh"
+# >>> THERE IS NO DEFAULT IDENTITY ANY MORE. THIS CONSTANT IS GONE ON PURPOSE. <<<
+#
+# It used to read `DEFAULT_CALLER_CELL = "lab-ovh"`, and that one line meant every
+# unconfigured caller on lab-ovh queried with the ORCHESTRATOR'S READ AUTHORITY.
+#
+# MEASURED 2026-09-18 (science-claude, mesh 43183/43186/43188). The gateway was never
+# bypassed and nothing was ever spoofed: `_query_via_gateway` sends NO caller field, so
+# the server binds identity from the bearer token, correctly. What the default did was
+# pick WHICH REAL TOKEN got presented — `_resolve_token(self_name, ...)` reads the file
+# that name points at. A cell asking a question on this box authenticated AS lab-ovh,
+# with lab-ovh's genuine credential, and got a full, plausible, correctly-authorised
+# answer belonging to somebody else.
+#
+# >>> A WRONG-IDENTITY WRITE ANNOUNCES ITSELF — a DM arrives signed by the wrong cell
+# and someone notices. A WRONG-IDENTITY READ ANNOUNCES NOTHING. <<< It was found only
+# because a repo its owner KNEW they owned was missing from their own results.
+#
+# WHY REFUSE RATHER THAN WARN (commander, 2026-09-18 04:44Z): a warning on a read that
+# returns a correct-looking answer is a line of text above a result the caller already
+# believes. And the cost of refusing was measured first, not assumed — of 8 executable
+# `swarph` invocations in systemd + cron on lab-ovh, 7 already pass `--as` or
+# `--token-file`, and the 8th (`monitor reexec-on-change`) cannot authenticate at all:
+# no --gateway, no --token-file, no --as exists on that verb. SCHEDULED WORK BREAKS IN
+# ZERO PLACES. The population that pays is interactive use, which is the population
+# that was silently mis-attributed.
+#
+# $SWARPH_SELF STILL WORKS AND IS THE INTENDED PATH. It is a DECLARED identity. What is
+# refused is the *undeclared* case, where a package-level guess stood in for one.
+IDENTITY_UNSET = object()  # sentinel: argparse default when --caller-cell is omitted
+
+
+class IdentityNotDeclared(RuntimeError):
+    """No caller identity was declared and there is no default to fall back to."""
+
+
+def require_caller_cell(explicit=None, *, verb: str) -> str:
+    """Resolve the caller cell, or REFUSE.
+
+    Order: explicit flag -> $SWARPH_SELF -> $SWARPH_CELL -> refuse.
+
+    The refusal names the verb and every way to satisfy it, because an error that
+    says only "identity unset" moves the work to the reader.
+    """
+    if explicit not in (None, IDENTITY_UNSET) and str(explicit).strip():
+        return str(explicit).strip()
+    for var in ("SWARPH_SELF", "SWARPH_CELL"):
+        v = (os.environ.get(var) or "").strip()
+        if v:
+            return v
+    raise IdentityNotDeclared(
+        f"swarph {verb}: NO CALLER IDENTITY DECLARED, and there is no default.\n"
+        f"  This used to fall back to 'lab-ovh', which meant an undeclared caller\n"
+        f"  queried with that cell's read authority and got somebody else's answer.\n"
+        f"  Declare one of:\n"
+        f"    --caller-cell <cell>      for this invocation\n"
+        f"    SWARPH_SELF=<cell>        for this shell or unit\n"
+        f"    SWARPH_CELL=<cell>        (MCP hosts)\n"
+        f"  It is NOT guessable: this box hosts several cells under one uid."
+    )
 
 # NOT 1 and NOT 2. A distinct code so "nothing was searched" can never be confused
 # with a crash or a usage error, and so a caller can branch on it specifically.
@@ -332,7 +385,7 @@ def _query_via_gateway(gateway: str, query: str, limit: int, token_file):
     from swarph_cli.commands.mesh import _post_json, _resolve_token  # local import: keeps
     # the local-only path free of any mesh dependency, so an offline cell still works.
 
-    self_name = os.environ.get("SWARPH_SELF") or DEFAULT_CALLER_CELL
+    self_name = require_caller_cell(verb="codegraph")
     token = _resolve_token(self_name, token_file)
     body = {"query": query, "limit": max(1, min(int(limit), 25))}
     status, payload = _post_json(gateway.rstrip("/") + "/codegraph", body, token)
@@ -352,7 +405,9 @@ def run_codegraph(argv) -> int:
                     "is configured (the server searches and returns the answer); falls back to a local index.")
     ap.add_argument("query", help="natural-language query, e.g. 'which function escapes HTML'")
     ap.add_argument("--index", default=DEFAULT_INDEX, help=f"index db (default {DEFAULT_INDEX})")
-    ap.add_argument("--caller-cell", default=DEFAULT_CALLER_CELL, help="A8 caller identity (default lab-ovh)")
+    ap.add_argument("--caller-cell", default=IDENTITY_UNSET,
+                    help="A8 caller identity. NO DEFAULT — else $SWARPH_SELF / $SWARPH_CELL, "
+                         "else the command REFUSES rather than guessing (it used to guess lab-ovh).")
     ap.add_argument("--limit", type=int, default=8)
     ap.add_argument("--json", action="store_true", help="machine-readable JSON output")
     ap.add_argument("--gateway", default=None,

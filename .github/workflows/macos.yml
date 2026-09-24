@@ -51,18 +51,15 @@
 
 name: macos
 
-# >>> DEACTIVATED 2026-08-21, COMMANDER'S CALL: "not ready." <<< The lane went
-# red on main (test_397_gh_identity_router token-routing, test_watchdog proc
-# ancestry — both Darwin-vs-Linux environment facts, not product regressions
-# observed on any real cell) and was MERGE-BLOCKING on PR #286: a red lane
-# that gates is worse than no lane (#554). Manual dispatch stays live so the
-# fix work can run it.
-#
-# RE-ENTRY CONDITION (this file's own doctrine — no permanent expected-red
-# without an expiry): re-enable pull_request/push when #554 lands — i.e. the
-# two red suites are fixed or carry declared exemptions with start dates and
-# end conditions, and the lane goes green on main by dispatch FIRST.
+# Re-enabled 2026-09-19 (#515). The two reds were fixed at the platform level,
+# not skipped: the gh-route wrapper is `env` (GNU `timeout` does not exist on
+# macOS) and `_pid_under` reads PPID via `ps` on darwin. The junit floor below
+# asserts those two node ids EXECUTED. A skipif(darwin) fails this file.
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -109,6 +106,22 @@ jobs:
           print(f"tests={tests} ran={ran} skipped={skips} failures+errors={bad}")
           assert bad == 0, f"{bad} failures/errors in junit"
           assert ran >= 600, f"collect-suspect: only {ran} tests ran (floor 600)"
+          # #515: these two must EXECUTE on macos-latest. A skip is a fail.
+          # Node ids, not a green summary — a collection change cannot pass silently.
+          need = {
+              "test_pid_under_walks_proc_ancestry",
+              "test_the_injected_token_REACHES_a_composed_command[wrapper-env-not-gnu-timeout]",
+          }
+          seen = {}
+          for tc in root.iter("testcase"):
+              name = tc.get("name") or ""
+              if name in need:
+                  seen[name] = tc.find("skipped") is not None
+          missing = need - set(seen)
+          assert not missing, f"node ids not collected: {sorted(missing)}"
+          skipped = [n for n, sk in seen.items() if sk]
+          assert not skipped, f"node ids skipped on the platform this leg exists to cover: {skipped}"
+          print("executed", sorted(seen))
           PY
 
       # A platform report, not a gate. The point of a first macOS runner is to

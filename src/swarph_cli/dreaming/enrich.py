@@ -20,18 +20,106 @@ ENRICH_SKIPPED_NO_SLM = "enrich skipped: no SLM client"
 
 
 def slm_client_available() -> bool:
-    """True iff the private-layout SLM client imports. Installed wheels lack
-    `workers` — that must degrade, not crash as exit 1 (#734)."""
+    """True iff SOME SLM client is usable: the private-layout one, else the
+    swarph-owned OpenAI-shape client (dreaming.slm) when it is configured AND
+    its endpoint answers.
+
+    ORDER IS DELIBERATE: the private client wins where it exists, so the one box
+    that has `workers` keeps its exact prior behaviour (storage_hub endpoint
+    resolution included) and this change is a pure ADDITION for everyone else.
+
+    Installed wheels lack `workers` — that must degrade, not crash as exit 1
+    (#734). Both branches return a bool and neither raises.
+    """
     try:
         from workers.slm_client import SLMClient  # noqa: F401
+        return True
     except ImportError:
-        return False
-    return True
+        pass
+    from . import slm
+    return slm.available()
 
 
 def _client():
-    from workers.slm_client import SLMClient
-    return SLMClient()
+    """Resolve a client in the same order slm_client_available() checks.
+
+    Callers reach here only after that returned True; if the endpoint died in
+    between, SLMClient() raises and enrich's per-session `except Exception`
+    turns it into ZERO proposals rather than a crash — the same degrade the
+    private path already had.
+    """
+    try:
+        from workers.slm_client import SLMClient
+        return SLMClient()
+    except ImportError:
+        from .slm import SLMClient as OwnedSLMClient
+        return OwnedSLMClient()
+
+
+def _manifest_sha(manifest: dict, file_key: str) -> str | None:
+    """Resolve sha256; model may omit .md while the manifest keys include it."""
+    if not file_key:
+        return None
+    candidates = [file_key]
+    if file_key.endswith(".md"):
+        candidates.append(file_key[:-3])
+    else:
+        candidates.append(file_key + ".md")
+    for key in candidates:
+        hit = manifest.get(key) or {}
+        sha = hit.get("sha256")
+        if sha:
+            return sha
+    return None
+
+
+def _norm_key_part(s: str | None) -> str:
+    """Strip + casefold — drop's #333: 'b.md' and 'b.md ' must be one row."""
+    return (s or "").strip().casefold()
+
+
+def _collapse_proposals(proposals: list[dict]) -> list[dict]:
+    """One row per normalised (file, proposed_link); supported_by = distinct sessions (#764/#333).
+
+    Exact-match dedup would discard agreement evidence — N sessions converging
+    on one link is the strongest signal. Collapse and COUNT; keep session ids.
+    supported_by is NEVER the proposal count: one session emitting the same
+    link twice still counts as 1 (#333).
+    """
+    groups: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for p in proposals:
+        file_raw = (p.get("file") or "").strip()
+        link_raw = (p.get("proposed_link") or "").strip()
+        if not file_raw or not link_raw:
+            continue
+        # Self-link: a file proposing itself is not enrichment (#333).
+        if _norm_key_part(file_raw) == _norm_key_part(link_raw):
+            continue
+        key = (_norm_key_part(file_raw), _norm_key_part(link_raw))
+        if key not in groups:
+            row = {
+                "file": file_raw,
+                "proposed_link": link_raw,
+                "rationale": p.get("rationale", ""),
+                "derived": True,
+                "supported_by": 0,
+                "sessions": [],
+            }
+            if p.get("source_sha256"):
+                row["source_sha256"] = p["source_sha256"]
+            groups[key] = row
+            order.append(key)
+        g = groups[key]
+        sid = p.get("session_id")
+        if sid and sid not in g["sessions"]:
+            g["sessions"].append(sid)
+        g["supported_by"] = len(g["sessions"])
+        if "source_sha256" not in g and p.get("source_sha256"):
+            g["source_sha256"] = p["source_sha256"]
+        if not g.get("rationale") and p.get("rationale"):
+            g["rationale"] = p["rationale"]
+    return [groups[k] for k in order]
 
 
 def enrich(clone: Path, records: list[dict], client=None) -> list[dict]:
@@ -79,18 +167,22 @@ def enrich(clone: Path, records: list[dict], client=None) -> list[dict]:
         for i in items:
             if not (isinstance(i, dict) and "file" in i and "link" in i):
                 continue
-            proposals.append({
+            row = {
                 "file": i["file"], "proposed_link": i["link"],
                 "rationale": i.get("why", ""), "derived": True,
                 # TWO COORDINATES, per GC2 and R2: source_sha256 says which FILE
                 # the proposal is against; session_id says which CONTEXT it came
                 # from. The hash alone answers only the first, and the talk's
                 # VERSIONING guardrail asks for both.
-                "source_sha256": manifest.get(i["file"], {}).get("sha256"),
                 "session_id": sid,
                 "transcript_range": s["range"],
-            })
-    return proposals
+            }
+            sha = _manifest_sha(manifest, i["file"])
+            if sha:
+                row["source_sha256"] = sha
+            # null source_sha256 is worse than absent (#764) — omit the key.
+            proposals.append(row)
+    return _collapse_proposals(proposals)
 
 
 def _sessions_from(records: list[dict]) -> dict:

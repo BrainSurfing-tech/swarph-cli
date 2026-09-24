@@ -4,6 +4,91 @@
 - monitor (#807, fourth defect): a second `ExecCondition=/usr/bin/test -x <shim>` before the import check — pip rewrites the module and the console script at different moments, so the import passed while the shim was absent and ExecStart 203/EXEC'd, paging once per upgrade (measured on the first real install after the repair, 19:07:03Z); the unit now skips until both artifacts exist
 - monitor (#807, third defect — droplet): `install-reexec` watches the trees the RESIDENTS load, read from each supervised monitor's own process (`/proc/<pid>/exe` and its `PYTHONPATH`), one `PathChanged=` per distinct tree labelled with the cells that load it, plus the shim's tree for the ExecStart; the installer's own import is no longer a watch source (a pipx shim over system-tree residents watched a tree nobody ran); residents this user cannot inspect are named in the report
 
+## 0.65.0 -- 2026-09-23
+
+- dreaming organize (#938): checks the MEMORY.md LINE limit as well as bytes. The harness loads
+  MEMORY.md and truncates after line 200, and the old byte-only check read "clean" at 197 lines
+  (2026-09-23). New findings: LINES (vs the 200-line truncation, target <= 188), CUT (the line where
+  the harness drops pointers: whichever of the line and byte cut points comes first) and DUP_TARGET
+  (two pointers to one file); DANGLING is unchanged. A same-line `SUPERSEDED <date>` note makes a
+  claim a mention, not a disagreement. `dreaming-report.md` now renders these findings and prints
+  lines beside bytes (they were collected but never shown). Reviewed by droplet (#324), who caught
+  a cut point of 249 instead of 201 when lines bind first. Fixed and pinned by a literal
+  cut_line=201 fixture that fails on the old code.
+- dreaming enrich (#764): one proposal row per normalised (file, link) with `supported_by` = the
+  number of DISTINCT sessions, never the proposal count; self-links dropped; `source_sha256`
+  populated or absent, never null. Before (0.64.0): N sessions proposing one link produced N rows;
+  an intermediate build counted proposals rather than sessions, fixed in #333 before merge.
+  Validated at 755529b on a live model by drop-on-meta-edge (#325); the #333 changes are covered
+  by tests.
+- dreaming notify (#937): a clean organize status line is no longer a finding, and organize
+  findings are keyed by category + named file with no counts or member lists. 0.64.0 would have
+  re-sent the DM on every memory edit (its key carried live byte counts; msg 48779).
+
+## 0.64.0 -- 2026-09-23
+
+- dreaming (#937): `swarph dreaming run --notify <cell>` sends ONE mesh DM to `<cell>` only
+  when the finding set changes (new and cleared findings named, with counts); an unchanged
+  set sends nothing. State is `.last-findings.json` beside the `--out` dir and advances only
+  after a successful send, so a failed send exits 4 and the next run retries the held
+  change. Before this, nightly dreaming wrote a report nobody read: the same 5 findings sat
+  for 7 nights (2026-09-17..23), two of them genuinely stale memory, fixed by hand a week
+  late. Validated on an installed build by drop-on-meta-edge (#321).
+- codegraph (#825): codegraph-on-grep flags a capped `match_count` instead of presenting a
+  truncated count as complete, extracts a recoverable symbol from a regex instead of
+  shredding it, and makes a partial bind legible in `hooks list` (`[partial]`, with the
+  missing events named) — lab-ovh ran PostToolUse-only from 09-11 to 09-23 with no readout
+  saying so.
+
+## 0.63.0 -- 2026-09-22
+
+- monitor (#126): `pending_from` is computed over EVERY inbox.log entry newer than
+  `last_delivered_id`, not over the 50-entry replay deque -- the deque bounds the
+  RETURNED LINES and the sender set was taken from it by convenience. Measured on a
+  live cell before the fix: `pending=177`, `pending_from` printed 4 peers, 12 distinct
+  senders were actually waiting, and the 8 it hid were by construction the ones who had
+  sent LEAST recently -- i.e. the longest waiters. The `pending` label now states what
+  the value counts: entries newer than a ledger that may never advance, which grows at
+  that cell's own DM rate for as long as the cursor is frozen. Two cells at the SAME
+  frozen cursor replayed 365 and 177 on identical code, so the number is not comparable
+  across cells and never was.
+- codegraph (#872): no caller identity => REFUSE. The package no longer guesses `lab-ovh`.
+- cli (#547): the verb list is derived from the registry, so banner, guide and registry
+  name one set instead of three disagreeing ones (8 / 15 / 46 before).
+- source_text (#874): the code-vs-prose splitter is lifted out of one pack into
+  `swarph_cli.source_text` -- a text search over source counts comments, docstrings and
+  string prose as executable code, and every such count is an upper bound presented as a
+  measurement.
+- ci (#831): `tools/check_review_signature.py` + `review-signature.yml` -- the
+  review-signature gate ported from lab-orchestrator/mesh-gateway.
+- spawn (#888): the opencode DATA dir moves out of the work-tree; the snapshot was
+  eating itself.
+- ci (#515): the macOS leg stops using GNU `timeout` and `/proc`, and the darwin `ps`
+  call decodes as utf-8 with replacement.
+- guide/onboard (#866): `swarph guide doctrine` -- bundled standard-of-evidence topic
+  (Law Zero, working set, membership axis, trichotomy, five intake fields, #864
+  durable-first). Approved extract is card #866 post 42503; pin test fails on silent
+  fork. `onboard` prints the command after mechanics so a new cell meets the standard,
+  not only the verbs.
+- board (#864): `cards say` on an unassigned card defaults `--to` to the project's
+  `owner_orchestrator` (second GET -- the card payload does not carry the owner) and
+  prints the chosen recipient plus why. Loud refusal survives when the owner is
+  unresolvable; no silent placeholder peer (#259).
+
+## 0.62.0 — 2026-09-16
+- opencode (#423): `OpencodeMembrane` — opencode as a durable swarph CELL. Isolation is `XDG_DATA_HOME` + `XDG_CONFIG_HOME` relocation (not `$HOME`, not a single data-dir knob) because opencode scopes its session DB **and** its plugin dir on those two, and keeps auth in the data dir. Sessions are opencode-owned: the cell carries no swarph-pinned UUID and resumes by per-directory discovery via `--session=<id>`. Ships a swarph hook plugin.
+- dreaming (#424): a swarph-**owned** OpenAI-shape SLM client (`dreaming/slm.py`, stdlib only, no host default per #578). **This is what lets `dreaming --enrich` run on an installed wheel at all** — `enrich` previously imported `workers.slm_client`, which exists in no wheel, so every installed consumer ran `--no-enrich` by necessity rather than by choice.
+- dreaming (#425): the SLM key env var is `SWARPH_SLM_TOKEN`. It was `SWARPH_SLM_API_KEY` for 30 minutes on `main` and **in no release** — see the note below.
+- memory (#417): a memory's snippet must not be its frontmatter delimiter — the cause of 21 `memory cached: ---` entries on the shared timeline between 2026-08-25 and 2026-09-15.
+
+### Note on the `SWARPH_SLM_TOKEN` name — narrower than a rename, and worth reading
+
+**No released swarph-cli ever read `SWARPH_SLM_API_KEY`.** `dreaming/slm.py` did not exist at v0.61.0; verified back to v0.54.0, no tag carries the string in `src/`. The old name lived on `main` only, between `abed88d` (2026-09-16 02:06:55Z) and `1090450` (02:36:43Z) — **30 minutes**. The only way to be affected is to have configured against a `main` checkout inside that window.
+
+Belt-and-braces, because the failure would be silent if it did happen: an absent env var is indistinguishable from an unconfigured one, so a stale `SWARPH_SLM_API_KEY` would produce zero enrichment proposals and no error. Swept before cutting — 0 occurrences across 539 live process environs, all systemd units and drop-ins, `/etc/default`, 23 `.env` files and the shell rc files on lab-ovh; droplet reports clean. Both sweeps carried a positive control (227 `PATH=` hits; 129 files mentioning `MESH_GATEWAY_URL`) so the zeros are not a probe that failed to run. **Not** verified on cells whose config neither box can read.
+
+Why renamed rather than exempted: the membranes' billing scrub strips `*_API_KEY` by suffix, so the old name could never have reached a spawned cell — and an exemption would have been a permanent hole in a billing control. The scrub keeps **zero** exemptions.
+
 ## 0.61.0 — 2026-09-15
 - reexec (#807/#419): `swarph-monitor-reexec.service` runs as **root**, and a `pip --user` install lives under the owner's `~/.local`, which root's interpreter never searches — so both `ExecCondition=` and `ExecStart=` raised `ModuleNotFoundError` on **every** fire, not only mid-install. `install-reexec` now derives the shim owner's user site and renders `Environment=PYTHONPATH=` when the consumed tree is one, and **refuses `--write`** when the condition it would install fails right now for the writing user. The earlier diagnosis (pip's mid-install window) was wrong and is corrected in the unit's own header: both causes predict identical journals, because a `.path` unit only ever fires at an install — firing the trigger alone, with no install running, is what told them apart.
 - reexec (#807/#420): rendered units carry a `# rendered-by: swarph-cli <version> (<package path>) install-reexec, <interpreter>, <UTC>` first line. The **package path** is load-bearing, not decoration: an unreleased tree reports the last release's version, so version alone cannot distinguish a unit rendered from a checkout (`.../src/...`) from one rendered from the published install (`.../site-packages/...`).

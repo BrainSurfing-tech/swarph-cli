@@ -641,10 +641,39 @@ def _fetch_peers(gateway: str, token: str) -> list[dict]:
     return []
 
 
+def _ppid(cur: int) -> int:
+    """Parent of ``cur``.
+
+    PRODUCTION, not a test helper (#515 / #492). ``_process_alive`` calls
+    ``_pid_under``, which calls this. Linux reads ``/proc/<pid>/stat`` —
+    ``comm`` can contain spaces and parens, so PPID is the field after the
+    final ``)``. Darwin has no ``/proc``; ``ps -o ppid=`` is the same fact.
+    A missing source raises ``OSError`` and the walker treats that as
+    "not under", which is the old Linux behaviour when ``/proc`` cannot
+    be read. ``monitor.py`` and ``orphan_daemons.py`` have their own
+    ``/proc`` readers and are not this function.
+    """
+    try:
+        with open(f"/proc/{cur}/stat", encoding="utf-8") as f:
+            data = f.read()
+    except OSError:
+        if sys.platform != "darwin":
+            raise
+        r = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(cur)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            raise OSError(f"ps could not read ppid of {cur}")
+        return int(r.stdout.strip())
+    after = data[data.rfind(")") + 2:].split()
+    return int(after[1])  # stat field 4 (PPID): state, ppid, ...
+
+
 def _pid_under(pid: int, ancestors: set, _max_depth: int = 40) -> bool:
     """Walk the PPID chain up from ``pid``; True if any ancestor is in
-    ``ancestors``. Reads ``/proc/<pid>/stat`` (Linux). The ``comm`` field can
-    contain spaces/parens, so parse PPID after the final ``)``."""
+    ``ancestors``. See ``_ppid`` for the platform split."""
     cur = pid
     for _ in range(_max_depth):
         if cur in ancestors:
@@ -652,11 +681,8 @@ def _pid_under(pid: int, ancestors: set, _max_depth: int = 40) -> bool:
         if cur <= 1:
             return False
         try:
-            with open(f"/proc/{cur}/stat", encoding="utf-8") as f:
-                data = f.read()
-            after = data[data.rfind(")") + 2:].split()
-            cur = int(after[1])  # stat field 4 (PPID): state, ppid, ...
-        except (OSError, ValueError, IndexError):
+            cur = _ppid(cur)
+        except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
             return False
     return cur in ancestors
 

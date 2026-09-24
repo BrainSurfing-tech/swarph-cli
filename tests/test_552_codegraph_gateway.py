@@ -31,6 +31,20 @@ import pytest
 from swarph_cli.commands import codegraph as cg
 
 
+@pytest.fixture(autouse=True)
+def _declare_identity(monkeypatch):
+    """DECLARE AN IDENTITY. Nothing in this file is about identity — it exercises
+    the relay contract — but before 2026-09-18 these tests ran on the package's
+    hardcoded `DEFAULT_CALLER_CELL = "lab-ovh"`. That default is gone (#872: an
+    undeclared caller inherited the orchestrator's read authority), so the code
+    path now REFUSES without one. The dependency this fixture replaces is itself
+    evidence of how far the fallback reached: a suite that never mentions
+    identity could not run without it.
+    """
+    monkeypatch.setenv("SWARPH_SELF", "test-cell")
+
+
+
 def test_gateway_chain_ends_at_the_canonical_mesh_variable(monkeypatch):
     """>>> THE CHAIN MUST END AT MESH_GATEWAY_URL, NOT SWARPH_BRAIN_GATEWAY. <<<
 

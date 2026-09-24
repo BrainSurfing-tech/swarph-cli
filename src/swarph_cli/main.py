@@ -93,6 +93,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "wake-hook-output": "swarph_cli.commands.wake_hook_output.run_wake_hook_output",
     "postcompact-hook-output": "swarph_cli.commands.postcompact_hook_output.run_postcompact_hook_output",
     "install-postcompact-hook": "swarph_cli.commands.install_postcompact_hook.run_install_postcompact_hook",
+    "install-opencode-plugin": "swarph_cli.commands.install_opencode_plugin.run_install_opencode_plugin",
     "memory-emit-hook": "swarph_cli.commands.memory_emit_hook.run_memory_emit_hook",
     "codegraph-hook": "swarph_cli.commands.codegraph_hook.run_codegraph_hook",
     "watchdog": "swarph_cli.commands.watchdog.run_watchdog",
@@ -130,6 +131,23 @@ _VERB_HANDLERS: dict[str, str] = {
     "guide": "swarph_cli.commands.guide.run_guide",
     # Future: "list-peers", "list-adapters", etc.
 }
+
+
+def registered_verbs() -> list[str]:
+    """#547: THE registry, enumerated. The no-args banner and `swarph guide` derive
+    from this one source; tests/test_547 asserts banner == guide == registry as SETS,
+    so a verb added here without a guide entry is a red test, not a silent gap."""
+    return sorted(_VERB_HANDLERS)
+
+
+def _verbs_block(width: int = 78) -> str:
+    """#547: the banner lists what EXISTS. Before this it listed 8 of 52 verbs by hand
+    and a reader experienced a small tool, not a gap."""
+    import textwrap
+    verbs = registered_verbs()
+    head = f"Verbs ({len(verbs)}) -- each has --help and a guide entry (swarph guide <verb>):"
+    return head + "\n" + textwrap.fill(", ".join(verbs), width=width,
+                                       initial_indent="  ", subsequent_indent="  ") + "\n"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -230,6 +248,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _print_banner() -> int:
     print(_BANNER.format(version=__version__), file=sys.stderr)
+    print(_verbs_block(), file=sys.stderr)
     return 0
 
 

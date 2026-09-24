@@ -66,7 +66,7 @@ _validate_uuid = validate_uuid_str  # historical helper name
 # ONE swarph-cli release, and entry into swarph_shared.VALID_PROVIDERS only in a
 # later one. spawn.py's guard is `VALID_PROVIDERS ⊆ MEMBRANES`, so this direction
 # is inert while the reverse raises at import for every fresh install (#247).
-CLI_ENABLED_PROVIDERS = VALID_PROVIDERS | {"muse", "cursor"}
+CLI_ENABLED_PROVIDERS = VALID_PROVIDERS | {"muse", "cursor", "opencode"}
 
 
 def _config_root() -> Path:

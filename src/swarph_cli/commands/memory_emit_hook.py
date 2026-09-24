@@ -67,15 +67,37 @@ def _memory_slug(file_path: str) -> Optional[str]:
 
 
 def _snippet(path: Path) -> str:
-    """First non-empty line, de-headed, collapsed, truncated. Unreadable file →
-    empty snippet (the pointer still emits — the write happened either way)."""
+    """One-line summary of a memory: its frontmatter `description`, else the first body
+    line. Unreadable file → empty snippet (the pointer still emits — the write happened).
+
+    Every memory file opens with YAML frontmatter, so "first non-empty line" returned the
+    literal `---` delimiter. That is a NON-EMPTY STRING, so the caller's `if snippet` guard
+    passed and the timeline took `memory cached: ---`. MEASURED 2026-09-15: 21 such entries
+    on the shared timeline between 2026-08-25 and 2026-09-15, every one of them useless.
+    An emptiness guard cannot catch a delimiter; the fix has to be here, not at the guard.
+    """
     try:
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            s = line.strip().lstrip("#").strip()
-            if s:
-                return " ".join(s.split())[:_SNIPPET_CHARS]
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except Exception:
-        pass
+        return ""
+    body = lines
+    if lines and lines[0].strip() == "---":
+        for i, line in enumerate(lines[1:], start=1):
+            if line.strip() == "---":
+                # `description:` exists precisely to be a one-line summary — prefer it.
+                for fm in lines[1:i]:
+                    if fm.strip().lower().startswith("description:"):
+                        d = fm.split(":", 1)[1].strip().strip('"').strip("'")
+                        if d:
+                            return " ".join(d.split())[:_SNIPPET_CHARS]
+                body = lines[i + 1:]
+                break
+        else:
+            body = lines[1:]          # unterminated frontmatter: skip the opening delimiter
+    for line in body:
+        s = line.strip().lstrip("#").strip()
+        if s and s != "---":          # a stray delimiter is never a summary
+            return " ".join(s.split())[:_SNIPPET_CHARS]
     return ""
 
 

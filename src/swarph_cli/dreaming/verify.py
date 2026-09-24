@@ -202,12 +202,28 @@ def _is_dated_record(context: str, asserted=None) -> bool:
                for ds, de in hits)
 
 
+def _is_superseded(context: str) -> bool:
+    """Same-line SUPERSEDED note: claim is a MENTION, not a live assertion (#938 addendum / #939).
+
+    grep -i supersed over dreaming/ was 0; corrected corpus lines still carried the
+    old address and re-flagged every night. An inline note must silence the probe.
+    """
+    return bool(re.search(r"SUPERSEDED", context or "", re.I))
+
+
 def verify(corpus: Path, manifest: dict) -> list[dict]:
     verdicts = []
     for c in extract_candidates(corpus):
         results = probe(c)
         base = {k: c[k] for k in ("file", "line", "kind", "ref", "asserted", "context")}
         base["source_sha256"] = manifest["files"].get(c["file"], {}).get("sha256")
+        # #938/#939: SUPERSEDED on the claim's line -> mention, never disagreement.
+        if _is_superseded(c.get("context", "")):
+            r = results[0] if results else {}
+            verdicts.append({**base, "observed": r.get("observed"),
+                             "surface": r.get("surface"),
+                             "verdict": "mention", "reason": "superseded"})
+            continue
         # GC4d: board_stage emits surface_disagreement ONLY, never disagree.
         # A card can sit at spec while the work is done; the corpus may be
         # the accurate side. Locked before any compare, including empty probe.
