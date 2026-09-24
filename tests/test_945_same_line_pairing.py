@@ -70,6 +70,41 @@ def test_d_two_units_one_address_is_multiple_units():
     assert "multiple_units" in _reasons(rows)
 
 
+def test_f_negation_past_200_chars_still_pairs(tmp_path):
+    # #945 does not widen the negation window. if false this reads unprobeable/negated_claim.
+    # extract stores context as line[:200], so a "NOT" appended past that cut still binds.
+    head = "gpt-service.service binds 100.64.189.91:8789 " + ("x" * 180)
+    assert len(head) >= 200 and "not" not in head[:200].lower()
+    line = head + " NOT running — nothing listens"
+    assert line.index("NOT") > 200
+    (tmp_path / "project_long.md").write_text(line + "\n", encoding="utf-8")
+    rows = extract_candidates(tmp_path)
+    binds = [r for r in rows if r["kind"] == "unit_bind"]
+    assert len(binds) == 1
+    assert binds[0]["asserted"] == "100.64.189.91:8789"
+    assert not any(r["kind"] == "unprobeable" and r.get("reason") == "negated_claim" for r in rows)
+
+
+def test_multiple_addresses_is_counted_in_the_report(tmp_path):
+    # if false this reads refusals: none — the unprobeable row never reached the report
+    from swarph_cli.dreaming.report import render
+    from swarph_cli.dreaming.verify import verify
+
+    (tmp_path / "project_gpt_service.md").write_text(GPT_SERVICE_LINE_19 + "\n", encoding="utf-8")
+    verdicts = verify(tmp_path, {"files": {}})
+    text = render(
+        verdicts,
+        {"index_bytes_before": 0, "index_bytes_after": 0},
+        [],
+        str(tmp_path),
+        "clone",
+    )
+    assert "| unprobeable |" in text
+    assert "multiple_addresses" in text
+    assert any(v["verdict"] == "unprobeable" and v["reason"] == "multiple_addresses"
+               for v in verdicts)
+
+
 def test_e_gpt_service_line_19_verbatim_is_refused(tmp_path):
     # if false this reads a unit_bind of gpt-service.service to one of the two addresses
     (tmp_path / "project_gpt_service.md").write_text(GPT_SERVICE_LINE_19 + "\n", encoding="utf-8")
