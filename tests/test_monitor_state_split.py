@@ -329,9 +329,10 @@ def test_replay_is_bounded_and_says_what_it_skipped(monkeypatch, tmp_path, capsy
 def test_replay_helper_returns_the_newest_and_counts_the_rest(tmp_path):
     log = tmp_path / "inbox.log"
     log.write_text("".join(json.dumps(_dm(i)) + "\n" for i in range(1, 11)), encoding="utf-8")
-    dms, skipped = mesh._replay_from_inbox_log(log, after_id=2, limit=3)
+    dms, skipped, pending_from = mesh._replay_from_inbox_log(log, after_id=2, limit=3)
     assert [d["id"] for d in dms] == [8, 9, 10]
     assert skipped == 5, "ids 3..7 were dropped by the cap and must be counted"
+    assert pending_from == ["droplet"], "single-sender fixture: full set still reports the one peer"
 
 
 # ── the `pull` sink: ledger advances on ACK, NEVER on observation ────────────
