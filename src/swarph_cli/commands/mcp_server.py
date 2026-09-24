@@ -42,6 +42,8 @@ import urllib.request
 from swarph_cli.commands import add
 from swarph_cli.commands import codegraph
 from swarph_cli.commands import brain_ask, memory, timeline
+from swarph_cli.commands import mesh as _mesh
+from swarph_cli.gateway_default import env_gateway
 
 # --------------------------------------------------------------------------- #
 # Config
@@ -243,6 +245,129 @@ def _timeline_navigate(op: str, start: str = "", end: str = "", date: str = "",
 
 
 # --------------------------------------------------------------------------- #
+# DM tools — card #735: a CHEAP COMPLETE read. Batch-shaped; no cursor; no ack verb.
+# --------------------------------------------------------------------------- #
+#
+# The affordable CLI form (`mesh inbox --peek`) truncates bodies at 160 chars and
+# the complete one (`--peek --json`) is ~23% envelope, so a cell rationally reads
+# the lossy one and does not know what it did not see. These helpers return ALL
+# unread with FULL bodies in ONE call, in a lean schema (null-noise keys dropped,
+# content never shortened). Deliberately absent, by spec: `next`/`previous`/
+# `close` (a cursor is hidden cross-turn state) and a separate `ack` (replying IS
+# the ack; anything unanswered keeps appearing in dm_unread). Errors are returned
+# as an `error` field, never disguised as an empty inbox.
+
+DM_FIELDS = ("id", "from_node", "to_node", "kind", "created_at", "thread_id", "content")
+DM_CEILING = 100        # spec #735: above this, the OLDEST 100 in full + a loud count of the rest
+DM_GATEWAY_WINDOW = 1000  # GET /messages `limit` max; `n` is the returned count, not a total (#587)
+
+
+def _dm_session(self_name: str | None = None) -> tuple[str, str, str]:
+    """(self, gateway, token) resolved the way every mesh verb resolves them:
+    explicit name, else $SWARPH_SELF; gateway from the environment; the peer's
+    own token file. Never another peer's unread by accident (#578 family)."""
+    who = _mesh._resolve_self_name(self_name)
+    gw = env_gateway().rstrip("/")
+    tok = _mesh._resolve_token(who, None)
+    return who, gw, tok
+
+
+def _lean(m: dict) -> dict:
+    """Typed fields with FULL content. Keys whose value is null/empty are dropped
+    (the gateway echoes read_at/channel/mentions/cc/related_task_id as noise);
+    `content` is always present and byte-identical to the source."""
+    out = {k: m.get(k) for k in DM_FIELDS if m.get(k) not in (None, "", [], {})}
+    out["content"] = m.get("content") or ""
+    return out
+
+
+def _dm_error(exc_or_text) -> dict:
+    return {"error": str(exc_or_text), "messages": [], "n": 0}
+
+
+def _dm_unread(self_name: str | None = None) -> dict:
+    """ALL unread DMs for self, full bodies, one call. Peek semantics: marks nothing
+    read. Above DM_CEILING the oldest DM_CEILING are returned in full and
+    `not_returned` says how many remain — never a shortened body, never silence."""
+    try:
+        who, gw, tok = _dm_session(self_name)
+        st, d = _mesh._http_get_json(
+            f"{gw}/messages?to={who}&unread_only=true&limit={DM_GATEWAY_WINDOW}", tok)
+        if not (200 <= st < 300):
+            return _dm_error(f"gateway {st}: {d.get('detail', d) if isinstance(d, dict) else d}")
+        msgs = sorted(d.get("messages", []), key=lambda m: int(m.get("id", 0)))
+        keep = msgs[:DM_CEILING]
+        return {
+            "self": who,
+            "messages": [_lean(m) for m in keep],
+            "n": len(keep),
+            "unread_seen": len(msgs),
+            "not_returned": len(msgs) - len(keep),
+            "window_full": len(msgs) >= DM_GATEWAY_WINDOW,
+        }
+    except Exception as exc:  # loud, never an empty inbox
+        return _dm_error(f"{type(exc).__name__}: {exc}")
+
+
+def _dm_reply(message_id: int, text: str, kind: str = "answer",
+              self_name: str | None = None) -> dict:
+    """Reply to a DM by id in ONE call. Routed like `mesh reply` (to the sender,
+    in the original's thread when it has one). THE REPLY IS THE ACK: the
+    replied-to message is marked read; nothing else is. Does not close board
+    obligations (`board obligations close` stays the close act, #562)."""
+    try:
+        if not (text or "").strip():
+            return {"error": "empty reply text"}
+        who, gw, tok = _dm_session(self_name)
+        original, why = _mesh._find_inbox_message(gw, tok, who, int(message_id), DM_GATEWAY_WINDOW)
+        if original is None:
+            return {"error": why}
+        to = original.get("from_node")
+        if not to:
+            return {"error": f"message {message_id} has no sender recorded; nobody to reply to"}
+        body = {"from_node": who, "to_node": to, "kind": kind, "content": text}
+        if original.get("thread_id"):
+            body["thread_id"] = original["thread_id"]
+        st, d = _mesh._post_json(f"{gw}/messages", body, tok)
+        if not (200 <= st < 300):
+            return {"error": f"gateway {st}: {d.get('detail', d) if isinstance(d, dict) else d}"}
+        ack_st, _ = _mesh._post_json(f"{gw}/messages/{int(message_id)}/read", {}, tok)
+        return {
+            "id": d.get("id"),
+            "to_node": to,
+            "kind": kind,
+            "thread_id": d.get("thread_id"),
+            "acked": int(message_id) if 200 <= ack_st < 300 else None,
+            "ack_status": ack_st,
+            "closed_obligations": d.get("closed_obligations") or [],
+        }
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _dm_thread(message_id: int, self_name: str | None = None) -> dict:
+    """The conversation a DM belongs to, full bodies, oldest first. A message with
+    no thread_id is returned alone (replies to it are routed by message id)."""
+    try:
+        who, gw, tok = _dm_session(self_name)
+        original, why = _mesh._find_inbox_message(gw, tok, who, int(message_id), DM_GATEWAY_WINDOW)
+        if original is None:
+            return _dm_error(why)
+        tid = original.get("thread_id")
+        if not tid:
+            return {"thread_id": None, "messages": [_lean(original)], "n": 1,
+                    "note": "message carries no thread_id; replies to it are routed by message id"}
+        st, d = _mesh._http_get_json(f"{gw}/messages?thread_id={tid}&limit={DM_GATEWAY_WINDOW}", tok)
+        if not (200 <= st < 300):
+            return _dm_error(f"gateway {st}: {d.get('detail', d) if isinstance(d, dict) else d}")
+        msgs = sorted(d.get("messages", []), key=lambda m: int(m.get("id", 0)))
+        return {"thread_id": tid, "messages": [_lean(m) for m in msgs], "n": len(msgs),
+                "window_full": len(msgs) >= DM_GATEWAY_WINDOW}
+    except Exception as exc:
+        return _dm_error(f"{type(exc).__name__}: {exc}")
+
+
+# --------------------------------------------------------------------------- #
 # FastMCP server — thin @tool wrappers over the helpers above
 # --------------------------------------------------------------------------- #
 #
@@ -295,6 +420,26 @@ try:
         The temporal hemisphere of the OKF traversal brain — entries are dated OKF nodes with
         [[link]] edges into knowledge. Complements semantic recall; $0, no model."""
         return _timeline_navigate(op, start=start, end=end, date=date, window=window)
+
+    @mcp.tool()
+    def swarph_dm_unread() -> dict:
+        """ALL unread DMs for this cell, FULL bodies, ONE call (card #735). Peek semantics:
+        nothing is marked read. No paging, no cursor. Replying with swarph_dm_reply is the
+        ack; anything unanswered keeps appearing here. `not_returned` > 0 means more than
+        the ceiling were unread and the oldest were returned in full."""
+        return _dm_unread()
+
+    @mcp.tool()
+    def swarph_dm_reply(message_id: int, text: str, kind: str = "answer") -> dict:
+        """Reply to a DM by id in one call, no content file. Routed to the sender in the
+        original's thread. The reply IS the ack: the replied-to message is marked read.
+        Does not close board obligations."""
+        return _dm_reply(message_id, text, kind)
+
+    @mcp.tool()
+    def swarph_dm_thread(message_id: int) -> dict:
+        """The conversation a DM belongs to, full bodies, oldest first."""
+        return _dm_thread(message_id)
 
 except ImportError as exc:  # pragma: no cover - exercised only when SDK absent
     mcp = None
@@ -358,7 +503,9 @@ def run_mcp_server(argv) -> int:
         prog="swarph mcp-server",
         description=(
             "Run an MCP (stdio) server exposing swarph_search / swarph_add / "
-            "swarph_describe / swarph_codegraph_query so any MCP host's AI "
+            "swarph_describe / swarph_codegraph_query / swarph_memory_navigate / "
+            "swarph_timeline_navigate and the DM tools swarph_dm_unread / "
+            "swarph_dm_reply / swarph_dm_thread (#735) so any MCP host's AI "
             "gets the swarph toolbelt."
         ),
     )
