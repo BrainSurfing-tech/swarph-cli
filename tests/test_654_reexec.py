@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import subprocess
 from pathlib import Path
 
@@ -594,6 +595,20 @@ def test_807d_resident_trees_reads_exe_and_environ_of_each_live_resident(tmp_pat
     monkeypatch.setattr(monitor.os, "readlink", lambda p: exes[int(p.split("/")[2])])
     monkeypatch.setattr(monitor, "_proc_pythonpath", lambda pid: "/pp" if pid == 102 else None)
     trees = monitor._resident_trees(tmp_path / "state")
+    if sys.platform.startswith("win"):
+        # The fake interpreters are sh scripts, which Windows cannot execute. The
+        # verb must ABSTAIN and name each resident it could not ask -- never return
+        # silence, which a reader cannot tell from "no resident loads a tree"
+        # (lab-ovh review on PR 422). Same shape as pack_stale_resident's
+        # CANDIDATE-UNKNOWABLE: a tree that could not be interrogated is not a tree
+        # that does not exist.
+        assert trees.pop("_unreadable") == [
+            ("cell-a", f"pid 101: {interp_a} could not be asked (OSError)"),
+            ("cell-b", f"pid 102: {interp_b} could not be asked (OSError)"),
+            ("cell-c", f"pid 103: {interp_a} could not be asked (OSError)"),
+        ]
+        assert trees == {}
+        return
     assert trees.pop("_unreadable") == []
     assert trees == {
         "/tree-a/swarph_cli/__init__.py": {"cells": ["cell-a", "cell-c"], "interpreter": str(interp_a)},

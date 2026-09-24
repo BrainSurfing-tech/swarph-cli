@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- monitor (#807, Windows): off Linux, `install-reexec` abstains by name instead of failing — each resident it could not ask is listed as `could not be asked (<error>)`, and an absent `systemctl` says `systemd supervision is Linux-only`. No silent `[]`: a tree the verb could not interrogate is not a tree that does not exist.
 - monitor (#807, fourth defect): a second `ExecCondition=/usr/bin/test -x <shim>` before the import check — pip rewrites the module and the console script at different moments, so the import passed while the shim was absent and ExecStart 203/EXEC'd, paging once per upgrade (measured on the first real install after the repair, 19:07:03Z); the unit now skips until both artifacts exist
 - monitor (#807, third defect — droplet): `install-reexec` watches the trees the RESIDENTS load, read from each supervised monitor's own process (`/proc/<pid>/exe` and its `PYTHONPATH`), one `PathChanged=` per distinct tree labelled with the cells that load it, plus the shim's tree for the ExecStart; the installer's own import is no longer a watch source (a pipx shim over system-tree residents watched a tree nobody ran); residents this user cannot inspect are named in the report
 

@@ -1544,8 +1544,13 @@ def _supervised_monitor_units() -> "list[tuple[str, str]]":
             capture_output=True, text=True, check=True,
             encoding="utf-8", errors="replace").stdout
     except (OSError, subprocess.CalledProcessError) as exc:
+        # Say WHY when the why is the platform: on Windows/macOS there is no
+        # systemd, so "cannot list" is the expected abstention, not a fault. On
+        # Linux a failing systemctl is a real fault and keeps the plain message.
+        why = ("" if sys.platform.startswith("linux") else
+               f": systemd supervision is Linux-only and this is {sys.platform}")
         raise RuntimeError(
-            "systemctl cannot list running swarph-monitor instances"
+            "systemctl cannot list running swarph-monitor instances" + why
         ) from exc
     by_peer: dict[str, str] = {}
     for line in out.splitlines():
