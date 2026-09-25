@@ -128,6 +128,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="write state and list unwatched cells; do not send")
     p.add_argument("--as", dest="sender", default="",
                    help="cell the alert is sent as; the unit sets this")
+    p.add_argument("--escalate",
+                   default=os.environ.get("WAKE_WATCHDOG_ESCALATE", "drop-on-meta-edge"),
+                   help="awake peer who also gets the outage DM (default: drop-on-meta-edge)")
     args = p.parse_args(argv)
     root = Path(os.environ.get("SWARPH_STATE_ROOT", os.path.expanduser("~/swarph_state")))
     state_path = Path(os.environ.get(
@@ -140,6 +143,12 @@ def main(argv: list[str] | None = None) -> int:
     cells = cells_under(root)
     state = load_state(state_path)
     alert = scan(cells, cmdlines, state, time.time(), timers=timers, crontab=crontab)
+    sender = args.sender.strip()
+    escalate = (args.escalate or "").strip()
+    if not args.dry_run and escalate and sender and escalate == sender:
+        print("wake_watchdog: escalation peer equals the sender; refusing to send",
+              file=sys.stderr)
+        return 2
     save_state(state_path, state)
     if args.dry_run:
         for name, inbox in cells.items():
@@ -163,7 +172,14 @@ def main(argv: list[str] | None = None) -> int:
             [swarph, "board", "cards", "say", "729", "--as", sender,
              "--to", name, "--content", f"{name}: DM wake is dead, re-arm"],
             check=False)
-        if dm.returncode == 0 and card.returncode == 0:
+        esc_ok = True
+        if escalate and escalate != name:
+            esc = subprocess.run(
+                [swarph, "mesh", "send", escalate, "--as", sender, "--kind", "fyi",
+                 "--content", f"{name}: DM wake is dead, re-arm"],
+                check=False)
+            esc_ok = esc.returncode == 0
+        if dm.returncode == 0 and card.returncode == 0 and esc_ok:
             state[name]["outage"] = True
             save_state(state_path, state)
         else:
