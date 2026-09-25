@@ -447,6 +447,11 @@ def _spawn_env_base(cell: Cell) -> dict[str, str]:
     env = scrub_env_for_subprocess()
     env["SWARPH_SPAWN"] = "1"
     env["SWARPH_SELF"] = cell.name
+    mode = os.environ.get("SWARPH_CHANNEL") or ""
+    if mode in {"allowlisted", "dev"}:
+        env["SWARPH_CHANNEL_CELL"] = cell.name
+    else:
+        env.pop("SWARPH_CHANNEL_CELL", None)
     return env
 
 
@@ -963,6 +968,12 @@ def _print_dry_run(
             file=sys.stderr,
         )
     print(f"#   provider:    {cell.provider}", file=sys.stderr)
+    channel_cell = _spawn_env_base(cell).get("SWARPH_CHANNEL_CELL")
+    if channel_cell:
+        print(
+            f"#   channel:     plugin:swarph@swarph, SWARPH_CHANNEL_CELL={channel_cell}",
+            file=sys.stderr,
+        )
     if cell.lineage is not None:
         print(
             f"#   lineage:     parent_peer_id="
