@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import sys
 import threading
@@ -115,16 +116,20 @@ def run_filter(
 
 
 def run_once(path: str, stdout: IO[str], *, timeout: float = 2.0) -> int:
-    """Follow the inbox file itself. Print the first real DM and exit 0.
+    """Follow the inbox file from EOF, like tail -n 0. Print the first real DM.
 
-    No child tail. Receipts and chatter are dropped, same as the stdin filter.
+    Bytes already in the file are not a wake. No child tail. Receipts are dropped.
     """
     deadline = time.monotonic() + timeout
-    pos = 0
+    pos = None
     while time.monotonic() < deadline:
         try:
             with open(path, encoding="utf-8") as fh:
-                fh.seek(pos)
+                if pos is None:
+                    fh.seek(0, os.SEEK_END)
+                    pos = fh.tell()
+                else:
+                    fh.seek(pos)
                 chunk = fh.read()
                 pos = fh.tell()
         except FileNotFoundError:
@@ -156,14 +161,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="silence-alert threshold (default: %(default)s)",
     )
     p.add_argument("--once", action="store_true",
-                   help="follow an inbox file, print the first real DM, exit 0")
+                   help="follow an inbox file from EOF, print the first real DM, exit 0")
     p.add_argument("--inbox", default="", help="inbox.log path for --once")
+    p.add_argument("--timeout", type=float, default=2.0,
+                   help="seconds --once waits for a new DM (default: %(default)s)")
     args = p.parse_args(argv)
     if args.once:
         if not args.inbox:
             print("dm_notify_filter --once needs --inbox", file=sys.stderr)
             return 2
-        return run_once(args.inbox, sys.stdout)
+        return run_once(args.inbox, sys.stdout, timeout=args.timeout)
     return run_filter(sys.stdin, sys.stdout, idle_seconds=args.idle_seconds)
 
 
