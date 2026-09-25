@@ -71,6 +71,7 @@ def estimate_tokens(text: Optional[str]) -> int:
 
 
 class MeteredGeminiBackend:
+    KIND = "semantic"
     """google-genai Developer API — the v1 DEFAULT metered backend. Real
     ``usage_metadata`` (prompt/candidates/thoughts token counts), pennies per
     call, no subscription-quota throttling.
@@ -142,6 +143,7 @@ class MeteredGeminiBackend:
 
 
 class MeteredMistralBackend:
+    KIND = "semantic"
     """Mistral AI's own API — the fifth bench lane (card #323).
 
     WHY THIS EXISTS: ``swarph bench`` could already PRICE mistral (90
@@ -228,6 +230,7 @@ class MeteredMistralBackend:
 
 
 class SubscriptionBackend:
+    KIND = "semantic"
     """STUB/interface-only backend for a $0 subscription path (e.g. a node's
     own CLI/OIDC lane). Deliberately NOT coupled to the reference stack's
     :878x/:879x lane map (decision #3) — a caller supplies ``call_fn`` to
@@ -384,7 +387,8 @@ def _noul_labels(question: Optional[dict]) -> tuple[str, str]:
     )
 
 
-def _typed_value(payload: dict, request: Optional[dict] = None) -> tuple[Any, Optional[float]]:
+def _typed_value(payload: dict, request: Optional[dict] = None,
+                 threshold: Optional[float] = None) -> tuple[Any, Optional[float]]:
     """Pull the typed answer out of a Jev /v1/systemone response.
 
     Prefers the question named ``answer``; otherwise the first question.
@@ -406,13 +410,15 @@ def _typed_value(payload: dict, request: Optional[dict] = None) -> tuple[Any, Op
             if key == "noul":
                 p_true = float(block[key])
                 pos, neg = _noul_labels(_noul_question(request or {}))
-                label = pos if p_true >= _NOUL_THRESHOLD else neg
+                cut = _NOUL_THRESHOLD if threshold is None else threshold
+                label = pos if p_true >= cut else neg
                 return label, p_true
             return block[key], None
     raise ValueError("systemone answer has no choice, noul, yes, or score")
 
 
 class RuleBackend:
+    KIND = "typed"
     """In-process callable. ``model_id`` is ``module:callable``.
 
     The callable receives ``(prompt, system)`` when it takes two arguments,
@@ -446,6 +452,7 @@ class RuleBackend:
 
 
 class TypedHttpBackend:
+    KIND = "typed"
     """POST a bench item to a Jev-compatible ``/v1/systemone`` server.
 
     ``model_id`` is the server base (``http://127.0.0.1:<port>``) or a full
@@ -495,4 +502,143 @@ class TypedHttpBackend:
             tokens_out=int(usage.get("output_tokens") or 0),
             latency_s=round(time.perf_counter() - t0, 6),
             estimated=False,
+        )
+
+
+def _dig(payload: dict, dotted: str):
+    cur: Any = payload
+    for part in dotted.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+def _redact(text: str, secrets: list[tuple[str, str, str]]) -> str:
+    """Replace the exact key and ``<scheme> <key>`` with ``<redacted:ENVNAME>``."""
+    if not text:
+        return text
+    for value, envname, scheme in secrets:
+        if not value:
+            continue
+        if scheme:
+            text = text.replace(f"{scheme} {value}", f"<redacted:{envname}>")
+        text = text.replace(value, f"<redacted:{envname}>")
+    return text
+
+
+class HttpBackend:
+    """Authenticated HTTP arm. typed-http is the no-auth typed case of this shape.
+
+    The key is read from the named env var at dispatch and placed only in the
+    declared header. A non-2xx error is ``HTTP <status> <reason>`` and never
+    the response body.
+    """
+
+    def __init__(self, *, name: str, kind: str, base_url: str, path: str,
+                 auth: Optional[dict] = None, usage: Optional[dict] = None,
+                 price: Optional[dict] = None, egress: str = "external",
+                 noul_threshold: Optional[float] = None, transport=None):
+        self.name = name
+        self.KIND = kind
+        self.base_url = base_url.rstrip("/")
+        self.path = path
+        self.auth = auth
+        self.usage = usage or {}
+        self.price = price
+        self.egress = egress
+        self.noul_threshold = noul_threshold
+        self.transport = transport
+        self.calls = 0
+
+    def missing_creds(self) -> list[str]:
+        if not self.auth:
+            return []
+        env = self.auth.get("env") or ""
+        if not os.environ.get(env):
+            return [f"{env} (provider {self.name})"]
+        return []
+
+    def secrets(self) -> list[tuple[str, str, str]]:
+        if not self.auth:
+            return []
+        env = self.auth.get("env") or ""
+        value = os.environ.get(env) or ""
+        if not value:
+            return []
+        return [(value, env, self.auth.get("scheme") or "")]
+
+    def generate(self, model_id: str, prompt: str, system: str = "") -> BackendResult:
+        t0 = time.perf_counter()
+        secrets = self.secrets()
+        try:
+            endpoint = self.base_url + self.path
+            if self.KIND == "typed":
+                body = _request_body(prompt, system)
+            else:
+                body = {
+                    "model": model_id or self.name,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                }
+            headers = {"Content-Type": "application/json"}
+            if self.auth:
+                env = self.auth["env"]
+                value = os.environ.get(env) or ""
+                scheme = self.auth.get("scheme") or ""
+                token = f"{scheme} {value}".strip() if scheme else value
+                headers[self.auth["header"]] = token
+            raw_body = json.dumps(body).encode()
+            self.calls += 1
+            if self.transport is not None:
+                status, reason, raw = self.transport(endpoint, headers, raw_body)
+            else:
+                req = urllib.request.Request(
+                    endpoint, data=raw_body, headers=headers, method="POST")
+                try:
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        status, reason, raw = resp.status, resp.reason, resp.read()
+                except urllib.error.HTTPError as exc:
+                    status, reason, raw = exc.code, exc.reason, exc.read()
+            if status < 200 or status >= 300:
+                return BackendResult(
+                    text="", tokens_in=0, tokens_thought=0, tokens_out=0,
+                    latency_s=round(time.perf_counter() - t0, 6),
+                    estimated=False, error=_redact(f"HTTP {status} {reason}", secrets))
+            payload = json.loads(raw.decode() or "{}")
+            if not isinstance(payload, dict):
+                raise ValueError("response is not an object")
+            if self.KIND == "typed":
+                label, p_true = _typed_value(payload, body, self.noul_threshold)
+                rendered = {"answer": label}
+                if p_true is not None:
+                    rendered["p_true"] = p_true
+                text = json.dumps(rendered)
+                in_path = self.usage.get("in") or "usage.input_tokens"
+                out_path = self.usage.get("out") or "usage.output_tokens"
+            else:
+                choices = payload.get("choices") or []
+                message = (choices[0].get("message") or {}) if choices else {}
+                text = message.get("content") or ""
+                if not text:
+                    raise ValueError("semantic response has no content")
+                in_path = self.usage.get("in") or "usage.prompt_tokens"
+                out_path = self.usage.get("out") or "usage.completion_tokens"
+            tin = _dig(payload, in_path)
+            tout = _dig(payload, out_path)
+            text = _redact(text, secrets)
+        except Exception as exc:
+            return BackendResult(
+                text="", tokens_in=0, tokens_thought=0, tokens_out=0,
+                latency_s=round(time.perf_counter() - t0, 6),
+                estimated=False, error=_redact(str(exc), secrets))
+        return BackendResult(
+            text=text,
+            tokens_in=int(tin or 0),
+            tokens_thought=0,
+            tokens_out=int(tout or 0),
+            latency_s=round(time.perf_counter() - t0, 6),
+            estimated=tin is None or tout is None,
         )
