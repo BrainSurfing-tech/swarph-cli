@@ -186,6 +186,19 @@ def _build_parser() -> argparse.ArgumentParser:
     sidecar.add_argument("--once", action="store_true", help="poll once and exit")
     _add_common(sidecar)
 
+    wait = sub.add_parser(
+        "wait",
+        help="block until the next real DM, print it, and exit",
+    )
+    wait.add_argument("--once", action="store_true", required=True,
+                      help="one-shot: exit after the next real DM or the timeout")
+    wait.add_argument("--as", dest="self_name", required=True,
+                      help="cell whose sidecar inbox to wait on. Required. "
+                           "Does not fall back to SWARPH_SELF.")
+    wait.add_argument("--max-wait-s", type=float, default=1500,
+                      help="give up after this many seconds (default 1500) and "
+                           "print the re-arm line")
+
     return p
 
 
@@ -2731,6 +2744,91 @@ def _run_sidecar(args: argparse.Namespace) -> int:
             state.pidfile_path.unlink(missing_ok=True)
 
 
+def _rearm_line(cell: str) -> str:
+    return f"swarph mesh wait --once --as {cell}"
+
+
+def _wait_pending(text: str, cell: str, last_id: int) -> list[dict]:
+    from swarph_cli.dm_frame import rows
+    from swarph_cli.scripts.dm_notify_filter import is_real_dm
+
+    pending = []
+    for row in rows(text):
+        if row.get("to_node") != cell or not is_real_dm(row):
+            continue
+        try:
+            rid = int(row["id"])
+        except (TypeError, ValueError):
+            continue
+        if rid <= last_id:
+            continue
+        pending.append(row)
+    pending.sort(key=lambda row: int(row["id"]))
+    return pending
+
+
+def _emit_wait(cell: str, pending: list[dict]) -> int | None:
+    """Print frames, then the re-arm line. Return the last id printed, or None."""
+    from swarph_cli.dm_frame import frame_text
+
+    shown = pending[:20]
+    for row in shown:
+        print(frame_text(row), flush=True)
+    if len(pending) > 20:
+        print(f"{len(pending) - 20} more, read the inbox", flush=True)
+    print(_rearm_line(cell), flush=True)
+    if not shown:
+        return None
+    return int(shown[-1]["id"])
+
+
+def _run_wait(args: argparse.Namespace) -> int:
+    from swarph_cli.channel import sidecar_of
+
+    cell = args.self_name
+    if not cell:
+        print("swarph mesh wait: --as is required", file=sys.stderr)
+        return 2
+    side = sidecar_of(cell)
+    inbox = side / "inbox.log"
+    if not inbox.is_file():
+        print(f"swarph mesh wait: inbox.log is missing: {inbox}", file=sys.stderr)
+        return 2
+    age = time.time() - inbox.stat().st_mtime
+    if age > 300 and pidfile_status(side / "monitor.pid")[0] not in ("live_ours", "foreign"):
+        print(
+            f"swarph mesh wait: inbox.log is {int(age)}s old and the sidecar is not running: {inbox}",
+            file=sys.stderr,
+        )
+        return 2
+    cursor_path = side / "wait_cursor.json"
+    last_id = -1
+    if cursor_path.is_file():
+        try:
+            saved = json.loads(cursor_path.read_text(encoding="utf-8"))
+            last_id = int(saved.get("last_delivered_id", -1))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            last_id = -1
+    deadline = time.monotonic() + float(args.max_wait_s)
+    while True:
+        pending = _wait_pending(inbox.read_text(encoding="utf-8", errors="replace"), cell, last_id)
+        if pending:
+            delivered = _emit_wait(cell, pending)
+            if delivered is not None:
+                cursor_path.write_text(
+                    json.dumps({"last_delivered_id": delivered}) + "\n",
+                    encoding="utf-8",
+                )
+            return 0
+        if time.monotonic() >= deadline:
+            waited = args.max_wait_s
+            shown = int(waited) if float(waited) == int(waited) else waited
+            print(f"no DM in {shown}s; re-arm: {_rearm_line(cell)}", flush=True)
+            print(_rearm_line(cell), flush=True)
+            return 0
+        time.sleep(0.1)
+
+
 def run_mesh(argv: list[str]) -> int:
     parser = _build_parser()
     try:
@@ -2747,6 +2845,8 @@ def run_mesh(argv: list[str]) -> int:
             return _run_peers(args)
         if args.command == "sidecar":
             return _run_sidecar(args)
+        if args.command == "wait":
+            return _run_wait(args)
         parser.error(f"unknown command: {args.command}")
     except RuntimeError as exc:
         print(f"swarph mesh: {exc}", file=sys.stderr)
