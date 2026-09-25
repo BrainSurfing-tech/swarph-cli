@@ -10,6 +10,7 @@ Contract from the live gateway OpenAPI:
   GET  /board/cards/{id}
   PATCH /board/cards/{id} {stage,assignee,links,actor}
 """
+import json
 from swarph_cli.commands import board
 
 
@@ -209,10 +210,20 @@ def test_card_edit_payload_clear_due():
     assert p["due_at"] == ""
 
 
-def _run_edit(monkeypatch, argv, patch_impl):
+def _run_edit(monkeypatch, argv, patch_impl, *, tmp_path=None, get_impl=None):
     monkeypatch.setattr(board, "_resolve_self_name", lambda *_a, **_k: "cursor-lin")
     monkeypatch.setattr(board, "_resolve_token", lambda *_a, **_k: "tok")
     monkeypatch.setattr(board, "_patch_json", patch_impl)
+    # #596: edit now READS the card first and captures the pre-image locally.
+    # Both are stubbed here so the existing dispatch tests stay about dispatch.
+    monkeypatch.setattr(board, "_http_get_json", get_impl or (lambda *_a, **_k: (
+        200, {"id": 125, "title": "T1", "body": "B1", "body_version": 2})))
+    if tmp_path is not None:
+        monkeypatch.setattr(board, "card_preimage_path",
+                            lambda: tmp_path / "pre.jsonl")
+    else:
+        monkeypatch.setattr(board, "_write_card_preimage",
+                            lambda *_a, **_k: "(stubbed)")
     return board.run_board(argv)
 
 
@@ -244,6 +255,55 @@ def test_edit_dispatch_surfaces_the_gateway_refusal(monkeypatch, capsys):
                                           "with an execute grant, ..."}))
     assert rc == 1
     assert "execute grant" in capsys.readouterr().err
+
+
+# ── #596: the pre-image the EDITING MACHINE keeps ──────────────────────────
+# The gateway retains a replaced TITLE (989c83d) and, for a body edit, only
+# {by, at, chars} — the replaced BODY text exists nowhere. Until #596's side
+# table ships, an edit that could not capture its pre-image must REFUSE.
+
+def test_edit_captures_the_preimage_before_patching(monkeypatch, tmp_path):
+    order = []
+    def fake_get(url, token, **k):
+        order.append("get")
+        return 200, {"id": 125, "title": "OLD T", "body": "OLD B", "body_version": 7}
+    def fake_patch(url, body, token, **k):
+        order.append("patch")
+        return 200, {"id": 125, "body_version": 8}
+    rc = _run_edit(monkeypatch, ["cards", "edit", "125", "--body", "NEW B"],
+                   fake_patch, tmp_path=tmp_path, get_impl=fake_get)
+    assert rc == 0
+    assert order == ["get", "patch"], "the read must PRECEDE the write"
+    lines = (tmp_path / "pre.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["prev_body"] == "OLD B" and rec["new_body"] == "NEW B"
+    assert rec["prev_title"] == "OLD T" and rec["body_version"] == 7
+
+
+def test_edit_refuses_when_the_card_cannot_be_read(monkeypatch, capsys, tmp_path):
+    def boom(*_a, **_k):
+        raise AssertionError("a PATCH must not follow a failed read — the "
+                             "replaced text would exist nowhere")
+    rc = _run_edit(monkeypatch, ["cards", "edit", "125", "--body", "NEW"],
+                   boom, tmp_path=tmp_path,
+                   get_impl=lambda *_a, **_k: (503, {"detail": "upstream"}))
+    assert rc == 1
+    assert "refusing to write" in capsys.readouterr().err
+    assert not (tmp_path / "pre.jsonl").exists()
+
+
+def test_preimage_append_does_not_merge_onto_an_unterminated_line(tmp_path, monkeypatch):
+    path = tmp_path / "pre.jsonl"
+    path.write_text('{"at": "earlier", "card": 1}')          # NO trailing newline
+    monkeypatch.setattr(board, "card_preimage_path", lambda: path)
+    board._write_card_preimage("cursor-lin", "http://gw", 125,
+                               {"title": "T", "body": "B", "body_version": 1},
+                               {"body": "B2"})
+    lines = path.read_text().splitlines()
+    assert len(lines) == 2, "the append must not merge onto the unterminated line"
+    assert json.loads(lines[0])["at"] == "earlier"
+    assert json.loads(lines[1])["prev_body"] == "B"
 
 
 # ── #590: obligations list — the read half of the ledger ────────────────────

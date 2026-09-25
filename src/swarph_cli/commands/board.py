@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 # #532 — negative-branch marker detection. THREE COPIES exist and no single
@@ -30,6 +33,7 @@ from typing import Optional
 # substring test can know a falsifier exists.
 _FAIL_MARKER_RE = re.compile(r"(?<![\w-])fail(?:s|ed|ing|ures?)?(?![\w-])", re.IGNORECASE)
 
+from swarph_cli.capture.paths import card_preimage_path
 from swarph_cli.commands._content import ContentError, add_content_args, resolve_content
 from swarph_cli.commands._display import sanitize_terminal as _s
 from swarph_cli.commands.mesh import (
@@ -176,6 +180,49 @@ def _card_edit_payload(actor, title, body, *, due_at=_SENTINEL, project_id=None,
         raise ValueError(
             "nothing to edit — pass --title, --body, --due, --project and/or --priority")
     return patch
+
+
+def _write_card_preimage(actor, gateway, card_id, card, patch) -> Path:
+    """Append the card's CURRENT title and body to a local log BEFORE an edit
+    replaces them. Returns the path written.
+
+    >>> WHY THE CLIENT AND NOT THE SERVER. <<< #596 is fixed for TITLE only: the
+    gateway retains the replaced title in ``body_history`` (mesh-gateway 989c83d,
+    live since 2026-09-17 13:22Z) and for a BODY edit appends {by, at, chars} —
+    who, when, and the length of the NEW text. The replaced body is gone, and
+    #596's side table (the system-wide fix) is a gateway change behind a deploy
+    gate. This is the footprint the EDITING MACHINE can keep on its own.
+
+    ponytail: one file, one box. It covers edits issued FROM HERE and nothing
+    else — a body replaced from another cell is still unrecoverable, and
+    "a transcript is a copy of the board nobody indexes" (drop-on-meta-edge,
+    #596) applies to this file too. The side table remains the real fix; this
+    only makes the window survivable.
+    """
+    rec = {
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "by": actor,
+        "gateway": gateway,
+        "card": card_id,
+        "body_version": card.get("body_version"),
+        "prev_title": card.get("title"),
+        "prev_body": card.get("body"),
+        "new_title": patch.get("title"),
+        "new_body": patch.get("body"),
+    }
+    path = card_preimage_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # A previous line with no trailing newline would MERGE with this one and
+    # destroy both records; the reader is json-per-line.
+    prefix = ""
+    if path.exists() and path.stat().st_size:
+        with path.open("rb") as fh:
+            fh.seek(-1, os.SEEK_END)
+            if fh.read(1) != b"\n":
+                prefix = "\n"
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(prefix + json.dumps(rec, ensure_ascii=False) + "\n")
+    return path
 
 
 def _apply_label(current: list, action: str, label: str) -> list:
@@ -1241,12 +1288,32 @@ def run_board(argv: list[str]) -> int:
             except ValueError as exc:
                 print(f"swarph board cards edit: {exc}", file=sys.stderr)
                 return 2
+            # READ BEFORE WRITE, and REFUSE if either the read or the capture
+            # fails. This mirrors `label`'s read-modify-write guard for a
+            # different reason: there the failed read would clobber the other
+            # labels; here it would destroy text nothing can recover (#596).
+            st_cur, cur = _http_get_json(f"{gw}/board/cards/{args.id}", token)
+            if st_cur != 200 or not isinstance(cur, dict):
+                print(f"swarph board cards edit: cannot read card #{args.id} "
+                      f"before editing (HTTP {st_cur}) — refusing to write. The "
+                      f"gateway keeps NO recoverable copy of a replaced body "
+                      f"(#596), so an edit whose pre-image was not captured is "
+                      f"an unrecoverable one", file=sys.stderr)
+                return 1
+            try:
+                pre = _write_card_preimage(self_name, gw, args.id, cur, patch)
+            except OSError as exc:
+                print(f"swarph board cards edit: cannot write the pre-image log "
+                      f"({exc}) — refusing to write, for the same reason: the "
+                      f"replaced text would exist nowhere (#596)", file=sys.stderr)
+                return 1
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", patch, token)
             # Surface body_version: it is the latch every verdict stamp keys on
             # (#199), so an edit that re-opens reviewed work is visible in the
             # success line, not only in a later audit.
             return _out(st, d, lambda x: f"card #{x.get('id')} edited "
-                                         f"(body_version={x.get('body_version')})", aj)
+                                         f"(body_version={x.get('body_version')}; "
+                                         f"pre-image {pre})", aj)
         if args.command == "thread":
             st, d = _http_get_json(_thread_url(gw, args.id, limit=args.limit), token)
             # NO special-casing of 403/409. `_out` already returns 1 and prints the
