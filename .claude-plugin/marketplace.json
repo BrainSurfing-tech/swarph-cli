@@ -1,5 +1,7 @@
 {
   "name": "swarph",
+  "description": "Swarph mesh channel for Claude Code. Pushes this cell's DMs into the session.",
+  "owner": {"name": "BrainSurfing-tech"},
   "plugins": [
     {"name": "swarph", "source": "./plugins/swarph"}
   ]
