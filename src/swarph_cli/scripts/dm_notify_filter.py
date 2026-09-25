@@ -35,6 +35,7 @@ import json
 import queue
 import sys
 import threading
+import time
 from typing import IO, Any, Optional
 
 _IDLE_DEFAULT_SECONDS = 1800
@@ -113,6 +114,39 @@ def run_filter(
                 return 0
 
 
+def run_once(path: str, stdout: IO[str], *, timeout: float = 2.0) -> int:
+    """Follow the inbox file itself. Print the first real DM and exit 0.
+
+    No child tail. Receipts and chatter are dropped, same as the stdin filter.
+    """
+    deadline = time.monotonic() + timeout
+    pos = 0
+    while time.monotonic() < deadline:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                fh.seek(pos)
+                chunk = fh.read()
+                pos = fh.tell()
+        except FileNotFoundError:
+            chunk = ""
+        for line in chunk.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(d, dict):
+                d = d.get("dm") or d
+                rendered = _format_dm(d) if isinstance(d, dict) else None
+                if rendered is not None:
+                    print(rendered, file=stdout, flush=True)
+                    return 0
+        time.sleep(0.05)
+    return 1
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(prog="dm_notify_filter")
     p.add_argument(
@@ -121,7 +155,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=_IDLE_DEFAULT_SECONDS,
         help="silence-alert threshold (default: %(default)s)",
     )
+    p.add_argument("--once", action="store_true",
+                   help="follow an inbox file, print the first real DM, exit 0")
+    p.add_argument("--inbox", default="", help="inbox.log path for --once")
     args = p.parse_args(argv)
+    if args.once:
+        if not args.inbox:
+            print("dm_notify_filter --once needs --inbox", file=sys.stderr)
+            return 2
+        return run_once(args.inbox, sys.stdout)
     return run_filter(sys.stdin, sys.stdout, idle_seconds=args.idle_seconds)
 
 
