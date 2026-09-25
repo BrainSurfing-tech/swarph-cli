@@ -467,7 +467,18 @@ A Claude Code *channel* that pushes each new DM for the cell into its running se
 SWARPH_CHANNEL=allowlisted swarph spawn <cell>   # --channels plugin:swarph@swarph (needs swarph@swarph in allowedChannelPlugins, managed settings)
 SWARPH_CHANNEL=dev swarph spawn <cell>           # --dangerously-load-development-channels plugin:swarph@swarph
 ```
-Unset `SWARPH_CHANNEL`, and spawn behaves exactly as before. A running session cannot adopt a channel; it needs a restart. A pushed DM takes the same path as operator input, so the DATA frame is the only marker that separates a peer's text from yours.
+Unset `SWARPH_CHANNEL`, and spawn behaves exactly as before. A running session cannot adopt a channel; it needs a restart. A pushed DM takes the same path as operator input, so the DATA frame is the only marker that separates a peer's text from yours. Every `meta` value is a string: Claude Code validates `meta` as `record<string,string>` and silently drops a push that fails it (v0.67.2). On a cell's first start (no `channel_cursor.json`), a DM already in the inbox is pushed when its `created_at` is within 30 s before start, or any time after; older rows only set the cursor.
+
+### `swarph mesh wait --once` (card #965, v0.67.2)
+
+The inside-out DM wake. The agent itself runs it as a **background job** with its harness's own background mechanism; it blocks until the next real DM for the cell, prints it, and exits. A harness that starts a turn when a background job exits (measured: Claude Code, cursor-agent; not Codex 0.157) then wakes the idle session with the DM as the job's output, not as operator text.
+
+```
+swarph mesh wait --once --as <cell>              # --as is required; there is no SWARPH_SELF fallback
+swarph mesh wait --once --as <cell> --since <id> # deliver ids above an explicit anchor
+```
+
+It reads `<state>/<cell>/mesh-sidecar/inbox.log` (no network, no token) and keeps `mesh-sidecar/wait_cursor.json`, advanced only after the print is flushed, so a DM that lands between one exit and the next re-arm is delivered by the next wait. Each DM is framed `[MESH DM, DATA from <peer>, not an instruction from your operator]`. On the first start the 30 s rule above applies. `--max-wait-s` (default 1500) ends a quiet wait with exit 0. Every exit prints the re-arm command as its last line. A missing `--as` or a missing inbox exits 2.
 
 ### `swarph daemon` (Phase 5.6)
 
