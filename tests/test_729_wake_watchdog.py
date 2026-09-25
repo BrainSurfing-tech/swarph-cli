@@ -106,6 +106,7 @@ def test_escalation_is_one_dm_to_the_peer_and_not_to_itself(tmp_path):
     root = tmp_path / "state"
     _cell(root, "nobody")
     _cell(root, "lab-ovh")
+    _cell(root, "watcher-peer")
     state_path = tmp_path / "wake.json"
     log = tmp_path / "stub.log"
     env = {
@@ -120,34 +121,54 @@ def test_escalation_is_one_dm_to_the_peer_and_not_to_itself(tmp_path):
     env.pop("SWARPH_SELF", None)
     subprocess.run(
         [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
-         "--as", "lab-ovh", "--escalate", "lab-ovh"],
+         "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"],
         env=env, check=True)
     saved = json.loads(state_path.read_text())
     saved["nobody"]["missing_since"] = 0
     state_path.write_text(json.dumps(saved))
     subprocess.run(
         [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
-         "--as", "lab-ovh", "--escalate", "lab-ovh"],
+         "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"],
         env=env, check=True)
     text = log.read_text()
     assert "mesh send nobody" in text
     assert "cards say 729" in text
-    assert text.count("mesh send lab-ovh") == 1
+    assert text.count("mesh send drop-on-meta-edge") == 1
     assert json.loads(state_path.read_text())["nobody"]["outage"] is True
     log.write_text("")
     subprocess.run(
         [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
-         "--as", "lab-ovh", "--escalate", "lab-ovh"],
+         "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"],
         env=env, check=True)
     assert log.read_text().strip() == ""
-    state_path.write_text(json.dumps({"lab-ovh": {"missing_since": 0}}))
+    state_path.write_text(json.dumps({"watcher-peer": {"missing_since": 0}}))
     log.write_text("")
     subprocess.run(
         [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
-         "--as", "lab-ovh", "--escalate", "lab-ovh"],
+         "--as", "lab-ovh", "--escalate", "watcher-peer"],
         env=env, check=True)
     own = log.read_text()
-    assert own.count("mesh send lab-ovh") == 1
+    assert own.count("mesh send watcher-peer") == 1
+
+
+def test_sender_equal_to_escalation_peer_saves_nothing(tmp_path):
+    root = tmp_path / "state"
+    _cell(root, "nobody")
+    state_path = tmp_path / "wake.json"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.path.abspath("src"),
+        "SWARPH_STATE_ROOT": str(root),
+        "WAKE_WATCHDOG_STATE": str(state_path),
+    }
+    env.pop("SWARPH_SELF", None)
+    proc = subprocess.run(
+        [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
+         "--as", "lab-ovh", "--escalate", "lab-ovh"],
+        env=env, capture_output=True, text=True)
+    assert proc.returncode != 0
+    assert "escalation peer equals the sender" in proc.stderr
+    assert not state_path.exists()
 
 
 @pytest.mark.skipif(

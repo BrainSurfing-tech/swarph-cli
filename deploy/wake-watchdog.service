@@ -4,4 +4,4 @@ Description=DM a cell whose inbox watcher has been dead for over a minute
 [Service]
 Type=oneshot
 Environment=MESH_GATEWAY_URL=http://100.64.189.91:8788
-ExecStart=/usr/bin/python3 -m swarph_cli.scripts.wake_watchdog --as lab-ovh --escalate lab-ovh
+ExecStart=/usr/bin/python3 -m swarph_cli.scripts.wake_watchdog --as lab-ovh --escalate drop-on-meta-edge
