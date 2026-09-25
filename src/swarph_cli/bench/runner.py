@@ -127,6 +127,10 @@ def _dispatch(backend: Backend, model_id: str, prompt: str, system: str) -> Back
 def _bound(spec: ModelSpec, backends: dict[str, Backend]):
     if spec.arm is not None:
         return spec.arm
+    # provider: is runnable only after the registry built an arm. The dict
+    # entry is the selectable class, not a fallback host.
+    if spec.backend == "provider":
+        return None
     return backends.get(spec.backend)
 
 
@@ -163,7 +167,11 @@ def preflight(specs: list[ModelSpec], backends: dict[str, Backend], *,
     for spec in specs:
         backend = _bound(spec, backends)
         if backend is None:
-            warnings.append(f"{spec.label} ({spec.backend}): no backend wired for {spec.backend!r} — skipped")
+            if spec.backend == "provider":
+                warnings.append(
+                    f"{spec.label}: provider {spec.provider or spec.id!r} is not in the registry — skipped")
+            else:
+                warnings.append(f"{spec.label} ({spec.backend}): no backend wired for {spec.backend!r} — skipped")
             continue
         missing = backend.missing_creds() if hasattr(backend, "missing_creds") else []
         if missing:

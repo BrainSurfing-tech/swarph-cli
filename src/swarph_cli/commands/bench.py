@@ -29,9 +29,9 @@ from swarph_cli.bench.backends import (
     RuleBackend,
     SubscriptionBackend,
     TypedHttpBackend,
+    HttpBackend,
 )
 from swarph_cli.bench.pack import PackError, load_pack, slugify_theme, validate_schema
-from swarph_cli.bench.backends import HttpBackend
 from swarph_cli.bench.providers import RegistryError, load_registry, registry_path
 from swarph_cli.bench.runner import ModelSpec, parse_models, preflight, run_pack
 from swarph_cli.bench.validate import validate_pack
@@ -59,6 +59,12 @@ def _default_backends() -> dict[str, Backend]:
         "subscription": SubscriptionBackend(),
         "rule": RuleBackend(),
         "typed-http": TypedHttpBackend(),
+        # Selectable class for the wiring lock. A real call is provider:<name>,
+        # which replaces this with the registry arm. An unresolved name is
+        # dropped in preflight and does not dispatch this placeholder.
+        "provider": HttpBackend(
+            name="provider", kind="typed", base_url="http://127.0.0.1",
+            path="/v1/systemone", egress="local"),
     }
 
 

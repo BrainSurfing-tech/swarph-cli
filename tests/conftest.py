@@ -120,6 +120,8 @@ _SWARPH_ENV = (
     "SWARPH_MEMORY_DIR",
     "SWARPH_CODEGRAPH_INDEX",
     "SWARPH_WITNESS",
+    # bench registry path — a developer's file must not become the suite's
+    "SWARPH_BENCH_PROVIDERS",
     "MESH_DB_PATH",
     "MESH_CALLER_BINDING_ENFORCE",
     "MESH_REVOCATION_ENFORCE",
