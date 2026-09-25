@@ -19,6 +19,7 @@ imports from here; the import is one-directional on purpose.
 from __future__ import annotations
 
 import argparse
+import datetime
 import difflib
 import json
 import os
@@ -198,6 +199,9 @@ def _build_parser() -> argparse.ArgumentParser:
     wait.add_argument("--max-wait-s", type=float, default=1500,
                       help="give up after this many seconds (default 1500) and "
                            "print the re-arm line")
+    wait.add_argument("--since", type=int, default=None,
+                      help="on first start, deliver ids above this anchor "
+                           "instead of seeking past them")
 
     return p
 
@@ -2744,6 +2748,26 @@ def _run_sidecar(args: argparse.Namespace) -> int:
             state.pidfile_path.unlink(missing_ok=True)
 
 
+_WAIT_GRACE_S = 30.0
+
+
+def _created_within(row: dict, started: float, grace_s: float) -> bool:
+    raw = row.get("created_at")
+    if raw is None:
+        return False
+    if isinstance(raw, (int, float)):
+        ts = float(raw)
+    else:
+        text = str(raw).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            ts = datetime.datetime.fromisoformat(text).timestamp()
+        except ValueError:
+            return False
+    return 0 <= (started - ts) <= grace_s
+
+
 def _rearm_line(cell: str) -> str:
     return f"swarph mesh wait --once --as {cell}"
 
@@ -2810,17 +2834,26 @@ def _run_wait(args: argparse.Namespace) -> int:
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             last_id = -1
     else:
-        # First start, same as channel.poll: record the newest id and deliver nothing old.
+        # First start: do not seek past rows that just arrived. A row is kept
+        # when --since puts it above the anchor, or when created_at is inside
+        # the grace window of this process. Older rows set the cursor.
         from swarph_cli.dm_frame import rows
 
-        ids = []
+        started = time.time()
+        since = getattr(args, "since", None)
+        stale_ids = []
         for row in rows(inbox.read_text(encoding="utf-8", errors="replace")):
             try:
-                ids.append(int(row["id"]))
+                rid = int(row["id"])
             except (KeyError, TypeError, ValueError):
                 continue
-        if ids:
-            last_id = max(ids)
+            if since is not None and rid > since:
+                continue
+            if _created_within(row, started, _WAIT_GRACE_S):
+                continue
+            stale_ids.append(rid)
+        if stale_ids:
+            last_id = max(stale_ids)
             cursor_path.write_text(
                 json.dumps({"last_delivered_id": last_id}) + "\n",
                 encoding="utf-8",

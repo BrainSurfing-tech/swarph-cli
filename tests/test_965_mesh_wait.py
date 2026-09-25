@@ -149,6 +149,20 @@ def test_first_start_seeks_to_end_and_prints_only_the_appended_dm(tmp_path):
     assert "more, read the inbox" not in out
 
 
+def test_dm_already_present_at_0s_is_printed(tmp_path):
+    """If false this reads: a DM present at process start is seeked past and never printed."""
+    side = _side(tmp_path)
+    row = json.dumps({
+        "id": 9, "from_node": "lab-ovh", "to_node": "cursor-lin",
+        "kind": "status", "content": "zero", "card": 1,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+    (side / "inbox.log").write_text(row + "\n", encoding="utf-8")
+    proc = _run(tmp_path, ["wait", "--once", "--as", "cursor-lin", "--max-wait-s", "2"])
+    assert proc.returncode == 0
+    assert "id=9 " in proc.stdout and "zero" in proc.stdout
+
+
 def test_missing_inbox_exits_2(tmp_path):
     """If false this reads: exit 0 with a re-arm line and no inbox."""
     _side(tmp_path)
