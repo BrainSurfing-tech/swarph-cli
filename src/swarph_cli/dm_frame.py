@@ -5,7 +5,28 @@ so the two cannot drift.
 """
 from __future__ import annotations
 
+import datetime
 import json
+
+FIRST_START_GRACE_S = 30.0
+
+
+def created_within(row: dict, started: float, grace_s: float = FIRST_START_GRACE_S) -> bool:
+    """True when created_at is at most grace_s before started, or any time after."""
+    raw = row.get("created_at")
+    if raw is None:
+        return False
+    if isinstance(raw, (int, float)):
+        ts = float(raw)
+    else:
+        text = str(raw).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            ts = datetime.datetime.fromisoformat(text).timestamp()
+        except ValueError:
+            return False
+    return (started - ts) <= grace_s
 
 
 def rows(text: str) -> list[dict]:

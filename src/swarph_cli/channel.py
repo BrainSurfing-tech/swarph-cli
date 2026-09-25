@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from swarph_cli.dm_frame import frame_text, rows
+from swarph_cli.dm_frame import FIRST_START_GRACE_S, created_within, frame_text, rows
 from swarph_cli.scripts.dm_notify_filter import is_real_dm
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -121,7 +121,12 @@ class Channel:
         return f"armed: {self.cell}, cursor {last}"
 
     def poll(self, now: float | None = None) -> list[dict]:
-        """Read new inbox lines. First start seeks to the end and pushes nothing old."""
+        """Read new inbox lines.
+
+        First start keeps a present row when created_at is within 30s before
+        this poll or any time after, via dm_frame.created_within. Older rows
+        set the cursor and are not pushed.
+        """
         now = time.time() if now is None else now
         notes: list[dict] = []
         if not self.inbox.is_file():
@@ -132,16 +137,23 @@ class Channel:
         rows = _rows(text)
         newest = max((int(r["id"]) for r in rows if str(r.get("id", "")).isdigit()), default=None)
         if self.cursor is None:
+            stale = []
+            for row in rows:
+                try:
+                    rid = int(row["id"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if created_within(row, now, FIRST_START_GRACE_S):
+                    continue
+                stale.append(rid)
             self.cursor = {
-                "last_pushed_id": newest,
+                "last_pushed_id": max(stale) if stale else None,
                 "inode": st.st_ino,
-                "offset": st.st_size,
+                "offset": 0,
                 "anomaly_sent": False,
             }
             self._save()
             notes.append(_note(self.armed_line()))
-            self._heartbeat(now, newest)
-            return notes
         if self.cursor.get("inode") != st.st_ino:
             self.cursor["inode"] = st.st_ino
             self.cursor["offset"] = 0
