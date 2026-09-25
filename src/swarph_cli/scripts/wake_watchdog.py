@@ -16,8 +16,28 @@ GAP_SECONDS = 60
 
 
 def _watching(inbox: str, cmdlines: Iterable[str]) -> bool:
+    """A reader is tail or dm_notify_filter with the inbox path as its own argument.
+
+    A process that merely mentions the path (a prompt, a log line) is not a reader.
+    """
     for cmd in cmdlines:
-        if inbox in cmd and ("tail" in cmd or "dm_notify_filter" in cmd):
+        parts = cmd.split()
+        if inbox not in parts:
+            continue
+        if any(os.path.basename(p) == "tail" for p in parts):
+            return True
+        if any(p.endswith("dm_notify_filter") or p.endswith("dm_notify_filter.py") for p in parts):
+            return True
+    return False
+
+
+def _cron_watched(name: str, crontab: str) -> bool:
+    """An active crontab line that runs dm_wake.py for this cell is its poller."""
+    for line in crontab.splitlines():
+        body = line.strip()
+        if not body or body.startswith("#"):
+            continue
+        if name in body and "dm_wake.py" in body:
             return True
     return False
 
@@ -29,13 +49,14 @@ def _timer_watched(name: str, timers: Iterable[str]) -> bool:
 
 def scan(cells: dict[str, str], cmdlines: Iterable[str], state: dict,
          now: float, *, gap: float = GAP_SECONDS,
-         timers: Iterable[str] = ()) -> list[str]:
+         timers: Iterable[str] = (), crontab: str = "") -> list[str]:
     """Return the cells that should get the one DM for this outage."""
     alert = []
     timers = list(timers)
     for name, inbox in cells.items():
         rec = state.setdefault(name, {})
-        if _watching(inbox, cmdlines) or _timer_watched(name, timers):
+        if (_watching(inbox, cmdlines) or _timer_watched(name, timers)
+                or _cron_watched(name, crontab)):
             rec["missing_since"] = None
             rec["outage"] = False
             continue
@@ -69,6 +90,13 @@ def load_state(path: Path) -> dict:
 def save_state(path: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def _crontab() -> str:
+    listed = subprocess.run(
+        ["crontab", "-l"], capture_output=True, text=True,
+        encoding="utf-8", errors="replace", check=False)
+    return listed.stdout or ""
 
 
 def _timer_lines() -> list[str]:
@@ -105,13 +133,15 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8", errors="replace", check=False)
     cmdlines = listed.stdout.splitlines()
     timers = _timer_lines()
+    crontab = _crontab()
     cells = cells_under(root)
     state = load_state(state_path)
-    alert = scan(cells, cmdlines, state, time.time(), timers=timers)
+    alert = scan(cells, cmdlines, state, time.time(), timers=timers, crontab=crontab)
     save_state(state_path, state)
     if args.dry_run:
         for name, inbox in cells.items():
-            if not _watching(inbox, cmdlines) and not _timer_watched(name, timers):
+            if not (_watching(inbox, cmdlines) or _timer_watched(name, timers)
+                    or _cron_watched(name, crontab)):
                 print(name, flush=True)
         return 0
     sender = args.sender.strip()

@@ -27,6 +27,27 @@ def test_one_dm_per_outage_and_none_while_watched():
     assert scan(cells, [], state, now=281) == ["cursor-lin"]
 
 
+def test_cron_poll_cell_is_not_flagged():
+    cells = {"drop-on-meta-edge": "/tmp/drop-inbox"}
+    state = {}
+    cron = ("*/2 * * * * /usr/bin/python3 "
+            "/home/ubuntu/drop-on-meta-edge/.claude/hooks/dm_wake.py\n")
+    assert scan(cells, [], state, now=0, crontab=cron) == []
+    assert scan(cells, [], state, now=120, crontab=cron) == []
+    commented = "# */2 * * * * python3 /home/ubuntu/drop-on-meta-edge/.claude/hooks/dm_wake.py\n"
+    again = {}
+    assert scan(cells, [], again, now=0, crontab=commented) == []
+    assert scan(cells, [], again, now=120, crontab=commented) == ["drop-on-meta-edge"]
+
+
+def test_an_unrelated_process_naming_the_inbox_is_not_a_watcher():
+    cells = {"cursor-lin": INBOX}
+    state = {}
+    noise = [f"claude --append-system-prompt read {INBOX} and summarize"]
+    assert scan(cells, noise, state, now=0) == []
+    assert scan(cells, noise, state, now=120) == ["cursor-lin"]
+
+
 def test_codex_waker_timer_counts_as_watched():
     cells = {"gpt-ops": "/tmp/gpt-ops-inbox"}
     state = {}
