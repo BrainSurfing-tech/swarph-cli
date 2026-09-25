@@ -1,0 +1,6 @@
+{
+  "name": "swarph",
+  "plugins": [
+    {"name": "swarph", "source": "./plugins/swarph"}
+  ]
+}
