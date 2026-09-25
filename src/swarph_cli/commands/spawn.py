@@ -447,6 +447,11 @@ def _spawn_env_base(cell: Cell) -> dict[str, str]:
     env = scrub_env_for_subprocess()
     env["SWARPH_SPAWN"] = "1"
     env["SWARPH_SELF"] = cell.name
+    mode = os.environ.get("SWARPH_CHANNEL") or ""
+    if mode in {"allowlisted", "dev"}:
+        env["SWARPH_CHANNEL_CELL"] = cell.name
+    else:
+        env.pop("SWARPH_CHANNEL_CELL", None)
     return env
 
 

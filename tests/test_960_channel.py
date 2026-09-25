@@ -27,6 +27,8 @@ def _chan(tmp_path, lines, cell="cursor-lin"):
 
 
 def test_legacy_era_is_pinned_and_permission_is_absent(monkeypatch):
+    monkeypatch.setenv("SWARPH_SELF", "cursor-lin")
+    monkeypatch.setenv("SWARPH_CHANNEL_CELL", "cursor-lin")
     monkeypatch.setenv("SWARPH_CHANNEL", "allowlisted")
     result = initialize_result(1)["result"]
     monkeypatch.setenv("SWARPH_CHANNEL", "dev")
@@ -145,6 +147,7 @@ def test_later_dm_is_pushed_with_no_further_client_traffic(tmp_path):
     env["SWARPH_SELF"] = "cursor-lin"
     env["SWARPH_STATE"] = str(root)
     env["SWARPH_CHANNEL"] = "allowlisted"
+    env["SWARPH_CHANNEL_CELL"] = "cursor-lin"
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     proc = subprocess.Popen(
         [sys.executable, "-m", "swarph_cli.channel"],
@@ -190,6 +193,7 @@ def _server(root: Path, mode: str | None):
         env.pop("SWARPH_CHANNEL", None)
     else:
         env["SWARPH_CHANNEL"] = mode
+        env["SWARPH_CHANNEL_CELL"] = "cursor-lin"
     return subprocess.Popen(
         [sys.executable, "-m", "swarph_cli.channel"],
         stdin=subprocess.PIPE,

@@ -32,13 +32,20 @@ def channel_opted_in() -> bool:
     return os.environ.get("SWARPH_CHANNEL") in {"allowlisted", "dev"}
 
 
+def channel_serves() -> bool:
+    """Only the cell spawn named in SWARPH_CHANNEL_CELL may poll."""
+    self_name = os.environ.get("SWARPH_SELF") or ""
+    named = os.environ.get("SWARPH_CHANNEL_CELL") or ""
+    return channel_opted_in() and bool(named) and named == self_name
+
+
 def capabilities() -> dict:
     """experimental claude/channel only. Never claude/channel/permission."""
     return {"experimental": {"claude/channel": {}}}
 
 
 def initialize_result(req_id) -> dict:
-    caps = capabilities() if channel_opted_in() else {"experimental": {}}
+    caps = capabilities() if channel_serves() else {"experimental": {}}
     return {
         "jsonrpc": "2.0",
         "id": req_id,
@@ -257,7 +264,7 @@ def serve(chan: Channel) -> None:
     Polling happens only when SWARPH_CHANNEL is allowlisted or dev, and only
     for the one process that holds mesh-sidecar/channel.lock.
     """
-    polling = channel_opted_in() and try_cell_lock(chan.inbox.parent / "channel.lock")
+    polling = channel_serves() and try_cell_lock(chan.inbox.parent / "channel.lock")
     lock = threading.Lock()
     started = threading.Event()
     stop = threading.Event()
@@ -290,6 +297,13 @@ def main(argv: list[str] | None = None) -> int:
     if not cell:
         print("swarph channel: SWARPH_SELF is unset; refusing to start", file=sys.stderr)
         return 2
+    if channel_opted_in() and not channel_serves():
+        named = os.environ.get("SWARPH_CHANNEL_CELL")
+        print(
+            f"swarph channel: SWARPH_CHANNEL_CELL={named!r} does not match "
+            f"SWARPH_SELF={cell!r}; refusing to serve",
+            file=sys.stderr,
+        )
     side = sidecar_of(cell)
     chan = Channel(
         cell,
