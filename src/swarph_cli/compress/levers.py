@@ -54,5 +54,5 @@ async def shorthand(source: str, *, system_prompt: str = SHORTHAND_SYSTEM, chat=
     else:
         # test path: lightweight message dicts are fine for the fake
         msgs = [{"role": "user", "content": source}]
-    resp = await chat(msgs, system_prompt=system_prompt, temperature=0.0, max_tokens=8000)
+    resp = await chat(msgs, system_prompt=system_prompt)
     return resp.text

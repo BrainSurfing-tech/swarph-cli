@@ -195,6 +195,8 @@ swarph bench prices [--refresh] [--grep <substr>]
 
 Task types: `numeric` (rel-err), `categorical` (exact), `ranking` (Kendall-tau), `text` (Jaccard). Packs are **data only** — the scoring engine is fixed and shared. Metered backend needs the provider key (e.g. `GEMINI_API_KEY`); the `[bench]` extra pulls `google-genai`.
 
+`provider:<name>` reads a TOML registry (`--providers`, else `$SWARPH_BENCH_PROVIDERS`, else `~/.config/swarph/bench_providers.toml`). The file names an env var; it does not hold the key. A worked example is `docs/examples/bench_providers.toml` (Jev, `env = "JEV_API_KEY"`, 0.42 USD per 1M input tokens, output free). `--max-usd` stops the run at the cap. A pack with `egress = "on_box_only"` refuses an external arm unless `--allow-egress <provider>` names it.
+
 ### `swarph brain-ask` (v0.14.0)
 
 Search the **swarph-brain** (gbrain) — the swarm's sovereign $0 semantic-retrieval memory — over MCP. The "does the swarm already know X?" reflex, as a one-shot.
@@ -299,7 +301,7 @@ $ swarph codegraph "cron expression validator" --json --limit 5
 
 It queries a locally-built index at `~/.swarph/codegraph/index.db` (override with `--index` or `SWARPH_CODEGRAPH_INDEX`); the index is built out-of-band from your repos (tree-sitter → SQLite FTS5, BM25-ranked). If no index is present the verb simply returns no matches — it never touches the network and never reads code it wasn't pointed at. Results are scoped by an owner-allowlist gate (`--caller-cell` / `SWARPH_CELL`, default: your cell): public repos are always visible; private repos are visible to the owning cell.
 
-The same capability is exposed as an **MCP tool** — running `swarph mcp-server` publishes `swarph_codegraph_query` alongside `swarph_search`/`swarph_add`/`swarph_describe`, so any MCP host's agent auto-discovers it and can reach for code-structure lookups while reading, writing, or debugging code. (Why a tool and not an always-on retrieval lane? Because *intent* to consult code structure lives with the calling agent — which already knows it's working on code — not in a similarity score.)
+The same capability is exposed as an **MCP tool** — running `swarph mcp-server` publishes `swarph_codegraph_query` alongside `swarph_search`/`swarph_add`/`swarph_describe` (and the mesh DM tools `swarph_dm_unread`, which returns every unread DM with full bodies in one call without marking them read; `swarph_dm_reply`, which replies by message id and marks that message read; and `swarph_dm_thread`, which returns a DM's whole conversation), so any MCP host's agent auto-discovers it and can reach for code-structure lookups while reading, writing, or debugging code. (Why a tool and not an always-on retrieval lane? Because *intent* to consult code structure lives with the calling agent — which already knows it's working on code — not in a similarity score.)
 
 ### `swarph gateway`
 

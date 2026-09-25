@@ -36,6 +36,11 @@ from importlib import resources
 from pathlib import Path
 
 from swarph_cli.cell import _atomic_write_text
+from swarph_cli.commands.hook_interpreter import (
+    hook_interpreter,
+    interpreter_can_import,
+    refuse_unless_importable,
+)
 
 _PAYLOAD = "swarph_cli.payloads.opencode"
 _PLUGIN_NAME = "swarph-opencode.js"
@@ -68,7 +73,7 @@ def _render_plugin(interpreter: str) -> str:
 
 def _render() -> str:
     """The rendered plugin, with @PYTHON@ pinned to THIS interpreter."""
-    return _render_plugin(str(Path(sys.executable).resolve()))
+    return _render_plugin(hook_interpreter())
 
 
 def _target(scope: str) -> Path:
@@ -92,6 +97,8 @@ def ensure_cell_plugin(cwd: Path) -> None:
     a failure must not block the spawn (worst case the cell runs unhooked)."""
     try:
         rendered = _render()
+        if not interpreter_can_import(hook_interpreter()):
+            return
         target = cell_plugin_path(cwd)
         if target.exists() and target.read_text(encoding="utf-8") == rendered:
             return
@@ -146,6 +153,7 @@ def run_install_opencode_plugin(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    refuse_unless_importable(hook_interpreter())
     target.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(target, rendered)
     # The #527 task-3 assert: "installed" is a claim about the filesystem.

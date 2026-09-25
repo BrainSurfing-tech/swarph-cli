@@ -79,6 +79,8 @@ def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
 _SWARPH_ENV = (
     # identity + addressing
     "SWARPH_SELF",
+    "SWARPH_STATE_ROOT",
+    "SWARPH_BIN",
     "SWARPH_NODE",
     "SWARPH_CELL",
     "SWARPH_SESSION_NAME",
@@ -118,6 +120,8 @@ _SWARPH_ENV = (
     "SWARPH_MEMORY_DIR",
     "SWARPH_CODEGRAPH_INDEX",
     "SWARPH_WITNESS",
+    # bench registry path — a developer's file must not become the suite's
+    "SWARPH_BENCH_PROVIDERS",
     "MESH_DB_PATH",
     "MESH_CALLER_BINDING_ENFORCE",
     "MESH_REVOCATION_ENFORCE",

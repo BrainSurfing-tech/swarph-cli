@@ -78,9 +78,13 @@ async def verify_expand(source: str, compressed: str, *, chat=None) -> bool:
         msgs = [ChatMessage(role="user", content=f"ORIGINAL:\n{source}\n\nCOMPRESSED:\n{compressed}")]
     else:
         msgs = [{"role": "user", "content": f"ORIGINAL:\n{source}\n\nCOMPRESSED:\n{compressed}"}]
-    resp = await chat(msgs, system_prompt=VERIFY_EXPAND_SYSTEM, temperature=0.0, max_tokens=2000)
-    try:
-        dropped = _json.loads(resp.text).get("dropped_facts", ["<unparseable>"])
-    except Exception:
-        return False  # unparseable verifier output -> fail safe
+    schema = {"type": "object", "properties": {"dropped_facts": {"type": "array"}}}
+    resp = await chat(msgs, system_prompt=VERIFY_EXPAND_SYSTEM, json_schema=schema)
+    parsed = getattr(resp, "parsed", None)
+    if not isinstance(parsed, dict):
+        try:
+            parsed = _json.loads(resp.text)
+        except Exception:
+            return False  # unparseable verifier output -> fail safe
+    dropped = parsed.get("dropped_facts", ["<unparseable>"]) if isinstance(parsed, dict) else ["<unparseable>"]
     return len(dropped) == 0
