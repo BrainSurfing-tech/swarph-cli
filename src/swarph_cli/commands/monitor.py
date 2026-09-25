@@ -128,6 +128,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_common(hcheck)
 
+    acheck = sub.add_parser(
+        "arm-check",
+        help="#729: refuse to arm a DM watch on a missing or stale inbox.log "
+             "(default max age 15m). Exit 0 = OK to arm; exit 2 = REFUSE.",
+    )
+    acheck.add_argument(
+        "--path",
+        default=None,
+        metavar="PATH",
+        help="inbox.log to check (default: "
+             "$HOME/swarph_state/<self>/mesh-sidecar/inbox.log)",
+    )
+    acheck.add_argument(
+        "--max-age-s",
+        type=int,
+        default=15 * 60,
+        help="refuse when mtime is older than this many seconds "
+             "(default 900 = 15 minutes). Override for quiet cells; "
+             "0 is REFUSED (infinite is the defect).",
+    )
+    _add_common(acheck)
+
     install = sub.add_parser(
         "install-task",
         help="#644: register the Windows Task Scheduler runner+watchdog pair "
@@ -694,6 +716,7 @@ def _collect(args: argparse.Namespace) -> dict:
             # entry newer than last_delivered_id, not over the 50-entry deque.
             "pending_from": pending_from,
             "label": sink.pending_label(len(dms) + skipped),
+            "delivery_gap": max(0, observed - delivered),
         })
 
     return {
@@ -736,6 +759,10 @@ def _collect(args: argparse.Namespace) -> dict:
         # absence that reads as evidence.
         "unread_reportable": bool(rows),
         "sinks": rows,
+        # #729: first-class metric for #722 digest. None = cannot report, not 0.
+        "delivery_gap": (
+            max(r["delivery_gap"] for r in rows) if rows else None
+        ),
         "pending_channel_posts": cursor.get("pending_channel_posts", []),
     }
 
@@ -815,6 +842,11 @@ def _print_status(info: dict, pending: int) -> None:
               "#644 (ORPHAN)")
     print(f"  state: {info['state_dir']}")
     print(f"  observation cursor: last_msg_id={info['observation_cursor']}")
+    gap = info.get("delivery_gap")
+    if gap is None:
+        print("  delivery_gap: CANNOT REPORT (no ledger sink)")
+    else:
+        print(f"  delivery_gap: {gap}  (#722 consumer; observed - min delivered)")
     if info.get("reexec_hold"):
         print(f"  {_fmt_reexec_hold(info['reexec_hold'])}")
 
@@ -882,6 +914,61 @@ def _cmd_stop(args: argparse.Namespace) -> int:
           "`swarph monitor start` resumes exactly where this one stopped.")
     print("swarph monitor: supervision HOLD written — a #644 watchdog will NOT "
           "revive this monitor. `swarph monitor start` clears the hold.")
+    return 0
+
+
+
+# -- arm-check (#729) ---------------------------------------------------------
+
+def _default_inbox_log(self_name: str) -> Path:
+    return Path.home() / "swarph_state" / self_name / "mesh-sidecar" / "inbox.log"
+
+
+def _cmd_arm_check(args: argparse.Namespace) -> int:
+    """Refuse to arm a DM watch on a missing or stale inbox.log.
+
+    Exit 0 = OK to arm. Exit 2 = REFUSE (do not start tail; do not claim armed).
+    """
+    self_name, _state_dir = _resolve(args)
+    max_age = int(args.max_age_s)
+    if max_age <= 0:
+        print(
+            f"arm-check {self_name}: REFUSE -- --max-age-s must be > 0 "
+            f"(got {max_age}); infinite age is the defect this check exists to kill",
+            file=sys.stderr,
+        )
+        return 2
+    path = Path(args.path) if args.path else _default_inbox_log(self_name)
+    if not path.exists():
+        print(
+            f"arm-check {self_name}: REFUSE -- missing {path} "
+            f"(age=missing). Do NOT arm a tail; do NOT claim armed.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        mtime = path.stat().st_mtime
+    except OSError as exc:
+        print(
+            f"arm-check {self_name}: REFUSE -- cannot stat {path}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+    age = time.time() - mtime
+    if age > max_age:
+        print(
+            f"arm-check {self_name}: REFUSE -- stale {path} "
+            f"age={age:.0f}s > max-age-s={max_age}. "
+            f"Do NOT arm a tail; do NOT claim armed. "
+            f"(Authoritative wake log is mesh-sidecar/inbox.log -- "
+            f"not lab-orchestrator/logs/inbox_watcher.log; card #729.)",
+            file=sys.stderr,
+        )
+        return 2
+    print(
+        f"arm-check {self_name}: OK path={path} age={age:.0f}s "
+        f"max-age-s={max_age} -- safe to arm"
+    )
     return 0
 
 
@@ -2013,6 +2100,8 @@ def run_monitor(argv: list[str]) -> int:
             return _cmd_status(args)
         if args.command == "stop":
             return _cmd_stop(args)
+        if args.command == "arm-check":
+            return _cmd_arm_check(args)
         if args.command == "heartbeat-check":
             return _cmd_heartbeat_check(args)
         if args.command == "install-task":

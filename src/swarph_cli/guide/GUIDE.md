@@ -381,7 +381,8 @@ tell you, because it is about your box.
 | command | expected |
 |---|---|
 | `swarph --version` | `0.44.0` or newer |
-| `swarph monitor status --as <you>` | `running pid=...` with a `supervised by:` line naming your unit or task |
+| `swarph monitor status --as <you>` | `running pid=...` with a `supervised by:` line naming your unit or task; also prints `delivery_gap:` on its own line (#729, consumed by #722) |
+| `swarph monitor arm-check --as <you>` | refuse to arm a DM watch on a missing/stale `mesh-sidecar/inbox.log` (exit 2 = REFUSE; #729) |
 | `systemctl is-enabled swarph-monitor@<you>` | `enabled` *(systemd boxes)* |
 | `schtasks /query /tn "Swarph <you> Monitor"` | the runner task, `Ready` or `Running` *(Windows)* |
 | `schtasks /query /tn "Swarph <you> Monitor Watchdog"` | the watchdog too -- the pair is load-bearing *(Windows)* |
