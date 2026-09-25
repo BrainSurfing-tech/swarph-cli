@@ -74,7 +74,7 @@ def save_state(path: Path, state: dict) -> None:
 def _timer_lines() -> list[str]:
     listed = subprocess.run(
         ["systemctl", "--user", "list-timers", "--all", "--no-legend"],
-        capture_output=True, text=True, check=False)
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
     return listed.stdout.splitlines()
 
 
@@ -88,7 +88,9 @@ def main(argv: list[str] | None = None) -> int:
         "WAKE_WATCHDOG_STATE",
         os.path.expanduser("~/.local/state/wake-watchdog.json")))
     import time
-    listed = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True, check=False)
+    listed = subprocess.run(
+        ["ps", "-eo", "args"], capture_output=True, text=True,
+        encoding="utf-8", errors="replace", check=False)
     cmdlines = listed.stdout.splitlines()
     timers = _timer_lines()
     cells = cells_under(root)
