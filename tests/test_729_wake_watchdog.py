@@ -87,10 +87,6 @@ def _cell(root: Path, name: str) -> None:
     (inbox / "inbox.log").write_text("")
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Windows cannot execute the POSIX swarph stub as argv0; the failed-send assertions run on Linux",
-)
 def _stub(tmp_path: Path):
     stub = tmp_path / "swarph"
     stub.write_text(textwrap.dedent("""\
@@ -154,6 +150,10 @@ def test_escalation_is_one_dm_to_the_peer_and_not_to_itself(tmp_path):
     assert own.count("mesh send lab-ovh") == 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows cannot execute the POSIX swarph stub as argv0; the failed-send assertions run on Linux",
+)
 def test_failed_send_is_not_saved_as_alerted_and_the_next_run_retries(tmp_path):
     root = tmp_path / "state"
     _cell(root, "nobody")
