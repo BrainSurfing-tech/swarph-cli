@@ -27,18 +27,24 @@ STALL_S = 120
 POLL_S = 1.0
 
 
+def channel_opted_in() -> bool:
+    """Spawn sets this. Every other session must not poll or write the cursor."""
+    return os.environ.get("SWARPH_CHANNEL") in {"allowlisted", "dev"}
+
+
 def capabilities() -> dict:
     """experimental claude/channel only. Never claude/channel/permission."""
     return {"experimental": {"claude/channel": {}}}
 
 
 def initialize_result(req_id) -> dict:
+    caps = capabilities() if channel_opted_in() else {"experimental": {}}
     return {
         "jsonrpc": "2.0",
         "id": req_id,
         "result": {
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": capabilities(),
+            "capabilities": caps,
             "serverInfo": {"name": "swarph-channel", "version": "1"},
             "instructions": INSTRUCTIONS,
         },
@@ -227,8 +233,31 @@ def _write(obj: dict) -> None:
     sys.stdout.flush()
 
 
+def try_cell_lock(path: Path):
+    """Exclusive flock. A second server for this cell gets None and must not poll."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+")
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 def serve(chan: Channel) -> None:
-    """Poll the inbox on a timer. A later DM does not wait for stdin traffic."""
+    """Poll the inbox on a timer. A later DM does not wait for stdin traffic.
+
+    Polling happens only when SWARPH_CHANNEL is allowlisted or dev, and only
+    for the one process that holds mesh-sidecar/channel.lock.
+    """
+    polling = channel_opted_in() and try_cell_lock(chan.inbox.parent / "channel.lock")
     lock = threading.Lock()
     started = threading.Event()
     stop = threading.Event()
@@ -241,14 +270,15 @@ def serve(chan: Channel) -> None:
                 for note in chan.poll():
                     _write(note)
 
-    threading.Thread(target=ticker, daemon=True).start()
+    if polling:
+        threading.Thread(target=ticker, daemon=True).start()
     for raw in sys.stdin:
         reply = handle_line(raw)
         if reply is None:
             continue
         with lock:
             _write(reply)
-            if reply.get("result", {}).get("protocolVersion") == PROTOCOL_VERSION:
+            if polling and reply.get("result", {}).get("protocolVersion") == PROTOCOL_VERSION:
                 for note in chan.poll():
                     _write(note)
                 started.set()
