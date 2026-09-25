@@ -3,5 +3,4 @@ Description=DM a cell whose inbox watcher has been dead for over a minute
 
 [Service]
 Type=oneshot
-Environment=PYTHONPATH=/home/ubuntu/worktrees/swarph-cli-729-once/src
 ExecStart=/usr/bin/python3 -m swarph_cli.scripts.wake_watchdog
