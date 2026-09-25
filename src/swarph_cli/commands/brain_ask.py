@@ -233,7 +233,7 @@ def _synthesize(facade_url: str, facade_token: str, question: str, chunks: list)
     body = {"model": os.environ.get("SWARPH_FACADE_MODEL", "claude"),
             "messages": [{"role": "system", "content": sys_prompt},
                          {"role": "user", "content": user}],
-            "max_tokens": 700, "temperature": 0.2}
+            }
     raw = _http_post(facade_url, body, facade_token, accept="application/json")
     doc = json.loads(raw)
     return doc["choices"][0]["message"]["content"].strip()

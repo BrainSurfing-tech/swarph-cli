@@ -202,8 +202,8 @@ def _memory_navigate(op: str, slug: str | None = None, type: str | None = None,
     swarph_codegraph_query. Ops: 'get', 'list', 'links', 'backlinks' (incoming),
     'traverse' (multi-hop OKF edges via depth/direction). File-native graph.
 
-    Fail-safe: any backend/parse error, or an unrecognised op, resolves to [] or
-    {} — never raises."""
+    Fail-safe: any backend/parse error, or an unrecognised op, returns [] —
+    never raises. A successful get returns the page object."""
     try:
         url = brain_ask._resolve_endpoint()
         token = brain_ask._resolve_token(None, brain_ask._self_name())
@@ -226,7 +226,8 @@ def _memory_navigate(op: str, slug: str | None = None, type: str | None = None,
 def _timeline_navigate(op: str, start: str = "", end: str = "", date: str = "",
                        window: str = "3d"):
     """Deterministic temporal lookup over the git timeline. op: 'range'|'around'|'since'.
-    Returns OKF node/edge records (list). Fail-safe: any bad input/op/read → [] (never raises).
+    since reads date, not start. Returns OKF node/edge records (list).
+    Fail-safe: any bad input/op/read → [] (never raises).
 
     Ops are explicitly whitelisted (mirrors ``_memory_navigate``): ``timeline._bounds``
     falls through to ``(None, None)`` for an unrecognized subcommand, which would
@@ -383,32 +384,58 @@ try:
 
     @mcp.tool()
     def swarph_search(query: str) -> list[dict]:
-        """Search the swarph for a capability (hooks, MCP servers, skills, tools, libraries). Returns matches with an install URI where applicable."""
+        """Search the swarph for a capability. Returns the results list.
+
+        [] is ambiguous: no matches, or the search could not run (network,
+        parse, or a body without a list of results). There is no error field.
+        """
         return _search(query, url=_METAEDGE_URL, token=_metaedge_token())
 
     @mcp.tool()
     def swarph_add(uri: str) -> dict:
-        """Install a swarph artifact by its swarph:// URI (trust-gated + security-scanned). Returns whether it installed."""
+        """Install a swarph:// artifact on this server host, non-interactively.
+
+        The installer is invoked with --yes in this process. It does not prompt.
+        Returns {installed: bool, code: int, detail: str}. code 0 means installed.
+        A malformed URI is code 2 and does not reach the installer.
+        """
         return _add(uri)
 
     @mcp.tool()
     def swarph_describe(uri: str) -> dict:
-        """Parse a swarph:// URI and show what it points at, without installing."""
+        """Parse a swarph:// URI. Nothing is installed and nothing is fetched.
+
+        Success keys: class, publisher, name, version, sha256.
+        A malformed URI returns {"error": "<message>"} and no other keys.
+        """
         return _describe(uri)
 
     @mcp.tool()
     def swarph_codegraph_query(query: str) -> list[dict]:
-        """Find where a function/class/method/symbol is DEFINED, or what CALLS it, across the indexed code repositories. Use this whenever you are reading, writing, debugging, or navigating code and need to locate a definition or trace call relationships by natural-language description (e.g. 'which function escapes HTML', 'where is the retry-parse helper defined', 'what calls the circuit breaker'). Returns ranked symbols with file path, line, signature, and caller count."""
+        """Find where a symbol is defined, or what calls it, in the local codegraph index.
+
+        Rows have name, kind, repo, file_path, start_line, signature, callers.
+        [] is ambiguous: no hits, or the query could not run (missing index,
+        undeclared caller, bad query). There is no error field.
+        """
         return _codegraph_query(query)
 
     @mcp.tool()
     def swarph_memory_navigate(op: str, slug: str = "", tag: str = "",
                                type: str = "", limit: int = 20,
                                depth: int = 1, direction: str = "out"):
-        """Deterministic OKF memory navigation over gbrain: op='get'|'list'|'links'|'backlinks'|'traverse'.
-        Exact canonical recall + file-native graph traversal (backlinks, multi-hop
-        --depth/--direction) — the knowledge-hemisphere counterpart to
-        swarph_codegraph_query. For fuzzy recall use semantic search instead."""
+        """Deterministic OKF memory navigation. op is one of get, list, links, backlinks, traverse.
+
+        get: slug. Success is the page object. An in-band gbrain error or
+        non-JSON tool text returns {} (memory.get_page). An unparseable body
+        or a transport error returns [].
+        list: type, tag, limit. tag is the reliable filter; gbrain reclassifies type.
+        links: slug, a list of slug strings (outgoing).
+        backlinks: slug, a list of slug strings (incoming).
+        traverse: slug, depth (default 1), direction out|in|both (default out).
+        A list of edge dicts.
+        An unrecognised op returns [].
+        """
         return _memory_navigate(op, slug=slug or None, type=type or None,
                                 tag=tag or None, limit=limit,
                                 depth=depth, direction=direction)
@@ -416,9 +443,14 @@ try:
     @mcp.tool()
     def swarph_timeline_navigate(op: str, start: str = "", end: str = "",
                                  date: str = "", window: str = "3d"):
-        """Deterministic temporal lookup over the swarph timeline: op='range'|'around'|'since'.
-        The temporal hemisphere of the OKF traversal brain — entries are dated OKF nodes with
-        [[link]] edges into knowledge. Complements semantic recall; $0, no model."""
+        """Deterministic lookup over the git timeline. op is range, around, or since.
+
+        range reads start and end. since reads date, not start. around reads date
+        and window. Dates are YYYY-MM-DD or YYYY-MM-DDTHH:MMZ. window is Nd or Nh
+        (default 3d), for example 3d or 12h.
+        Each hit is {node, edges, cell, text}. [] means no hits, or the op, date,
+        or read failed. There is no error field.
+        """
         return _timeline_navigate(op, start=start, end=end, date=date, window=window)
 
     @mcp.tool()
