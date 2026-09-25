@@ -32,9 +32,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import sys
 import threading
+import time
 from typing import IO, Any, Optional
 
 _IDLE_DEFAULT_SECONDS = 1800
@@ -113,6 +115,43 @@ def run_filter(
                 return 0
 
 
+def run_once(path: str, stdout: IO[str], *, timeout: float = 2.0) -> int:
+    """Follow the inbox file from EOF, like tail -n 0. Print the first real DM.
+
+    Bytes already in the file are not a wake. No child tail. Receipts are dropped.
+    """
+    deadline = time.monotonic() + timeout
+    pos = None
+    while time.monotonic() < deadline:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                if pos is None:
+                    fh.seek(0, os.SEEK_END)
+                    pos = fh.tell()
+                else:
+                    fh.seek(pos)
+                chunk = fh.read()
+                pos = fh.tell()
+        except FileNotFoundError:
+            chunk = ""
+        for line in chunk.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(d, dict):
+                d = d.get("dm") or d
+                rendered = _format_dm(d) if isinstance(d, dict) else None
+                if rendered is not None:
+                    print(rendered, file=stdout, flush=True)
+                    return 0
+        time.sleep(0.05)
+    return 1
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(prog="dm_notify_filter")
     p.add_argument(
@@ -121,7 +160,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=_IDLE_DEFAULT_SECONDS,
         help="silence-alert threshold (default: %(default)s)",
     )
+    p.add_argument("--once", action="store_true",
+                   help="follow an inbox file from EOF, print the first real DM, exit 0")
+    p.add_argument("--inbox", default="", help="inbox.log path for --once")
+    p.add_argument("--timeout", type=float, default=2.0,
+                   help="seconds --once waits for a new DM (default: %(default)s)")
     args = p.parse_args(argv)
+    if args.once:
+        if not args.inbox:
+            print("dm_notify_filter --once needs --inbox", file=sys.stderr)
+            return 2
+        return run_once(args.inbox, sys.stdout, timeout=args.timeout)
     return run_filter(sys.stdin, sys.stdout, idle_seconds=args.idle_seconds)
 
 
