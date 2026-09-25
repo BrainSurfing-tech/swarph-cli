@@ -1,6 +1,10 @@
-"""card #955 F1-F10. Docstrings must match the code, and the three call sites
+"""card #955 F1-F12. Docstrings must match the code, and the three call sites
 must not pass temperature or max_tokens."""
 import inspect
+
+import pytest
+
+pytest.importorskip("mcp.server.fastmcp")
 
 from swarph_cli.commands import mcp_server as mcp
 from swarph_cli.commands import brain_ask
@@ -19,6 +23,9 @@ def test_since_is_not_documented_as_reading_start():
 def test_memory_doc_names_params_and_drops_the_false_tool():
     doc = mcp.swarph_memory_navigate.__doc__
     assert "tag is the reliable filter" in doc
+    assert "returns {}" in doc
+    assert "slug strings" in doc
+    assert "edge dicts" in doc
     assert "out|in|both" in doc
     assert "semantic search" not in doc
     assert "--depth" not in doc and "--direction" not in doc

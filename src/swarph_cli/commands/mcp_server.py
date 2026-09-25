@@ -426,12 +426,15 @@ try:
                                depth: int = 1, direction: str = "out"):
         """Deterministic OKF memory navigation. op is one of get, list, links, backlinks, traverse.
 
-        get: slug, returns the page object.
+        get: slug. Success is the page object. An in-band gbrain error or
+        non-JSON tool text returns {} (memory.get_page). An unparseable body
+        or a transport error returns [].
         list: type, tag, limit. tag is the reliable filter; gbrain reclassifies type.
-        links: slug, outgoing edges.
-        backlinks: slug, incoming edges.
+        links: slug, a list of slug strings (outgoing).
+        backlinks: slug, a list of slug strings (incoming).
         traverse: slug, depth (default 1), direction out|in|both (default out).
-        An unrecognised op or a backend error returns [].
+        A list of edge dicts.
+        An unrecognised op returns [].
         """
         return _memory_navigate(op, slug=slug or None, type=type or None,
                                 tag=tag or None, limit=limit,
