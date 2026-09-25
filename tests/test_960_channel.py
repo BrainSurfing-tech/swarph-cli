@@ -26,7 +26,12 @@ def _chan(tmp_path, lines, cell="cursor-lin"):
     )
 
 
-def test_legacy_era_is_pinned_and_permission_is_absent():
+def test_legacy_era_is_pinned_and_permission_is_absent(monkeypatch):
+    monkeypatch.setenv("SWARPH_CHANNEL", "allowlisted")
+    result = initialize_result(1)["result"]
+    monkeypatch.setenv("SWARPH_CHANNEL", "dev")
+    assert "claude/channel" in json.dumps(initialize_result(1)["result"]["capabilities"])
+    monkeypatch.setenv("SWARPH_CHANNEL", "allowlisted")
     result = initialize_result(1)["result"]
     assert result["protocolVersion"] == PROTOCOL_VERSION == "2025-06-18"
     assert result["protocolVersion"] != "2026-07-28"
@@ -139,6 +144,7 @@ def test_later_dm_is_pushed_with_no_further_client_traffic(tmp_path):
     env = os.environ.copy()
     env["SWARPH_SELF"] = "cursor-lin"
     env["SWARPH_STATE"] = str(root)
+    env["SWARPH_CHANNEL"] = "allowlisted"
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     proc = subprocess.Popen(
         [sys.executable, "-m", "swarph_cli.channel"],
@@ -170,6 +176,101 @@ def test_later_dm_is_pushed_with_no_further_client_traffic(tmp_path):
     proc.kill()
     proc.wait(timeout=5)
     assert any("id=7 " in line for line in lines), lines
+
+
+def _server(root: Path, mode: str | None):
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    env["SWARPH_SELF"] = "cursor-lin"
+    env["SWARPH_STATE"] = str(root)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    if mode is None:
+        env.pop("SWARPH_CHANNEL", None)
+    else:
+        env["SWARPH_CHANNEL"] = mode
+    return subprocess.Popen(
+        [sys.executable, "-m", "swarph_cli.channel"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        text=True,
+    )
+
+
+def _init(proc) -> str:
+    assert proc.stdin is not None and proc.stdout is not None
+    proc.stdin.write(json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+    }) + "\n")
+    proc.stdin.flush()
+    return proc.stdout.readline()
+
+
+def test_unset_channel_does_not_declare_or_write(tmp_path):
+    root = tmp_path / "state"
+    side = root / "cursor-lin" / "mesh-sidecar"
+    side.mkdir(parents=True)
+    inbox = side / "inbox.log"
+    inbox.write_text("", encoding="utf-8")
+    proc = _server(root, None)
+    line = _init(proc)
+    inbox.write_text(_row(8, "cursor-lin", body="gated") + "\n", encoding="utf-8")
+    import time
+    time.sleep(2)
+    proc.kill()
+    proc.wait(timeout=5)
+    assert "claude/channel" not in line
+    assert not (side / "channel_cursor.json").exists()
+    assert not (side / "channel_heartbeat.json").exists()
+
+
+def test_second_server_does_not_poll(tmp_path):
+    import threading
+    import time
+
+    root = tmp_path / "state"
+    side = root / "cursor-lin" / "mesh-sidecar"
+    side.mkdir(parents=True)
+    inbox = side / "inbox.log"
+    inbox.write_text("", encoding="utf-8")
+    first = _server(root, "allowlisted")
+    second = _server(root, "allowlisted")
+    caught: dict[str, list[str]] = {"a": [], "b": []}
+
+    def read(proc, key: str) -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            caught[key].append(line)
+            if "id=11 " in line:
+                return
+
+    threads = [
+        threading.Thread(target=read, args=(first, "a"), daemon=True),
+        threading.Thread(target=read, args=(second, "b"), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    for proc in (first, second):
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+        }) + "\n")
+        proc.stdin.flush()
+        time.sleep(0.4)
+    inbox.write_text(_row(11, "cursor-lin", body="once") + "\n", encoding="utf-8")
+    for thread in threads:
+        thread.join(5)
+    first.kill()
+    second.kill()
+    first.wait(timeout=5)
+    second.wait(timeout=5)
+    pushes = [
+        key for key, lines in caught.items() if any("id=11 " in line for line in lines)
+    ]
+    assert len(pushes) == 1, caught
 
 
 def test_unset_self_exits_nonzero(monkeypatch):
