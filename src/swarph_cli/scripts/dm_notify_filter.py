@@ -53,6 +53,11 @@ def _reader(stream: IO[str], q: "queue.Queue[Optional[str]]") -> None:
         q.put(None)
 
 
+def is_real_dm(d: dict[str, Any]) -> bool:
+    """True when the line is a DM the wake should surface. Receipts are not."""
+    return _format_dm(d) is not None
+
+
 def _format_dm(d: dict[str, Any]) -> Optional[str]:
     mid, frm, kind = d.get("id"), d.get("from_node"), d.get("kind")
     if not (mid and frm):

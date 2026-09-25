@@ -400,6 +400,11 @@ def _build_claude_argv(
             argv.extend(["--append-system-prompt", starter])
 
     argv.extend(passthrough)
+    mode = os.environ.get("SWARPH_CHANNEL") or ""
+    if mode == "allowlisted":
+        argv.extend(["--channels", "plugin:swarph@swarph"])
+    elif mode == "dev":
+        argv.extend(["--dangerously-load-development-channels", "plugin:swarph@swarph"])
     return argv
 
 

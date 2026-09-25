@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "swarph": {
+      "command": "python3",
+      "args": ["-m", "swarph_cli.channel"]
+    }
+  }
+}

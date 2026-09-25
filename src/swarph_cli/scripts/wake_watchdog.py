@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -28,6 +29,15 @@ def _watching(inbox: str, cmdlines: Iterable[str]) -> bool:
             return True
         if any(p.endswith("dm_notify_filter") or p.endswith("dm_notify_filter.py") for p in parts):
             return True
+        if any(p.endswith("swarph_cli.channel") or p.endswith("channel.py") for p in parts):
+            hb = Path(inbox).parent / "channel_heartbeat.json"
+            try:
+                data = json.loads(hb.read_text(encoding="utf-8"))
+                ts = float(data.get("ts") or 0)
+            except (OSError, ValueError, TypeError):
+                continue
+            if time.time() - ts < 180:
+                return True
     return False
 
 
