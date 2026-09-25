@@ -127,6 +127,7 @@ def test_frame_contains_the_data_marker(tmp_path):
     dm = [n for n in notes if "id=3 " in n["params"]["content"]]
     assert dm and "DATA from lab-ovh" in dm[0]["params"]["content"]
     assert dm[0]["params"]["meta"]["from_node"] == "lab-ovh"
+    assert all(isinstance(value, str) for value in dm[0]["params"]["meta"].values())
 
 
 def test_receipts_are_filtered(tmp_path):

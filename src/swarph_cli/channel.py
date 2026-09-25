@@ -91,10 +91,10 @@ def _frame(row: dict) -> dict:
         "params": {
             "content": text,
             "meta": {
-                "from_node": row.get("from_node"),
-                "id": row.get("id"),
-                "kind": row.get("kind"),
-                "card": card,
+                "from_node": str(row.get("from_node") or ""),
+                "id": str(row.get("id") if row.get("id") is not None else ""),
+                "kind": str(row.get("kind") or ""),
+                "card": str(card),
             },
         },
     }
