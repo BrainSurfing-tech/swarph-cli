@@ -102,6 +102,10 @@ def _stub(tmp_path: Path):
     return stub
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows cannot execute the POSIX swarph stub as argv0; the escalation assertions run on Linux",
+)
 def test_escalation_is_one_dm_to_the_peer_and_not_to_itself(tmp_path):
     root = tmp_path / "state"
     _cell(root, "nobody")
