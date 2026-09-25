@@ -263,10 +263,8 @@ def _arm_instruction(cell_name: Optional[str], source: str = "unresolved") -> st
         "`swarph monitor status`.\n"
         "ARM EXACTLY ONE WAKE SOURCE: if a swarph monitor push sink "
         "(tmux:<cell>) or another watch already wakes this cell, do NOT "
-        "arm a second one. Overlapping wakes can abort an in-flight turn "
-        "(grok-researcher transcript probe, 2026-08-18: 13 historical "
-        "mid_turn_aborts from watchdog+tmux wake overlap), and the abort "
-        "is invisible in every success counter."
+        "arm a second one. Overlapping wakes can abort an in-flight turn, "
+        "and the abort is invisible in every success counter."
         + _provenance_note(source)
     )
 
@@ -368,7 +366,7 @@ def _verify_report(cell_name: Optional[str], source: str = "unresolved") -> str:
             f"[swarph silent-wake] DM wake ARMED for {cell_name}: swarph "
             f"monitor push sink(s) {', '.join(push_sinks)} deliver DMs into "
             "this session. Mid-session silence detection is the monitor's "
-            "job (card #487), not this hook's — this verification covers "
+            "job, not this hook's — this verification covers "
             "session start only." + provenance
         )
     if any("is_push" not in s for s in sinks):
