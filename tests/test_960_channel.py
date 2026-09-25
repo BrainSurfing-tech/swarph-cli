@@ -49,6 +49,52 @@ def test_first_start_does_not_replay(tmp_path):
     assert chan.cursor["last_pushed_id"] == 2
 
 
+def _stamped(i, created_at, body):
+    return json.dumps({
+        "id": i, "from_node": "lab-ovh", "to_node": "cursor-lin",
+        "kind": "status", "content": body, "card": 1, "created_at": created_at,
+    })
+
+
+def _pushed(notes):
+    return " ".join(n["params"]["content"] for n in notes)
+
+
+def test_present_dm_at_0s_is_pushed(tmp_path):
+    """If false this reads: a DM present at first poll is marked pushed and never shown."""
+    now = 1_700_000_000
+    chan = _chan(tmp_path, [_stamped(4, now, "zero")])
+    assert "id=4 " in _pushed(chan.poll(now=now))
+
+
+def test_stamp_plus_2s_is_pushed(tmp_path):
+    """If false this reads: a row stamped after the poll clock is marked pushed and never shown."""
+    now = 1_700_000_000
+    chan = _chan(tmp_path, [_stamped(5, now + 2, "ahead")])
+    assert "id=5 " in _pushed(chan.poll(now=now))
+
+
+def test_stamp_minus_40s_is_not_pushed(tmp_path):
+    """If false this reads: a row 40s old was pushed, or the in-window row was skipped."""
+    now = 1_700_000_000
+    chan = _chan(tmp_path, [_stamped(6, now - 40, "old"), _stamped(7, now, "zero")])
+    blob = _pushed(chan.poll(now=now))
+    assert "id=6 " not in blob
+    assert "id=7 " in blob
+
+
+def test_old_backlog_is_not_pushed(tmp_path):
+    """If false this reads: an old backlog row was pushed, or the in-window row was skipped."""
+    now = 1_700_000_000
+    lines = [_row(i, "cursor-lin", body=f"old-{i}") for i in range(1, 6)]
+    lines.append(_stamped(6, now, "zero"))
+    chan = _chan(tmp_path, lines)
+    blob = _pushed(chan.poll(now=now))
+    assert "id=6 " in blob
+    for i in range(1, 6):
+        assert f"id={i} " not in blob
+
+
 def test_resume_does_not_push_the_same_id(tmp_path):
     chan = _chan(tmp_path, [_row(1, "cursor-lin")])
     chan.poll(now=1_000)

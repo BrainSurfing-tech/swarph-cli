@@ -19,7 +19,6 @@ imports from here; the import is one-directional on purpose.
 from __future__ import annotations
 
 import argparse
-import datetime
 import difflib
 import json
 import os
@@ -2750,26 +2749,6 @@ def _run_sidecar(args: argparse.Namespace) -> int:
             state.pidfile_path.unlink(missing_ok=True)
 
 
-_WAIT_GRACE_S = 30.0
-
-
-def _created_within(row: dict, started: float, grace_s: float) -> bool:
-    raw = row.get("created_at")
-    if raw is None:
-        return False
-    if isinstance(raw, (int, float)):
-        ts = float(raw)
-    else:
-        text = str(raw).strip()
-        if text.endswith("Z"):
-            text = text[:-1] + "+00:00"
-        try:
-            ts = datetime.datetime.fromisoformat(text).timestamp()
-        except ValueError:
-            return False
-    return (started - ts) <= grace_s
-
-
 def _rearm_line(cell: str) -> str:
     return f"swarph mesh wait --once --as {cell}"
 
@@ -2839,7 +2818,7 @@ def _run_wait(args: argparse.Namespace) -> int:
         # First start: do not seek past rows that just arrived. A row is kept
         # when --since puts it above the anchor, or when created_at is inside
         # the grace window of this process. Older rows set the cursor.
-        from swarph_cli.dm_frame import rows
+        from swarph_cli.dm_frame import FIRST_START_GRACE_S, created_within, rows
 
         started = time.time()
         since = getattr(args, "since", None)
@@ -2851,7 +2830,7 @@ def _run_wait(args: argparse.Namespace) -> int:
                 continue
             if since is not None and rid > since:
                 continue
-            if _created_within(row, started, _WAIT_GRACE_S):
+            if created_within(row, started, FIRST_START_GRACE_S):
                 continue
             stale_ids.append(rid)
         if stale_ids:
