@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -43,7 +44,6 @@ def scan(cells: dict[str, str], cmdlines: Iterable[str], state: dict,
             rec["missing_since"] = now
             continue
         if now - since > gap and not rec.get("outage"):
-            rec["outage"] = True
             alert.append(name)
     return alert
 
@@ -78,10 +78,22 @@ def _timer_lines() -> list[str]:
     return listed.stdout.splitlines()
 
 
+def _swarph_bin() -> str:
+    explicit = os.environ.get("SWARPH_BIN", "")
+    if explicit:
+        return explicit
+    home = os.path.expanduser("~/.local/bin/swarph")
+    if os.path.isfile(home):
+        return home
+    return "swarph"
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="wake_watchdog")
     p.add_argument("--dry-run", action="store_true",
                    help="write state and list unwatched cells; do not send")
+    p.add_argument("--as", dest="sender", default="",
+                   help="cell the alert is sent as; the unit sets this")
     args = p.parse_args(argv)
     root = Path(os.environ.get("SWARPH_STATE_ROOT", os.path.expanduser("~/swarph_state")))
     state_path = Path(os.environ.get(
@@ -102,18 +114,28 @@ def main(argv: list[str] | None = None) -> int:
             if not _watching(inbox, cmdlines) and not _timer_watched(name, timers):
                 print(name, flush=True)
         return 0
-    sender = os.environ.get("SWARPH_SELF", "")
+    sender = args.sender.strip()
+    if not sender:
+        print("wake_watchdog: --as is empty; not marking any cell alerted", file=sys.stderr)
+        return 2
+    swarph = _swarph_bin()
+    rc = 0
     for name in alert:
         print(f"outage {name}", flush=True)
-        subprocess.run(
-            ["swarph", "mesh", "send", name, "--as", sender, "--kind", "fyi",
+        dm = subprocess.run(
+            [swarph, "mesh", "send", name, "--as", sender, "--kind", "fyi",
              "--content", "your DM wake is dead, re-arm"],
             check=False)
-        subprocess.run(
-            ["swarph", "board", "cards", "say", "729", "--as", sender,
+        card = subprocess.run(
+            [swarph, "board", "cards", "say", "729", "--as", sender,
              "--to", name, "--content", f"{name}: DM wake is dead, re-arm"],
             check=False)
-    return 0
+        if dm.returncode == 0 and card.returncode == 0:
+            state[name]["outage"] = True
+            save_state(state_path, state)
+        else:
+            rc = 1
+    return rc
 
 
 if __name__ == "__main__":

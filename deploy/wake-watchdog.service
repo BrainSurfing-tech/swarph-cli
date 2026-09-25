@@ -3,4 +3,4 @@ Description=DM a cell whose inbox watcher has been dead for over a minute
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 -m swarph_cli.scripts.wake_watchdog
+ExecStart=/usr/bin/python3 -m swarph_cli.scripts.wake_watchdog --as lab-ovh
