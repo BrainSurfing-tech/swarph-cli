@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from swarph_cli.cell import _atomic_write_text
+from swarph_cli.commands.hook_interpreter import hook_interpreter, refuse_unless_importable
 from swarph_cli.commands.install_wake_hook import _detect_harness
 
 _PAYLOAD = "swarph_cli.payloads.postcompact"
@@ -162,7 +163,7 @@ def _env_prefix(cell: Optional[str], memory_dir: Optional[Path]) -> str:
 
 def _render(name: str, *, env_prefix: str) -> str:
     return (_payload_text(name)
-            .replace("@PYTHON@", shlex.quote(str(Path(sys.executable).resolve())))
+            .replace("@PYTHON@", shlex.quote(hook_interpreter()))
             .replace("@ENV_PREFIX@", env_prefix))
 
 
@@ -467,6 +468,7 @@ def run_install_postcompact_hook(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+    refuse_unless_importable(hook_interpreter())
     scripts.mkdir(parents=True, exist_ok=True)
     for name in names:
         dest = scripts / name
