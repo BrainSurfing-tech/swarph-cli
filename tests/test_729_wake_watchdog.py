@@ -27,6 +27,18 @@ def test_one_dm_per_outage_and_none_while_watched():
     assert scan(cells, [], state, now=281) == ["cursor-lin"]
 
 
+def test_a_missing_listing_binary_is_an_empty_listing(monkeypatch):
+    import swarph_cli.scripts.wake_watchdog as w
+
+    def boom(argv, **kwargs):
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr(w.subprocess, "run", boom)
+    assert w._crontab() == ""
+    assert w._timer_lines() == []
+    assert w._listing(["ps", "-eo", "args"]) == ""
+
+
 def test_cron_poll_cell_is_not_flagged():
     cells = {"drop-on-meta-edge": "/tmp/drop-inbox"}
     state = {}
@@ -64,6 +76,7 @@ def test_main_guard_is_required():
     unit = Path("deploy/wake-watchdog.service").read_text(encoding="utf-8")
     assert "PYTHONPATH" not in unit
     assert "--as lab-ovh" in unit
+    assert "Environment=MESH_GATEWAY_URL=http://100.64.189.91:8788" in unit
 
 
 def _cell(root: Path, name: str) -> None:

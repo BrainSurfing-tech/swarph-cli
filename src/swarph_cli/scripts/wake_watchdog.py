@@ -92,18 +92,24 @@ def save_state(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state), encoding="utf-8")
 
 
-def _crontab() -> str:
-    listed = subprocess.run(
-        ["crontab", "-l"], capture_output=True, text=True,
-        encoding="utf-8", errors="replace", check=False)
+def _listing(argv: list[str]) -> str:
+    """A missing binary is an empty listing, which is also a host with no timers."""
+    try:
+        listed = subprocess.run(
+            argv, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=False)
+    except FileNotFoundError:
+        return ""
     return listed.stdout or ""
 
 
+def _crontab() -> str:
+    return _listing(["crontab", "-l"])
+
+
 def _timer_lines() -> list[str]:
-    listed = subprocess.run(
-        ["systemctl", "--user", "list-timers", "--all", "--no-legend"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
-    return listed.stdout.splitlines()
+    return _listing(
+        ["systemctl", "--user", "list-timers", "--all", "--no-legend"]).splitlines()
 
 
 def _swarph_bin() -> str:
@@ -128,10 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         "WAKE_WATCHDOG_STATE",
         os.path.expanduser("~/.local/state/wake-watchdog.json")))
     import time
-    listed = subprocess.run(
-        ["ps", "-eo", "args"], capture_output=True, text=True,
-        encoding="utf-8", errors="replace", check=False)
-    cmdlines = listed.stdout.splitlines()
+    cmdlines = _listing(["ps", "-eo", "args"]).splitlines()
     timers = _timer_lines()
     crontab = _crontab()
     cells = cells_under(root)
