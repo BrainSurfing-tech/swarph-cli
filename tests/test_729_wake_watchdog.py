@@ -6,6 +6,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from swarph_cli.scripts.wake_watchdog import scan
 
 INBOX = "/home/ubuntu/swarph_state/cursor-lin/mesh-sidecar/inbox.log"
@@ -85,6 +87,10 @@ def _cell(root: Path, name: str) -> None:
     (inbox / "inbox.log").write_text("")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows cannot execute the POSIX swarph stub as argv0; the failed-send assertions run on Linux",
+)
 def test_failed_send_is_not_saved_as_alerted_and_the_next_run_retries(tmp_path):
     root = tmp_path / "state"
     _cell(root, "nobody")
