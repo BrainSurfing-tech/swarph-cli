@@ -202,15 +202,17 @@ def _memory_navigate(op: str, slug: str | None = None, type: str | None = None,
     swarph_codegraph_query. Ops: 'get', 'list', 'links', 'backlinks' (incoming),
     'traverse' (multi-hop OKF edges via depth/direction). File-native graph.
 
-    Fail-safe: any backend/parse error, or an unrecognised op, returns [] —
-    never raises. A successful get returns the page object."""
+    A successful get returns the page object. A zero list is ``{"result": []}``.
+    A gateway 4xx/5xx, a JSON-RPC error envelope, or an unrecognised op is an
+    error object, not ``[]`` or ``{}``. Never raises."""
     try:
         url = brain_ask._resolve_endpoint()
         token = brain_ask._resolve_token(None, brain_ask._self_name())
         if op == "get" and slug:
             return memory.get_page(url, token, slug)
         if op == "list":
-            return memory.list_pages(url, token, type, tag, limit)
+            pages = memory.list_pages(url, token, type, tag, limit)
+            return pages if pages else {"result": []}
         if op == "links" and slug:
             return memory.links(url, token, slug)
         if op == "backlinks" and slug:
@@ -218,9 +220,15 @@ def _memory_navigate(op: str, slug: str | None = None, type: str | None = None,
         if op == "traverse" and slug:
             return [memory._as_okf_edge(f, t, d, h)
                     for (f, t, h, d) in memory.traverse(url, token, slug, depth, direction)]
-        return []
-    except Exception:
-        return []
+        # Unrecognised op: ask the gateway so its 422 is the answer, not silence.
+        memory._via_gateway(op, {"slug": slug, "type": type, "tag": tag, "limit": limit})
+        return {"error": f"unrecognised op {op!r}", "status": 422}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace") if exc.fp else ""
+        return {"error": raw or str(exc.reason), "status": exc.code}
+    except Exception as exc:
+        # `type` is a parameter of this function; do not call the builtin.
+        return {"error": f"{exc.__class__.__name__}: {exc}"}
 
 
 def _timeline_navigate(op: str, start: str = "", end: str = "", date: str = "",
@@ -426,15 +434,16 @@ try:
                                depth: int = 1, direction: str = "out"):
         """Deterministic OKF memory navigation. op is one of get, list, links, backlinks, traverse.
 
-        get: slug. Success is the page object. An in-band gbrain error or
-        non-JSON tool text returns {} (memory.get_page). An unparseable body
-        or a transport error returns [].
+        get: slug. Success is the page object. A gateway 4xx/5xx, a JSON-RPC
+        error envelope, or a transport failure returns {"error": ...}, with
+        "status" on an HTTP error. It never returns {} or [].
         list: type, tag, limit. tag is the reliable filter; gbrain reclassifies type.
+        Zero matches are {"result": []}.
         links: slug, a list of slug strings (outgoing).
         backlinks: slug, a list of slug strings (incoming).
         traverse: slug, depth (default 1), direction out|in|both (default out).
         A list of edge dicts.
-        An unrecognised op returns [].
+        An unrecognised op returns {"error": ..., "status": 422}.
         """
         return _memory_navigate(op, slug=slug or None, type=type or None,
                                 tag=tag or None, limit=limit,

@@ -47,6 +47,10 @@ def _mcp_call(url: str, token: str, tool: str, arguments: dict):
     }
     raw = brain_ask._http_post(url, body, token)
     envelope = json.loads(_strip_sse(raw))
+    if isinstance(envelope, dict) and "error" in envelope:
+        raise RuntimeError("jsonrpc error " + json.dumps(envelope["error"]))
+    if not isinstance(envelope, dict) or "result" not in envelope:
+        raise RuntimeError("jsonrpc missing result")
     content = (envelope.get("result") or {}).get("content") or []
     for part in content:
         if part.get("type") == "text":
@@ -64,7 +68,12 @@ def _gateway_call(gw_base: str, peer_token: str, op: str, arguments: dict):
     url = gw_base.rstrip("/") + "/memory"
     raw = brain_ask._http_post(url, {"op": op, "arguments": arguments}, peer_token,
                                accept="application/json")
-    return json.loads(raw).get("result")
+    payload = json.loads(raw)
+    if isinstance(payload, dict) and "error" in payload:
+        raise RuntimeError("jsonrpc error " + json.dumps(payload["error"]))
+    if not isinstance(payload, dict) or "result" not in payload:
+        raise RuntimeError("gateway missing result")
+    return payload["result"]
 
 
 def _via_gateway(op: str, arguments: dict):
@@ -86,7 +95,9 @@ def get_page(url: str, token: str, slug: str) -> dict:
     routed, out = _via_gateway("get", {"slug": slug})
     if not routed:
         out = _mcp_call(url, token, "get_page", {"slug": slug})
-    return out if isinstance(out, dict) else {}
+    if not isinstance(out, dict):
+        raise RuntimeError(f"get_page: no page {slug!r}")
+    return out
 
 
 def list_pages(url: str, token: str, type_: str | None = None,
@@ -102,7 +113,11 @@ def list_pages(url: str, token: str, type_: str | None = None,
     routed, out = _via_gateway("list", args)
     if not routed:
         out = _mcp_call(url, token, "list_pages", args)
-    return out if isinstance(out, list) else (out.get("pages", []) if isinstance(out, dict) else [])
+    if isinstance(out, list):
+        return out
+    if isinstance(out, dict) and isinstance(out.get("pages"), list):
+        return out["pages"]
+    raise RuntimeError("list_pages: expected a list")
 
 
 # The one true OKF link grammar lives in okf_links (pinned, tested). memory
