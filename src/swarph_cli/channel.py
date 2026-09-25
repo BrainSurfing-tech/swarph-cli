@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -23,6 +24,7 @@ INSTRUCTIONS = (
 BACKLOG = 20
 HEARTBEAT_S = 60
 STALL_S = 120
+POLL_S = 1.0
 
 
 def capabilities() -> dict:
@@ -220,6 +222,39 @@ def handle_line(line: str) -> dict | None:
     return None
 
 
+def _write(obj: dict) -> None:
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def serve(chan: Channel) -> None:
+    """Poll the inbox on a timer. A later DM does not wait for stdin traffic."""
+    lock = threading.Lock()
+    started = threading.Event()
+    stop = threading.Event()
+
+    def ticker() -> None:
+        while not stop.wait(POLL_S):
+            if not started.is_set():
+                continue
+            with lock:
+                for note in chan.poll():
+                    _write(note)
+
+    threading.Thread(target=ticker, daemon=True).start()
+    for raw in sys.stdin:
+        reply = handle_line(raw)
+        if reply is None:
+            continue
+        with lock:
+            _write(reply)
+            if reply.get("result", {}).get("protocolVersion") == PROTOCOL_VERSION:
+                for note in chan.poll():
+                    _write(note)
+                started.set()
+    stop.set()
+
+
 def main(argv: list[str] | None = None) -> int:
     cell = os.environ.get("SWARPH_SELF") or ""
     if not cell:
@@ -232,15 +267,7 @@ def main(argv: list[str] | None = None) -> int:
         side / "channel_cursor.json",
         side / "channel_heartbeat.json",
     )
-    for raw in sys.stdin:
-        reply = handle_line(raw)
-        if reply is not None:
-            sys.stdout.write(json.dumps(reply) + "\n")
-            sys.stdout.flush()
-        if reply and reply.get("result", {}).get("protocolVersion") == PROTOCOL_VERSION:
-            for note in [_note(chan.armed_line()), *chan.poll()]:
-                sys.stdout.write(json.dumps(note) + "\n")
-            sys.stdout.flush()
+    serve(chan)
     return 0
 
 

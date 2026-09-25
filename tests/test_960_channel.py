@@ -125,6 +125,53 @@ def test_spawn_channel_flag_is_off_unless_asked(monkeypatch):
     assert "--dangerously-load-development-channels" in argv
 
 
+def test_later_dm_is_pushed_with_no_further_client_traffic(tmp_path):
+    """Stdio server must push a DM appended after initialize, with stdin idle."""
+    import subprocess
+    import sys
+    import threading
+
+    root = tmp_path / "state"
+    side = root / "cursor-lin" / "mesh-sidecar"
+    side.mkdir(parents=True)
+    inbox = side / "inbox.log"
+    inbox.write_text("", encoding="utf-8")
+    env = os.environ.copy()
+    env["SWARPH_SELF"] = "cursor-lin"
+    env["SWARPH_STATE"] = str(root)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "swarph_cli.channel"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        text=True,
+    )
+    lines: list[str] = []
+
+    def reader() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lines.append(line)
+            if "id=7 " in line:
+                return
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    assert proc.stdin is not None
+    proc.stdin.write(json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+    }) + "\n")
+    proc.stdin.flush()
+    thread.join(1.5)
+    inbox.write_text(_row(7, "cursor-lin", body="later") + "\n", encoding="utf-8")
+    thread.join(5)
+    proc.kill()
+    proc.wait(timeout=5)
+    assert any("id=7 " in line for line in lines), lines
+
+
 def test_unset_self_exits_nonzero(monkeypatch):
     import subprocess
     import sys
