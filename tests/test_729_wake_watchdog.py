@@ -91,6 +91,65 @@ def _cell(root: Path, name: str) -> None:
     sys.platform == "win32",
     reason="Windows cannot execute the POSIX swarph stub as argv0; the failed-send assertions run on Linux",
 )
+def _stub(tmp_path: Path):
+    stub = tmp_path / "swarph"
+    stub.write_text(textwrap.dedent("""\
+        #!/bin/sh
+        echo "$@" >> "$STUB_LOG"
+        exit "$STUB_RC"
+    """))
+    stub.chmod(0o755)
+    return stub
+
+
+def test_escalation_is_one_dm_to_the_peer_and_not_to_itself(tmp_path):
+    root = tmp_path / "state"
+    _cell(root, "nobody")
+    _cell(root, "lab-ovh")
+    state_path = tmp_path / "wake.json"
+    log = tmp_path / "stub.log"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.path.abspath("src"),
+        "SWARPH_STATE_ROOT": str(root),
+        "WAKE_WATCHDOG_STATE": str(state_path),
+        "SWARPH_BIN": str(_stub(tmp_path)),
+        "STUB_LOG": str(log),
+        "STUB_RC": "0",
+    }
+    env.pop("SWARPH_SELF", None)
+    subprocess.run(
+        [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
+         "--as", "lab-ovh", "--escalate", "lab-ovh"],
+        env=env, check=True)
+    saved = json.loads(state_path.read_text())
+    saved["nobody"]["missing_since"] = 0
+    state_path.write_text(json.dumps(saved))
+    subprocess.run(
+        [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
+         "--as", "lab-ovh", "--escalate", "lab-ovh"],
+        env=env, check=True)
+    text = log.read_text()
+    assert "mesh send nobody" in text
+    assert "cards say 729" in text
+    assert text.count("mesh send lab-ovh") == 1
+    assert json.loads(state_path.read_text())["nobody"]["outage"] is True
+    log.write_text("")
+    subprocess.run(
+        [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
+         "--as", "lab-ovh", "--escalate", "lab-ovh"],
+        env=env, check=True)
+    assert log.read_text().strip() == ""
+    state_path.write_text(json.dumps({"lab-ovh": {"missing_since": 0}}))
+    log.write_text("")
+    subprocess.run(
+        [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
+         "--as", "lab-ovh", "--escalate", "lab-ovh"],
+        env=env, check=True)
+    own = log.read_text()
+    assert own.count("mesh send lab-ovh") == 1
+
+
 def test_failed_send_is_not_saved_as_alerted_and_the_next_run_retries(tmp_path):
     root = tmp_path / "state"
     _cell(root, "nobody")
