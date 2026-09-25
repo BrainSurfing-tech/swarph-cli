@@ -72,7 +72,7 @@ def test_appended_dm_exits_within_2s_and_cursor_follows_the_print(tmp_path):
         [sys.executable, "-m", "swarph_cli", "mesh", "wait", "--once", "--as", "cursor-lin"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
-    time.sleep(0.3)
+    time.sleep(1.0)
     assert not (side / "wait_cursor.json").exists()
     inbox.write_text(_row(7, "cursor-lin", body="later") + "\n", encoding="utf-8")
     out, err = proc.communicate(timeout=5)
@@ -94,7 +94,7 @@ def test_two_dms_are_both_printed_and_survive_rearm(tmp_path):
         [sys.executable, "-m", "swarph_cli", "mesh", "wait", "--once", "--as", "cursor-lin"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
-    time.sleep(0.2)
+    time.sleep(1.0)
     inbox.write_text(_row(4, "cursor-lin", body="one") + "\n" + _row(5, "cursor-lin", body="two") + "\n", encoding="utf-8")
     out, err = proc.communicate(timeout=5)
     assert proc.returncode == 0, err
@@ -139,7 +139,7 @@ def test_first_start_seeks_to_end_and_prints_only_the_appended_dm(tmp_path):
         [sys.executable, "-m", "swarph_cli", "mesh", "wait", "--once", "--as", "cursor-lin"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
-    time.sleep(0.3)
+    time.sleep(1.0)
     inbox.write_text(old + "\n" + _row(26, "cursor-lin", body="fresh") + "\n", encoding="utf-8")
     out, err = proc.communicate(timeout=5)
     assert proc.returncode == 0, err
