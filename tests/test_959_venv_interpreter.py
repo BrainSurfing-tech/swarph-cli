@@ -71,8 +71,15 @@ def test_wake_hook_bakes_the_venv_interpreter_and_it_imports(tmp_path):
     assert proc.returncode == 0, proc.stderr
     settings = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
     command = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-    baked = command.split()[0].strip("'\"")
-    assert Path(baked) == py.absolute()
-    assert "bin/python" in baked or baked.endswith("python.exe")
-    imported = subprocess.run([baked, "-c", "import swarph_cli"], capture_output=True, text=True)
-    assert imported.returncode == 0, imported.stderr
+    import shlex
+    baked = shlex.split(command)[0]
+    run_env = os.environ.copy()
+    run_env["PYTHONNOUSERSITE"] = "1"
+    run_env.pop("PYTHONPATH", None)
+    ran = subprocess.run(shlex.split(command), env=run_env, capture_output=True, text=True)
+    problems = []
+    if Path(baked) != py.absolute():
+        problems.append(f"path {baked} != {py.absolute()}")
+    if ran.returncode != 0 or "hookSpecificOutput" not in ran.stdout:
+        problems.append(ran.stderr or ran.stdout or f"exit {ran.returncode}")
+    assert not problems, "\n".join(problems)
