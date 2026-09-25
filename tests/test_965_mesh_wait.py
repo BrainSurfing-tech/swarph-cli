@@ -163,6 +163,23 @@ def test_dm_already_present_at_0s_is_printed(tmp_path):
     assert "id=9 " in proc.stdout and "zero" in proc.stdout
 
 
+def test_future_stamp_at_plus_2s_is_printed(tmp_path):
+    """If false this reads: a present row stamped after the process clock is seeked past."""
+    side = _side(tmp_path)
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 2))
+    row = json.dumps({
+        "id": 11, "from_node": "lab-ovh", "to_node": "cursor-lin",
+        "kind": "status", "content": "ahead", "card": 1,
+        "created_at": stamp,
+    })
+    (side / "inbox.log").write_text(row + "\n", encoding="utf-8")
+    proc = _run(tmp_path, ["wait", "--once", "--as", "cursor-lin", "--max-wait-s", "2"])
+    assert proc.returncode == 0
+    assert "id=11 " in proc.stdout and "ahead" in proc.stdout
+    help_proc = _run(tmp_path, ["wait", "--help"])
+    assert "30" in help_proc.stdout
+
+
 def test_missing_inbox_exits_2(tmp_path):
     """If false this reads: exit 0 with a re-arm line and no inbox."""
     _side(tmp_path)

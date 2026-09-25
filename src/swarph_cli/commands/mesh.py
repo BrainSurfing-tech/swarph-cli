@@ -198,7 +198,9 @@ def _build_parser() -> argparse.ArgumentParser:
                            "Does not fall back to SWARPH_SELF.")
     wait.add_argument("--max-wait-s", type=float, default=1500,
                       help="give up after this many seconds (default 1500) and "
-                           "print the re-arm line")
+                           "print the re-arm line. On first start, a row already "
+                           "in the inbox is delivered when its created_at is within "
+                           "30 s before process start, or any time after it.")
     wait.add_argument("--since", type=int, default=None,
                       help="on first start, deliver ids above this anchor "
                            "instead of seeking past them")
@@ -2765,7 +2767,7 @@ def _created_within(row: dict, started: float, grace_s: float) -> bool:
             ts = datetime.datetime.fromisoformat(text).timestamp()
         except ValueError:
             return False
-    return 0 <= (started - ts) <= grace_s
+    return (started - ts) <= grace_s
 
 
 def _rearm_line(cell: str) -> str:
