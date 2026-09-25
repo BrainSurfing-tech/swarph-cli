@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from swarph_cli.cell import _atomic_write_text
+from swarph_cli.commands.hook_interpreter import hook_interpreter, refuse_unless_importable
 from swarph_cli.commands.wake_hook_output import _tmux_session_cell
 
 
@@ -48,7 +49,7 @@ _KNOWN_HARNESSES = ("claude", "codex", "cursor", "muse", "antigravity")
 def _command(
     harness: str, cell: Optional[str] = None, *, windows: bool = False
 ) -> str:
-    interpreter = str(Path(sys.executable).resolve())
+    interpreter = hook_interpreter()
     # Hook runners use the POSIX command on Unix and commandWindows on
     # Windows.  POSIX quoting produces a literal leading apostrophe in
     # PowerShell, so keep the Windows form separately and use native
@@ -409,6 +410,8 @@ def run_install_wake_hook(argv: Optional[list[str]] = None) -> int:
         return 0
 
     payload = json.dumps(after, indent=2, sort_keys=True) + "\n"
+    if not args.uninstall:
+        refuse_unless_importable(hook_interpreter())
     _atomic_write_text(target, payload)
     # ASSERT THE ARTIFACT CHANGED AT THE STEP THAT CHANGES IT (card #527
     # task 3): "installed" is a claim about the filesystem and must be

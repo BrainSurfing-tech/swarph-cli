@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from swarph_cli.cell import _atomic_write_text
+from swarph_cli.commands.hook_interpreter import hook_interpreter, refuse_unless_importable
 
 
 _OWNED_MODULE = "swarph_cli"
@@ -45,7 +46,7 @@ def _read_hooks(path: Path) -> dict[str, Any]:
 
 
 def _command(verb: str, *, windows: bool) -> str:
-    interpreter = str(Path(sys.executable).resolve())
+    interpreter = hook_interpreter()
     if windows:
         return f'"{interpreter}" -m {_OWNED_MODULE} {verb}'
     return f"{shlex.quote(interpreter)} -m {_OWNED_MODULE} {verb}"
@@ -146,6 +147,8 @@ def run_install_codex_hooks(argv: list[str] | None = None) -> int:
         return 0
     if changed:
         target.parent.mkdir(parents=True, exist_ok=True)
+        if not args.uninstall:
+            refuse_unless_importable(hook_interpreter())
         _atomic_write_text(target, json.dumps(after, indent=2, sort_keys=True) + "\n")
     print(f"swarph install-codex-hooks: {action} {'updated' if changed else 'already current'} at {target}.", file=sys.stderr)
     if not args.uninstall:
