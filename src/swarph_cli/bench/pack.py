@@ -88,6 +88,14 @@ def validate_schema(pack: dict) -> tuple[list[str], list[str]]:
     if "description" in pack and not isinstance(pack["description"], str):
         errors.append("'description' must be a string when present")
 
+    kind = pack.get("request_kind", "semantic")
+    if "request_kind" in pack and kind not in {"typed", "semantic"}:
+        errors.append("'request_kind' must be typed or semantic")
+    if pack.get("egress") not in {None, "on_box_only"}:
+        errors.append("'egress' must be on_box_only when present")
+    if "noul_threshold" in pack and not isinstance(pack["noul_threshold"], (int, float)):
+        errors.append("'noul_threshold' must be a number")
+
     tasks = pack.get("tasks")
     if not isinstance(tasks, list) or len(tasks) < 1:
         errors.append("'tasks' is required and must be a non-empty array")
@@ -111,6 +119,13 @@ def validate_schema(pack: dict) -> tuple[list[str], list[str]]:
         prompt = task.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             errors.append(f"{where}.prompt is required and must be a non-empty string")
+        elif kind == "typed":
+            try:
+                parsed = json.loads(prompt)
+            except json.JSONDecodeError:
+                parsed = None
+            if not isinstance(parsed, dict) or "state" not in parsed or "questions" not in parsed:
+                errors.append(f"{where}.prompt must be JSON with state and questions when request_kind is typed")
 
         ttype = task.get("type")
         if ttype not in TASK_TYPES:

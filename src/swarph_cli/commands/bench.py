@@ -31,6 +31,8 @@ from swarph_cli.bench.backends import (
     TypedHttpBackend,
 )
 from swarph_cli.bench.pack import PackError, load_pack, slugify_theme, validate_schema
+from swarph_cli.bench.backends import HttpBackend
+from swarph_cli.bench.providers import RegistryError, load_registry, registry_path
 from swarph_cli.bench.runner import ModelSpec, parse_models, preflight, run_pack
 from swarph_cli.bench.validate import validate_pack
 from swarph_cli.commands._display import sanitize_terminal as _s
@@ -125,6 +127,11 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("--models", required=True, help="comma list, id[:backend[:label]]")
     r.add_argument("--pack", required=True, help="path to a pack JSON file")
     r.add_argument("--report", choices=["json", "table"], default="table")
+    r.add_argument("--providers", default=None, help="TOML provider registry (env-var names only)")
+    r.add_argument("--max-usd", type=float, default=None, help="stop dispatching at this run-wide spend")
+    r.add_argument("--max-usd-per-arm", type=float, default=None)
+    r.add_argument("--allow-egress", action="append", default=[], help="provider allowed off-box")
+    r.add_argument("--allow-unpriced", action="append", default=[], help="provider allowed with no price under a cap")
     r.add_argument("--strict", action="store_true",
                     help="abort (no dispatch) if ANY requested model lacks credentials, "
                          "instead of skipping it and running the rest")
@@ -178,7 +185,26 @@ def _cmd_run(args) -> int:
 
     specs = parse_models(args.models)
     backends = _default_backends()
-    runnable, warnings = preflight(specs, backends)
+    try:
+        registry = load_registry(registry_path(args.providers))
+    except (OSError, RegistryError) as exc:
+        print(f"swarph bench run: {exc}", file=sys.stderr)
+        return 2
+    for spec in specs:
+        if spec.backend != "provider":
+            continue
+        entry = registry.get(spec.provider)
+        if entry is None:
+            continue
+        spec.arm = HttpBackend(
+            name=spec.provider, kind=entry["kind"], base_url=entry["base_url"],
+            path=entry["path"], auth=entry.get("auth"), usage=entry.get("usage"),
+            price=entry.get("price"), egress=entry["egress"],
+            noul_threshold=pack.get("noul_threshold"))
+    allow_egress = set(args.allow_egress or [])
+    runnable, warnings = preflight(
+        specs, backends, pack=pack, allow_egress=allow_egress,
+        allow_unpriced=set(args.allow_unpriced or []), max_usd=args.max_usd)
     for w in warnings:
         print(f"swarph bench run: WARN {w}", file=sys.stderr)
     if warnings and args.strict:
@@ -189,12 +215,14 @@ def _cmd_run(args) -> int:
         print("swarph bench run: no runnable models (all lack credentials)", file=sys.stderr)
         return 1
 
-    result = run_pack(runnable, pack, backends)
+    result = run_pack(
+        runnable, pack, backends, max_usd=args.max_usd,
+        max_usd_per_arm=args.max_usd_per_arm, allow_egress=allow_egress)
     if args.report == "json":
         print(json.dumps(result, indent=2))
     else:
         print(_format_run_table(result))
-    return 0
+    return int(result.get("exit_code") or 0)
 
 
 def _cmd_validate(args) -> int:

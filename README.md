@@ -195,6 +195,8 @@ swarph bench prices [--refresh] [--grep <substr>]
 
 Task types: `numeric` (rel-err), `categorical` (exact), `ranking` (Kendall-tau), `text` (Jaccard). Packs are **data only** — the scoring engine is fixed and shared. Metered backend needs the provider key (e.g. `GEMINI_API_KEY`); the `[bench]` extra pulls `google-genai`.
 
+`provider:<name>` reads a TOML registry (`--providers`, else `$SWARPH_BENCH_PROVIDERS`, else `~/.config/swarph/bench_providers.toml`). The file names an env var; it does not hold the key. A worked example is `docs/examples/bench_providers.toml` (Jev, `env = "JEV_API_KEY"`, 0.42 USD per 1M input tokens, output free). `--max-usd` stops the run at the cap. A pack with `egress = "on_box_only"` refuses an external arm unless `--allow-egress <provider>` names it.
+
 ### `swarph brain-ask` (v0.14.0)
 
 Search the **swarph-brain** (gbrain) — the swarm's sovereign $0 semantic-retrieval memory — over MCP. The "does the swarm already know X?" reflex, as a one-shot.
