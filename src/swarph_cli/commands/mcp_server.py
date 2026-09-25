@@ -436,7 +436,7 @@ try:
 
         get: slug. Success is the page object. A gateway 4xx/5xx, a JSON-RPC
         error envelope, or a transport failure returns {"error": ...}, with
-        "status" on an HTTP error. Not {} or [].
+        "status" on an HTTP error. It never returns {} or [].
         list: type, tag, limit. tag is the reliable filter; gbrain reclassifies type.
         Zero matches are {"result": []}.
         links: slug, a list of slug strings (outgoing).
