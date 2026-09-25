@@ -40,6 +40,8 @@ def _run(tmp_path: Path, argv: list[str], *, self_env: bool = False) -> subproce
 def test_pending_dm_exits_immediately_and_skips_receipt_and_foreign(tmp_path):
     """If false this reads: no wait command, or a receipt/foreign row is printed."""
     side = _side(tmp_path)
+    (side / "wait_cursor.json").write_text(
+        json.dumps({"last_delivered_id": 0}) + "\n", encoding="utf-8")
     (side / "inbox.log").write_text("\n".join([
         _row(1, "cursor-lin", body="real"),
         json.dumps({
@@ -121,6 +123,30 @@ def test_missing_as_exits_2_even_with_swarph_self(tmp_path):
     assert "invalid choice" not in proc.stderr
     assert "--as" in proc.stderr
     assert "id=1 " not in proc.stdout
+
+
+def test_first_start_seeks_to_end_and_prints_only_the_appended_dm(tmp_path):
+    """If false this reads: a pre-existing row is delivered on first start."""
+    side = _side(tmp_path)
+    inbox = side / "inbox.log"
+    old = "\n".join(_row(i, "cursor-lin", body=f"old-{i}") for i in range(1, 26))
+    inbox.write_text(old + "\n", encoding="utf-8")
+    env = os.environ.copy()
+    env["SWARPH_STATE"] = str(tmp_path)
+    env["PYTHONPATH"] = str(REPO / "src")
+    env.pop("SWARPH_SELF", None)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "swarph_cli", "mesh", "wait", "--once", "--as", "cursor-lin"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    time.sleep(0.3)
+    inbox.write_text(old + "\n" + _row(26, "cursor-lin", body="fresh") + "\n", encoding="utf-8")
+    out, err = proc.communicate(timeout=5)
+    assert proc.returncode == 0, err
+    assert "id=26 " in out and "fresh" in out
+    for i in range(1, 26):
+        assert f"id={i} " not in out
+    assert "more, read the inbox" not in out
 
 
 def test_missing_inbox_exits_2(tmp_path):

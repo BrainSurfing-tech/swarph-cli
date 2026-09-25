@@ -2809,6 +2809,22 @@ def _run_wait(args: argparse.Namespace) -> int:
             last_id = int(saved.get("last_delivered_id", -1))
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             last_id = -1
+    else:
+        # First start, same as channel.poll: record the newest id and deliver nothing old.
+        from swarph_cli.dm_frame import rows
+
+        ids = []
+        for row in rows(inbox.read_text(encoding="utf-8", errors="replace")):
+            try:
+                ids.append(int(row["id"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if ids:
+            last_id = max(ids)
+            cursor_path.write_text(
+                json.dumps({"last_delivered_id": last_id}) + "\n",
+                encoding="utf-8",
+            )
     deadline = time.monotonic() + float(args.max_wait_s)
     while True:
         pending = _wait_pending(inbox.read_text(encoding="utf-8", errors="replace"), cell, last_id)
