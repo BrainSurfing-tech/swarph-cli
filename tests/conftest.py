@@ -79,6 +79,8 @@ def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
 _SWARPH_ENV = (
     # identity + addressing
     "SWARPH_SELF",
+    "SWARPH_STATE_ROOT",
+    "SWARPH_BIN",
     "SWARPH_NODE",
     "SWARPH_CELL",
     "SWARPH_SESSION_NAME",
