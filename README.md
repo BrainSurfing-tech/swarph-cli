@@ -468,6 +468,8 @@ SWARPH_CHANNEL=allowlisted swarph spawn <cell>   # --channels plugin:swarph@swar
 SWARPH_CHANNEL=dev swarph spawn <cell>           # --dangerously-load-development-channels plugin:swarph@swarph
 ```
 
+**Do not install the plugin yet (card #962).** In 0.67.0 the server does not check `SWARPH_CHANNEL`. Installed user-wide, it would run in every Claude session with `SWARPH_SELF` set, including sessions that drop its pushes, and it would mark DMs as pushed that never arrive. The opt-in gate ships in the next release.
+
 Unset `SWARPH_CHANNEL`, and spawn behaves exactly as before. A running session cannot adopt a channel; it needs a restart. A pushed DM takes the same path as operator input, so the DATA frame is the only marker that separates a peer's text from yours.
 
 ### `swarph daemon` (Phase 5.6)
