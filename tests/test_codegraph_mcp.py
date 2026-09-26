@@ -72,6 +72,7 @@ def test_codegraph_query_returns_compact_row(tmp_path, monkeypatch):
     assert row["name"] == "renderThing"
     assert set(row.keys()) == {
         "name", "kind", "repo", "file_path", "start_line", "signature", "callers",
+        "edges_truncated",
     }
 
 

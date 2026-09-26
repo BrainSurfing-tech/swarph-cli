@@ -188,6 +188,7 @@ def _codegraph_query(query: str, *, limit: int = 8) -> list[dict]:
                 "start_line": r["start_line"],
                 "signature": r["signature"],
                 "callers": r["callers"],
+                "edges_truncated": bool(r.get("edges_truncated")),
             }
             for r in rows
         ]

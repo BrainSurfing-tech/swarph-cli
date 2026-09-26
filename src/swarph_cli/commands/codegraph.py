@@ -237,10 +237,21 @@ def structural_query(term, *, index_path, caller_cell, limit=8, allowlist=None) 
                 f"WHERE e.dst_symbol=? AND e.edge_type='calls' AND src.repo IN ({qmarks})",
                 (sid, *sorted(allowed))
             ).fetchone()[0]
+            # Ruling C (card #559, 2026-09-10): B's filter above is unchanged.
+            # edges_truncated is true when that filter dropped at least one call
+            # edge because the peer cannot read the caller's repo. Existence
+            # only — a count of the hidden edges would be the #194 leak again.
+            dropped = con.execute(
+                f"SELECT 1 FROM edges e JOIN symbols src ON src.id = e.src_symbol "
+                f"WHERE e.dst_symbol=? AND e.edge_type='calls' AND src.repo NOT IN ({qmarks}) "
+                f"LIMIT 1",
+                (sid, *sorted(allowed)),
+            ).fetchone()
             out.append({"repo": repo, "name": name, "kind": kind,
                         "file_path": fp, "start_line": line, "callers": callers, "score": score,
                         "qualified_name": qualified_name or "", "docstring": docstring or "",
-                        "signature": signature or ""})
+                        "signature": signature or "",
+                        "edges_truncated": dropped is not None})
         return out
     # OperationalError (lock/busy, or a malformed FTS5 MATCH query string) OR DatabaseError
     # (corrupt/non-sqlite file) — both are sqlite3.Error siblings — fail safe (A2), never raise/hang.
@@ -279,6 +290,8 @@ def format_human(rows, term) -> str:
         loc = f"{r['file_path']}:{r['start_line']}"
         n = r["callers"]
         callers = f"  ({n} caller{'s' if n != 1 else ''})" if n else ""
+        if r.get("edges_truncated"):
+            callers += "  [edges_truncated]"
         lines.append(f"{i}. {r['name']}  [{r['kind']}]  {r['repo']}  {loc}{callers}")
         if r["signature"]:
             lines.append(f"     {r['signature']}")
