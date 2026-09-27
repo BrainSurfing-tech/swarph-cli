@@ -16,6 +16,9 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+import hashlib
+import json
+
 from .backends import Backend
 from .pack import validate_schema
 from .quality import d_text
@@ -280,4 +283,64 @@ def validate_pack(
         report.warnings.extend(disc_warnings)
 
     report.warnings.extend(gate_calibration(pack, backends))
+    report.errors.extend(gate_signal_pack(pack))
     return report
+
+
+def tasks_sha256(tasks: list) -> str:
+    """sha256 of the task list. Frozen canon: json.dumps with sort_keys and
+    compact separators, UTF-8. The pack builder must use this exact canon."""
+    blob = json.dumps(tasks, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def gate_signal_pack(pack: dict) -> list[str]:
+    """A signal pack is valid only with a matching task-list sha256, a frozen
+    5-bar outcome rule, and cardinality > 1 on both conditioning axes
+    (regime and sector). A constant axis passes a schema check and still
+    measures nothing."""
+    header = pack.get("header")
+    if not isinstance(header, dict) or header.get("pack_kind") != "signal":
+        return []
+    errors: list[str] = []
+    tasks = pack.get("tasks") or []
+    digest = tasks_sha256(tasks)
+    if header.get("sha256_tasks") != digest:
+        errors.append(
+            f"header.sha256_tasks does not match the task list (computed {digest})"
+        )
+    if header.get("row_count") != len(tasks):
+        errors.append(
+            f"header.row_count={header.get('row_count')!r} does not match len(tasks)={len(tasks)}"
+        )
+    outcome = header.get("outcome") if isinstance(header.get("outcome"), dict) else {}
+    if outcome.get("horizon_bars") != 5 or outcome.get("up_gt") is None or outcome.get("down_lt") is None:
+        errors.append("header.outcome must freeze horizon_bars=5, up_gt, and down_lt")
+    for key in ("data_window", "universe_source_query", "price_history_snapshot_date"):
+        if not header.get(key):
+            errors.append(f"header.{key} is required on a signal pack")
+    regimes: set[str] = set()
+    sectors: set[str] = set()
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        cls = str((task.get("meta") or {}).get("class") or "")
+        if "|" not in cls:
+            errors.append(f"task {task.get('id')!r} meta.class must be '<regime>|<sector>'")
+            continue
+        regime, sector = cls.split("|", 1)
+        if regime:
+            regimes.add(regime)
+        if sector:
+            sectors.add(sector)
+    if len(regimes) < 2:
+        errors.append(
+            f"conditioning axis regime has cardinality {len(regimes)}; "
+            "a constant axis is not a valid pack"
+        )
+    if len(sectors) < 2:
+        errors.append(
+            f"conditioning axis sector has cardinality {len(sectors)}; "
+            "a constant axis is not a valid pack"
+        )
+    return errors

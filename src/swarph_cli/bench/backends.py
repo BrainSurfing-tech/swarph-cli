@@ -475,6 +475,15 @@ class RuleBackend:
         )
 
 
+class SignalBackend(RuleBackend):
+    """Deterministic signal arm (#213). ``model_id`` is ``module:callable``.
+
+    Same call as :class:`RuleBackend`: no credentials, no network, the
+    callable's return value is the categorical label. The runner scores a
+    ``signal:`` arm with the robust date-grouped scorer, not mean distance.
+    """
+
+
 class TypedHttpBackend:
     KIND = "typed"
     """POST a bench item to a Jev-compatible ``/v1/systemone`` server.
