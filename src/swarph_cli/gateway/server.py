@@ -3117,7 +3117,7 @@ async def scheduled_event_fire_now(name: str,
         c.execute(
             "UPDATE scheduled_events SET last_fired_at = ?, last_status = 'fired', "
             "fire_count = fire_count + 1 WHERE name = ?", (now, name))
-    return {"name": name, "fired": True, "fired_at": now,
+    return {"name": name, "fired": False, "marked": True, "fired_at": now,
             "target_cell": row["target_cell"], "task": row["task"],
             "context_ref": json.loads(row["context_ref"])}
 

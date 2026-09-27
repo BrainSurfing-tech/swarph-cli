@@ -107,14 +107,15 @@ def test_cooldown_suppresses_second_tick(isolated_state):
         # stale peer returned both ticks (still stranded)
         return_value=[{"name": "droplet", "last_health": "2020-01-01T00:00:00+00:00"}],
     ), patch(
-        "swarph_cli.commands.watchdog._dm_wake", return_value=True
+        "swarph_cli.commands.watchdog._dm_wake", return_value="accepted"
     ) as dm_mock:
         fired_1 = _run_scan(args, log_path, now_epoch=1_700_000_000)
         fired_2 = _run_scan(args, log_path, now_epoch=1_700_000_000 + 600)  # 10min later < 1800
 
     assert dm_mock.call_count == 1
-    assert fired_1 == 1
-    assert fired_2 == 0  # tick-2 suppressed by cooldown → not a wake (no exit 3)
+    # A gateway accept is not a fired wake (#184).
+    assert fired_1 == 0
+    assert fired_2 == 0
 
 
 def test_past_cooldown_rewakes(isolated_state):
@@ -126,13 +127,13 @@ def test_past_cooldown_rewakes(isolated_state):
         "swarph_cli.commands.watchdog._fetch_peers",
         return_value=[{"name": "droplet", "last_health": "2020-01-01T00:00:00+00:00"}],
     ), patch(
-        "swarph_cli.commands.watchdog._dm_wake", return_value=True
+        "swarph_cli.commands.watchdog._dm_wake", return_value="accepted"
     ) as dm_mock:
         _run_scan(args, log_path, now_epoch=1_700_000_000)
         fired_2 = _run_scan(args, log_path, now_epoch=1_700_000_000 + 1801)  # past cooldown
 
     assert dm_mock.call_count == 2
-    assert fired_2 == 1
+    assert fired_2 == 0
 
 
 def test_failed_dm_does_not_start_cooldown(isolated_state):
@@ -171,7 +172,7 @@ def test_successful_wake_stamps_state(isolated_state):
         "swarph_cli.commands.watchdog._fetch_peers",
         return_value=[{"name": "droplet", "last_health": "2020-01-01T00:00:00+00:00"}],
     ), patch(
-        "swarph_cli.commands.watchdog._dm_wake", return_value=True
+        "swarph_cli.commands.watchdog._dm_wake", return_value="accepted"
     ):
         _run_scan(args, log_path, now_epoch=1_700_000_000)
 

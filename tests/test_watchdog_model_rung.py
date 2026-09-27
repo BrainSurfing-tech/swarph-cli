@@ -628,9 +628,12 @@ def test_send_keys_targets_resolved_pane():
         calls.append(argv)
         if argv[1] == "list-panes":
             return _panes_result("%1 bash\n%2 claude\n")
+        if argv[1] == "capture-pane":
+            return _panes_result(">\n")
         return _panes_result("", rc=0)
 
-    with patch("swarph_cli.commands.watchdog.subprocess.run", side_effect=fake_run):
+    with patch("swarph_cli.commands.watchdog.subprocess.run", side_effect=fake_run), \
+         patch("swarph_cli.commands.watchdog._SUBMIT_SETTLE_S", 0):
         ok = wd._tmux_send_keys("lab", "/model claude-opus-4-8", clear_input=True)
     assert ok
     send = [c for c in calls if c[1] == "send-keys"][0]
