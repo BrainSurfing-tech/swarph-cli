@@ -497,13 +497,14 @@ def _unmerge_hook(settings: dict, event: str, matcher: str, command: str) -> dic
     return settings
 
 
-def _drop_command_outside_bindings(settings: dict, command: str, bundle: HookBundle) -> dict:
-    """Remove ``command`` from every event this bundle does not declare.
+def _drop_command_outside_bindings(settings: dict, commands, bundle: HookBundle) -> dict:
+    """Remove this bundle's command strings from events it does not declare.
 
     ``_merge_hook`` only adds. A binding deleted from the bundle would
     otherwise survive the next install, which is how the retired codegraph
-    prompt-side events came back (card #825). Other commands on those events
-    are left alone.
+    prompt-side events came back (card #825). ``commands`` is the install
+    ladder (canonical plus older Windows forms). Other commands on those
+    events are left alone.
     """
     keep = {(b.event, b.matcher) for b in bundle.bindings}
     hooks = settings.get("hooks")
@@ -516,7 +517,8 @@ def _drop_command_outside_bindings(settings: dict, command: str, bundle: HookBun
             matcher = entry.get("matcher", "")
             if (event, matcher) in keep:
                 continue
-            _unmerge_hook(settings, event, matcher, command)
+            for command in commands:
+                _unmerge_hook(settings, event, matcher, command)
     return settings
 
 
@@ -720,7 +722,8 @@ def install_hook(
     # Drop this command from every event the bundle no longer declares.
     # Otherwise a retired binding (codegraph UserPromptSubmit/Stop, #825)
     # stays forever, and the next add puts it back if it was removed by hand.
-    settings = _drop_command_outside_bindings(settings, command, bundle)
+    settings = _drop_command_outside_bindings(
+        settings, _installed_command_variants(bundle, hooks_home), bundle)
 
     # ---- write the script (version-stamped), then atomic-save settings ----
     hooks_home_p.mkdir(parents=True, exist_ok=True)

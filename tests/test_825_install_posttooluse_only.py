@@ -22,6 +22,12 @@ def _events_for(settings: dict, command: str) -> set[tuple[str, str]]:
     return found
 
 
+def _codegraph_command(home):
+    """The command string install writes. On Windows that is bash plus the path."""
+    bundle = hooks.resolve_builtin("codegraph-on-grep")
+    return hooks._installed_command(bundle, home)
+
+
 def test_hooks_add_writes_only_the_posttooluse_codegraph_entry(tmp_path):
     """Fails on main: add writes UserPromptSubmit, Stop, and StopFailure too."""
     settings_path = tmp_path / "settings.json"
@@ -32,15 +38,14 @@ def test_hooks_add_writes_only_the_posttooluse_codegraph_entry(tmp_path):
         settings_path=settings_path, hooks_home=home,
     ) == 0
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    command = str(home / "codegraph-on-grep.sh")
-    assert _events_for(settings, command) == {("PostToolUse", "Bash")}
+    assert _events_for(settings, _codegraph_command(home)) == {("PostToolUse", "Bash")}
 
 
 def test_hooks_add_drops_a_prompt_side_binding_already_in_settings(tmp_path):
     """A settings file that still has the retired events must not keep them."""
     home = tmp_path / "hooks"
     home.mkdir()
-    command = str(home / "codegraph-on-grep.sh")
+    command = _codegraph_command(home)
     other = str(home / "cell-resilience.sh")
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(json.dumps({
