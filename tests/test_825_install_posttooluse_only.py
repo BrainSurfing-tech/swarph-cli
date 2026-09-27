@@ -66,3 +66,40 @@ def test_hooks_add_drops_a_prompt_side_binding_already_in_settings(tmp_path):
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     assert _events_for(settings, command) == {("PostToolUse", "Bash")}
     assert _events_for(settings, other) == {("Stop", "")}
+
+
+def _add(settings_path, home, body: dict) -> int:
+    settings_path.write_text(json.dumps(body), encoding="utf-8")
+    return hooks.run_hooks(
+        ["add", "codegraph-on-grep", "--yes"],
+        settings_path=settings_path, hooks_home=home,
+    )
+
+
+def test_sessionstart_group_with_empty_hooks_is_kept(tmp_path):
+    """An empty hooks list never held the command. The sweep must not delete it."""
+    home = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+    group = {"matcher": "startup", "hooks": []}
+    assert _add(settings_path, home, {"hooks": {"SessionStart": [group]}}) == 0
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert settings["hooks"]["SessionStart"] == [group]
+
+
+def test_matcher_only_notification_group_is_kept(tmp_path):
+    """A group with no hooks key never held the command. Leave it byte-for-byte."""
+    home = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+    group = {"matcher": ""}
+    assert _add(settings_path, home, {"hooks": {"Notification": [group]}}) == 0
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert settings["hooks"]["Notification"] == [group]
+
+
+def test_non_dict_entry_in_an_unrelated_event_does_not_crash(tmp_path):
+    """A string in another event is not a group. Install exits 0 and leaves it."""
+    home = tmp_path / "hooks"
+    settings_path = tmp_path / "settings.json"
+    assert _add(settings_path, home, {"hooks": {"Notification": ["junk"]}}) == 0
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert settings["hooks"]["Notification"] == ["junk"]

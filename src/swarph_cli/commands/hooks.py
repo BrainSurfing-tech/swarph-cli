@@ -510,15 +510,33 @@ def _drop_command_outside_bindings(settings: dict, commands, bundle: HookBundle)
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         return settings
+    drop = {v for c in commands for v in _command_variants_for(c)}
     for event, entries in list(hooks.items()):
         if not isinstance(entries, list):
             continue
+        removed = False
         for entry in list(entries):
-            matcher = entry.get("matcher", "")
-            if (event, matcher) in keep:
+            # A string (or anything else) in an unrelated event is not a
+            # group. Skip it. _unmerge_hook would call .get on it (#825).
+            if not isinstance(entry, dict):
                 continue
-            for command in commands:
-                _unmerge_hook(settings, event, matcher, command)
+            acts = entry.get("hooks")
+            if not isinstance(acts, list) or (event, entry.get("matcher", "")) in keep:
+                continue
+            kept = [
+                a for a in acts
+                if not (isinstance(a, dict) and a.get("command") in drop)
+            ]
+            # Never rewrite a group that did not hold this command. An empty
+            # hooks list and a matcher-only group stay as they were.
+            if len(kept) == len(acts):
+                continue
+            entry["hooks"] = kept
+            if not kept:
+                entries.remove(entry)
+                removed = True
+        if removed and not entries:
+            del hooks[event]
     return settings
 
 
