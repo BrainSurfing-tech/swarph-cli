@@ -494,6 +494,7 @@ answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not comman
 - `swarph brain-ask` -- search the swarph-brain memory with a question; optional $0 synthesis.
 - `swarph cell` -- capture-at-birth operator surface for a cell (subcommands; see its --help).
 - `swarph channel` -- channels control plane: create, list, join, leave, members, post, read (see [Channels](#channels)).
+- `swarph channel-serve` -- the DM channel MCP server, on this install's interpreter (not system python3).
 - `swarph chat` -- interactive REPL against a provider.
 - `swarph codegraph` -- structural code search over a local index (see [Code and history](#code-and-history)).
 - `swarph codegraph-hook` -- hook plumbing: the structural-search companion Claude Code hooks call.

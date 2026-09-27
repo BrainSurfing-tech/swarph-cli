@@ -1234,6 +1234,22 @@ def _powershell_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _reentry_env_assignments() -> list[tuple[str, str]]:
+    """Env a new tmux session must be given. It inherits the server, not us.
+
+    SWARPH_SPAWN is the loop guard. SWARPH_CHANNEL and SWARPH_CHANNEL_CELL
+    are forwarded only when this process actually has them: a hop that drops
+    them re-enters spawn with no channel, and the inner spawn never adds
+    --channels (#975).
+    """
+    pairs = [("SWARPH_SPAWN", "1")]
+    for key in ("SWARPH_CHANNEL", "SWARPH_CHANNEL_CELL"):
+        value = os.environ.get(key) or ""
+        if value:
+            pairs.append((key, value))
+    return pairs
+
+
 def _tmux_session_command(tmux: str, name: str, cwd: Path) -> list[str]:
     """Build the create command for real tmux or Windows psmux.
 
@@ -1241,9 +1257,13 @@ def _tmux_session_command(tmux: str, name: str, cwd: Path) -> list[str]:
     Set the working directory and loop-guard in its PowerShell child instead.
     """
     reentry = _swarph_reentry_binary()
+    env_pairs = _reentry_env_assignments()
     if sys.platform == "win32":
+        assigns = "; ".join(
+            f"$env:{key}={_powershell_quote(value)}" for key, value in env_pairs
+        )
         command = (
-            "$env:SWARPH_SPAWN='1'; "
+            f"{assigns}; "
             f"Set-Location -LiteralPath {_powershell_quote(str(cwd))}; "
             f"& {_powershell_quote(reentry)} spawn {_powershell_quote(name)}"
         )
@@ -1252,11 +1272,11 @@ def _tmux_session_command(tmux: str, name: str, cwd: Path) -> list[str]:
             "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-Command", command,
         ]
-    return [
-        tmux, "new-session", "-d", "-s", name,
-        "-c", str(cwd), "-e", "SWARPH_SPAWN=1",
-        reentry, "spawn", name,
-    ]
+    cmd = [tmux, "new-session", "-d", "-s", name, "-c", str(cwd)]
+    for key, value in env_pairs:
+        cmd.extend(["-e", f"{key}={value}"])
+    cmd.extend([reentry, "spawn", name])
+    return cmd
 
 
 def _tmux_create_session(tmux: str, name: str, cwd: Path) -> bool:

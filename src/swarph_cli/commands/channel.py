@@ -204,6 +204,17 @@ def _run_read(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_channel_serve(argv: list | None = None) -> int:
+    """Run the DM channel MCP server on this install's interpreter.
+
+    The plugin used to exec ``python3 -m swarph_cli.channel``. On a pipx
+    install that python3 cannot import swarph_cli. ``swarph channel-serve``
+    is the console script, so the venv that owns ``swarph`` owns the server.
+    """
+    from swarph_cli.channel import main as serve_main
+    return serve_main(list(argv) if argv else None)
+
+
 def run_channel(argv: list) -> int:
     p = _build_parser()
     args = p.parse_args(argv)
