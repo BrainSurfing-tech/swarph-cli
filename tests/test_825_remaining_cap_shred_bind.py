@@ -138,7 +138,7 @@ def test_825_old_extract_would_miss_recoverable_symbol():
 
 
 def test_825_partial_bind_is_legible(tmp_path):
-    """PostToolUse-only install must list as partial, not available/installed."""
+    """PostToolUse/Bash is the whole codegraph binding now, so it lists installed."""
     settings_path = tmp_path / "settings.json"
     hooks_home = tmp_path / "hooks"
     hooks_home.mkdir()
@@ -160,6 +160,6 @@ def test_825_partial_bind_is_legible(tmp_path):
         settings_path=settings_path, hooks_home=hooks_home, out=lines.append,
     )
     blob = "\n".join(lines)
-    assert "codegraph-on-grep  [partial]" in blob
-    assert "UserPromptSubmit" in blob
-    assert "MISSING" in blob
+    assert "codegraph-on-grep  [installed]" in blob
+    assert "UserPromptSubmit" not in blob
+    assert "MISSING" not in blob
