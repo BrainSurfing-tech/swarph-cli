@@ -797,12 +797,48 @@ def _resolve_send_target(name: str, process_name: str = "claude") -> str:
 _SUBMIT_SETTLE_S = 0.6
 
 
+# Claude's composer is the last ❯ / > line. Everything under the ─── rule is
+# the status footer ("⏵⏵ auto mode on", "✔ Update installed"), which is the
+# last non-empty line of a live pane and is not the composer (#184, #553).
+_COMPOSER_MARKERS = ("❯", ">", "›")
+
+
+def _composed_text(stdout: str) -> Optional[str]:
+    """Text in the composer, with wrapped continuation lines joined.
+
+    None when no composer marker is present. The footer below the rule is
+    not part of the composer.
+    """
+    lines = (stdout or "").splitlines()
+    idx = None
+    for i, ln in enumerate(lines):
+        if ln.strip().startswith(_COMPOSER_MARKERS):
+            idx = i
+    if idx is None:
+        return None
+    first = lines[idx].strip()
+    for marker in _COMPOSER_MARKERS:
+        if first.startswith(marker):
+            first = first[len(marker):].strip()
+            break
+    chunks = [first] if first else []
+    for ln in lines[idx + 1:]:
+        s = ln.strip()
+        if not s:
+            continue
+        if "───" in s or s.startswith("─"):
+            break
+        chunks.append(s)
+    return " ".join(chunks)
+
+
 def _composer_still_holds(target: str, text: str) -> Optional[bool]:
-    """Whether the pane's last non-empty line still contains `text`.
+    """Whether the composer, not the status footer, still contains `text`.
 
     True = the payload is still composed (accepted, not submitted).
-    False = a pane was read and that line does not hold it.
-    None = the pane could not be read. Callers fail closed on None.
+    False = the composer was read and does not hold it.
+    None = the pane could not be read, or no composer line was found.
+    Callers fail closed on None.
     """
     try:
         result = subprocess.run(
@@ -814,10 +850,10 @@ def _composer_still_holds(target: str, text: str) -> Optional[bool]:
         return None
     if result.returncode != 0:
         return None
-    lines = [ln.rstrip() for ln in (result.stdout or "").splitlines() if ln.strip()]
-    if not lines:
+    composed = _composed_text(result.stdout or "")
+    if composed is None:
         return None
-    return text in lines[-1]
+    return text in composed
 
 
 def _tmux_send_keys(

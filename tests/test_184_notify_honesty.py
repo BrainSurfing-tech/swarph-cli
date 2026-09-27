@@ -16,19 +16,53 @@ class _R:
         self.stdout = stdout
 
 
-def test_tmux_send_keys_rc0_is_not_success_while_composer_holds_the_payload(monkeypatch):
+def _claude_pane(composer: str) -> str:
+    """Live science-claude shape, 2026-09-27: ❯ composer, rule, footer below."""
+    return (
+        "────────────────────────────────────────── cell ─\n"
+        f"{composer}\n"
+        "───────────────────────────────────────────────────────────\n"
+        "  ⏵⏵ auto mode on · 1 shell, 1 monitor\n"
+        "                   ✔ Update installed · Restart to update\n"
+    )
+
+
+def _send(monkeypatch, pane, payload, capture_rc=0):
     monkeypatch.setattr(wd, "_SUBMIT_SETTLE_S", 0, raising=False)
-    payload = "watchdog wake still sitting"
 
     def fake_run(argv, **kwargs):
         if argv[1] == "list-panes":
             return _R(stdout="%9 claude\n")
         if argv[1] == "capture-pane":
-            return _R(stdout=f"> {payload}\n")
+            return _R(rc=capture_rc, stdout=pane)
         return _R(rc=0)
 
     monkeypatch.setattr(wd.subprocess, "run", fake_run)
-    assert wd._tmux_send_keys("lab", payload) is False
+    return wd._tmux_send_keys("lab", payload)
+
+
+def test_payload_still_in_composer_is_not_success(monkeypatch):
+    payload = "watchdog wake still sitting"
+    pane = _claude_pane(f"❯ {payload}")
+    assert "✔ Update installed" in pane
+    assert _send(monkeypatch, pane, payload) is False
+
+
+def test_empty_composer_after_submit_is_success(monkeypatch):
+    # The measured footer contains these words. The last-line check treats
+    # that footer as the composer and reports the wake still held.
+    payload = "Update installed"
+    assert _send(monkeypatch, _claude_pane("❯"), payload) is True
+
+
+def test_payload_wrapped_over_two_composer_lines_is_not_success(monkeypatch):
+    payload = "watchdog wake still sitting in the composer"
+    pane = _claude_pane("❯ watchdog wake still\n  sitting in the composer")
+    assert _send(monkeypatch, pane, payload) is False
+
+
+def test_unreadable_pane_is_not_success(monkeypatch):
+    assert _send(monkeypatch, "", "watchdog wake still sitting", capture_rc=1) is False
 
 
 def test_dm_wake_2xx_is_not_a_delivery(monkeypatch):
