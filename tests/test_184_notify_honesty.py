@@ -61,6 +61,21 @@ def test_payload_wrapped_over_two_composer_lines_is_not_success(monkeypatch):
     assert _send(monkeypatch, pane, payload) is False
 
 
+def test_payload_wrapped_inside_a_token_is_not_success(monkeypatch):
+    # A terminal wraps at the column, so 'lab-ovh' can split as 'la' / 'b-ovh'.
+    # Joining those lines with a space hides the token and reads as delivered.
+    payload = "lab-ovh"
+    pane = _claude_pane("❯ la\n  b-ovh")
+    assert "✔ Update installed" in pane
+    assert _send(monkeypatch, pane, payload) is False
+
+
+def test_payload_echoed_in_history_with_empty_composer_is_success(monkeypatch):
+    payload = "watchdog wake still sitting"
+    pane = _claude_pane(f"echoed {payload} above the prompt\n❯")
+    assert _send(monkeypatch, pane, payload) is True
+
+
 def test_unreadable_pane_is_not_success(monkeypatch):
     assert _send(monkeypatch, "", "watchdog wake still sitting", capture_rc=1) is False
 

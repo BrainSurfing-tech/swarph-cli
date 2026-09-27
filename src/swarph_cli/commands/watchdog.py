@@ -853,7 +853,9 @@ def _composer_still_holds(target: str, text: str) -> Optional[bool]:
     composed = _composed_text(result.stdout or "")
     if composed is None:
         return None
-    return text in composed
+    # A wrap inside a token ('la' / 'b-ovh') joins with a space the payload
+    # does not have. Fold all whitespace on both sides (#184, #555).
+    return re.sub(r"\s+", "", text) in re.sub(r"\s+", "", composed)
 
 
 def _tmux_send_keys(
