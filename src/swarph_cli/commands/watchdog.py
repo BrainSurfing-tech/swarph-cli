@@ -792,6 +792,34 @@ def _resolve_send_target(name: str, process_name: str = "claude") -> str:
     return name
 
 
+# How long to wait after Enter before reading the composer. tmux rc==0 means
+# the keys were accepted, not that the pane submitted them (#184).
+_SUBMIT_SETTLE_S = 0.6
+
+
+def _composer_still_holds(target: str, text: str) -> Optional[bool]:
+    """Whether the pane's last non-empty line still contains `text`.
+
+    True = the payload is still composed (accepted, not submitted).
+    False = a pane was read and that line does not hold it.
+    None = the pane could not be read. Callers fail closed on None.
+    """
+    try:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-t", target],
+            capture_output=True, timeout=5, text=True,
+            encoding="utf-8", errors="replace",
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    lines = [ln.rstrip() for ln in (result.stdout or "").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    return text in lines[-1]
+
+
 def _tmux_send_keys(
     name: str, text: str, clear_input: bool = False, process_name: str = "claude"
 ) -> bool:
@@ -805,6 +833,10 @@ def _tmux_send_keys(
     slash-command inject (drop seat-A C2): a prose wake merging into typed
     text is noise, but `/model ...` merging into typed text submits a
     corrupted command.
+
+    Returns True only when a follow-up capture shows the payload has left
+    the composer line. tmux accepting the keys is not delivery (#184). An
+    unreadable pane is False: the wake stays retryable.
     """
     target = _resolve_send_target(name, process_name)
     keys = ["C-u", text, "Enter"] if clear_input else [text, "Enter"]
@@ -813,7 +845,10 @@ def _tmux_send_keys(
             ["tmux", "send-keys", "-t", target, *keys],
             capture_output=True, timeout=5,
         )
-        return result.returncode == 0
+        if result.returncode != 0:
+            return False
+        time.sleep(_SUBMIT_SETTLE_S)
+        return _composer_still_holds(target, text) is False
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return False
 
@@ -824,12 +859,12 @@ def _dm_wake(
     target_peer: str,
     token: str,
     content: str,
-) -> bool:
-    """A1-DM: send a cross-host wake DM to a stranded peer on another host.
+) -> str | bool:
+    """A1-DM: POST a wake DM. Never raises.
 
-    POSTs a mesh DM (kind=fyi) to ``{gateway}/messages``; the target peer's
-    sidecar/inbox-watcher then wakes it. Pure send action — never raises (an
-    alert/wake path must not crash the watchdog); returns True iff 2xx.
+    Returns ``"accepted"`` when the gateway stores the row (HTTP 2xx) and
+    ``False`` otherwise. ``"accepted"`` is not delivery: this process cannot
+    see the recipient ledger, so it must not return True (#184).
     """
     try:
         body = {
@@ -843,7 +878,9 @@ def _dm_wake(
             body,
             token,
         )
-        return 200 <= status < 300
+        if 200 <= status < 300:
+            return "accepted"
+        return False
     except Exception:
         return False
 
@@ -1113,7 +1150,8 @@ def _notify_peer_event(
         f"(autonomous ladder action; watchdog log on host has the diag)"
     )
     diag["notify_peer"] = peer
-    diag["notify_sent"] = _dm_wake(args.gateway, role, peer, token, content)
+    # 2xx stored the row. It did not deliver it (#184).
+    diag["notify_accepted"] = _dm_wake(args.gateway, role, peer, token, content) == "accepted"
 
 
 def _escalate_a2(
@@ -1259,17 +1297,16 @@ def _dm_wake_scan(
     local session check uses.
 
     T4 — per-peer no-spam cooldown. A peer that stays stale across many ticks
-    is DM'd ONCE per ``--dm-wake-cooldown-sec`` window, not every tick. The
+    is POSTed ONCE per ``--dm-wake-cooldown-sec`` window, not every tick. The
     cooldown state ``{peer: last_wake_epoch}`` is loaded once at scan start;
-    inside the loop a peer is SKIPPED while ``now - last_wake < cooldown_sec``
-    (a cooldown-skip does NOT count as a wake). Only a SUCCESSFUL ``_dm_wake``
-    stamps the cooldown; the state is saved once after the loop.
+    inside the loop a peer is SKIPPED while ``now - last_wake < cooldown_sec``.
+    Only a gateway-accepted POST stamps the cooldown; a rejected POST is
+    retried next tick. The state is saved once after the loop.
 
     ``now_epoch`` defaults to ``_now()`` (injectable for deterministic tests).
 
-    Returns the count of wake DMs that fired successfully THIS tick (0 if none
-    / if ``--dm-wake`` is off / if every stale peer was within cooldown). Never
-    raises (an alert path must not crash the watchdog).
+    Returns 0. A 2xx is the gateway storing the row, not the recipient's
+    ledger, so this scan does not report a fired wake (#184). Never raises.
     """
     if not args.dm_wake:
         return 0
@@ -1300,20 +1337,21 @@ def _dm_wake_scan(
     # T4 — load the per-peer cooldown map once at scan start.
     state = _load_dm_wake_state(state_path)
 
-    fired = 0
+    accepted = 0
     skipped: list[str] = []
     for target in stale:
         last_wake = state.get(target, 0)
         if now_epoch - last_wake < cooldown_sec:
-            # Within cooldown — already DM'd this peer recently. Skip; a
-            # cooldown-skip must NOT count toward the exit-3 wake tally.
+            # Within cooldown — already POSTed this peer recently. Skip.
             skipped.append(target)
             continue
-        if _dm_wake(gateway, self_peer, target, token or "", _DM_WAKE_PROMPT):
-            # Only a SUCCESSFUL DM starts the cooldown — a failed send must
-            # be retried next tick, not suppressed.
+        if _dm_wake(gateway, self_peer, target, token or "", _DM_WAKE_PROMPT) == "accepted":
+            # Gateway stored the row. Stamp the cooldown so the next tick
+            # does not re-POST, but do NOT count it as a fired wake: a 2xx
+            # is not the recipient's ledger (#184). A rejected POST leaves
+            # the cooldown unset so the next tick retries.
             state[target] = now_epoch
-            fired += 1
+            accepted += 1
 
     # Persist the (possibly-updated) cooldown map once after the loop.
     _save_dm_wake_state(state_path, state)
@@ -1325,12 +1363,13 @@ def _dm_wake_scan(
             "self_peer": self_peer,
             "stale_peers": stale,
             "skipped_cooldown": skipped,
-            "wakes_fired": fired,
+            "wakes_accepted": accepted,
+            "wakes_fired": 0,
             "cooldown_sec": cooldown_sec,
         },
         args.verbose,
     )
-    return fired
+    return 0
 
 
 def run_check(args: argparse.Namespace) -> int:
@@ -1338,13 +1377,11 @@ def run_check(args: argparse.Namespace) -> int:
     exit 0/1/2/3/4 — byte-for-byte unchanged), then layers the ``--dm-wake``
     mesh-monitor scan on top.
 
-    Exit precedence (T3): the local own-session action wins. If the local
-    decision took a real action or errored (rc != 0), that code is returned
-    unchanged — the dm-wake scan is an ADDITIONAL mesh-monitor action and
-    must not suppress or be suppressed by the local signal. ONLY when the
-    local decision was a no-op (rc == 0) AND at least one cross-host wake DM
-    fired do we surface exit 3 (A1-DM). When ``--dm-wake`` is off the scan is
-    a pure no-op, so the 0/1/2 behavior is preserved exactly.
+    Exit precedence (T3): the local own-session action wins. The dm-wake
+    scan POSTs and returns 0: a gateway accept is not a delivered wake, so
+    it does not surface exit 3 (#184). Exit 3 remains the local detection
+    error (unreadable cursor). When ``--dm-wake`` is off the scan is a
+    pure no-op.
     """
     log_path = _resolve_log_path(args.log)
     global _HEALTH_EMITTER

@@ -78,7 +78,9 @@ def test_dm_wake_fires_for_stale_cross_host_peer_exit_3(
             "--threshold", "60",
             "--dm-wake",
         ])
-    assert rc == 3
+    # Gateway accept is not a delivered wake, so the process stays at the
+    # local no-op (#184). The POST still happens.
+    assert rc == 0
     dm_mock.assert_called_once()
     call_args = dm_mock.call_args[0]
     # _dm_wake(gateway, self_peer, target_peer, token, content)
@@ -190,6 +192,6 @@ def test_dm_wake_excludes_self_but_wakes_other(isolated_state, fresh_cursor):
             "--threshold", "60",
             "--dm-wake",
         ])
-    assert rc == 3
+    assert rc == 0
     dm_mock.assert_called_once()
     assert dm_mock.call_args[0][2] == "droplet"  # never "lab"

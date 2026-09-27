@@ -256,7 +256,7 @@ def run_schedule(argv: list) -> int:
         if args.command == "delete":
             return _run_delete(args)
         if args.command == "fire-now":
-            return _run_action(args, "fire-now", "fire-now", "fired")
+            return _run_action(args, "fire-now", "fire-now", "marked")
         parser.error(f"unknown command: {args.command}")
     except RuntimeError as exc:
         print(f"swarph schedule: {exc}", file=sys.stderr)

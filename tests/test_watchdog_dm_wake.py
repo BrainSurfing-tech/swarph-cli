@@ -48,7 +48,8 @@ def test_dm_wake_success_returns_true_and_posts_expected_body():
             token="tok",
             content=_DM_WAKE_PROMPT,
         )
-    assert ok is True
+    assert ok == "accepted"
+    assert ok is not True
     # _post_json(url, body, token, ...)
     args, kwargs = mock_post.call_args
     url = args[0]
@@ -72,7 +73,7 @@ def test_dm_wake_strips_trailing_slash_on_gateway():
             token="tok",
             content="wake",
         )
-    assert ok is True
+    assert ok == "accepted"
     assert mock_post.call_args[0][0] == "http://gw:8788/messages"
 
 
