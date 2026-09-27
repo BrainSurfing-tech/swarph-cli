@@ -1081,6 +1081,38 @@ def _write_cursor_atomic(path: Path, cursor: dict) -> None:
     os.replace(tmp, path)
 
 
+def _persist_wake_stamp(state: "MonitorState") -> None:
+    """Rewrite cursor.json once a wake stamp exists.
+
+    The observation save runs before any sink, so it records last_wake_at
+    while the name is still unknown. Without this second write the file
+    keeps 0.0 after a keystroke (#405).
+    """
+    stamps: list[float] = []
+    for led in state.ledgers.values():
+        raw = led.get("last_wake_at")
+        if raw is None:
+            continue
+        try:
+            stamp = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if stamp > 0:
+            stamps.append(stamp)
+    if not stamps:
+        return
+    newest = max(stamps)
+    previous = state.observed.get("last_wake_at")
+    try:
+        previous_f = float(previous) if previous is not None else 0.0
+    except (TypeError, ValueError):
+        previous_f = 0.0
+    if previous_f == newest:
+        return
+    state.observed["last_wake_at"] = newest
+    _write_cursor_atomic(state.cursor_path, dict(state.cursor))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # card #122 — pluggable delivery
 #
@@ -1218,6 +1250,18 @@ class NoneSink(Sink):
         super().__init__("none")
 
 
+def _stamp_wake(led: dict) -> None:
+    """The keystroke, not the delivery report.
+
+    `last_delivery_at` also moves when a standing wake returns True with no
+    keystroke. `last_wake_at` moves only here, beside `last_wake_injected_at`.
+    The name is absent until this runs; 0.0 is not a time.
+    """
+    now = time.time()
+    led["last_wake_at"] = now
+    led["last_wake_injected_at"] = now
+
+
 class TmuxSink(Sink):
     """Poke a tmux pane — the behaviour `mesh sidecar` has always had.
 
@@ -1303,7 +1347,7 @@ class TmuxSink(Sink):
                             return None
                         ok = _tmux_wake(self.target)
                         if ok:
-                            led["last_wake_injected_at"] = time.time()
+                            _stamp_wake(led)
                             return True
                         if ok is None:
                             return None  # human adopted mid-settle: defer
@@ -1332,7 +1376,7 @@ class TmuxSink(Sink):
                             return None
                         ok = _tmux_wake(self.target)
                         if ok:
-                            led["last_wake_injected_at"] = time.time()
+                            _stamp_wake(led)
                             return True
                         if ok is None:
                             return None  # human adopted mid-settle: defer
@@ -1377,7 +1421,8 @@ class TmuxSink(Sink):
                 # The wake text was OBSERVED already sitting in this pane, so
                 # the injection anchor stays valid for this session — nudging
                 # it does not re-anchor (the text predates us).
-                led.setdefault("last_wake_injected_at", time.time())
+                if "last_wake_injected_at" not in led:
+                    _stamp_wake(led)
                 return True
             return False
         if composer == "busy":
@@ -1404,7 +1449,7 @@ class TmuxSink(Sink):
             return None
         if ok:
             led["wake_outstanding"] = True
-            led["last_wake_injected_at"] = time.time()
+            _stamp_wake(led)
             return True
         # False splits by what the pane actually holds: text observably STUCK
         # in the composer -> mark outstanding so the next poll nudges instead
@@ -1726,7 +1771,17 @@ class MonitorState:
                 continue
             led = _new_ledger()
             led["last_delivered_id"] = seed
-            led["last_delivery_at"] = float(self.observed.get("last_wake_at", 0.0))
+            raw = self.observed.get("last_wake_at")
+            try:
+                stamp = float(raw) if raw is not None else 0.0
+            except (TypeError, ValueError):
+                stamp = 0.0
+            led["last_delivery_at"] = stamp
+            # A positive file value is the only wake time the old cursor had.
+            # 0.0 was the unread default, not a measurement — leave the key
+            # absent so a later read is unknown, not "never".
+            if stamp > 0:
+                led["last_wake_at"] = stamp
             self.ledgers[sink.name] = led
 
     def ledger(self, name: str) -> dict:
@@ -2350,6 +2405,10 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
     # A delivery deferred by the idle guard (or failed against a dead sink) must
     # still land even though no NEW mail arrived, so this runs on every poll.
     _monitor_deliver(state)
+    # The observation cursor is written BEFORE delivery, while last_wake_at is
+    # still unknown. A wake that landed this poll has to be written again or
+    # cursor.json keeps the 0.0 default after a real keystroke (#405).
+    _persist_wake_stamp(state)
 
     # MATERIALIZE new ledgers even if nothing moved them. Found by driving the
     # real CLI: a pure `--deliver pull` monitor never writes ledgers.json until
@@ -2611,7 +2670,14 @@ class _LegacyCursorView(MutableMapping):
         if key == "last_msg_id":
             return self._observed.get("last_msg_id", 0)
         if key == "last_wake_at":
-            return float(self._led()["last_delivery_at"])
+            raw = self._led().get("last_wake_at")
+            if raw is None:
+                return None
+            try:
+                stamp = float(raw)
+            except (TypeError, ValueError):
+                return None
+            return stamp if stamp > 0 else None
         if key == "pending_wake":
             return int(self._led()["last_delivered_id"]) < self._observed_id()
         raise KeyError(key)
@@ -2630,7 +2696,11 @@ class _LegacyCursorView(MutableMapping):
                 self._led()["last_delivered_id"] = int(value)
             return
         if key == "last_wake_at":
-            self._led()["last_delivery_at"] = float(value)
+            stamp = float(value)
+            self._led()["last_wake_at"] = stamp
+            # The idle guard reads last_delivery_at. Legacy callers suppress
+            # it by assigning this key; keep that clock in step.
+            self._led()["last_delivery_at"] = stamp
             return
         if key == "pending_wake":
             self._led()["last_delivered_id"] = 0 if value else self._observed_id()

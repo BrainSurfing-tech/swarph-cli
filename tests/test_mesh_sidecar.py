@@ -114,11 +114,21 @@ def test_sidecar_wakes_on_new_mail_and_advances_cursor(tmp_path, monkeypatch):
     assert state.cursor["last_wake_at"] == 1000.0
     disk_cursor = json.loads((tmp_path / "cursor.json").read_text())
     assert disk_cursor["last_msg_id"] == 2
+    # Card #405: the file used to keep the 0.0 default after this wake.
+    assert disk_cursor["last_wake_at"] == 1000.0
+    assert state.ledger("tmux:gpt-ops-pane")["last_wake_at"] == 1000.0
     log_ids = [
         json.loads(line)["id"]
         for line in (tmp_path / "inbox.log").read_text().splitlines()
     ]
     assert log_ids == [1, 2]
+
+
+def test_fresh_state_reads_last_wake_at_as_unknown(tmp_path):
+    """Card #405: a name that was never assigned is unknown, not never-woke."""
+    state = _state(tmp_path)
+    assert state.cursor["last_wake_at"] is None
+    assert "last_wake_at" not in state.ledger("tmux:gpt-ops-pane")
 
 
 def test_sidecar_no_wake_on_empty_inbox(tmp_path, monkeypatch):
@@ -235,7 +245,8 @@ def test_sidecar_corrupt_cursor_defaults_without_crashing(tmp_path, capsys):
     state = _state(tmp_path)
 
     assert state.cursor["last_msg_id"] == 0
-    assert state.cursor["last_wake_at"] == 0.0
+    # 0.0 was the unread default pretending to be "never woke" (#405).
+    assert state.cursor["last_wake_at"] is None
     assert "ignoring unreadable cursor" in capsys.readouterr().err
 
 
