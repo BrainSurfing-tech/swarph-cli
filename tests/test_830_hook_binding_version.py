@@ -113,7 +113,7 @@ def test_install_refuses_when_handler_missing_events(tmp_path, monkeypatch):
         monkeypatch.setattr(hooks, "_find_windows_bash", lambda: Path("C:/Git/bash.exe"))
     monkeypatch.setattr(
         "swarph_cli.commands.codegraph_hook.supported_hook_events",
-        lambda: frozenset({"PostToolUse"}),  # missing UserPromptSubmit/Stop*
+        lambda: frozenset({"UserPromptSubmit"}),  # missing the PostToolUse binding
     )
     settings = tmp_path / "settings.json"
     settings.write_text("{}", encoding="utf-8")
@@ -128,4 +128,4 @@ def test_install_refuses_when_handler_missing_events(tmp_path, monkeypatch):
     assert not (home / bundle.script_name).exists()
     blob = "\n".join(lines)
     assert "does not advertise" in blob
-    assert "UserPromptSubmit" in blob
+    assert "PostToolUse" in blob

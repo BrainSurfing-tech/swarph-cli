@@ -190,17 +190,17 @@ exit 0
 # The bundled codegraph hook (cards #194 + #825). Thin wrapper around
 # `swarph codegraph-hook` so heuristics stay unit-testable.
 #
-# #825: UserPromptSubmit is the load-bearing binding — fires while tool choice
-# is still open. PostToolUse/Bash is kept initially for a shared audit series
-# (drop later if audit shows zero influence). Stop/StopFailure close the
-# counterfactual (subsequent=neither).
+# #825, retired 2026-09-26: UserPromptSubmit / Stop / StopFailure are not
+# installed. The audit showed the prompt side did not steer tool choice
+# (3 codegraph calls in 1,206 displays). PostToolUse/Bash is the binding
+# that stays. install_hook drops the retired events for this command so a
+# later `swarph hooks add` cannot put them back.
 _CODEGRAPH_ON_GREP_SH = r"""#!/bin/sh
 # codegraph-on-grep.sh — swarph bundled Claude Code hook (#194 + #825).
 # swarph-cli-bundle-version: __SWARPH_CLI_VERSION__
 #
-# UserPromptSubmit: coding keywords in the prompt → structural codegraph context
-# before a tool is chosen. PostToolUse/Bash: annotate code greps (shared audit).
-# Stop/StopFailure: record whether the session grepped, called codegraph, or neither.
+# PostToolUse/Bash: annotate code greps. UserPromptSubmit, Stop, and
+# StopFailure are not bound (card #825, retired 2026-09-26).
 # #830: version stamp is substituted at install time — hooks list compares it to
 # the running swarph --version so a binding/code skew is reportable.
 exec swarph codegraph-hook "$@"
@@ -210,10 +210,8 @@ BUILTIN_HOOKS: dict = {
     "codegraph-on-grep": HookBundle(
         name="codegraph-on-grep",
         description=(
-            "On UserPromptSubmit (coding keywords) and PostToolUse/Bash (code "
-            "grep), queries the gateway's structural codegraph and injects "
-            "symbol-level answers. Prompt path steers tool choice; Bash path "
-            "annotates. Audits counterfactual outcomes. Never blocks. Reports "
+            "On PostToolUse/Bash (code grep), queries the gateway's structural "
+            "codegraph and injects symbol-level answers. Never blocks. Reports "
             "an unavailable index LOUDLY rather than as 'no matches'."
         ),
         publisher="swarph-builtin",
@@ -221,13 +219,10 @@ BUILTIN_HOOKS: dict = {
         script_name="codegraph-on-grep.sh",
         script_body=_CODEGRAPH_ON_GREP_SH,
         bindings=(
-            HookBinding("UserPromptSubmit", ""),
             HookBinding("PostToolUse", "Bash"),
-            HookBinding("Stop", ""),
-            HookBinding("StopFailure", ""),
         ),
         handler_events=(
-            "UserPromptSubmit", "PostToolUse", "Stop", "StopFailure",
+            "PostToolUse",
         ),
     ),
     "cell-resilience": HookBundle(
@@ -502,6 +497,29 @@ def _unmerge_hook(settings: dict, event: str, matcher: str, command: str) -> dic
     return settings
 
 
+def _drop_command_outside_bindings(settings: dict, command: str, bundle: HookBundle) -> dict:
+    """Remove ``command`` from every event this bundle does not declare.
+
+    ``_merge_hook`` only adds. A binding deleted from the bundle would
+    otherwise survive the next install, which is how the retired codegraph
+    prompt-side events came back (card #825). Other commands on those events
+    are left alone.
+    """
+    keep = {(b.event, b.matcher) for b in bundle.bindings}
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return settings
+    for event, entries in list(hooks.items()):
+        if not isinstance(entries, list):
+            continue
+        for entry in list(entries):
+            matcher = entry.get("matcher", "")
+            if (event, matcher) in keep:
+                continue
+            _unmerge_hook(settings, event, matcher, command)
+    return settings
+
+
 # --------------------------------------------------------------------------- #
 # Local-bundle resolver (T3)
 # --------------------------------------------------------------------------- #
@@ -699,6 +717,10 @@ def install_hook(
     settings = _load_settings(settings_path)
     for b in bundle.bindings:
         settings = _merge_hook(settings, b.event, b.matcher, command)
+    # Drop this command from every event the bundle no longer declares.
+    # Otherwise a retired binding (codegraph UserPromptSubmit/Stop, #825)
+    # stays forever, and the next add puts it back if it was removed by hand.
+    settings = _drop_command_outside_bindings(settings, command, bundle)
 
     # ---- write the script (version-stamped), then atomic-save settings ----
     hooks_home_p.mkdir(parents=True, exist_ok=True)
@@ -1058,8 +1080,9 @@ def list_hooks(
 
         name  [installed|partial|available]  trust=builtin  — description
 
-    ``partial`` (#825): at least one binding present but not the full set —
-    the lab-ovh codegraph case (PostToolUse only, UserPromptSubmit/Stop absent).
+    ``partial`` (#825): at least one binding present but not the full set.
+    codegraph-on-grep has a single PostToolUse/Bash binding, so that shape
+    is installed, not partial.
     When installed and the script carries a ``swarph-cli-bundle-version`` stamp
     (#830), a second line reports match / mismatch vs the running package.
     """
