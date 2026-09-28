@@ -16,11 +16,28 @@ from typing import Iterable
 GAP_SECONDS = 60
 
 
+def _channel_alive(inbox: str, now: float | None = None) -> bool:
+    """A channel server writes channel_heartbeat.json beside the inbox every 60 s.
+
+    `swarph channel-serve` takes no inbox argument, so no command line names the
+    path; a fresh heartbeat is the only evidence the channel is reading.
+    """
+    hb = Path(inbox).parent / "channel_heartbeat.json"
+    try:
+        ts = float(json.loads(hb.read_text(encoding="utf-8")).get("ts") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    return (time.time() if now is None else now) - ts < 180
+
+
 def _watching(inbox: str, cmdlines: Iterable[str]) -> bool:
-    """A reader is tail or dm_notify_filter with the inbox path as its own argument.
+    """A reader is tail or dm_notify_filter with the inbox path as its own argument,
+    or a channel server whose heartbeat is fresh.
 
     A process that merely mentions the path (a prompt, a log line) is not a reader.
     """
+    if _channel_alive(inbox):
+        return True
     for cmd in cmdlines:
         parts = cmd.split()
         if inbox not in parts:
@@ -29,15 +46,6 @@ def _watching(inbox: str, cmdlines: Iterable[str]) -> bool:
             return True
         if any(p.endswith("dm_notify_filter") or p.endswith("dm_notify_filter.py") for p in parts):
             return True
-        if any(p.endswith("swarph_cli.channel") or p.endswith("channel.py") for p in parts):
-            hb = Path(inbox).parent / "channel_heartbeat.json"
-            try:
-                data = json.loads(hb.read_text(encoding="utf-8"))
-                ts = float(data.get("ts") or 0)
-            except (OSError, ValueError, TypeError):
-                continue
-            if time.time() - ts < 180:
-                return True
     return False
 
 
