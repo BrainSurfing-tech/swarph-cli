@@ -117,8 +117,11 @@ def _peer_token_path(self_name: str) -> Path:
 # 6 of 6 cells). An undeclared cell now does no peer-token lookup at all: brain reads
 # still work from GBRAIN_TOKEN / SWARPH_BRAIN_TOKEN / --token-file, and the gateway
 # path, which needs the cell's own peer token, refuses with the missing variable named.
-# SWARPH_NODE stays accepted after the house order: this verb has always read it.
-_IDENTITY_ENV = identity.ENV + identity.NODE_ALIAS
+# The identity picks a CREDENTIAL file here, so this verb reads SWARPH_SELF (and its
+# legacy SWARPH_NODE alias) only, like the mesh verbs: an ambient SWARPH_CELL, which
+# psmux leaks from the spawning environment (#538), must not select another cell's
+# peer token.
+_IDENTITY_ENV = identity.SELF_ONLY + identity.NODE_ALIAS
 
 
 def _self_name() -> Optional[str]:

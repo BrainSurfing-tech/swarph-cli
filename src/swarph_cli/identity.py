@@ -30,7 +30,8 @@ from typing import Optional, Sequence, Tuple
 
 ENV: Tuple[str, ...] = ("SWARPH_SELF", "SWARPH_CELL")
 SELF_ONLY: Tuple[str, ...] = ("SWARPH_SELF",)
-# SWARPH_NODE: a legacy alias brain_ask has always read, after SWARPH_SELF. Named here
+# SWARPH_NODE: a legacy alias brain_ask has always read, after SWARPH_SELF (brain_ask
+# reads SELF_ONLY + NODE_ALIAS because its identity picks a credential). Named here
 # so no importable module spells an identity variable. (cell_probe and cell_selfcheck
 # also read SWARPH_SELF directly: they must run as bare files where this package is
 # not importable, and neither falls back to a peer name.)

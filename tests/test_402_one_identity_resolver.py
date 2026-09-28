@@ -58,7 +58,8 @@ def test_a_self_only_site_ignores_an_ambient_SWARPH_CELL(clean):
 # ---- the card's three-way retest, at a live site ---------------------------------
 
 @pytest.mark.parametrize("env,expected", [
-    ({"SWARPH_CELL": "ws-lc"}, "ws-lc"),      # main: 'lab-ovh' (wrong variable)
+    ({"SWARPH_CELL": "ws-lc"}, None),         # main: 'lab-ovh'. CELL is ambient here: it
+                                              # would pick a peer TOKEN, so it declares nothing
     ({"SWARPH_SELF": "ws-lc"}, "ws-lc"),
     ({}, None),                               # main: 'lab-ovh' (peer-name default)
 ])
@@ -66,6 +67,19 @@ def test_brain_ask_three_way_retest(clean, env, expected):
     for k, v in env.items():
         clean.setenv(k, v)
     assert brain_ask._self_name() == expected
+
+
+def test_brain_ask_never_selects_a_token_from_a_leaked_SWARPH_CELL(clean, tmp_path):
+    """psmux leaks SWARPH_CELL (#538). If brain_ask took it as the identity, a leaked
+    CELL would promote ANOTHER cell's peer token above GBRAIN_TOKEN."""
+    from swarph_cli import tokens
+    clean.setattr(tokens.Path, "home", staticmethod(lambda: tmp_path))
+    d = tmp_path / ".config" / "swarph"
+    d.mkdir(parents=True)
+    (d / "other-cell.peer_token").write_text("OTHER-CELLS-TOKEN")
+    clean.setenv("SWARPH_CELL", "other-cell")
+    clean.setenv("GBRAIN_TOKEN", "BRAIN-TOKEN")
+    assert brain_ask._resolve_token(None, brain_ask._self_name()) == "BRAIN-TOKEN"
 
 
 def test_brain_ask_gateway_path_refuses_an_undeclared_cell(clean, tmp_path, capsys):
