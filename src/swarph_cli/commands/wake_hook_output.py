@@ -28,13 +28,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-
-from swarph_cli import identity
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
+from swarph_cli import identity
 from swarph_cli.cell import (
     CellError,
     cells_dir,

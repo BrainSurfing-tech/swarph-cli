@@ -30,12 +30,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-
-from swarph_cli import identity
 import re
 import sqlite3
 import sys
 
+from swarph_cli import identity
 from swarph_cli.commands.codegraph_hook import _match_quality
 
 DEFAULT_INDEX = os.path.expanduser("~/.swarph/codegraph/index.db")

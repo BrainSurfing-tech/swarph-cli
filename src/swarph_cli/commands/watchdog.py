@@ -65,8 +65,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-
-from swarph_cli import identity
 import re
 import shlex
 import shutil
@@ -79,6 +77,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from swarph_cli import identity
 from swarph_cli.gateway_default import env_gateway
 
 from swarph_cli.commands.mesh import _post_json
@@ -1888,6 +1887,12 @@ def run_install_service(args: argparse.Namespace) -> int:
     """
     files = _bundled_systemd_files()
     cell = args.cell
+    if cell == identity.SENTINEL:
+        # card #402: an install is not a turn, so there is no reason to fall back.
+        # Units named after the sentinel would supervise nobody, permanently.
+        print("swarph watchdog --install-service: no cell identity declared. "
+              "Pass --cell <cell> or set SWARPH_SELF.", file=sys.stderr)
+        return 4
 
     # v0.10.1: units are PER-CELL — swarph-watchdog-<cell>.{service,timer} +
     # /etc/default/swarph-watchdog-<cell> — so a multi-cell host runs one

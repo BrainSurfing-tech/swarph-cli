@@ -25,8 +25,6 @@ from __future__ import annotations
 
 import json
 import os
-
-from swarph_cli import identity
 import re
 import sys
 import uuid
@@ -35,6 +33,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from swarph_cli import identity
 from swarph_cli.gateway_default import env_gateway
 
 TIMEOUT_S = 6

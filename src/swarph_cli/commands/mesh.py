@@ -22,8 +22,6 @@ import argparse
 import difflib
 import json
 import os
-
-from swarph_cli import identity
 import re
 import stat
 import subprocess
@@ -33,6 +31,7 @@ import urllib.error
 import urllib.parse
 import uuid
 
+from swarph_cli import identity
 import swarph_cli
 import urllib.request
 from collections import deque

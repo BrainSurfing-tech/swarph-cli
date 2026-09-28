@@ -50,8 +50,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-
-from swarph_cli import identity
 import re
 import shlex
 import shutil
@@ -61,6 +59,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Optional
 
+from swarph_cli import identity
 from swarph_cli.cell import _atomic_write_text
 from swarph_cli.commands.hook_interpreter import hook_interpreter, refuse_unless_importable
 from swarph_cli.commands.install_wake_hook import _detect_harness

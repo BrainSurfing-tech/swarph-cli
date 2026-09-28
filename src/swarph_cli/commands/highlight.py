@@ -25,14 +25,13 @@ from __future__ import annotations
 import argparse
 import http.client
 import os
-
-from swarph_cli import identity
 import socket
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from swarph_cli import identity
 from swarph_cli.commands.mesh import _post_json, _resolve_token
 from swarph_cli.timeline_paths import timeline_dir
 
@@ -179,7 +178,12 @@ def _log_via_gateway(gateway: str, cell: str, highlight: str,
     if memory:
         body["memory"] = memory
     try:
-        token = _resolve_token(cell, token_file)
+        # card #402: only a DECLARED identity may select its own peer token over the
+        # ambient one. A name guessed from git user.name or the hostname is
+        # attribution only: on a shared box it can be ANOTHER cell's name, and its
+        # peer token must not be presented as this caller's.
+        token = _resolve_token(cell, token_file,
+                               identity_is_explicit=cell_source in _DECLARED_SOURCES)
     except RuntimeError as exc:
         print(_credential_error(cell, cell_source, exc), file=sys.stderr)
         return 1
@@ -247,6 +251,10 @@ def _is_git_repo(repo: Path) -> bool:
         return False
     r = _git(repo, "rev-parse", "--is-inside-work-tree")
     return r.returncode == 0 and r.stdout.strip() == "true"
+
+
+# Sources that DECLARE an identity (as opposed to guessing one), card #402.
+_DECLARED_SOURCES = ("--cell", "$SWARPH_SELF", "$SWARPH_CELL")
 
 
 def _resolve_cell(arg, repo: Path) -> tuple[str, str]:

@@ -45,13 +45,24 @@ class IdentityNotDeclared(RuntimeError):
 
 def declared(explicit: Optional[str] = None, *,
              env: Sequence[str] = ENV) -> Tuple[Optional[str], str]:
-    """(name, source), or (None, "undeclared"). Never guesses."""
+    """(name, source), or (None, "undeclared"). Never guesses.
+
+    A blank flag (None, "", whitespace) means the flag was not given, so the
+    environment decides (#872 pins this for --caller-cell). Among the
+    environment variables the FIRST non-empty value decides, exactly as the
+    `a or b` chains this replaces did: an empty string falls through to the
+    next variable, anything else stops the search. The deciding value is
+    stripped; if nothing is left (a whitespace-only SWARPH_SELF), the identity
+    is UNDECLARED. It does not fall through, so a blank SWARPH_SELF can never
+    hand the identity to a leaked SWARPH_CELL (#538).
+    """
     if explicit is not None and str(explicit).strip():
         return str(explicit).strip(), "flag"
     for var in env:
-        value = (os.environ.get(var) or "").strip()
-        if value:
-            return value, f"${var}"
+        raw = os.environ.get(var) or ""
+        if raw:
+            name = raw.strip()
+            return (name, f"${var}") if name else (None, "undeclared")
     return None, "undeclared"
 
 

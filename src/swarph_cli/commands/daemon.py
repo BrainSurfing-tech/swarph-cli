@@ -40,8 +40,6 @@ import argparse
 import asyncio
 import json
 import os
-
-from swarph_cli import identity
 import signal
 import sys
 import time
@@ -51,6 +49,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Optional
 
+from swarph_cli import identity
 from swarph_cli import session_bridge, stall_alert
 from swarph_cli.console_safe import print_safe
 from swarph_cli.delivery_queue import DeliveryQueue

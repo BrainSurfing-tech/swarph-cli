@@ -40,8 +40,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-
-from swarph_cli import identity
 import re
 import shutil
 import sys
@@ -49,6 +47,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from swarph_cli import identity
 from swarph_cli import __version__ as _SWARPH_CLI_VERSION
 
 # Placeholder substituted at install time into generated scripts (#830).

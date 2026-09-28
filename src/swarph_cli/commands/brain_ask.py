@@ -28,11 +28,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-
-from swarph_cli import identity
 import sys
 import urllib.request
 
+from swarph_cli import identity
 from swarph_cli import tokens
 from pathlib import Path
 from typing import Optional

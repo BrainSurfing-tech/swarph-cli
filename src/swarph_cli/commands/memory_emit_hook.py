@@ -29,8 +29,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
-
-from swarph_cli import identity
 import re
 import socket
 import sys
@@ -38,6 +36,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from swarph_cli import identity
 from swarph_cli.commands.highlight import _log_via_gateway, _resolve_gateway
 
 _SUPPRESS_WINDOW = dt.timedelta(minutes=30)
@@ -139,7 +138,14 @@ def _cell() -> str:
     # leaks SWARPH_CELL from the spawning environment, so a CELL-first order
     # posts this cell's highlight under ANOTHER cell's name and token
     # (measured by cursor-win on the Windows membrane, 2026-08-22).
-    return identity.declared()[0] or socket.gethostname()
+    return _cell_with_source()[0]
+
+
+def _cell_with_source() -> tuple:
+    name, source = identity.declared()
+    if name is not None:
+        return name, source
+    return socket.gethostname(), "hostname"
 
 
 def run_memory_emit_hook(argv: list[str] | None = None) -> int:
@@ -168,7 +174,9 @@ def run_memory_emit_hook(argv: list[str] | None = None) -> int:
         gateway = _resolve_gateway(None)
         if not gateway:
             return 0  # no gateway configured -> nowhere to emit; silent by design
-        rc = _log_via_gateway(gateway, _cell(), text, f"[[{slug}]]", None, None)
+        cell, cell_source = _cell_with_source()
+        rc = _log_via_gateway(gateway, cell, text, f"[[{slug}]]", None, None,
+                              cell_source=cell_source)
         if rc == 0:
             _mark_emitted(slug)
     except Exception:

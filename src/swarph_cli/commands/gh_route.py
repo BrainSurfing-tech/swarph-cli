@@ -21,11 +21,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-
-from swarph_cli import identity
 import sys
 from typing import Optional
 
+from swarph_cli import identity
 from swarph_cli import gh_identity as ghid
 from swarph_cli.cell import cells_dir
 from swarph_cli.console_safe import print_safe

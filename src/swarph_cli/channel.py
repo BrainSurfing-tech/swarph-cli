@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import json
 import os
-
-from swarph_cli import identity
 import sys
 import threading
 import time
 from pathlib import Path
 
+from swarph_cli import identity
 from swarph_cli.dm_frame import FIRST_START_GRACE_S, created_within, frame_text, rows
 from swarph_cli.scripts.dm_notify_filter import is_real_dm
 
@@ -38,7 +37,7 @@ def channel_opted_in() -> bool:
 def channel_serves() -> bool:
     """Only the cell spawn named in SWARPH_CHANNEL_CELL may poll."""
     self_name = identity.declared(env=identity.SELF_ONLY)[0] or ""
-    named = os.environ.get("SWARPH_CHANNEL_CELL") or ""
+    named = (os.environ.get("SWARPH_CHANNEL_CELL") or "").strip()
     return channel_opted_in() and bool(named) and named == self_name
 
 

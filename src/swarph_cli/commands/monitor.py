@@ -38,14 +38,13 @@ import argparse
 import getpass
 import json
 import os
-
-from swarph_cli import identity
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+from swarph_cli import identity
 from swarph_cli.gateway_default import env_gateway
 
 from . import mesh
@@ -361,7 +360,7 @@ def _self_name_was_derived(args: argparse.Namespace) -> bool:
     That is the dangerous path: `--as` and $SWARPH_SELF are deliberate, a
     directory name is incidental.
     """
-    return not args.self_name and identity.declared(env=identity.SELF_ONLY)[0] is None
+    return identity.declared(args.self_name, env=identity.SELF_ONLY)[0] is None
 
 
 def _verify_self_is_registered(self_name, gateway, token):

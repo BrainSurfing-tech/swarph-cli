@@ -36,11 +36,10 @@ import argparse
 import importlib.metadata
 import json
 import os
-
-from swarph_cli import identity
 import urllib.error
 import urllib.request
 
+from swarph_cli import identity
 from swarph_cli.commands import add
 from swarph_cli.commands import codegraph
 from swarph_cli.commands import brain_ask, memory, timeline

@@ -25,8 +25,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-
-from swarph_cli import identity
 import pathlib
 import sys
 import tempfile
@@ -35,6 +33,7 @@ import urllib.request
 from getpass import getpass
 from pathlib import Path
 from typing import Optional
+from swarph_cli import identity
 from swarph_cli import tokens
 from swarph_cli.console_safe import print_safe
 from swarph_cli.gateway_default import env_gateway, require_gateway

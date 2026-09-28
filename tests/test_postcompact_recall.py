@@ -142,7 +142,7 @@ def _run_emit(monkeypatch, payload: dict, posted: list, state: Path) -> int:
     # A gateway must be CONFIGURED or the emit is a designed silent no-op.
     monkeypatch.setenv("SWARPH_GATEWAY", "http://test-gateway:8788")
     monkeypatch.setattr(me, "_log_via_gateway",
-                        lambda gw, cell, text, mem, when, tf: posted.append(
+                        lambda gw, cell, text, mem, when, tf, **kw: posted.append(
                             {"text": text, "memory": mem}) or 0)
     return me.run_memory_emit_hook([])
 
@@ -183,7 +183,7 @@ def test_gateway_failure_exits_zero(monkeypatch, tmp_path):
         json.dumps(_write_payload(str(target)))))
     monkeypatch.setenv("SWARPH_EMIT_STATE", str(tmp_path / "state.json"))
     monkeypatch.setenv("SWARPH_GATEWAY", "http://test-gateway:8788")
-    monkeypatch.setattr(me, "_log_via_gateway", lambda *a: 1)  # gateway down
+    monkeypatch.setattr(me, "_log_via_gateway", lambda *a, **kw: 1)  # gateway down
     assert me.run_memory_emit_hook([]) == 0, "a failed emit must NEVER fail the tool result"
 
 
@@ -246,7 +246,7 @@ def test_bom_prefixed_stdin_still_emits(monkeypatch, tmp_path):
     monkeypatch.setenv("SWARPH_GATEWAY", "http://test-gateway:8788")
     posted = []
     monkeypatch.setattr(me, "_log_via_gateway",
-                        lambda gw, cell, text, mem, when, tf: posted.append(mem) or 0)
+                        lambda gw, cell, text, mem, when, tf, **kw: posted.append(mem) or 0)
     rc = me.run_memory_emit_hook([])
     assert rc == 0
     assert posted == ["[[bom-memory]]"], (
