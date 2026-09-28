@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+
+from swarph_cli import identity
 import sys
 import threading
 import time
@@ -35,7 +37,7 @@ def channel_opted_in() -> bool:
 
 def channel_serves() -> bool:
     """Only the cell spawn named in SWARPH_CHANNEL_CELL may poll."""
-    self_name = os.environ.get("SWARPH_SELF") or ""
+    self_name = identity.declared(env=identity.SELF_ONLY)[0] or ""
     named = os.environ.get("SWARPH_CHANNEL_CELL") or ""
     return channel_opted_in() and bool(named) and named == self_name
 
@@ -290,7 +292,7 @@ def serve(chan: Channel) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    cell = os.environ.get("SWARPH_SELF") or ""
+    cell = identity.declared(env=identity.SELF_ONLY)[0] or ""
     if not cell:
         print("swarph channel: SWARPH_SELF is unset; refusing to start", file=sys.stderr)
         return 2

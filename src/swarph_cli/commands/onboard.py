@@ -25,6 +25,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+
+from swarph_cli import identity
 import pathlib
 import sys
 import tempfile
@@ -294,7 +296,7 @@ def _resolve_token(token_file_arg: Optional[str], *,
     # Limited to "SWARPH_SELF is set", so an operator who names no cell is
     # unaffected and #243's additivity guarantee survives for that population.
     env_tok = os.environ.get("MESH_GATEWAY_TOKEN")
-    self_name = os.environ.get("SWARPH_SELF", "").strip()
+    self_name = identity.declared(env=identity.SELF_ONLY)[0] or ""
     # Set when a per-peer credential was found but is not usable for THIS target
     # (#467b). Distinguishes "you have the WRONG credential" from "you have NO
     # credential" at the refusal below — two different operator problems, and
@@ -387,7 +389,7 @@ def _resolve_token(token_file_arg: Optional[str], *,
     #
     # Placed AFTER the existing two so a working operator-token setup is
     # unchanged; this only fills the hole where the verb used to prompt.
-    self_name = os.environ.get("SWARPH_SELF", "").strip()
+    self_name = identity.declared(env=identity.SELF_ONLY)[0] or ""
     if self_name:
         peer_tok = Path.home() / ".config" / "swarph" / f"{self_name}.peer_token"
         if peer_tok.exists():
@@ -887,7 +889,7 @@ def run_onboard(argv: list[str]) -> int:
     # swarph onboard`. Defer there leaves the first cells with no
     # credential — they cannot use the tools. Detected only when GET
     # /peers is readable; a failed read keeps established-mesh defer.
-    cell_context = os.environ.get("SWARPH_SELF", "").strip() == canonical
+    cell_context = identity.declared(env=identity.SELF_ONLY)[0] == canonical
     rstatus, rpayload = _get_json(f"{args.gateway}/peers", token)
     bootstrap_window = _registry_is_bootstrap_window(rstatus, rpayload)
     defer_mint = (not cell_context) and (not bootstrap_window)

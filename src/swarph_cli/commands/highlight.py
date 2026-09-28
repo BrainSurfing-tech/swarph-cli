@@ -25,6 +25,8 @@ from __future__ import annotations
 import argparse
 import http.client
 import os
+
+from swarph_cli import identity
 import socket
 import subprocess
 import sys
@@ -257,12 +259,9 @@ def _resolve_cell(arg, repo: Path) -> tuple[str, str]:
     """
     if arg:
         return _collapse(arg), "--cell"
-    self_env = os.environ.get("SWARPH_SELF")
-    if self_env:
-        return _collapse(self_env), "$SWARPH_SELF"
-    cell_env = os.environ.get("SWARPH_CELL")
-    if cell_env:
-        return _collapse(cell_env), "$SWARPH_CELL"
+    name, source = identity.declared()
+    if name is not None:
+        return _collapse(name), source
     if _is_git_repo(repo):
         r = _git(repo, "config", "user.name")
         if r.returncode == 0 and r.stdout.strip():

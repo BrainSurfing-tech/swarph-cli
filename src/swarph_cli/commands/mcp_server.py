@@ -36,6 +36,8 @@ import argparse
 import importlib.metadata
 import json
 import os
+
+from swarph_cli import identity
 import urllib.error
 import urllib.request
 
@@ -152,7 +154,7 @@ def _codegraph_query(query: str, *, limit: int = 8) -> list[dict]:
     """Structural code search over the local codegraph index (Task 1).
 
     Delegates to :func:`codegraph.structural_query` against the module-level
-    ``_CODEGRAPH_INDEX`` path, using ``SWARPH_CELL`` (else
+    ``_CODEGRAPH_INDEX`` path, using the house identity order (``SWARPH_SELF``, then ``SWARPH_CELL``; else
     ``codegraph.require_caller_cell``, which REFUSES rather than defaulting) as
     the A8 caller identity and the
     default operate-what-you-own allowlist (``allowlist=None``).
@@ -170,8 +172,10 @@ def _codegraph_query(query: str, *, limit: int = 8) -> list[dict]:
         # authority. require_caller_cell raises IdentityNotDeclared, which the
         # NEVER-RAISES contract below turns into an empty result — FAIL-CLOSED: the
         # MCP host gets nothing rather than somebody else's answer.
-        caller_cell = codegraph.require_caller_cell(
-            os.environ.get("SWARPH_CELL"), verb="mcp codegraph_query")
+        # card #402: SWARPH_CELL used to be passed as the EXPLICIT identity here,
+        # so it outranked SWARPH_SELF, the CELL-first order #538 measured posting
+        # under another cell's name. The house order now decides.
+        caller_cell = codegraph.require_caller_cell(None, verb="mcp codegraph_query")
         rows = codegraph.structural_query(
             query,
             index_path=_CODEGRAPH_INDEX,

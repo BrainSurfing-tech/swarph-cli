@@ -40,6 +40,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+
+from swarph_cli import identity
 import re
 import shutil
 import sys
@@ -309,11 +311,7 @@ def touch_activity(argv: list[str] | None = None) -> int:
         from swarph_cli.cell import discover_cell_in_cwd, load_cell
         from swarph_cli.commands.watchdog import _resolve_activity_marker_path
 
-        role = (
-            os.environ.get("SWARPH_SELF")
-            or os.environ.get("SWARPH_CELL")
-            or "unidentified-cell"
-        )
+        role = identity.or_sentinel()
         cell_marker = None
         cell_path = discover_cell_in_cwd()
         if cell_path is not None:

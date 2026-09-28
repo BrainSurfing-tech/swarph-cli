@@ -21,6 +21,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+
+from swarph_cli import identity
 import sys
 from typing import Optional
 
@@ -69,7 +71,7 @@ def run_hook(stdin_text: Optional[str] = None) -> int:
         # The caller named a credential. #332: an explicit argument is a decision.
         return _allow_unchanged()
 
-    peer = os.environ.get("SWARPH_SELF", "").strip()
+    peer = identity.declared(env=identity.SELF_ONLY)[0] or ""
     try:
         res = ghid.resolve(peer or None)
     except ghid.RouterRefusal as exc:
@@ -93,7 +95,7 @@ def run_hook(stdin_text: Optional[str] = None) -> int:
 
 
 def run_show() -> int:
-    peer = os.environ.get("SWARPH_SELF", "").strip()
+    peer = identity.declared(env=identity.SELF_ONLY)[0] or ""
     try:
         res = ghid.resolve(peer or None)
     except ghid.RouterRefusal as exc:

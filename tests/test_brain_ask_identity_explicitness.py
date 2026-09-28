@@ -1,7 +1,7 @@
 """A defaulted name is not an explicit identity — tested THROUGH THE CALLER.
 
 gpt-ops, reviewing #190: `brain_ask._self_name()` never returns empty (it falls
-back to _DEFAULT_SELF), so deriving `identity_is_explicit` from `bool(self_name)`
+back to _DEFAULT_SELF, removed by card #402), so deriving `identity_is_explicit` from `bool(self_name)`
 meant TWO things at once:
 
   1. a local `lab-ovh.peer_token` would outrank GBRAIN_TOKEN on any invocation
@@ -27,7 +27,7 @@ from swarph_cli.commands import brain_ask
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setattr(tokens.Path, "home", staticmethod(lambda: tmp_path))
-    for var in ("GBRAIN_TOKEN", "SWARPH_BRAIN_TOKEN", "SWARPH_SELF", "SWARPH_NODE"):
+    for var in ("GBRAIN_TOKEN", "SWARPH_BRAIN_TOKEN", "SWARPH_SELF", "SWARPH_CELL", "SWARPH_NODE"):
         monkeypatch.delenv(var, raising=False)
     return tmp_path
 
@@ -39,8 +39,8 @@ def _write_peer(home, name: str, token: str):
 
 
 def test_defaulted_identity_does_NOT_promote_another_cells_token(home, monkeypatch):
-    """>>> THE BLOCKER. <<< No SWARPH_SELF / SWARPH_NODE, so _self_name() returns
-    the legacy default 'lab-ovh'. A lab-ovh.peer_token lying on this disk must
+    """>>> THE BLOCKER. <<< No identity declared. (Before card #402 _self_name()
+    returned the legacy default 'lab-ovh'; now it returns None.) A lab-ovh.peer_token lying on this disk must
     NOT be preferred over the brain's own env credential — nothing named a cell,
     so nothing earned precedence.
     """
@@ -76,16 +76,16 @@ def test_swarph_node_also_counts_as_naming_the_cell(home, monkeypatch):
     assert got == "MY-OWN-TOKEN"
 
 
-def test_defaulted_identity_still_reaches_the_peer_token_as_LAST_resort(home):
-    """Non-vacuity: the pre-existing fallback is PRESERVED, not deleted. With no
-    brain env vars at all, the defaulted name may still supply a credential —
-    exactly as before #190. The change is to its RANK, not its existence.
+def test_an_undeclared_cell_never_presents_another_cells_token(home):
+    """Card #402 REVERSES what this test used to pin. Before, with no brain env vars
+    at all, the defaulted name 'lab-ovh' supplied lab-ovh's credential as a last
+    resort: an undeclared cell authenticated AS lab-ovh. There is no default name
+    now, so there is no peer-token lookup and no credential.
     """
-    _write_peer(home, "lab-ovh", "LAST-RESORT")
+    _write_peer(home, "lab-ovh", "SOMEONE-ELSES-TOKEN")
 
-    got = brain_ask._resolve_token(None, brain_ask._self_name())
-
-    assert got == "LAST-RESORT"
+    assert brain_ask._self_name() is None
+    assert brain_ask._resolve_token(None, brain_ask._self_name()) is None
 
 
 def test_explicit_token_file_still_wins_for_both(home, monkeypatch, tmp_path):

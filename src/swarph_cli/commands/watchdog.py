@@ -65,6 +65,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+
+from swarph_cli import identity
 import re
 import shlex
 import shutil
@@ -2044,11 +2046,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--cell",
-        default=(
-            os.environ.get("SWARPH_SELF")
-            or os.environ.get("SWARPH_CELL")
-            or "unidentified-cell"
-        ),
+        default=identity.or_sentinel(),
     )
     p.add_argument("--cursor", default=None)
     p.add_argument(

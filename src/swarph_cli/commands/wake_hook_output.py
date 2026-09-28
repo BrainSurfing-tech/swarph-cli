@@ -28,6 +28,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+
+from swarph_cli import identity
 import subprocess
 import sys
 from pathlib import Path
@@ -187,7 +189,7 @@ def _resolve_cell(explicit: Optional[str] = None) -> tuple[Optional[str], str]:
         return name, source
     if explicit:
         return explicit, "install-time --cell"
-    env_self = os.environ.get("SWARPH_SELF", "").strip()
+    env_self = identity.declared(env=identity.SELF_ONLY)[0] or ""
     if env_self:
         return env_self, "$SWARPH_SELF"
     cwd_local = discover_cell_in_cwd()

@@ -28,6 +28,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+
+from swarph_cli import identity
 import sys
 import urllib.request
 
@@ -108,22 +110,24 @@ def _peer_token_path(self_name: str) -> Path:
     return Path.home() / ".config" / "swarph" / f"{self_name}.peer_token"
 
 
-# The fallback is ANOTHER CELL'S NAME. Harmless on lab-ovh, silently wrong everywhere
-# else — and it is what made the cold-env failure report a TOKEN fault: with SWARPH_SELF
-# unset the cell hunts lab-ovh.peer_token, finds nothing, and blames the credential.
-# MEASURED 2026-07-29 on 6 of 6 cells (droplet isolated it: adding ONLY the two env vars,
-# changing NO token, turned exit 2 into exit 0 at 1.00).
-# The default is KEPT (removing it would break callers that rely on it) and ANNOUNCED.
-_DEFAULT_SELF = "lab-ovh"
+# card #402: there is NO default identity. The old fallback was ANOTHER CELL'S NAME
+# ("lab-ovh"): harmless on lab-ovh, silently wrong everywhere else, and it made the
+# cold-env failure report a TOKEN fault (with SWARPH_SELF unset the cell hunted
+# lab-ovh.peer_token, found nothing and blamed the credential; measured 2026-07-29 on
+# 6 of 6 cells). An undeclared cell now does no peer-token lookup at all: brain reads
+# still work from GBRAIN_TOKEN / SWARPH_BRAIN_TOKEN / --token-file, and the gateway
+# path, which needs the cell's own peer token, refuses with the missing variable named.
+# SWARPH_NODE stays accepted after the house order: this verb has always read it.
+_IDENTITY_ENV = identity.ENV + identity.NODE_ALIAS
 
 
-def _self_name() -> str:
-    return os.environ.get("SWARPH_SELF") or os.environ.get("SWARPH_NODE") or _DEFAULT_SELF
+def _self_name() -> Optional[str]:
+    return identity.declared(env=_IDENTITY_ENV)[0]
 
 
-def _self_name_is_defaulted() -> bool:
-    """True when no env named this cell and we fell back to _DEFAULT_SELF."""
-    return not (os.environ.get("SWARPH_SELF") or os.environ.get("SWARPH_NODE"))
+def _self_name_is_undeclared() -> bool:
+    """True when no flag or env names this cell. There is no fallback name."""
+    return _self_name() is None
 
 
 def env_diagnosis() -> str:
@@ -135,10 +139,9 @@ def env_diagnosis() -> str:
     a sourced profile, a bashrc or a settings.json `env` block never applies.
     """
     bits = []
-    if _self_name_is_defaulted():
-        bits.append(f"SWARPH_SELF unset — defaulting to {_DEFAULT_SELF!r}, which is "
-                    f"probably NOT this cell (so any peer-token lookup will hunt the "
-                    f"wrong file)")
+    if _self_name_is_undeclared():
+        bits.append("SWARPH_SELF unset — no cell identity is declared, so no peer-token "
+                    "lookup is attempted (there is no default identity; card #402)")
     if not os.environ.get("SWARPH_BRAIN_GATEWAY"):
         bits.append("SWARPH_BRAIN_GATEWAY unset — falling back to a direct brain "
                     "connection, which only works where the brain service is reachable "
@@ -167,8 +170,8 @@ def _resolve_token(token_file: Optional[str], self_name: str) -> Optional[str]:
     reviewing #190, and it is the sharpest kind of catch: I had noticed the
     hazard, written a comment about it, and not handled it.
 
-    `_self_name()` NEVER returns empty — it falls back to _DEFAULT_SELF
-    ("lab-ovh"). So `bool(self_name)` is always true here, and passing that as
+    `_self_name()` used to NEVER return empty — it fell back to a default peer
+    name ("lab-ovh"; removed by card #402). So `bool(self_name)` was always true, and passing that as
     identity_is_explicit would promote `lab-ovh.peer_token` — ANOTHER CELL'S
     CREDENTIAL — above GBRAIN_TOKEN on every invocation where nothing named the
     cell. The comment above already says why that fallback is dangerous
@@ -183,15 +186,15 @@ def _resolve_token(token_file: Optional[str], self_name: str) -> Optional[str]:
     rather than the resolver, because a unit test at the resolver cannot see
     what the caller makes reachable.
 
-    Explicitness therefore comes from `_self_name_is_defaulted()`, not from
-    truthiness: a guessed name keeps the old env-first order exactly, and only a
-    name the operator actually supplied earns precedence over ambient values.
+    Explicitness therefore comes from whether a name was DECLARED, not from
+    truthiness. Since card #402 nothing is ever guessed, so a declared name is
+    the only kind there is, and an undeclared cell gets the env-first order.
     """
     res = tokens.resolve_token(
         self_name or None,
         token_file,
         env_keys=("GBRAIN_TOKEN", "SWARPH_BRAIN_TOKEN"),
-        identity_is_explicit=bool(self_name) and not _self_name_is_defaulted(),
+        identity_is_explicit=self_name is not None,
     )
     return res.token if res is not None else None
 
@@ -262,6 +265,12 @@ def run_brain_ask(argv: list) -> int:
     gw = os.environ.get("SWARPH_BRAIN_GATEWAY")
     if gw:
         self_name = _self_name()
+        if self_name is None:
+            sys.stderr.write(env_diagnosis())
+            sys.stderr.write(
+                "swarph brain-ask: SWARPH_BRAIN_GATEWAY set but no cell identity is "
+                "declared, so there is no peer token to present (set SWARPH_SELF)\n")
+            return 2
         try:
             peer_token = _peer_token_path(self_name).read_text(encoding="utf-8").strip()
         except OSError:

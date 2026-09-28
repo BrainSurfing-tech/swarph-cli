@@ -21,7 +21,7 @@ import pytest
 
 from swarph_cli.commands import brain_ask as ba
 
-_ENV = ("SWARPH_SELF", "SWARPH_NODE", "SWARPH_BRAIN_GATEWAY")
+_ENV = ("SWARPH_SELF", "SWARPH_CELL", "SWARPH_NODE", "SWARPH_BRAIN_GATEWAY")
 
 
 @pytest.fixture
@@ -41,13 +41,16 @@ def test_cold_env_names_self_and_gateway_not_the_token(cold):
     assert "bashrc" in d, "must say the surfaces that do NOT reach cron/systemd"
 
 
-def test_defaulting_to_another_cells_name_is_announced(cold):
-    """The fallback is a REAL PEER NAME. Silently impersonating it is what produced a
-    token error on five cells that all had perfectly good tokens."""
-    assert ba._self_name() == ba._DEFAULT_SELF
-    assert ba._self_name_is_defaulted() is True
-    assert ba._DEFAULT_SELF in ba.env_diagnosis()
-    assert "probably NOT this cell" in ba.env_diagnosis()
+def test_an_undeclared_cell_is_named_as_undeclared_not_as_another_cell(cold):
+    """The old fallback was a REAL PEER NAME ('lab-ovh'), and silently impersonating
+    it produced a token error on five cells that had perfectly good tokens. Card
+    #402 removed the fallback: the diagnosis says nothing is declared and names no
+    other cell."""
+    assert ba._self_name() is None
+    assert ba._self_name_is_undeclared() is True
+    d = ba.env_diagnosis()
+    assert "SWARPH_SELF unset" in d and "no cell identity is declared" in d
+    assert "lab-ovh" not in d
 
 
 def test_configured_env_produces_no_diagnosis(monkeypatch):
@@ -69,5 +72,5 @@ def test_SWARPH_NODE_also_satisfies_self(monkeypatch):
     """SWARPH_NODE is an accepted alias — treating it as unset would emit a false fault."""
     monkeypatch.setenv("SWARPH_NODE", "gpu-wsl")
     monkeypatch.delenv("SWARPH_SELF", raising=False)
-    assert ba._self_name_is_defaulted() is False
+    assert ba._self_name_is_undeclared() is False
     assert "SWARPH_SELF unset" not in ba.env_diagnosis()

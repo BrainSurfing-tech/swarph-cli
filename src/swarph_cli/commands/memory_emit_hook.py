@@ -29,6 +29,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+
+from swarph_cli import identity
 import re
 import socket
 import sys
@@ -137,8 +139,7 @@ def _cell() -> str:
     # leaks SWARPH_CELL from the spawning environment, so a CELL-first order
     # posts this cell's highlight under ANOTHER cell's name and token
     # (measured by cursor-win on the Windows membrane, 2026-08-22).
-    return (os.environ.get("SWARPH_SELF") or os.environ.get("SWARPH_CELL")
-            or socket.gethostname())
+    return identity.declared()[0] or socket.gethostname()
 
 
 def run_memory_emit_hook(argv: list[str] | None = None) -> int:

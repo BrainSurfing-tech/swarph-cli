@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import json
 import os
+
+from swarph_cli import identity
 import re
 import sys
 import uuid
@@ -477,7 +479,7 @@ def supported_hook_events() -> frozenset:
 def run_codegraph_hook(argv: Optional[list] = None) -> int:
     """ALWAYS exits 0 — must never fail a turn."""
     argv = list(argv or [])
-    self_name = os.environ.get("SWARPH_SELF", "").strip()
+    self_name = identity.declared(env=identity.SELF_ONLY)[0] or ""
     gateway = env_gateway()
     for i, a in enumerate(argv):
         if a == "--as" and i + 1 < len(argv):

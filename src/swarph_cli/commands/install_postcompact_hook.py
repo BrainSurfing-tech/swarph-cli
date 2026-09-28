@@ -50,6 +50,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+
+from swarph_cli import identity
 import re
 import shlex
 import shutil
@@ -392,8 +394,7 @@ def run_install_postcompact_hook(argv: Optional[list[str]] = None) -> int:
         )
         return 2
 
-    cell = args.cell or os.environ.get("SWARPH_SELF") \
-        or os.environ.get("SWARPH_CELL") or None
+    cell = identity.declared(args.cell)[0]
     memory_dir: Optional[Path] = None
     if args.memory_dir:
         memory_dir = Path(os.path.expanduser(args.memory_dir))

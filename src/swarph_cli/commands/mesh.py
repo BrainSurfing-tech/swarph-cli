@@ -22,6 +22,8 @@ import argparse
 import difflib
 import json
 import os
+
+from swarph_cli import identity
 import re
 import stat
 import subprocess
@@ -301,11 +303,9 @@ def _resolve_self_name(
     *,
     state_dir: Optional[Path] = None,
 ) -> str:
-    if arg:
-        return arg
-    env = os.environ.get("SWARPH_SELF")
-    if env:
-        return env
+    name, _ = identity.declared(arg, env=identity.SELF_ONLY)
+    if name is not None:
+        return name
     if state_dir is not None:
         return state_dir.name
     raise RuntimeError("cannot resolve self identity; pass --as or set SWARPH_SELF")
@@ -323,11 +323,9 @@ def _resolve_self_with_source(arg: Optional[str]) -> tuple:
     Reading consumes, so an unlucky first command marks another peer's queue read,
     silently, exit 0. Same family as board #360 (identity fails TOWARD lab-ovh).
     """
-    if arg:
-        return arg, "--as"
-    env = os.environ.get("SWARPH_SELF")
-    if env:
-        return env, "$SWARPH_SELF"
+    name, source = identity.declared(arg, env=identity.SELF_ONLY)
+    if name is not None:
+        return name, ("--as" if source == "flag" else source)
     raise RuntimeError("cannot resolve self identity; pass --as or set SWARPH_SELF")
 
 
