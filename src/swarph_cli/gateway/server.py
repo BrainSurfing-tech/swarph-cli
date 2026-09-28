@@ -1076,6 +1076,17 @@ async def peers_register(req: PeerRegisterRequest,
     name. capabilities dict is the JSON snapshot from claude-service /health.
     """
     ctx = _authorize(authorization)
+    # #472: bind the caller to the name it registers. Without this, any
+    # per-peer-authenticated caller could register ANY name and be handed a
+    # freshly minted credential for it. Ported from the deployed gateway
+    # (mesh-gateway #467b/#108), same field and site names so both trees'
+    # telemetry agrees: UNCONDITIONAL (never gated on predicting whether a
+    # mint will happen; #467b's race) and OUTSIDE the transaction below
+    # (_check_caller_binding writes telemetry on its own connection, which
+    # would wait out the busy timeout against a held write lock; #108).
+    # The shared token stays unbound (C2's documented no-op; closure is C5).
+    _check_caller_binding(ctx, req.name, field="register_mint_target",
+                          site="peers_register_mint")
     # B2 owner-stamping (META_EDGE_IDENTITY_CONTRACT.md §Cell-join). A Meta-Edge
     # principal ties the registered cell to its owner (the node-in-your-tailnet
     # relationship); lab principals (shared/commander/per-peer token) leave owner
