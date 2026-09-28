@@ -218,3 +218,23 @@ def test_failed_send_is_not_saved_as_alerted_and_the_next_run_retries(tmp_path):
     assert retried.returncode == 0
     done = json.loads(state_path.read_text())
     assert done["nobody"]["outage"] is True
+
+
+def test_a_channel_cell_with_a_fresh_heartbeat_is_watched(tmp_path):
+    """Live 2026-09-28: `swarph channel-serve` has no inbox path on its command line, so the
+    old cmdline match never fired and every channel cell was paged 'DM wake is dead' (msgs
+    53556-54021). Fails on main: scan alerts although the heartbeat is 5 s old."""
+    import time as _t
+    inbox = tmp_path / "mesh-sidecar" / "inbox.log"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text("")
+    hb = inbox.parent / "channel_heartbeat.json"
+    cells = {"drop": str(inbox)}
+    channel_ps = ["/usr/bin/python3 /home/ubuntu/.local/bin/swarph channel-serve"]
+    state = {}
+    hb.write_text(json.dumps({"pid": 1, "ts": _t.time() - 5}))
+    assert scan(cells, channel_ps, state, now=0) == []
+    assert scan(cells, channel_ps, state, now=120) == []
+    hb.write_text(json.dumps({"pid": 1, "ts": _t.time() - 600}))  # server died 10 min ago
+    assert scan(cells, channel_ps, state, now=130) == []
+    assert scan(cells, channel_ps, state, now=200) == ["drop"]
