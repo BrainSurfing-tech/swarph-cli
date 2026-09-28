@@ -34,6 +34,7 @@ import re
 import sqlite3
 import sys
 
+from swarph_cli import identity
 from swarph_cli.commands.codegraph_hook import _match_quality
 
 DEFAULT_INDEX = os.path.expanduser("~/.swarph/codegraph/index.db")
@@ -68,8 +69,8 @@ DEFAULT_INDEX = os.path.expanduser("~/.swarph/codegraph/index.db")
 IDENTITY_UNSET = object()  # sentinel: argparse default when --caller-cell is omitted
 
 
-class IdentityNotDeclared(RuntimeError):
-    """No caller identity was declared and there is no default to fall back to."""
+# card #402: one exception class for "nobody declared this cell", shared by every verb.
+IdentityNotDeclared = identity.IdentityNotDeclared
 
 
 def require_caller_cell(explicit=None, *, verb: str) -> str:
@@ -80,12 +81,10 @@ def require_caller_cell(explicit=None, *, verb: str) -> str:
     The refusal names the verb and every way to satisfy it, because an error that
     says only "identity unset" moves the work to the reader.
     """
-    if explicit not in (None, IDENTITY_UNSET) and str(explicit).strip():
-        return str(explicit).strip()
-    for var in ("SWARPH_SELF", "SWARPH_CELL"):
-        v = (os.environ.get(var) or "").strip()
-        if v:
-            return v
+    # card #402: the order lives in swarph_cli.identity, once, for every verb.
+    name, _ = identity.declared(None if explicit is IDENTITY_UNSET else explicit)
+    if name is not None:
+        return name
     raise IdentityNotDeclared(
         f"swarph {verb}: NO CALLER IDENTITY DECLARED, and there is no default.\n"
         f"  This used to fall back to 'lab-ovh', which meant an undeclared caller\n"

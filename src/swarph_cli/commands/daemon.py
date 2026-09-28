@@ -49,6 +49,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Optional
 
+from swarph_cli import identity
 from swarph_cli import session_bridge, stall_alert
 from swarph_cli.console_safe import print_safe
 from swarph_cli.delivery_queue import DeliveryQueue
@@ -115,18 +116,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_self_name(arg: Optional[str], state_dir: Path) -> str:
-    if arg:
-        return arg
-    env = os.environ.get("SWARPH_SELF")
-    if env:
-        return env
-    return state_dir.name
+    name, _ = identity.declared(arg, env=identity.SELF_ONLY)
+    return name if name is not None else state_dir.name
 
 
 def _resolve_state_dir(arg: Optional[str], self_name_arg: Optional[str]) -> Path:
     if arg:
         return Path(arg).expanduser()
-    self_name = self_name_arg or os.environ.get("SWARPH_SELF")
+    self_name = identity.declared(self_name_arg, env=identity.SELF_ONLY)[0]
     if self_name:
         return Path.home() / "swarph_state" / self_name
     # Last resort — a self_name is needed to disambiguate; surface error.
@@ -550,7 +547,7 @@ def run_daemon(argv: list[str]) -> int:
     args = _build_parser().parse_args(argv)
 
     # Resolve identity + state path
-    self_name = args.self_name or os.environ.get("SWARPH_SELF")
+    self_name = identity.declared(args.self_name, env=identity.SELF_ONLY)[0]
     if args.state_dir:
         state_dir = Path(args.state_dir).expanduser()
         if not self_name:

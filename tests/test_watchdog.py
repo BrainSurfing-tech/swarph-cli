@@ -736,15 +736,17 @@ def test_install_service_two_cells_distinct_targets(isolated_state, capsys):
     assert "watchdog --check --cell science-claude" in out_sci
 
 
-def test_install_service_dry_run_default_cell_is_unidentified(isolated_state, capsys):
-    """Without --cell and with no SWARPH_SELF/SWARPH_CELL set, the dry-run preview must
-    NOT silently claim lab-ovh's own name (#402) — it uses the 'unidentified-cell'
-    sentinel instead, same as touch_activity's and --cell's own default."""
+def test_install_service_dry_run_without_an_identity_refuses(isolated_state, capsys):
+    """Without --cell and with no SWARPH_SELF/SWARPH_CELL set, the install must NOT
+    silently claim lab-ovh's own name (#402). It used to fall back to the
+    'unidentified-cell' sentinel and install units named after it; an install is
+    not a turn, so it now refuses (rc 4) and names the flag and variable."""
     rc = run_watchdog(argv=["--install-service", "--dry-run"])
-    assert rc == 0
+    assert rc == 4
     captured = capsys.readouterr()
-    assert "SWARPH_CELL=unidentified-cell" in captured.err
+    assert "no cell identity declared" in captured.err
     assert "SWARPH_CELL=lab" not in captured.err
+    assert "unidentified-cell" not in captured.err
 
 
 @_POSIX_WATCHDOG_SKIP

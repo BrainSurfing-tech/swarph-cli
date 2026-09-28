@@ -33,6 +33,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from swarph_cli import identity
 from swarph_cli.gateway_default import env_gateway
 
 TIMEOUT_S = 6
@@ -477,7 +478,7 @@ def supported_hook_events() -> frozenset:
 def run_codegraph_hook(argv: Optional[list] = None) -> int:
     """ALWAYS exits 0 — must never fail a turn."""
     argv = list(argv or [])
-    self_name = os.environ.get("SWARPH_SELF", "").strip()
+    self_name = identity.declared(env=identity.SELF_ONLY)[0] or ""
     gateway = env_gateway()
     for i, a in enumerate(argv):
         if a == "--as" and i + 1 < len(argv):

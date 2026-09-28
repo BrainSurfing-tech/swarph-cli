@@ -85,6 +85,11 @@ def _via_gateway(op: str, arguments: dict):
     if not gw:
         return False, None
     self_name = brain_ask._self_name()
+    if self_name is None:
+        # card #402: no default identity, so no peer token to present. OSError keeps
+        # run_memory's CLI fail-safe; the text names the variable to set.
+        raise OSError("SWARPH_BRAIN_GATEWAY is set but no cell identity is declared, "
+                      "so there is no peer token to present (set SWARPH_SELF)")
     peer_token = brain_ask._peer_token_path(self_name).read_text(encoding="utf-8").strip()
     return True, _gateway_call(gw, peer_token, op, arguments)
 

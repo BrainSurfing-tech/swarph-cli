@@ -24,6 +24,7 @@ import os
 import sys
 from typing import Optional
 
+from swarph_cli import identity
 from swarph_cli import gh_identity as ghid
 from swarph_cli.cell import cells_dir
 from swarph_cli.console_safe import print_safe
@@ -69,7 +70,7 @@ def run_hook(stdin_text: Optional[str] = None) -> int:
         # The caller named a credential. #332: an explicit argument is a decision.
         return _allow_unchanged()
 
-    peer = os.environ.get("SWARPH_SELF", "").strip()
+    peer = identity.declared(env=identity.SELF_ONLY)[0] or ""
     try:
         res = ghid.resolve(peer or None)
     except ghid.RouterRefusal as exc:
@@ -93,7 +94,7 @@ def run_hook(stdin_text: Optional[str] = None) -> int:
 
 
 def run_show() -> int:
-    peer = os.environ.get("SWARPH_SELF", "").strip()
+    peer = identity.declared(env=identity.SELF_ONLY)[0] or ""
     try:
         res = ghid.resolve(peer or None)
     except ghid.RouterRefusal as exc:

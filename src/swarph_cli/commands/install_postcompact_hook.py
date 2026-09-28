@@ -59,6 +59,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Optional
 
+from swarph_cli import identity
 from swarph_cli.cell import _atomic_write_text
 from swarph_cli.commands.hook_interpreter import hook_interpreter, refuse_unless_importable
 from swarph_cli.commands.install_wake_hook import _detect_harness
@@ -392,8 +393,7 @@ def run_install_postcompact_hook(argv: Optional[list[str]] = None) -> int:
         )
         return 2
 
-    cell = args.cell or os.environ.get("SWARPH_SELF") \
-        or os.environ.get("SWARPH_CELL") or None
+    cell = identity.declared(args.cell)[0]
     memory_dir: Optional[Path] = None
     if args.memory_dir:
         memory_dir = Path(os.path.expanduser(args.memory_dir))

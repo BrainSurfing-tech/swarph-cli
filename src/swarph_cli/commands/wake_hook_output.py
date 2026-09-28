@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
+from swarph_cli import identity
 from swarph_cli.cell import (
     CellError,
     cells_dir,
@@ -187,7 +188,7 @@ def _resolve_cell(explicit: Optional[str] = None) -> tuple[Optional[str], str]:
         return name, source
     if explicit:
         return explicit, "install-time --cell"
-    env_self = os.environ.get("SWARPH_SELF", "").strip()
+    env_self = identity.declared(env=identity.SELF_ONLY)[0] or ""
     if env_self:
         return env_self, "$SWARPH_SELF"
     cwd_local = discover_cell_in_cwd()
