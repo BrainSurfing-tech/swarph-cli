@@ -14,11 +14,11 @@ Ships these backends:
   passes ``vertexai=False`` EXPLICITLY — a ``GOOGLE_GENAI_USE_VERTEXAI=true``
   env 401s API-key auth (this exact bug bit the reference lab; see
   ``model_showdown.py::run_metered``).
-- :class:`SubscriptionBackend` — a STUB/interface only. Tokens are always
-  ESTIMATED (``~len(text)/4``, flagged via ``estimated=True``) and it does
-  NOT couple to any specific subscription lane map; a caller wires an actual
-  $0 CLI/OIDC path in by passing ``call_fn``. Not exercised against a live
-  provider anywhere in this package.
+- :class:`SubscriptionBackend` — a stub until a ``call_fn`` is wired. A
+  string return is still ESTIMATED (``~len(text)/4``). A
+  :class:`~swarph_cli.bench.claude_cli.CliResult` uses the CLI's reported
+  usage (``estimated=False``). ``swarph bench`` wires ``claude -p`` when
+  the ``claude`` binary is on PATH.
 - :class:`RuleBackend` — in-process ``rule:<module:callable>``. No credentials.
 - :class:`TypedHttpBackend` — POST to a Jev-compatible ``/v1/systemone``
   (laya-serve). No credentials; per-item latency is the HTTP round trip.
@@ -229,6 +229,15 @@ class MeteredMistralBackend:
         )
 
 
+def normalize_judge_action(text: str) -> str:
+    """BUY or SKIP, after trimming and uppercasing. Anything else is ABSTAIN."""
+    try:
+        action = str(json.loads(text).get("action", "")).strip().upper()
+    except Exception:
+        return "ABSTAIN"
+    return action if action in ("BUY", "SKIP") else "ABSTAIN"
+
+
 class SubscriptionBackend:
     KIND = "semantic"
     """STUB/interface-only backend for a $0 subscription path (e.g. a node's
@@ -271,20 +280,35 @@ class SubscriptionBackend:
             )
         t0 = time.time()
         try:
-            text = self._call_fn(model_id, prompt, system) or ""
+            raw = self._call_fn(model_id, prompt, system)
         except Exception as exc:
             return BackendResult(
                 text="", tokens_in=0, tokens_thought=0, tokens_out=0,
                 latency_s=round(time.time() - t0, 2), estimated=True, error=str(exc),
             )
         latency_s = round(time.time() - t0, 2)
+        if raw is None or isinstance(raw, str):
+            text = raw or ""
+            return BackendResult(
+                text=text,
+                tokens_in=estimate_tokens(prompt),
+                tokens_thought=0,
+                tokens_out=estimate_tokens(text),
+                latency_s=latency_s,
+                estimated=True,
+            )
+        # CliResult from claude_cli: real usage, and the billing/rate-limit error
+        # is the result, not an exception. An error discards the answer text.
+        err = getattr(raw, "error", None)
+        text = "" if err else (getattr(raw, "text", "") or "")
         return BackendResult(
             text=text,
-            tokens_in=estimate_tokens(prompt),
+            tokens_in=int(getattr(raw, "tokens_in", 0) or 0),
             tokens_thought=0,
-            tokens_out=estimate_tokens(text),
+            tokens_out=int(getattr(raw, "tokens_out", 0) or 0),
             latency_s=latency_s,
-            estimated=True,
+            estimated=False,
+            error=err,
         )
 
 

@@ -197,6 +197,8 @@ Task types: `numeric` (rel-err), `categorical` (exact), `ranking` (Kendall-tau),
 
 `provider:<name>` reads a TOML registry (`--providers`, else `$SWARPH_BENCH_PROVIDERS`, else `~/.config/swarph/bench_providers.toml`). The file names an env var; it does not hold the key. A worked example is `docs/examples/bench_providers.toml` (Jev, `env = "JEV_API_KEY"`, 0.42 USD per 1M input tokens, output free). `--max-usd` stops the run at the cap. A pack with `egress = "on_box_only"` refuses an external arm unless `--allow-egress <provider>` names it.
 
+`claude-sonnet-5-5:subscription` runs `claude -p` on the Claude subscription when `claude` is on PATH. The argv is fixed: `--max-turns 1`, `--output-format stream-json`, `--strict-mcp-config`, an empty MCP config, `--tools ""`, `--setting-sources ""`. The prompt goes on stdin. The child environment drops `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and every `SWARPH_CHANNEL*` name. A result whose `apiKeySource` is not `none` is `billing:<source>`, is not scored, and aborts the rest of the run on every arm. A usage limit is retried after 60s and then 300s; the arm then stops with `--ledger`, and the next run skips tasks that already completed. It is not scored as an answer.
+
 ### `swarph brain-ask` (v0.14.0)
 
 Search the **swarph-brain** (gbrain) — the swarm's sovereign $0 semantic-retrieval memory — over MCP. The "does the swarm already know X?" reflex, as a one-shot.

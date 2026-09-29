@@ -241,3 +241,75 @@ def test_preflight_skips_and_warns_on_missing_creds():
     runnable, warnings = preflight([ModelSpec(id="a", label="model-a")], {"metered": NoCredsBackend()})
     assert runnable == []
     assert warnings and "model-a" in warnings[0] and "SOME_API_KEY" in warnings[0]
+
+
+def _two_tasks():
+    return {
+        "theme": "rate-limit",
+        "system": "s",
+        "tasks": [
+            {"id": "t1", "type": "categorical", "prompt": "one", "expected": "BUY"},
+            {"id": "t2", "type": "categorical", "prompt": "two", "expected": "BUY"},
+        ],
+    }
+
+
+def test_rate_limit_backs_off_then_stops_without_scoring():
+    class Always:
+        def __init__(self):
+            self.n = 0
+
+        def generate(self, model_id, prompt, system=""):
+            self.n += 1
+            return BackendResult("", 0, 0, 0, 0.0, False, error="rate_limit")
+
+        def missing_creds(self):
+            return []
+
+    waits = []
+    backend = Always()
+    result = run_pack(
+        [ModelSpec(id="m", label="m")], _two_tasks(), {"metered": backend}, sleeper=waits.append)
+    assert waits == [60, 300]
+    assert backend.n == 3
+    rows = result["detail"]["m"]
+    assert [r["not_run"] for r in rows] == ["rate_limit", "rate_limit"]
+    assert result["partial"] == "rate_limit"
+    assert all(r["text"] == "" for r in rows)
+
+
+def test_billing_rejection_aborts_every_arm_after_one_call():
+    class Billing:
+        def __init__(self):
+            self.n = 0
+
+        def generate(self, model_id, prompt, system=""):
+            self.n += 1
+            return BackendResult("", 1, 0, 0, 0.0, False, error="billing:ANTHROPIC_API_KEY")
+
+        def missing_creds(self):
+            return []
+
+    backend = Billing()
+    result = run_pack(
+        [ModelSpec(id="a", label="arm-a"), ModelSpec(id="b", label="arm-b")],
+        _two_tasks(),
+        {"metered": backend},
+    )
+    assert backend.n == 1
+    assert result["partial"] == "aborted"
+    assert result["aborted"] is True
+    assert result["detail"]["arm-a"][0]["error"] == "billing:ANTHROPIC_API_KEY"
+    assert result["detail"]["arm-a"][0]["text"] == ""
+    assert all(r["not_run"] == "aborted" for r in result["detail"]["arm-b"])
+
+
+def test_resume_does_not_resend_completed_tasks(tmp_path):
+    backend = ScriptedBackend({"one": "BUY", "two": "BUY"})
+    ledger = tmp_path / "ledger.json"
+    spec = [ModelSpec(id="m", label="m")]
+    run_pack(spec, _two_tasks(), {"metered": backend}, ledger_path=str(ledger))
+    sent = len(backend.calls)
+    run_pack(spec, _two_tasks(), {"metered": backend}, ledger_path=str(ledger))
+    assert len(backend.calls) == sent
+    assert sent == 2

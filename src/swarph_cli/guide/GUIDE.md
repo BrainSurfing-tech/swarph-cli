@@ -488,7 +488,7 @@ registry name the SAME set, so a verb shipped without a line here is a red test.
 answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not commands you type.
 
 - `swarph add` -- install a swarph artifact by `swarph://` URI (magnet-link style).
-- `swarph bench` -- deterministic LLM benchmark-pack runner (card #101). `provider:<name>` uses a TOML registry of env-var names (example `docs/examples/bench_providers.toml`, Jev at 0.42 USD per 1M input tokens, output free). `--max-usd` is a hard cap. `egress = "on_box_only"` refuses an external arm unless `--allow-egress` names that provider.
+- `swarph bench` -- deterministic LLM benchmark-pack runner (card #101). `provider:<name>` uses a TOML registry of env-var names (example `docs/examples/bench_providers.toml`, Jev at 0.42 USD per 1M input tokens, output free). `--max-usd` is a hard cap. `egress = "on_box_only"` refuses an external arm unless `--allow-egress` names that provider. `claude-sonnet-5-5:subscription` is `claude -p` on the Claude subscription (isolation flags, billing guard requires `apiKeySource=none` and aborts every arm, prompt on stdin, every `SWARPH_CHANNEL*` name stripped). A usage limit retries 60s then 300s and resumes from `--ledger`; it is not scored.
 - `swarph board` -- the mesh board: projects, cards, obligations (see [The board](#the-board)).
 - `swarph brain` -- run the gbrain HTTP brain server, the $0 semantic memory.
 - `swarph brain-ask` -- search the swarph-brain memory with a question; optional $0 synthesis.

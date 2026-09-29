@@ -12,6 +12,7 @@ alongside the aggregate, and the CLI always PRINTS it.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -95,6 +96,7 @@ class TaskRow:
     estimated: bool
     error: Optional[str] = None
     not_run: Optional[str] = None
+    text: str = ""
 
 
 @dataclass
@@ -225,6 +227,33 @@ def _secrets_of(specs, backends) -> list:
     return found
 
 
+def _taskrow_from_ledger(item: dict) -> TaskRow:
+    return TaskRow(
+        task_id=item["task_id"],
+        cls=item.get("cls") or "",
+        distance=float(item.get("distance") or 0.0),
+        parse_ok=bool(item.get("parse_ok")),
+        tokens_in=int(item.get("tokens_in") or 0),
+        tokens_thought=int(item.get("tokens_thought") or 0),
+        tokens_out=int(item.get("tokens_out") or 0),
+        latency_s=float(item.get("latency_s") or 0.0),
+        cost_usd=float(item.get("cost_usd") or 0.0),
+        estimated=bool(item.get("estimated")),
+        error=item.get("error"),
+        not_run=item.get("not_run"),
+        text=item.get("text") or "",
+    )
+
+
+def _skipped(task: dict, reason: str) -> TaskRow:
+    """A task that was not scored. rate_limit is retryable, never an ABSTAIN."""
+    return TaskRow(
+        task_id=task["id"], cls=class_of(task), distance=0.0, parse_ok=False,
+        tokens_in=0, tokens_thought=0, tokens_out=0, latency_s=0.0,
+        cost_usd=0.0, estimated=False, error=reason, not_run=reason, text="",
+    )
+
+
 def run_pack(
     specs: list[ModelSpec],
     pack: dict,
@@ -235,6 +264,7 @@ def run_pack(
     max_usd_per_arm: Optional[float] = None,
     allow_egress: Optional[set[str]] = None,
     ledger_path: Optional[str] = None,
+    sleeper=None,
 ) -> dict:
     """Run every spec against every task in ``pack`` (or a ``task_ids``
     subset). ``backends`` maps backend-name ("metered"/"subscription"/...) ->
@@ -260,6 +290,17 @@ def run_pack(
     secrets = _secrets_of(specs, backends)
     allow_egress = allow_egress or set()
     overrides = []
+    sleep = sleeper or time.sleep
+    run_aborted = False
+    prior_detail: dict = {}
+    if ledger_path:
+        from pathlib import Path
+        ledger = Path(ledger_path)
+        if ledger.is_file():
+            try:
+                prior_detail = json.loads(ledger.read_text(encoding="utf-8")).get("detail") or {}
+            except (OSError, json.JSONDecodeError):
+                prior_detail = {}
 
     for spec in specs:
         backend = _bound(spec, backends)
@@ -272,9 +313,24 @@ def run_pack(
                 "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             })
 
+        resumed = {}
+        for item in prior_detail.get(spec.label) or []:
+            if isinstance(item, dict) and item.get("task_id") and item.get("error") is None and not item.get("not_run"):
+                resumed[item["task_id"]] = _taskrow_from_ledger(item)
+
         rows: list[TaskRow] = []
         arm_spent = 0.0
+        arm_stopped = False
         for task in tasks:
+            if task["id"] in resumed:
+                rows.append(resumed[task["id"]])
+                continue
+            if run_aborted:
+                rows.append(_skipped(task, "aborted"))
+                continue
+            if arm_stopped:
+                rows.append(_skipped(task, "rate_limit"))
+                continue
             if (max_usd is not None and spent >= max_usd) or (
                     max_usd_per_arm is not None and arm_spent >= max_usd_per_arm):
                 partial = "spend_cap"
@@ -286,8 +342,31 @@ def run_pack(
                 ))
                 continue
             result = _dispatch(backend, spec.id, task["prompt"], system)
+            rate_hits = 0
+            while result.error == "rate_limit" and rate_hits < 2:
+                sleep(60 if rate_hits == 0 else 300)
+                rate_hits += 1
+                result = _dispatch(backend, spec.id, task["prompt"], system)
             if result.error:
                 result.error = _redact(result.error, secrets)
+            if result.error and str(result.error).startswith("billing:"):
+                # A billing leak aborts every remaining task on every arm.
+                # The answer is already empty. One such call stops the run.
+                partial = "aborted"
+                run_aborted = True
+                rows.append(TaskRow(
+                    task_id=task["id"], cls=class_of(task), distance=0.0, parse_ok=False,
+                    tokens_in=result.tokens_in, tokens_thought=result.tokens_thought,
+                    tokens_out=result.tokens_out, latency_s=result.latency_s,
+                    cost_usd=0.0, estimated=result.estimated, error=result.error,
+                    not_run="aborted", text="",
+                ))
+                continue
+            if result.error == "rate_limit":
+                partial = "rate_limit"
+                arm_stopped = True
+                rows.append(_skipped(task, "rate_limit"))
+                continue
             if result.error:
                 rows.append(TaskRow(
                     task_id=task["id"], cls=class_of(task), distance=1.0, parse_ok=False,
@@ -308,6 +387,7 @@ def run_pack(
                 latency_s=result.latency_s,
                 cost_usd=usd,
                 estimated=result.estimated or unknown,
+                text=result.text,
             ))
         detail[spec.label] = rows
 
@@ -340,7 +420,9 @@ def run_pack(
             estimated=any(r.estimated for r in done),
             per_class=per_class,
             errors=sum(1 for r in rows if r.error and not r.not_run),
-            partial="spend_cap" if any(r.not_run for r in rows) else None,
+            partial=("aborted" if any(r.not_run == "aborted" for r in rows)
+                     else "rate_limit" if any(r.not_run == "rate_limit" for r in rows)
+                     else "spend_cap" if any(r.not_run for r in rows) else None),
             price_source=(getattr(backend, "price", None) or {}).get("source", "")
             if isinstance(getattr(backend, "price", None), dict) else "",
             egress=_arm_egress(spec, backend),
@@ -354,6 +436,7 @@ def run_pack(
         "theme": pack.get("theme"),
         "tasks_total": len(tasks),
         "partial": partial,
+        "aborted": partial == "aborted",
         "exit_code": 1 if partial else 0,
         "egress_overrides": overrides,
         "board": [vars(b) for b in board],
