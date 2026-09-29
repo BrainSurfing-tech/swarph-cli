@@ -53,7 +53,9 @@ def test_second_enter_fires_only_when_the_first_did_not_submit(tmux):
     """The Codex shape, now verified instead of blind: first Enter leaves the
     prompt in the composer, second clears it."""
     calls, state = tmux
-    state["captures"] = ["> check mesh", "> "]
+    # First frame is the pre-inject look (prompt choice). The pending frame
+    # is what the first Enter left behind.
+    state["captures"] = ["> ", "> check mesh", "> "]
     assert mesh._tmux_wake("pane") is True
     assert enters(calls) == 2
 
@@ -62,7 +64,7 @@ def test_concatenated_backlog_is_detected_and_drained(tmux):
     """The observed defect shape: two wakes stacked unsubmitted. The substring
     check catches the concatenation and the retry Enter drains it."""
     calls, state = tmux
-    state["captures"] = ["> check meshcheck mesh", "> "]
+    state["captures"] = ["> ", "> check meshcheck mesh", "> "]
     assert mesh._tmux_wake("pane") is True
     assert enters(calls) == 2
 
@@ -101,7 +103,7 @@ def test_capture_failure_mid_loop_stops_the_loop(tmux, monkeypatch):
     state["captures"] = ["> check mesh"]  # first capture: still pending
 
     def flaky(argv, **kw):
-        if argv[1] == "capture-pane" and state["i"] > 0:
+        if argv[1] == "capture-pane" and state["i"] > 1:
             raise OSError("tmux socket vanished")
         if argv[1] == "capture-pane":
             i = min(state["i"], len(state["captures"]) - 1)
@@ -161,7 +163,7 @@ def test_codex_composer_marker_counts_as_recognizable(tmux):
 
 def test_cursor_composer_holding_the_wake_is_pending(tmux):
     calls, state = tmux
-    state["captures"] = ["→ check mesh", "→ Add a follow-up"]
+    state["captures"] = ["→ Add a follow-up", "→ check mesh", "→ Add a follow-up"]
     assert mesh._tmux_wake("pane") is True
     assert enters(calls) == 2
 
@@ -199,6 +201,8 @@ def gate(monkeypatch):
                         lambda t: calls.__setitem__("enter", calls["enter"] + 1) or True)
     monkeypatch.setattr(mesh, "_wake_still_pending", lambda t: box["pending"])
     monkeypatch.setattr(mesh, "_composer_state", lambda t: box["composer"])
+    monkeypatch.setattr(mesh, "_opencode_in_progress", lambda t: False)
+    monkeypatch.setattr(mesh, "_opencode_turn_finished_target", lambda t: False)
     import swarph_cli.commands.watchdog as wd
     monkeypatch.setattr(wd, "_gateway_unread_count",
                         lambda g, p, t: box["unread"])
@@ -540,3 +544,192 @@ def test_engine_defers_on_adopted_mid_settle_with_real_tmux_sink(tmp_path, tmux,
     out = capsys.readouterr()
     assert "DEFERRED" in out.out
     assert "DELIVERY FAILED" not in out.err
+
+
+# ── opencode 1.18.33, measured on a sacrificial pane (card #961) ──────────
+#
+# The composer is a ┃ box, not a > / › / → line. A ▣ spinner sits between
+# the transcript and the box; lines above it are history. `esc interrupt`
+# and `Permission required` mean a keystroke is the wrong key.
+
+_OPENCODE_IDLE = """\
+┃
+┃  Ask anything… "What is the tech stack of this project?"
+┃
+┃  Build · DeepSeek V4 Pro (New) OpenCode Go
+╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  tab agents
+  ctrl+p commands
+"""
+
+_OPENCODE_HOLDING = """\
+┃
+┃  check mesh: swarph_dm_unread
+┃
+┃  Build · DeepSeek V4 Pro (New) OpenCode Go
+╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+"""
+
+_OPENCODE_RUNNING = """\
+┃  check mesh: swarph_dm_unread
+┃  Click to expand
+▣  Build · DeepSeek V4 Pro (New)
+┃
+┃
+┃  Build · DeepSeek V4 Pro (New) OpenCode Go
+  esc interrupt
+"""
+
+# 1.18.33 draws the dialog inside the box. The mode row and the bottom
+# border are not on this screen (drop-on-meta-edge, card #961 post 54557).
+_OPENCODE_PERMISSION = """\
+┃
+┃  △ Permission required
+┃
+  Allow once
+  Allow always
+  Reject
+"""
+
+_OPENCODE_FINISHED = """\
+▣  Build · DeepSeek V4 Pro (New) · 3.3s
+┃
+┃  Ask anything… "What is the tech stack of this project?"
+┃
+┃  Build · DeepSeek V4 Pro (New) OpenCode Go
+╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  tab agents  ctrl+p commands
+"""
+
+
+def test_opencode_idle_box_is_a_clear_composer(tmux):
+    calls, state = tmux
+    state["captures"] = [_OPENCODE_IDLE]
+    assert mesh._composer_state("sac") == "clear"
+    assert mesh._agent_running("sac") is False
+    # `--auto` rewrites the mode row to "Build auto ·" (1.18.33).
+    state["captures"] = [_OPENCODE_IDLE.replace("Build ·", "Build auto ·")]
+    state["i"] = 0
+    assert mesh._composer_state("sac") == "clear"
+
+
+def test_opencode_unsubmitted_pointer_is_wake_not_unknown(tmux):
+    """Main reads this pane as no composer at all, so the sink fails closed
+    and the text stays typed. The box is a composer, and this line is wake."""
+    calls, state = tmux
+    state["captures"] = [_OPENCODE_HOLDING]
+    assert mesh._composer_state("sac") == "wake"
+
+
+def test_opencode_human_text_in_the_box_is_busy(tmux):
+    calls, state = tmux
+    state["captures"] = [_OPENCODE_HOLDING.replace(
+        "check mesh: swarph_dm_unread", "look at the diff")]
+    assert mesh._composer_state("sac") == "busy"
+
+
+def test_opencode_transcript_above_the_spinner_is_not_the_composer(tmux):
+    """The submitted prompt stays on screen above ▣. Reading it as the
+    composer would send another Enter into the running turn."""
+    calls, state = tmux
+    state["captures"] = [_OPENCODE_RUNNING]
+    assert mesh._composer_state("sac") == "clear"
+    assert mesh._agent_running("sac") is True
+
+
+def test_opencode_permission_modal_is_not_typed_into(tmux):
+    """The dialog is a ┃ row. deliver returns None from the busy branch.
+    False would be the unrecognised-pane fallthrough, which also sends no
+    keys and is the wrong outcome."""
+    calls, state = tmux
+    assert "┃  △ Permission required" in _OPENCODE_PERMISSION
+    assert "╹▀" not in _OPENCODE_PERMISSION
+    assert "Build ·" not in _OPENCODE_PERMISSION
+    state["captures"] = [_OPENCODE_PERMISSION]
+    assert mesh._composer_state("sac") == "busy"
+    sink = mesh.TmuxSink("sac")
+    assert sink.deliver(_State(), [], 1) is None
+    assert enters(calls) == 0
+    assert not any("-l" in c for c in calls)
+
+
+def test_opencode_finished_header_is_not_a_running_turn(tmux):
+    calls, state = tmux
+    state["captures"] = [_OPENCODE_FINISHED]
+    assert mesh._agent_running("sac") is False
+    assert mesh._opencode_turn_finished_target("sac") is True
+    assert mesh._composer_state("sac") == "clear"
+
+
+def test_opencode_deferral_keeps_wake_outstanding(tmux):
+    calls, state = tmux
+    state["captures"] = [_OPENCODE_RUNNING]
+    st = _State()
+    st.ledger("x")["wake_outstanding"] = True
+    assert mesh.TmuxSink("sac").deliver(st, [], 2) is None
+    assert st.ledger("x")["wake_outstanding"] is True
+    assert enters(calls) == 0
+    assert not any("-l" in c for c in calls)
+
+
+def test_opencode_finished_turn_earns_another_wake(tmux, monkeypatch):
+    """Inside the trust window a standing wake would report delivery with
+    no keystroke. A finished header means the cell is idle again."""
+    import time
+    import swarph_cli.commands.watchdog as wd
+    monkeypatch.setattr(wd, "_gateway_unread_count", lambda *a, **k: 1)
+    calls, state = tmux
+    state["captures"] = [_OPENCODE_FINISHED]
+    st = _State()
+    st.ledger("x")["wake_outstanding"] = True
+    st.ledger("x")["last_wake_injected_at"] = time.time()
+    assert mesh.TmuxSink("sac").deliver(st, [], 3) is True
+    literals = [c for c in calls if "-l" in c]
+    assert literals == [[
+        "tmux", "send-keys", "-t", "sac", "-l", mesh._OPENCODE_WAKE_PROMPT]]
+    assert enters(calls) == 1
+    assert st.ledger("x")["wake_outstanding"] is True
+
+
+def test_opencode_running_turn_gets_no_second_prompt(tmux):
+    calls, state = tmux
+    state["captures"] = [_OPENCODE_RUNNING]
+    sink = mesh.TmuxSink("sac")
+    assert sink.deliver(_State(), [], 1) is None
+    assert enters(calls) == 0
+    assert not any("-l" in c for c in calls)
+
+
+def test_opencode_idle_injects_the_pointer_then_one_enter(tmux):
+    calls, state = tmux
+    state["captures"] = [_OPENCODE_IDLE, _OPENCODE_RUNNING]
+    assert mesh._tmux_wake("sac") is True
+    literals = [c for c in calls if "-l" in c]
+    assert literals == [[
+        "tmux", "send-keys", "-t", "sac", "-l", mesh._OPENCODE_WAKE_PROMPT]]
+    assert enters(calls) == 1
+
+
+def test_opencode_holding_wake_is_nudged_not_retyped(tmux):
+    calls, state = tmux
+    state["captures"] = [_OPENCODE_HOLDING]
+    sink = mesh.TmuxSink("sac")
+    assert sink.deliver(_State(), [], 1) is True
+    assert enters(calls) == 1
+    assert not any("-l" in c for c in calls)
+
+
+def test_opencode_dropin_names_the_tmux_sink_and_is_not_the_template():
+    """install-unit renders swarph-monitor@.service only. This file is the
+    review copy of the opencode drop-in; nothing in this test installs it."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    dropin = root / "deploy" / "monitor" / "swarph-monitor@opencode.conf"
+    text = dropin.read_text(encoding="utf-8")
+    assert "ExecStart=" in text
+    assert "--deliver tmux:opencode" in text
+    assert "--deliver pull" in text
+    assert "--as opencode" in text
+    template = (root / "src" / "swarph_cli" / "systemd"
+                / "swarph-monitor@.service").read_text(encoding="utf-8")
+    assert "tmux:opencode" not in template

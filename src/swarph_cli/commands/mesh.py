@@ -1474,6 +1474,11 @@ class TmuxSink(Sink):
         # observation and let the fresh path take over — it defers while
         # running (#619) and injects at the first idle poll.
         if led.get("wake_outstanding") and _agent_running(self.target):
+            # Opencode keeps the finished ▣ header on screen, so a deferral
+            # during the turn must not clear the flag: the next idle poll
+            # still owes a wake. Cursor's #620 clear stays.
+            if _opencode_in_progress(self.target):
+                return None
             led["wake_outstanding"] = False
         if led.get("wake_outstanding"):
             # Lazy: watchdog imports mesh module-level, so the reverse must
@@ -1496,6 +1501,17 @@ class TmuxSink(Sink):
                     _tmux_enter(self.target)  # one verified nudge, no new text
                     return True
                 if composer == "clear":
+                    # A finished opencode turn leaves a ▣ header with a
+                    # trailing duration and a clear box. The standing-wake
+                    # claim would swallow every later DM. Inject again.
+                    if _opencode_turn_finished_target(self.target):
+                        ok = _tmux_wake(self.target)
+                        if ok:
+                            _stamp_wake(led)
+                            return True
+                        if ok is None:
+                            return None
+                        return False
                     # #611: a clear composer proves the wake SUBMITTED only if
                     # the pane it was injected into is still the pane we are
                     # reading. The ledger flag survives a respawn; the wake
@@ -1979,6 +1995,15 @@ def _log_dm(state: MonitorState, dm: dict) -> None:
 
 
 _WAKE_PROMPT = "check mesh"
+# Opencode has no push channel (#601). The wake is one line that names the
+# pull tool and carries no DM body, so the turn cannot answer mail it was
+# not shown. Longer than _WAKE_PROMPT, so wake-text detection strips this
+# one first.
+_OPENCODE_WAKE_PROMPT = "check mesh: swarph_dm_unread"
+# A finished turn keeps its ▣ header and adds a trailing duration
+# (`· 3.3s`). An in-progress header has no such suffix. Measured by
+# drop-on-meta-edge on 1.18.33 (card #961, post 54557).
+_OPENCODE_DONE = re.compile(r"·\s*\d+(?:\.\d+)?s\s*$")
 # Submit-verify bounds (#533): the settle pause lets the -l literal LAND in
 # the composer before Enter can submit it (the blind gesture raced this), and
 # the attempt bound keeps a never-submitting pane from being Enter-spammed
@@ -2072,20 +2097,155 @@ _COMPOSER_PLACEHOLDERS = ("Add a follow-up", "Ask Codex to do anything")
 _CURSOR_RUN_HINT = "ctrl+c to stop"
 
 
-def _agent_running(target: str) -> Optional[bool]:
-    """True if the pane's composer row carries cursor's run-state hint.
+def _only_wake_text(content: str) -> bool:
+    """True when the composer holds wake text and nothing else.
 
-    The #619 deferral signal: a keystroke into a RUNNING TUI lands in the
-    follow-up queue, and the queue is input-gated (measured live 2026-08-26,
-    twice: queued wakes fired only when the human next typed — 10:00 and
-    10:09Z). On an unattended cell a queued wake never fires, so no wake
-    keystroke may be sent while this returns True. None = pane or composer
-    unreadable; callers treat unknown as NOT-running (the composer state was
-    already established by then — this guard only vets the timing).
+    The opencode prompt contains the cursor/claude prompt as a prefix, so
+    the longer string is removed first. A stack of either prompt still
+    counts as wake text (one Enter drains it). Anything left over is a
+    human's line.
+    """
+    rest = content
+    for prompt in (_OPENCODE_WAKE_PROMPT, _WAKE_PROMPT):
+        rest = rest.replace(prompt, "")
+    return rest.strip() == ""
+
+
+def _opencode_mode_row(line: str) -> bool:
+    """The mode row under the input. ``--auto`` inserts a word, so the row
+    is ``Build ·`` or ``Build auto ·`` (measured 1.18.33, both shapes).
+    """
+    s = line.strip()
+    if not s.startswith("┃") or "·" not in s:
+        return False
+    body = s[1:].strip()
+    return body.startswith("Build") or body.startswith("Plan")
+
+
+def _opencode_permission_row(line: str) -> bool:
+    """The 1.18.33 dialog, drawn inside the box.
+
+    The row is ``┃  △ Permission required``. The mode row and the ``╹▀``
+    border are gone on that screen, so this row is the whole signal.
+    """
+    s = line.strip()
+    return s.startswith("┃") and "△" in s and "Permission required" in s
+
+
+def _is_opencode_pane(lines: list[str]) -> bool:
+    """The opencode composer box, measured on 1.18.33.
+
+    The input row is a ``┃`` line. The mode row under it names Build or
+    Plan and a ``·``. The bottom of the box is ``╹▀``. The permission
+    dialog keeps the ``┃`` row and drops the mode row and the border.
+    Cursor and claude do not draw any of these.
+    """
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("╹▀") or _opencode_mode_row(ln) or _opencode_permission_row(ln):
+            return True
+    return False
+
+
+def _opencode_running(lines: list[str]) -> bool:
+    """True only while a turn is in progress.
+
+    The footer shows ``esc interrupt``, and the ▣ header has no trailing
+    duration. A finished turn keeps the ▣ header and adds ``· <n>s``,
+    with no interrupt hint. That pane is idle. The permission dialog is
+    not a turn; it has its own branch.
+    """
+    if any("esc interrupt" in ln for ln in lines):
+        return True
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("▣") and not _OPENCODE_DONE.search(s):
+            return True
+    return False
+
+
+def _opencode_turn_finished(lines: list[str]) -> bool:
+    """The ▣ header carried a duration and the interrupt hint is gone."""
+    if _opencode_running(lines):
+        return False
+    return any(
+        ln.strip().startswith("▣") and _OPENCODE_DONE.search(ln.strip())
+        for ln in lines
+    )
+
+
+def _opencode_in_progress(target: str) -> bool:
+    """In-progress opencode turn. A deferral here keeps wake_outstanding."""
+    lines = _capture_pane_lines(target)
+    if not lines or not _is_opencode_pane(lines):
+        return False
+    return _opencode_running(lines)
+
+
+def _opencode_turn_finished_target(target: str) -> bool:
+    lines = _capture_pane_lines(target)
+    if not lines or not _is_opencode_pane(lines):
+        return False
+    return _opencode_turn_finished(lines)
+
+
+def _opencode_input(lines: list[str]) -> Optional[str]:
+    """The composer input row's text, '' when that row is empty, None if no box.
+
+    Walk up from the mode row. Blank ``┃`` lines are the box padding. A
+    ``▣`` spinner sits between the transcript and the box, and the walk
+    stops there so a submitted prompt in the transcript is not read as
+    text still sitting in the composer.
+    """
+    mode_at = None
+    for i, ln in enumerate(lines):
+        if _opencode_mode_row(ln):
+            mode_at = i
+    if mode_at is None:
+        return None
+    for ln in reversed(lines[:mode_at]):
+        s = ln.strip()
+        if s.startswith("▣"):
+            return ""
+        if not s.startswith("┃"):
+            continue
+        body = s[1:].strip()
+        if body:
+            return body
+    return ""
+
+
+def _opencode_composer_state(lines: list[str]) -> Optional[str]:
+    if any(_opencode_permission_row(ln) for ln in lines):
+        return "busy"
+    text = _opencode_input(lines)
+    if text is None:
+        return None
+    if not text or text.startswith("Ask anything"):
+        return "clear"
+    if _only_wake_text(text):
+        return "wake"
+    return "busy"
+
+
+def _agent_running(target: str) -> Optional[bool]:
+    """True while a keystroke would miss the idle composer.
+
+    Cursor: the composer row carries 'ctrl+c to stop' (measured live on
+    cursor-lin 2026-08-24). A keystroke into that TUI lands in the
+    follow-up queue, and the queue is input-gated (measured live
+    2026-08-26, twice: queued wakes fired only when the human next typed).
+    Opencode: ``esc interrupt`` or a ▣ header with no trailing duration.
+    A finished ``· <n>s`` header is idle. None =
+    pane or composer unreadable; callers treat unknown as NOT-running
+    (the composer state was already established by then — this guard
+    only vets the timing).
     """
     lines = _capture_pane_lines(target)
     if lines is None:
         return None
+    if _is_opencode_pane(lines):
+        return _opencode_running(lines)
     composer = _composer_line(lines)
     if composer is None:
         return None
@@ -2112,6 +2272,8 @@ def _composer_state(target: str) -> Optional[str]:
     lines = _capture_pane_lines(target)
     if lines is None:
         return None
+    if _is_opencode_pane(lines):
+        return _opencode_composer_state(lines)
     composer = _composer_line(lines)
     if composer is None:
         return None
@@ -2126,7 +2288,7 @@ def _composer_state(target: str) -> Optional[str]:
     # A human who types exactly 'check mesh' by hand is indistinguishable
     # from our own unsubmitted wake — and submitting it runs the same
     # command, so the collision is harmless in that direction only.
-    if content.replace(_WAKE_PROMPT, "").strip() == "":
+    if _only_wake_text(content):
         return "wake"
     return "busy"
 
@@ -2199,8 +2361,11 @@ def _tmux_wake(target: str) -> Optional[bool]:
     wake stays owed and the ledger retries the whole wake later.
     """
     try:
+        seen = _capture_pane_lines(target)
+        prompt = (_OPENCODE_WAKE_PROMPT
+                  if seen and _is_opencode_pane(seen) else _WAKE_PROMPT)
         subprocess.run(
-            ["tmux", "send-keys", "-t", target, "-l", _WAKE_PROMPT],
+            ["tmux", "send-keys", "-t", target, "-l", prompt],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -2233,6 +2398,10 @@ def _tmux_wake(target: str) -> Optional[bool]:
                 # must NOT acknowledge delivery — return None and let the
                 # sink DEFER, keeping the cursor back so a later poll
                 # retries the wake when the composer clears.
+                return None
+            # "wake" while a turn is already on screen: another Enter stacks
+            # a follow-up. Defer; the sink does not advance.
+            if _agent_running(target):
                 return None
             # "wake": still sitting unsubmitted — loop another Enter.
         print(

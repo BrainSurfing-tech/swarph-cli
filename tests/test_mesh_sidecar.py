@@ -60,6 +60,7 @@ def test_tmux_wake_sends_literal_prompt_then_submits_and_verifies(monkeypatch):
     assert mesh._tmux_wake("gpt-lc:0.0") is True
     assert seen == ["gpt-lc:0.0"]  # verified through the composer gate
     assert [command for command, _ in calls] == [
+        ["tmux", "capture-pane", "-p", "-t", "gpt-lc:0.0"],
         ["tmux", "send-keys", "-t", "gpt-lc:0.0", "-l", "check mesh"],
         ["tmux", "send-keys", "-t", "gpt-lc:0.0", "Enter"],
     ]
