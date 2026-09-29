@@ -32,7 +32,7 @@ def _wire(monkeypatch, messages):
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.setattr(mesh, "_http_get_json", lambda url, tok, **k: _inbox(messages))
     def fake_post(url, body, token, **k):
-        posts.append(url)
+        posts.append((url, body))
         return (200, {"ok": True})
     monkeypatch.setattr(mesh, "_post_json", fake_post)
     return posts
@@ -49,16 +49,15 @@ ALREADY_READ = {"id": 4000, "from_node": "lab-ovh", "kind": "fyi",
 def test_inbox_marks_displayed_unread_messages_read(monkeypatch, capsys):
     posts = _wire(monkeypatch, [UNREAD, ALSO_UNREAD])
     assert mesh._run_inbox(_args()) == 0
-    assert posts == ["http://gw:8788/messages/4444/read",
-                     "http://gw:8788/messages/4474/read"], \
-        "every unread DM the CLI printed must be marked read"
+    assert posts == [("http://gw:8788/messages/read", {"ids": [4444, 4474]})], \
+        "unread DMs are one bulk mark-read, not one POST per id"
 
 
 def test_inbox_does_not_remark_already_read(monkeypatch, capsys):
     posts = _wire(monkeypatch, [ALREADY_READ, UNREAD])
     mesh._run_inbox(_args())
-    assert posts == ["http://gw:8788/messages/4444/read"], \
-        "a message already read must not be POSTed again"
+    assert posts == [("http://gw:8788/messages/read", {"ids": [4444]})], \
+        "a message already read must not be in the bulk body"
 
 
 def test_peek_marks_nothing(monkeypatch, capsys):
@@ -72,7 +71,7 @@ def test_json_output_also_marks_read(monkeypatch, capsys):
     """A script consuming --json has consumed the messages just as surely."""
     posts = _wire(monkeypatch, [UNREAD])
     assert mesh._run_inbox(_args(json=True)) == 0
-    assert posts == ["http://gw:8788/messages/4444/read"]
+    assert posts == [("http://gw:8788/messages/read", {"ids": [4444]})]
 
 
 def test_mark_read_failure_never_breaks_the_listing(monkeypatch, capsys):
@@ -87,6 +86,60 @@ def test_mark_read_failure_never_breaks_the_listing(monkeypatch, capsys):
     out, err = capsys.readouterr()
     assert "id=4444" in out, "the message was still shown"
     assert "mark-read" in err.lower(), "the failure is surfaced, not swallowed"
+
+
+def test_752_ids_are_two_bulk_posts_and_zero_per_id(monkeypatch):
+    posts = []
+
+    def fake(url, body, token, **k):
+        posts.append((url, body))
+        return 200, {}
+
+    monkeypatch.setattr(mesh, "_post_json", fake)
+    failed = mesh._mark_read("http://gw:8788", "tok", [{"id": i} for i in range(752)])
+    assert failed == []
+    assert [url for url, _ in posts] == [
+        "http://gw:8788/messages/read",
+        "http://gw:8788/messages/read",
+    ]
+    assert len(posts[0][1]["ids"]) == 500
+    assert len(posts[1][1]["ids"]) == 252
+    assert all("/messages/" + str(i) + "/read" not in url for url, _ in posts for i in range(752))
+
+
+def test_a_404_on_the_bulk_route_falls_back_to_per_id(monkeypatch):
+    posts = []
+
+    def fake(url, body, token, **k):
+        posts.append(url)
+        if url.endswith("/messages/read"):
+            return 404, {"detail": "Not Found"}
+        return 200, {}
+
+    monkeypatch.setattr(mesh, "_post_json", fake)
+    assert mesh._mark_read("http://gw:8788", "tok", [{"id": 1}, {"id": 2}]) == []
+    assert posts == [
+        "http://gw:8788/messages/read",
+        "http://gw:8788/messages/1/read",
+        "http://gw:8788/messages/2/read",
+    ]
+
+
+def test_the_per_id_url_is_only_the_fallback():
+    from pathlib import Path
+    root = Path(mesh.__file__).resolve().parents[2]
+    hits = []
+    for path in root.rglob("*.py"):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "/messages/{msg_id}/read" in line or "/messages/{int(message_id)}/read" in line:
+                if "@app." in line:
+                    continue
+                hits.append((str(path), lineno, line))
+    assert len(hits) == 1, hits
+    path, lineno, line = hits[0]
+    assert path == str(Path(mesh.__file__).resolve())
+    window = Path(path).read_text(encoding="utf-8").splitlines()[max(0, lineno - 12):lineno]
+    assert any("404" in earlier for earlier in window), window
 
 
 def test_empty_inbox_posts_nothing(monkeypatch, capsys):
