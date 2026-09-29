@@ -1474,6 +1474,11 @@ class TmuxSink(Sink):
         # observation and let the fresh path take over — it defers while
         # running (#619) and injects at the first idle poll.
         if led.get("wake_outstanding") and _agent_running(self.target):
+            # Opencode keeps the finished ▣ header on screen, so a deferral
+            # during the turn must not clear the flag: the next idle poll
+            # still owes a wake. Cursor's #620 clear stays.
+            if _opencode_in_progress(self.target):
+                return None
             led["wake_outstanding"] = False
         if led.get("wake_outstanding"):
             # Lazy: watchdog imports mesh module-level, so the reverse must
@@ -1496,6 +1501,17 @@ class TmuxSink(Sink):
                     _tmux_enter(self.target)  # one verified nudge, no new text
                     return True
                 if composer == "clear":
+                    # A finished opencode turn leaves a ▣ header with a
+                    # trailing duration and a clear box. The standing-wake
+                    # claim would swallow every later DM. Inject again.
+                    if _opencode_turn_finished_target(self.target):
+                        ok = _tmux_wake(self.target)
+                        if ok:
+                            _stamp_wake(led)
+                            return True
+                        if ok is None:
+                            return None
+                        return False
                     # #611: a clear composer proves the wake SUBMITTED only if
                     # the pane it was injected into is still the pane we are
                     # reading. The ledger flag survives a respawn; the wake
@@ -1984,6 +2000,10 @@ _WAKE_PROMPT = "check mesh"
 # not shown. Longer than _WAKE_PROMPT, so wake-text detection strips this
 # one first.
 _OPENCODE_WAKE_PROMPT = "check mesh: swarph_dm_unread"
+# A finished turn keeps its ▣ header and adds a trailing duration
+# (`· 3.3s`). An in-progress header has no such suffix. Measured by
+# drop-on-meta-edge on 1.18.33 (card #961, post 54557).
+_OPENCODE_DONE = re.compile(r"·\s*\d+(?:\.\d+)?s\s*$")
 # Submit-verify bounds (#533): the settle pause lets the -l literal LAND in
 # the composer before Enter can submit it (the blind gesture raced this), and
 # the attempt bound keeps a never-submitting pane from being Enter-spammed
@@ -2102,35 +2122,71 @@ def _opencode_mode_row(line: str) -> bool:
     return body.startswith("Build") or body.startswith("Plan")
 
 
+def _opencode_permission_row(line: str) -> bool:
+    """The 1.18.33 dialog, drawn inside the box.
+
+    The row is ``┃  △ Permission required``. The mode row and the ``╹▀``
+    border are gone on that screen, so this row is the whole signal.
+    """
+    s = line.strip()
+    return s.startswith("┃") and "△" in s and "Permission required" in s
+
+
 def _is_opencode_pane(lines: list[str]) -> bool:
     """The opencode composer box, measured on 1.18.33.
 
     The input row is a ``┃`` line. The mode row under it names Build or
-    Plan and a ``·``. The bottom of the box is ``╹▀``. Cursor and claude
-    do not draw either.
+    Plan and a ``·``. The bottom of the box is ``╹▀``. The permission
+    dialog keeps the ``┃`` row and drops the mode row and the border.
+    Cursor and claude do not draw any of these.
     """
     for ln in lines:
         s = ln.strip()
-        if s.startswith("╹▀") or _opencode_mode_row(ln):
-            return True
-        if s.startswith("Permission required"):
+        if s.startswith("╹▀") or _opencode_mode_row(ln) or _opencode_permission_row(ln):
             return True
     return False
 
 
 def _opencode_running(lines: list[str]) -> bool:
-    """A turn or a modal is on screen. Enter during either is the wrong key.
+    """True only while a turn is in progress.
 
-    ``esc interrupt`` is the first seconds of a turn. ``▣`` stays for the
-    rest of it (the footer drops the interrupt hint while the spinner
-    remains). ``Permission required`` is a confirm dialog: Enter there
-    grants access, so it counts as running and the sink defers.
+    The footer shows ``esc interrupt``, and the ▣ header has no trailing
+    duration. A finished turn keeps the ▣ header and adds ``· <n>s``,
+    with no interrupt hint. That pane is idle. The permission dialog is
+    not a turn; it has its own branch.
     """
+    if any("esc interrupt" in ln for ln in lines):
+        return True
     for ln in lines:
         s = ln.strip()
-        if s.startswith("Permission required") or "esc interrupt" in s or s.startswith("▣"):
+        if s.startswith("▣") and not _OPENCODE_DONE.search(s):
             return True
     return False
+
+
+def _opencode_turn_finished(lines: list[str]) -> bool:
+    """The ▣ header carried a duration and the interrupt hint is gone."""
+    if _opencode_running(lines):
+        return False
+    return any(
+        ln.strip().startswith("▣") and _OPENCODE_DONE.search(ln.strip())
+        for ln in lines
+    )
+
+
+def _opencode_in_progress(target: str) -> bool:
+    """In-progress opencode turn. A deferral here keeps wake_outstanding."""
+    lines = _capture_pane_lines(target)
+    if not lines or not _is_opencode_pane(lines):
+        return False
+    return _opencode_running(lines)
+
+
+def _opencode_turn_finished_target(target: str) -> bool:
+    lines = _capture_pane_lines(target)
+    if not lines or not _is_opencode_pane(lines):
+        return False
+    return _opencode_turn_finished(lines)
 
 
 def _opencode_input(lines: list[str]) -> Optional[str]:
@@ -2160,7 +2216,7 @@ def _opencode_input(lines: list[str]) -> Optional[str]:
 
 
 def _opencode_composer_state(lines: list[str]) -> Optional[str]:
-    if any(ln.strip().startswith("Permission required") for ln in lines):
+    if any(_opencode_permission_row(ln) for ln in lines):
         return "busy"
     text = _opencode_input(lines)
     if text is None:
@@ -2179,7 +2235,8 @@ def _agent_running(target: str) -> Optional[bool]:
     cursor-lin 2026-08-24). A keystroke into that TUI lands in the
     follow-up queue, and the queue is input-gated (measured live
     2026-08-26, twice: queued wakes fired only when the human next typed).
-    Opencode: ``▣`` / ``esc interrupt`` / the permission dialog. None =
+    Opencode: ``esc interrupt`` or a ▣ header with no trailing duration.
+    A finished ``· <n>s`` header is idle. None =
     pane or composer unreadable; callers treat unknown as NOT-running
     (the composer state was already established by then — this guard
     only vets the timing).
