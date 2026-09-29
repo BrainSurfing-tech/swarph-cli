@@ -22,8 +22,8 @@ class _Board:
         import json
         url = req.full_url
         self.calls.append((req.get_method(), url, req.data))
-        if url.endswith("/messages") or "/messages" in url:
-            raise AssertionError(f"stall alert DMed instead of asking: {url}")
+        if "/messages" in url:
+            raise AssertionError(f"main DMs commander: {url}")
 
         class _Resp:
             def __init__(self, raw):
@@ -64,7 +64,7 @@ class _Board:
 
 def test_stall_opens_one_obligation_held_by_lab_ovh(monkeypatch):
     board = _Board()
-    monkeypatch.setattr(st, "_open_url", board.handle)
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.send_stall_alert("http://gw", "tok", "workstation-lc", 12, 3) is True
     assert st.send_stall_alert("http://gw", "tok", "workstation-lc", 24, 3) is True
     asks = [c for c in board.calls if c[0] == "POST" and c[1].endswith("/ask")]
@@ -85,8 +85,10 @@ def test_stall_opens_one_obligation_held_by_lab_ovh(monkeypatch):
 
 def test_drain_closes_the_stall_row(monkeypatch):
     board = _Board()
-    monkeypatch.setattr(st, "_open_url", board.handle)
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.send_stall_alert("http://gw", "tok", "cell", 6, 2) is True
+    assert hasattr(st, "clear_stall_alert"), (
+        "opens no per-cell row: main DMs commander and cannot close one cell")
     assert st.clear_stall_alert("http://gw", "tok", "cell") is True
     assert all(r["status"] == "closed" for r in board.rows)
     assert st.clear_stall_alert("http://gw", "tok", "cell") is True
@@ -96,7 +98,7 @@ def test_drain_closes_the_stall_row(monkeypatch):
 
 def test_two_cells_do_not_share_a_row(monkeypatch):
     board = _Board()
-    monkeypatch.setattr(st, "_open_url", board.handle)
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.send_stall_alert("http://gw", "tok", "cell-a", 6, 1) is True
     assert st.send_stall_alert("http://gw", "tok", "cell-b", 6, 4) is True
     asks = [c for c in board.calls if c[0] == "POST" and c[1].endswith("/ask")]
@@ -104,6 +106,8 @@ def test_two_cells_do_not_share_a_row(monkeypatch):
     import json
     named = [json.loads(c[2].decode())["what"] for c in asks]
     assert any("cell=cell-b " in text for text in named)
+    assert hasattr(st, "clear_stall_alert"), (
+        "opens no per-cell row: main DMs commander and cannot close one cell")
     assert st.clear_stall_alert("http://gw", "tok", "cell-b") is True
     still = [r for r in board.rows if r["status"] == "open"]
     closed = [r for r in board.rows if r["status"] == "closed"]
@@ -113,7 +117,7 @@ def test_two_cells_do_not_share_a_row(monkeypatch):
 
 def test_lab_ovh_stall_is_held_by_someone_else(monkeypatch):
     board = _Board()
-    monkeypatch.setattr(st, "_open_url", board.handle)
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.send_stall_alert("http://gw", "tok", "lab-ovh", 6, 1) is True
     import json
     body = json.loads(board.calls[-1][2].decode())
