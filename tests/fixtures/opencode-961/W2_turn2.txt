@@ -1,0 +1,55 @@
+
+  ┃                                                                                                                                                                                 Checking swarph_dm_unread mesh
+  ┃  check mesh: swarph_dm_unread
+  ┃                                                                                                                                                                                 Context
+                                                                                                                                                                                    13,848 tokens
+     + Thought: 805ms                                                                                                                                                               1% used
+                                                                                                                                                                                    $0.01 spent
+  ┃
+  ┃  $ ls                                                                                                                                                                           LSP
+  ┃                                                                                                                                                                                 LSPs are disabled
+  ┃  AGENTS.md
+  ┃
+
+     NO-MESH-TOOL-HERE
+
+     ▣  Build · DeepSeek V4 Pro (New) · 6.6s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃                                                                                                                                                                                 /tmp/claude-1000/-home-ubuntu-drop-on-
+  ┃                                                                                                                                                                                 meta-edge/d7cba227-9da7-4d92-92da-
+  ┃                                                                                                                                                                                 8d32b827949a/scratchpad/oc/sacW/ws:
+  ┃  Build · DeepSeek V4 Pro (New) OpenCode Go                                                                                                                                      feat/sacrificial-612
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   /tmp/claude-1000/-home-ubuntu-drop-on-meta-edge/d7cba227-9da7-4d92-92da-8d32b827949a/scratchpad/oc/sacW/ws                                13.8K (1%) · $0.01  ctrl+p commands    • OpenCode 1.18.33
+

@@ -2000,12 +2000,13 @@ _WAKE_PROMPT = "check mesh"
 # not shown. Longer than _WAKE_PROMPT, so wake-text detection strips this
 # one first.
 _OPENCODE_WAKE_PROMPT = "check mesh: swarph_dm_unread"
-# A finished turn keeps its ▣ header and adds a trailing duration.
+# A finished turn keeps its ▣ header and adds a duration.
 # Short turns read `· 3.3s` (drop-on-meta-edge, 1.18.33, card #961 post
 # 54557). A longer idle turn reads `· 3m 4s` (opencode pane, 2026-09-29
-# 07:10Z). An in-progress header has no such suffix.
+# 07:10Z). On a wide pane the same row continues into the sidebar, so the
+# duration is not the end of the line. An in-progress header has no duration.
 _OPENCODE_DONE = re.compile(
-    r"·\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+(?:\.\d+)?s\s*$"
+    r"·\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+(?:\.\d+)?s\b"
 )
 # Submit-verify bounds (#533): the settle pause lets the -l literal LAND in
 # the composer before Enter can submit it (the blind gesture raced this), and
@@ -2192,14 +2193,29 @@ def _opencode_turn_finished_target(target: str) -> bool:
     return _opencode_turn_finished(lines)
 
 
+def _opencode_row_text(line: str) -> str:
+    """Text on one ``┃`` row, with a right-aligned footer cut off.
+
+    A long cwd:branch is drawn inside the box, right-aligned, and wraps
+    across as many rows as the path needs. The gap before that footer is
+    a run of 4 or more spaces. Composer text is the left side of the row.
+    Leading spaces stay in place for the split, then the left side is
+    stripped. Skipping a fixed number of rows cannot work: the row count
+    is the path length over the box width.
+    """
+    idx = line.find("┃")
+    if idx < 0:
+        return ""
+    return re.split(r" {4,}", line[idx + 1:], maxsplit=1)[0].strip()
+
+
 def _opencode_input(lines: list[str]) -> Optional[str]:
     """Composer text inside the box, '' when that box is empty, None if no box.
 
-    The mode row is the bottom of the input. The ``┃`` row directly above
-    it is the footer (the right-aligned cwd), not typed text. The input
-    is the ``┃`` rows above that footer. The walk stops at the first line
-    that is not a ``┃`` row — the top of the box — so a transcript ``┃``
-    row above the box is never read as composer text.
+    Walk up from the mode row. Each ``┃`` row contributes only the text
+    before its footer gap. The walk stops at the first line that is not a
+    ``┃`` row — the top of the box — so a transcript ``┃`` row above the
+    box is never composer text.
     """
     mode_at = None
     for i, ln in enumerate(lines):
@@ -2207,17 +2223,12 @@ def _opencode_input(lines: list[str]) -> Optional[str]:
             mode_at = i
     if mode_at is None:
         return None
-    # The footer occupies the ┃ row immediately above the mode row.
-    last = mode_at - 1
-    if last >= 0 and lines[last].strip().startswith("┃"):
-        last -= 1
-    for ln in reversed(lines[: last + 1]):
-        s = ln.strip()
-        if not s.startswith("┃"):
+    for ln in reversed(lines[:mode_at]):
+        if not ln.strip().startswith("┃"):
             return ""
-        body = s[1:].strip()
-        if body:
-            return body
+        text = _opencode_row_text(ln)
+        if text:
+            return text
     return ""
 
 
