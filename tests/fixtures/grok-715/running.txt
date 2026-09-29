@@ -1,0 +1,24 @@
+
+  sandbox:workspace /tmp/grok-715-sacrifice          2.2K / 256K │ [Dashboard]
+
+
+     ❯ Reply with exactly PONG. Do not use tools.                   10:17 PM   █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+
+    ⠸ Waiting for response… 1.1s                            1.1s ⇣2.20k [stop]
+
+   Run /doctor for details and fixes.
+
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                        │
+  ╰─────────────────────────────────── Grok 4.7 Fast (low) · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+x:shortcuts
+

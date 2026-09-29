@@ -1497,7 +1497,7 @@ class TmuxSink(Sink):
             # Opencode keeps the finished ▣ header on screen, so a deferral
             # during the turn must not clear the flag: the next idle poll
             # still owes a wake. Cursor's #620 clear stays.
-            if _opencode_in_progress(self.target):
+            if _opencode_in_progress(self.target) or _grok_in_progress(self.target):
                 return None
             led["wake_outstanding"] = False
         if led.get("wake_outstanding"):
@@ -1524,7 +1524,8 @@ class TmuxSink(Sink):
                     # A finished opencode turn leaves a ▣ header with a
                     # trailing duration and a clear box. The standing-wake
                     # claim would swallow every later DM. Inject again.
-                    if _opencode_turn_finished_target(self.target):
+                    if (_opencode_turn_finished_target(self.target)
+                            or _grok_turn_finished_target(self.target)):
                         ok = _tmux_wake(self.target)
                         if ok:
                             _stamp_wake(led)
@@ -2020,6 +2021,9 @@ _WAKE_PROMPT = "check mesh"
 # not shown. Longer than _WAKE_PROMPT, so wake-text detection strips this
 # one first.
 _OPENCODE_WAKE_PROMPT = "check mesh: swarph_dm_unread"
+# Grok's TUI has the same shape (#715, grok 1.0.41): no push channel, so
+# the wake is one line naming the pull tool and no DM body.
+_GROK_WAKE_PROMPT = "check mesh: swarph_dm_unread"
 # A finished turn keeps its ▣ header and adds a duration.
 # Short turns read `· 3.3s` (drop-on-meta-edge, 1.18.33, card #961 post
 # 54557). A longer idle turn reads `· 3m 4s` (opencode pane, 2026-09-29
@@ -2130,7 +2134,7 @@ def _only_wake_text(content: str) -> bool:
     human's line.
     """
     rest = content
-    for prompt in (_OPENCODE_WAKE_PROMPT, _WAKE_PROMPT):
+    for prompt in (_GROK_WAKE_PROMPT, _OPENCODE_WAKE_PROMPT, _WAKE_PROMPT):
         rest = rest.replace(prompt, "")
     return rest.strip() == ""
 
@@ -2265,6 +2269,79 @@ def _opencode_composer_state(lines: list[str]) -> Optional[str]:
     return "busy"
 
 
+def _is_grok_pane(lines: list[str]) -> bool:
+    """Grok Build 1.0.41 composer, measured on a sacrificial TUI.
+
+    The footer names ``Grok 4.`` inside the box. History also draws a ``❯``
+    for the submitted prompt; that row has no box bar, so it is not the
+    composer.
+    """
+    return any("Grok 4." in ln or ln.strip().startswith("Grok Build") for ln in lines)
+
+
+def _grok_input(lines: list[str]) -> Optional[str]:
+    """Text in the live ``│ ❯`` box, '' when empty, None if no box."""
+    row = None
+    for ln in lines:
+        if "❯" in ln and "│" in ln:
+            row = ln
+    if row is None:
+        return None
+    after = row.split("❯", 1)[1]
+    if "│" in after:
+        after = after.split("│", 1)[0]
+    return after.strip()
+
+
+def _grok_running(lines: list[str]) -> bool:
+    """True only while the turn is in progress.
+
+    ``Waiting for response`` is the running footer. ``Worked for Ns`` is a
+    finished turn left on screen; reading that as running is the one-shot
+    bug (the next DM never wakes).
+    """
+    return any("Waiting for response" in ln for ln in lines)
+
+
+def _grok_turn_finished(lines: list[str]) -> bool:
+    if _grok_running(lines):
+        return False
+    return any("Worked for" in ln for ln in lines)
+
+
+def _grok_in_progress(target: str) -> bool:
+    lines = _capture_pane_lines(target)
+    if not lines or not _is_grok_pane(lines):
+        return False
+    return _grok_running(lines)
+
+
+def _grok_turn_finished_target(target: str) -> bool:
+    lines = _capture_pane_lines(target)
+    if not lines or not _is_grok_pane(lines):
+        return False
+    return _grok_turn_finished(lines)
+
+
+def _grok_composer_state(lines: list[str]) -> Optional[str]:
+    text = _grok_input(lines)
+    if text is None:
+        return None
+    if not text:
+        return "clear"
+    if _only_wake_text(text):
+        return "wake"
+    return "busy"
+
+
+def _wake_prompt_for(lines: Optional[list[str]]) -> str:
+    if lines and _is_grok_pane(lines):
+        return _GROK_WAKE_PROMPT
+    if lines and _is_opencode_pane(lines):
+        return _OPENCODE_WAKE_PROMPT
+    return _WAKE_PROMPT
+
+
 def _agent_running(target: str) -> Optional[bool]:
     """True while a keystroke would miss the idle composer.
 
@@ -2283,6 +2360,8 @@ def _agent_running(target: str) -> Optional[bool]:
         return None
     if _is_opencode_pane(lines):
         return _opencode_running(lines)
+    if _is_grok_pane(lines):
+        return _grok_running(lines)
     composer = _composer_line(lines)
     if composer is None:
         return None
@@ -2311,6 +2390,8 @@ def _composer_state(target: str) -> Optional[str]:
         return None
     if _is_opencode_pane(lines):
         return _opencode_composer_state(lines)
+    if _is_grok_pane(lines):
+        return _grok_composer_state(lines)
     composer = _composer_line(lines)
     if composer is None:
         return None
@@ -2399,8 +2480,7 @@ def _tmux_wake(target: str) -> Optional[bool]:
     """
     try:
         seen = _capture_pane_lines(target)
-        prompt = (_OPENCODE_WAKE_PROMPT
-                  if seen and _is_opencode_pane(seen) else _WAKE_PROMPT)
+        prompt = _wake_prompt_for(seen)
         subprocess.run(
             ["tmux", "send-keys", "-t", target, "-l", prompt],
             check=True,
