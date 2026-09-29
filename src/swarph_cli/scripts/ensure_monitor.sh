@@ -74,12 +74,25 @@ _heartbeat_fresh() {
   local f="$1"
   [ -n "$f" ] && [ -f "$f" ] || return 1
   command -v python3 >/dev/null 2>&1 || return 1
-  python3 -c 'import json,sys,time
+  python3 -c 'import json,os,sys,time
 try:
-    ts=float(json.load(open(sys.argv[1],encoding="utf-8")).get("ts") or 0)
+    data=json.load(open(sys.argv[1],encoding="utf-8"))
+    ts=float(data.get("ts") or 0)
 except Exception:
     raise SystemExit(1)
-raise SystemExit(0 if time.time()-ts < 180 else 1)' "$f"
+age=time.time()-ts
+# A clock a few seconds ahead is still a live writer. An hour ahead is not.
+if age < -30 or age >= 180:
+    raise SystemExit(1)
+pid=data.get("pid")
+if pid is not None:
+    try:
+        os.kill(int(pid), 0)
+    except PermissionError:
+        pass
+    except OSError:
+        raise SystemExit(1)
+raise SystemExit(0)' "$f"
 }
 
 HB_ROOT="${STATE_DIR:-$HOME/swarph_state/$SELF}"

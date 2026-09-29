@@ -78,3 +78,49 @@ def test_absent_heartbeat_still_starts(tmp_path):
     proc, calls = _run(tmp_path, age=None)
     assert proc.returncode == 0
     assert "monitor start" in calls
+
+
+def _run_payload(tmp_path: Path, payload: dict):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    shim = bindir / "swarph"
+    shim.write_text(FAKE, encoding="utf-8")
+    shim.chmod(0o755)
+    log = tmp_path / "calls.log"
+    side = tmp_path / "state" / "mesh-sidecar"
+    side.mkdir(parents=True)
+    (side / "channel_heartbeat.json").write_text(json.dumps(payload), encoding="utf-8")
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+    env["SWARPH_SELF"] = "cursor-lin"
+    env["SWARPH_STATE_DIR"] = str(tmp_path / "state")
+    env["FAKE_LOG"] = str(log)
+    proc = subprocess.run(
+        [_bash(), str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60)
+    calls = log.read_text(encoding="utf-8") if log.exists() else ""
+    return proc, calls
+
+
+def test_a_future_timestamp_an_hour_ahead_starts(tmp_path):
+    proc, calls = _run_payload(tmp_path, {"ts": time.time() + 3600})
+    assert proc.returncode == 0
+    assert "monitor start" in calls
+
+
+def test_a_timestamp_within_skew_stays_fresh(tmp_path):
+    proc, calls = _run_payload(tmp_path, {"ts": time.time() + 10})
+    assert proc.returncode == 0
+    assert "monitor start" not in calls
+
+
+def test_a_fresh_heartbeat_with_a_dead_pid_starts(tmp_path):
+    pid_max = int(Path("/proc/sys/kernel/pid_max").read_text())
+    proc, calls = _run_payload(tmp_path, {"ts": time.time(), "pid": pid_max + 1})
+    assert proc.returncode == 0
+    assert "monitor start" in calls
+
+
+def test_a_fresh_heartbeat_with_a_live_pid_skips(tmp_path):
+    proc, calls = _run_payload(tmp_path, {"ts": time.time(), "pid": os.getpid()})
+    assert proc.returncode == 0
+    assert "monitor start" not in calls
