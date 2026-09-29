@@ -1979,6 +1979,11 @@ def _log_dm(state: MonitorState, dm: dict) -> None:
 
 
 _WAKE_PROMPT = "check mesh"
+# Opencode has no push channel (#601). The wake is one line that names the
+# pull tool and carries no DM body, so the turn cannot answer mail it was
+# not shown. Longer than _WAKE_PROMPT, so wake-text detection strips this
+# one first.
+_OPENCODE_WAKE_PROMPT = "check mesh: swarph_dm_unread"
 # Submit-verify bounds (#533): the settle pause lets the -l literal LAND in
 # the composer before Enter can submit it (the blind gesture raced this), and
 # the attempt bound keeps a never-submitting pane from being Enter-spammed
@@ -2072,20 +2077,118 @@ _COMPOSER_PLACEHOLDERS = ("Add a follow-up", "Ask Codex to do anything")
 _CURSOR_RUN_HINT = "ctrl+c to stop"
 
 
-def _agent_running(target: str) -> Optional[bool]:
-    """True if the pane's composer row carries cursor's run-state hint.
+def _only_wake_text(content: str) -> bool:
+    """True when the composer holds wake text and nothing else.
 
-    The #619 deferral signal: a keystroke into a RUNNING TUI lands in the
-    follow-up queue, and the queue is input-gated (measured live 2026-08-26,
-    twice: queued wakes fired only when the human next typed — 10:00 and
-    10:09Z). On an unattended cell a queued wake never fires, so no wake
-    keystroke may be sent while this returns True. None = pane or composer
-    unreadable; callers treat unknown as NOT-running (the composer state was
-    already established by then — this guard only vets the timing).
+    The opencode prompt contains the cursor/claude prompt as a prefix, so
+    the longer string is removed first. A stack of either prompt still
+    counts as wake text (one Enter drains it). Anything left over is a
+    human's line.
+    """
+    rest = content
+    for prompt in (_OPENCODE_WAKE_PROMPT, _WAKE_PROMPT):
+        rest = rest.replace(prompt, "")
+    return rest.strip() == ""
+
+
+def _opencode_mode_row(line: str) -> bool:
+    """The mode row under the input. ``--auto`` inserts a word, so the row
+    is ``Build ·`` or ``Build auto ·`` (measured 1.18.33, both shapes).
+    """
+    s = line.strip()
+    if not s.startswith("┃") or "·" not in s:
+        return False
+    body = s[1:].strip()
+    return body.startswith("Build") or body.startswith("Plan")
+
+
+def _is_opencode_pane(lines: list[str]) -> bool:
+    """The opencode composer box, measured on 1.18.33.
+
+    The input row is a ``┃`` line. The mode row under it names Build or
+    Plan and a ``·``. The bottom of the box is ``╹▀``. Cursor and claude
+    do not draw either.
+    """
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("╹▀") or _opencode_mode_row(ln):
+            return True
+        if s.startswith("Permission required"):
+            return True
+    return False
+
+
+def _opencode_running(lines: list[str]) -> bool:
+    """A turn or a modal is on screen. Enter during either is the wrong key.
+
+    ``esc interrupt`` is the first seconds of a turn. ``▣`` stays for the
+    rest of it (the footer drops the interrupt hint while the spinner
+    remains). ``Permission required`` is a confirm dialog: Enter there
+    grants access, so it counts as running and the sink defers.
+    """
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("Permission required") or "esc interrupt" in s or s.startswith("▣"):
+            return True
+    return False
+
+
+def _opencode_input(lines: list[str]) -> Optional[str]:
+    """The composer input row's text, '' when that row is empty, None if no box.
+
+    Walk up from the mode row. Blank ``┃`` lines are the box padding. A
+    ``▣`` spinner sits between the transcript and the box, and the walk
+    stops there so a submitted prompt in the transcript is not read as
+    text still sitting in the composer.
+    """
+    mode_at = None
+    for i, ln in enumerate(lines):
+        if _opencode_mode_row(ln):
+            mode_at = i
+    if mode_at is None:
+        return None
+    for ln in reversed(lines[:mode_at]):
+        s = ln.strip()
+        if s.startswith("▣"):
+            return ""
+        if not s.startswith("┃"):
+            continue
+        body = s[1:].strip()
+        if body:
+            return body
+    return ""
+
+
+def _opencode_composer_state(lines: list[str]) -> Optional[str]:
+    if any(ln.strip().startswith("Permission required") for ln in lines):
+        return "busy"
+    text = _opencode_input(lines)
+    if text is None:
+        return None
+    if not text or text.startswith("Ask anything"):
+        return "clear"
+    if _only_wake_text(text):
+        return "wake"
+    return "busy"
+
+
+def _agent_running(target: str) -> Optional[bool]:
+    """True while a keystroke would miss the idle composer.
+
+    Cursor: the composer row carries 'ctrl+c to stop' (measured live on
+    cursor-lin 2026-08-24). A keystroke into that TUI lands in the
+    follow-up queue, and the queue is input-gated (measured live
+    2026-08-26, twice: queued wakes fired only when the human next typed).
+    Opencode: ``▣`` / ``esc interrupt`` / the permission dialog. None =
+    pane or composer unreadable; callers treat unknown as NOT-running
+    (the composer state was already established by then — this guard
+    only vets the timing).
     """
     lines = _capture_pane_lines(target)
     if lines is None:
         return None
+    if _is_opencode_pane(lines):
+        return _opencode_running(lines)
     composer = _composer_line(lines)
     if composer is None:
         return None
@@ -2112,6 +2215,8 @@ def _composer_state(target: str) -> Optional[str]:
     lines = _capture_pane_lines(target)
     if lines is None:
         return None
+    if _is_opencode_pane(lines):
+        return _opencode_composer_state(lines)
     composer = _composer_line(lines)
     if composer is None:
         return None
@@ -2126,7 +2231,7 @@ def _composer_state(target: str) -> Optional[str]:
     # A human who types exactly 'check mesh' by hand is indistinguishable
     # from our own unsubmitted wake — and submitting it runs the same
     # command, so the collision is harmless in that direction only.
-    if content.replace(_WAKE_PROMPT, "").strip() == "":
+    if _only_wake_text(content):
         return "wake"
     return "busy"
 
@@ -2199,8 +2304,11 @@ def _tmux_wake(target: str) -> Optional[bool]:
     wake stays owed and the ledger retries the whole wake later.
     """
     try:
+        seen = _capture_pane_lines(target)
+        prompt = (_OPENCODE_WAKE_PROMPT
+                  if seen and _is_opencode_pane(seen) else _WAKE_PROMPT)
         subprocess.run(
-            ["tmux", "send-keys", "-t", target, "-l", _WAKE_PROMPT],
+            ["tmux", "send-keys", "-t", target, "-l", prompt],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -2233,6 +2341,10 @@ def _tmux_wake(target: str) -> Optional[bool]:
                 # must NOT acknowledge delivery — return None and let the
                 # sink DEFER, keeping the cursor back so a later poll
                 # retries the wake when the composer clears.
+                return None
+            # "wake" while a turn is already on screen: another Enter stacks
+            # a follow-up. Defer; the sink does not advance.
+            if _agent_running(target):
                 return None
             # "wake": still sitting unsubmitted — loop another Enter.
         print(
