@@ -217,9 +217,14 @@ def test_successful_delivery_resets_deferred_ticks(monkeypatch, tmp_path):
     mesh._monitor_iteration(state)
     assert state.ledger(sink.name)["deferred_ticks"] == 1
 
+    import swarph_cli.stall_alert as alerts
+    closed = []
+    monkeypatch.setattr(
+        alerts, "clear_stall_alert", lambda *args: closed.append(args) or True)
     composer["state"] = "clear"
     mesh._monitor_iteration(state)
     assert state.ledger(sink.name)["deferred_ticks"] == 0
+    assert closed == [("http://gw:8788", "tok", "lab-ovh")]
 
 
 # ── the ledger IS the retry mechanism (re-selection is not) ──────────────────
