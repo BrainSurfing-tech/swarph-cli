@@ -278,6 +278,32 @@ def test_rate_limit_backs_off_then_stops_without_scoring():
     assert all(r["text"] == "" for r in rows)
 
 
+def test_billing_rejection_aborts_every_arm_after_one_call():
+    class Billing:
+        def __init__(self):
+            self.n = 0
+
+        def generate(self, model_id, prompt, system=""):
+            self.n += 1
+            return BackendResult("", 1, 0, 0, 0.0, False, error="billing:ANTHROPIC_API_KEY")
+
+        def missing_creds(self):
+            return []
+
+    backend = Billing()
+    result = run_pack(
+        [ModelSpec(id="a", label="arm-a"), ModelSpec(id="b", label="arm-b")],
+        _two_tasks(),
+        {"metered": backend},
+    )
+    assert backend.n == 1
+    assert result["partial"] == "aborted"
+    assert result["aborted"] is True
+    assert result["detail"]["arm-a"][0]["error"] == "billing:ANTHROPIC_API_KEY"
+    assert result["detail"]["arm-a"][0]["text"] == ""
+    assert all(r["not_run"] == "aborted" for r in result["detail"]["arm-b"])
+
+
 def test_resume_does_not_resend_completed_tasks(tmp_path):
     backend = ScriptedBackend({"one": "BUY", "two": "BUY"})
     ledger = tmp_path / "ledger.json"

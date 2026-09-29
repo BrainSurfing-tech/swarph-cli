@@ -291,6 +291,7 @@ def run_pack(
     allow_egress = allow_egress or set()
     overrides = []
     sleep = sleeper or time.sleep
+    run_aborted = False
     prior_detail: dict = {}
     if ledger_path:
         from pathlib import Path
@@ -324,6 +325,9 @@ def run_pack(
             if task["id"] in resumed:
                 rows.append(resumed[task["id"]])
                 continue
+            if run_aborted:
+                rows.append(_skipped(task, "aborted"))
+                continue
             if arm_stopped:
                 rows.append(_skipped(task, "rate_limit"))
                 continue
@@ -345,6 +349,19 @@ def run_pack(
                 result = _dispatch(backend, spec.id, task["prompt"], system)
             if result.error:
                 result.error = _redact(result.error, secrets)
+            if result.error and str(result.error).startswith("billing:"):
+                # A billing leak aborts every remaining task on every arm.
+                # The answer is already empty. One such call stops the run.
+                partial = "aborted"
+                run_aborted = True
+                rows.append(TaskRow(
+                    task_id=task["id"], cls=class_of(task), distance=0.0, parse_ok=False,
+                    tokens_in=result.tokens_in, tokens_thought=result.tokens_thought,
+                    tokens_out=result.tokens_out, latency_s=result.latency_s,
+                    cost_usd=0.0, estimated=result.estimated, error=result.error,
+                    not_run="aborted", text="",
+                ))
+                continue
             if result.error == "rate_limit":
                 partial = "rate_limit"
                 arm_stopped = True
@@ -403,7 +420,8 @@ def run_pack(
             estimated=any(r.estimated for r in done),
             per_class=per_class,
             errors=sum(1 for r in rows if r.error and not r.not_run),
-            partial=("rate_limit" if any(r.not_run == "rate_limit" for r in rows)
+            partial=("aborted" if any(r.not_run == "aborted" for r in rows)
+                     else "rate_limit" if any(r.not_run == "rate_limit" for r in rows)
                      else "spend_cap" if any(r.not_run for r in rows) else None),
             price_source=(getattr(backend, "price", None) or {}).get("source", "")
             if isinstance(getattr(backend, "price", None), dict) else "",
@@ -418,6 +436,7 @@ def run_pack(
         "theme": pack.get("theme"),
         "tasks_total": len(tasks),
         "partial": partial,
+        "aborted": partial == "aborted",
         "exit_code": 1 if partial else 0,
         "egress_overrides": overrides,
         "board": [vars(b) for b in board],

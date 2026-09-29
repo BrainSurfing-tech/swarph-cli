@@ -28,6 +28,12 @@ def test_clean_env_strips_keys():
     assert set(e) == {"PATH"}
 
 
+def test_clean_env_strips_unseen_swarph_channel_prefix():
+    e = C.clean_env({"SWARPH_CHANNEL_X": "secret", "PATH": "/usr/bin", "HOME": "/root"})
+    assert "SWARPH_CHANNEL_X" not in e
+    assert e == {"PATH": "/usr/bin", "HOME": "/root"}
+
+
 def test_parse_ok():
     r = C.parse_stream(lines())
     assert r.text == '{"action": "BUY"}' and r.tokens_in == 421 and r.tokens_out == 12 and r.error is None

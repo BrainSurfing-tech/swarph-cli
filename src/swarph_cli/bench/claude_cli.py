@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Optional
 
-_STRIP = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "SWARPH_CHANNEL", "SWARPH_CHANNEL_CELL")
+_STRIP_EXACT = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 _RATE = ("usage limit", "rate limit", "429", "overloaded")
 
 
@@ -29,7 +29,11 @@ def build_argv(model_id: str, system: str) -> list:
 
 
 def clean_env(env: dict) -> dict:
-    return {k: v for k, v in env.items() if k not in _STRIP}
+    """Drop billing keys and every SWARPH_CHANNEL* name, including ones not listed yet."""
+    return {
+        k: v for k, v in env.items()
+        if k not in _STRIP_EXACT and not k.startswith("SWARPH_CHANNEL")
+    }
 
 
 def parse_stream(lines) -> CliResult:
