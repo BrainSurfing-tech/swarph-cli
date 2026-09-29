@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
@@ -53,10 +54,16 @@ def _default_backends() -> dict[str, Backend]:
     `metered` stays bound to Gemini so existing `id:metered` specs keep their
     meaning; mistral is its own key rather than a redefinition.
     """
+    # claude on PATH wires the subscription lane to an isolated `claude -p`
+    # (card #999). Without the binary the stub stays, and preflight skips it.
+    subscription = SubscriptionBackend()
+    if shutil.which("claude"):
+        from swarph_cli.bench.claude_cli import call as claude_call
+        subscription = SubscriptionBackend(call_fn=claude_call)
     return {
         "metered": MeteredGeminiBackend(),
         "mistral": MeteredMistralBackend(),
-        "subscription": SubscriptionBackend(),
+        "subscription": subscription,
         "rule": RuleBackend(),
         "typed-http": TypedHttpBackend(),
         # Selectable class for the wiring lock. A real call is provider:<name>,
@@ -138,6 +145,9 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("--max-usd-per-arm", type=float, default=None)
     r.add_argument("--allow-egress", action="append", default=[], help="provider allowed off-box")
     r.add_argument("--allow-unpriced", action="append", default=[], help="provider allowed with no price under a cap")
+    r.add_argument("--ledger", default=None,
+                   help="JSON path. A re-run skips tasks that already completed; "
+                        "a usage limit stops the arm here and the next run resumes")
     r.add_argument("--strict", action="store_true",
                     help="abort (no dispatch) if ANY requested model lacks credentials, "
                          "instead of skipping it and running the rest")
@@ -223,7 +233,8 @@ def _cmd_run(args) -> int:
 
     result = run_pack(
         runnable, pack, backends, max_usd=args.max_usd,
-        max_usd_per_arm=args.max_usd_per_arm, allow_egress=allow_egress)
+        max_usd_per_arm=args.max_usd_per_arm, allow_egress=allow_egress,
+        ledger_path=args.ledger)
     if args.report == "json":
         print(json.dumps(result, indent=2))
     else:
