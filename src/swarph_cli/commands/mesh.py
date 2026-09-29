@@ -2000,10 +2000,13 @@ _WAKE_PROMPT = "check mesh"
 # not shown. Longer than _WAKE_PROMPT, so wake-text detection strips this
 # one first.
 _OPENCODE_WAKE_PROMPT = "check mesh: swarph_dm_unread"
-# A finished turn keeps its ▣ header and adds a trailing duration
-# (`· 3.3s`). An in-progress header has no such suffix. Measured by
-# drop-on-meta-edge on 1.18.33 (card #961, post 54557).
-_OPENCODE_DONE = re.compile(r"·\s*\d+(?:\.\d+)?s\s*$")
+# A finished turn keeps its ▣ header and adds a trailing duration.
+# Short turns read `· 3.3s` (drop-on-meta-edge, 1.18.33, card #961 post
+# 54557). A longer idle turn reads `· 3m 4s` (opencode pane, 2026-09-29
+# 07:10Z). An in-progress header has no such suffix.
+_OPENCODE_DONE = re.compile(
+    r"·\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+(?:\.\d+)?s\s*$"
+)
 # Submit-verify bounds (#533): the settle pause lets the -l literal LAND in
 # the composer before Enter can submit it (the blind gesture raced this), and
 # the attempt bound keeps a never-submitting pane from being Enter-spammed
@@ -2190,12 +2193,13 @@ def _opencode_turn_finished_target(target: str) -> bool:
 
 
 def _opencode_input(lines: list[str]) -> Optional[str]:
-    """The composer input row's text, '' when that row is empty, None if no box.
+    """Composer text inside the box, '' when that box is empty, None if no box.
 
-    Walk up from the mode row. Blank ``┃`` lines are the box padding. A
-    ``▣`` spinner sits between the transcript and the box, and the walk
-    stops there so a submitted prompt in the transcript is not read as
-    text still sitting in the composer.
+    The mode row is the bottom of the input. The ``┃`` row directly above
+    it is the footer (the right-aligned cwd), not typed text. The input
+    is the ``┃`` rows above that footer. The walk stops at the first line
+    that is not a ``┃`` row — the top of the box — so a transcript ``┃``
+    row above the box is never read as composer text.
     """
     mode_at = None
     for i, ln in enumerate(lines):
@@ -2203,12 +2207,14 @@ def _opencode_input(lines: list[str]) -> Optional[str]:
             mode_at = i
     if mode_at is None:
         return None
-    for ln in reversed(lines[:mode_at]):
+    # The footer occupies the ┃ row immediately above the mode row.
+    last = mode_at - 1
+    if last >= 0 and lines[last].strip().startswith("┃"):
+        last -= 1
+    for ln in reversed(lines[: last + 1]):
         s = ln.strip()
-        if s.startswith("▣"):
-            return ""
         if not s.startswith("┃"):
-            continue
+            return ""
         body = s[1:].strip()
         if body:
             return body

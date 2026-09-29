@@ -602,6 +602,25 @@ _OPENCODE_FINISHED = """\
 """
 
 
+def test_live_idle_footer_is_clear_and_not_running(tmux):
+    """The 07:10Z pane: composer empty, transcript full of ┃ rows, footer
+    cwd on the ┃ row above the mode row, finished header `· 3m 4s`.
+    0.69.1 returns that path as composer text and treats the header as
+    still running."""
+    from pathlib import Path
+    fixture = (Path(__file__).resolve().parent / "fixtures"
+               / "opencode-pane-idle-footer-0710.txt")
+    text = fixture.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    assert any("Found the real blocker" in ln and ln.strip().startswith("┃")
+               for ln in lines)
+    _calls, state = tmux
+    state["captures"] = [text]
+    assert mesh._opencode_input(lines) == ""
+    assert mesh._composer_state("sac") == "clear"
+    assert mesh._agent_running("sac") is False
+
+
 def test_opencode_idle_box_is_a_clear_composer(tmux):
     calls, state = tmux
     state["captures"] = [_OPENCODE_IDLE]

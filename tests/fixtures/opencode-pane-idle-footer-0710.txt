@@ -1,0 +1,72 @@
+  ┃  Click to expand
+  ┃                                                                                                                 Ensure single DM wake for opencode
+                                                                                                                    cell identity
+     + Thought: 19.2s
+                                                                                                                    Context
+     Confirmed — you're right, and I've got the exact root cause. The composer is genuinely empty (""), but         463,065 tokens
+     lab's 0.69.1 _opencode_input is returning the footer's cwd line as composer text:                              46% used
+                                                                                                                    $2.46 spent
+     _opencode_input(lines)  ->  '~/swarph-cli:feat/596-cli-preimage-'
+     _opencode_composer_state ->  'busy'                                                                            MCP
+                                                                                                                    • swarph Connected
+     It walks up from the mode row and reads the branch-path footer (which also renders with a ┃ border, one
+     line above the mode row) before reaching the empty composer box. That non-empty, non-wake string → "human      LSP
+     text" → defer forever.                                                                                         LSPs are disabled
+
+     Reporting it to lab with the exact repro:
+
+  ┃
+  ┃  # Wrote /tmp/opencode/lab-wake-bug.md
+  ┃
+  ┃    1 Found the real blocker on #961's opencode wake, and it is a bug in 0.69.1's `_opencode_input`, not
+  ┃      composer residue.
+  ┃    2
+  ┃    3 The composer is EMPTY (the two `┃` padding rows hold ""), yet `_opencode_composer_state` returns
+  ┃      'busy', so the monitor defers "composer holds human text" on every poll. Root cause:
+  ┃      `_opencode_input` walks UP from the mode row and reads the FOOTER's cwd line as composer text — that
+  ┃      line also renders with a `┃` border, one row above the mode row, and the walk hits it before the
+  ┃      empty box.
+  ┃    4
+  ┃    5 Measured, not inferred (openccode 1.18.33, tmux opencode:0):
+  ┃    6
+  ┃    7     _is_opencode_pane(lines)        -> True
+  ┃    8     _opencode_input(lines)          -> '~/swarph-cli:feat/596-cli-preimage-'
+  ┃    9     _opencode_composer_state(lines) -> 'busy'
+  ┃   10     _opencode_running(lines)        -> True
+  ┃   11     composer box                    -> the two '┃' rows are "" (empty)
+  ┃   12
+  ┃   13 Suggested fix: in `_opencode_input`, exclude the footer cwd line — a `┃` row whose body is a path (
+  ┃      starts with `~`, or carries a `feat/`/branch) is the status bar, not composer text. Cleaner: delimit
+  ┃      the box by walking DOWN from the `╹▀` border to the first `┃` content, rather than up from the mode
+  ┃      row, so the cwd/mode footer is never in scope. The mode row detection already knows `Build ·`/`Plan
+  ┃      ·`; the cwd line is the one line above it and should be out of bounds.
+  ┃   14
+  ┃
+
+  ┃
+  ┃  $ swarph mesh send lab-ovh --kind answer --content-file /tmp/opencode/lab-wake-bug.md --as opencode 2>&1 |
+  ┃  tail -2
+  ┃
+  ┃  sent id=54698 from=opencode to=lab-ovh kind=answer
+  ┃
+
+     + Thought: 3.4s
+
+     Done — bug reported to lab (msg 54698) with the exact repro and fix.
+
+     Your diagnosis was right: the composer is empty, but lab's detector reads the cwd footer line (~/swarph-
+     cli:feat/596-cli-preimage-, which shares the ┃ border) as composer text → busy → defers forever.
+
+     Nothing to fix on my side — it's a one-line scope bug in their _opencode_input (skip the status-bar path
+     line, or walk down from ╹▀ instead of up from the mode row). Once they patch it, the wake will fire
+     correctly on your DMs.
+
+     ▣  Build · DeepSeek V4 Pro (New) · 3m 4s
+
+  ┃
+  ┃
+  ┃                                                                                                                 ~/swarph-cli:feat/596-cli-preimage-
+  ┃  Build · DeepSeek V4 Pro (New) OpenCode Go                                                                      capture
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   /home/ubuntu/swarph-cli                                                 463.1K (46%) · $2.46  ctrl+p commands    • OpenCode 1.18.33
+
