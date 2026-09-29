@@ -18,6 +18,9 @@ from swarph_cli.console_safe import print_safe
 _STALL_FIRST = 6  # first alert after this many consecutive deferred ticks
 _CARD = 989
 _HOLDER = "lab-ovh"
+# lab-ovh's own stall cannot escalate to lab-ovh. Another orchestrator holds it.
+_OTHER = "drop-on-meta-edge"
+_TIMEOUT_HOURS = 24
 _PREFIX = f"STALL card #{_CARD}"
 
 
@@ -65,7 +68,16 @@ def _request(method: str, url: str, token: str, payload: dict | None = None) -> 
     return json.loads(raw) if raw else {}
 
 
-def _live(gateway: str, token: str) -> list[dict]:
+def _holder_for(self_name: str) -> str:
+    return _OTHER if self_name == _HOLDER else _HOLDER
+
+
+def _cell_row(row: dict, self_name: str) -> bool:
+    needle = f"cell={self_name} "
+    return needle in (row.get("accept") or "") or needle in (row.get("what") or "")
+
+
+def _live(gateway: str, token: str, self_name: str) -> list[dict]:
     rows: list[dict] = []
     for status in ("open", "fallback_fired"):
         data = _request(
@@ -79,7 +91,7 @@ def _live(gateway: str, token: str) -> list[dict]:
         if row.get("id") in seen:
             continue
         seen.add(row.get("id"))
-        if _PREFIX in (row.get("accept") or "") or _PREFIX in (row.get("what") or ""):
+        if _cell_row(row, self_name):
             live.append(row)
     return live
 
@@ -91,16 +103,18 @@ def send_stall_alert(gateway: str, token: str, self_name: str,
     DMs commander, and a second call while the row is open opens nothing."""
     try:
         gateway = gateway.rstrip("/")
-        if _live(gateway, token):
+        if _live(gateway, token, self_name):
             return True
+        holder = _holder_for(self_name)
         _request(
             "POST", f"{gateway}/board/cards/{_CARD}/ask", token,
-            {"holder": _HOLDER,
+            {"holder": holder,
              "what": _what(self_name, count, pending_n),
              "created_by": self_name,
              "kind": "action",
              "fallback_mode": "escalate",
-             "fallback_target": _HOLDER,
+             "fallback_target": holder,
+             "timeout_hours": _TIMEOUT_HOURS,
              "accept": _accept(self_name, count, pending_n)})
         return True
     except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as exc:
@@ -118,7 +132,7 @@ def clear_stall_alert(gateway: str, token: str, self_name: str) -> bool:
     )
     try:
         gateway = gateway.rstrip("/")
-        live = _live(gateway, token)
+        live = _live(gateway, token, self_name)
         for row in live:
             _request(
                 "POST", f"{gateway}/board/obligations/{row['id']}/close", token,

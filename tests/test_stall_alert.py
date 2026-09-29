@@ -44,9 +44,12 @@ class _Board:
             return _Resp(json.dumps({"obligations": live}).encode())
         if req.get_method() == "POST" and url.endswith("/ask"):
             body = json.loads(req.data.decode())
+            hours = body.get("timeout_hours")
             row = {"id": self.next_id, "status": "open",
                    "holder": body["holder"], "what": body["what"],
-                   "accept": body["accept"]}
+                   "accept": body["accept"],
+                   "timeout_at": "2026-09-30T14:00:00+00:00" if hours else None,
+                   "fallback_target": body.get("fallback_target")}
             self.next_id += 1
             self.rows.append(row)
             return _Resp(json.dumps({"id": row["id"]}).encode())
@@ -74,6 +77,9 @@ def test_stall_opens_one_obligation_held_by_lab_ovh(monkeypatch):
     assert "ticks=12" in body["what"]
     assert "pending_dms=3" in body["what"]
     assert "commander" not in json.dumps(body)
+    assert body["fallback_target"] != body["created_by"]
+    assert body["timeout_hours"] == 24
+    assert board.rows[0]["timeout_at"] is not None
     assert all("/messages" not in c[1] for c in board.calls)
 
 
@@ -86,6 +92,35 @@ def test_drain_closes_the_stall_row(monkeypatch):
     assert st.clear_stall_alert("http://gw", "tok", "cell") is True
     closes = [c for c in board.calls if "/close" in c[1]]
     assert len(closes) == 1
+
+
+def test_two_cells_do_not_share_a_row(monkeypatch):
+    board = _Board()
+    monkeypatch.setattr(st, "_open_url", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "cell-a", 6, 1) is True
+    assert st.send_stall_alert("http://gw", "tok", "cell-b", 6, 4) is True
+    asks = [c for c in board.calls if c[0] == "POST" and c[1].endswith("/ask")]
+    assert len(asks) == 2
+    import json
+    named = [json.loads(c[2].decode())["what"] for c in asks]
+    assert any("cell=cell-b " in text for text in named)
+    assert st.clear_stall_alert("http://gw", "tok", "cell-b") is True
+    still = [r for r in board.rows if r["status"] == "open"]
+    closed = [r for r in board.rows if r["status"] == "closed"]
+    assert len(still) == 1 and "cell=cell-a " in still[0]["what"]
+    assert len(closed) == 1 and "cell=cell-b " in closed[0]["what"]
+
+
+def test_lab_ovh_stall_is_held_by_someone_else(monkeypatch):
+    board = _Board()
+    monkeypatch.setattr(st, "_open_url", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "lab-ovh", 6, 1) is True
+    import json
+    body = json.loads(board.calls[-1][2].decode())
+    assert body["holder"] != "lab-ovh"
+    assert body["fallback_target"] != "lab-ovh"
+    assert body["fallback_target"] == body["holder"]
+    assert board.rows[0]["timeout_at"] is not None
 
 
 def test_send_stall_alert_failsafe_on_error(monkeypatch):
