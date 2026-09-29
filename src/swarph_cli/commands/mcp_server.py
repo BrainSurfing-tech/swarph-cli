@@ -344,14 +344,15 @@ def _dm_reply(message_id: int, text: str, kind: str = "answer",
         st, d = _mesh._post_json(f"{gw}/messages", body, tok)
         if not (200 <= st < 300):
             return {"error": f"gateway {st}: {d.get('detail', d) if isinstance(d, dict) else d}"}
-        ack_st, _ = _mesh._post_json(f"{gw}/messages/{int(message_id)}/read", {}, tok)
+        failed = _mesh._mark_read(gw, tok, [{"id": int(message_id)}])
+        acked = int(message_id) not in failed
         return {
             "id": d.get("id"),
             "to_node": to,
             "kind": kind,
             "thread_id": d.get("thread_id"),
-            "acked": int(message_id) if 200 <= ack_st < 300 else None,
-            "ack_status": ack_st,
+            "acked": int(message_id) if acked else None,
+            "ack_status": 200 if acked else 0,
             "closed_obligations": d.get("closed_obligations") or [],
         }
     except Exception as exc:

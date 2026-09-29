@@ -143,8 +143,8 @@ def test_reply_is_the_ack_and_only_that_message(monkeypatch):
     assert posts[0][0] == "http://gw/messages" and posts[0][1] == {
         "from_node": "lab-ovh", "to_node": "cursor-lin", "kind": "answer",
         "content": "on it — thread 81570cab", "thread_id": "81570cab-0000-4000-8000-000000000001"}
-    reads = [u for u, _ in posts if u.endswith("/read")]
-    assert reads == ["http://gw/messages/32004/read"], reads        # exactly one ack, the replied-to one
+    reads = [(u, b) for u, b in posts if str(u).endswith("/read")]
+    assert reads == [("http://gw/messages/read", {"ids": [32004]})], reads
     assert mcp_server._dm_reply(32004, "   ")["error"] == "empty reply text"
 
 

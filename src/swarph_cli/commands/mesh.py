@@ -944,38 +944,58 @@ def _run_reply(args: argparse.Namespace) -> int:
     return 0
 
 
-def _mark_read(gateway: str, token: str, messages: list) -> None:
+_BULK_READ_MAX = 500
+
+
+def _mark_read(gateway: str, token: str, messages: list) -> list:
     """Mark every unread DM we just surfaced as read. Best-effort.
 
-    Reading your inbox consumes it — like any mail client. Without this, a peer's
-    request stays "unread" no matter how many times it is answered, and an agent
-    whose loop asks "is it still unread?" can never exit. That is not theoretical:
-    on 2026-07-10 grok-researcher answered one request 67 times (~410k tokens)
-    because the CLI never called the gateway's POST /messages/{id}/read.
+    One POST /messages/read per 500 ids. The gateway's single worker spends a
+    synchronous sqlite write on every request, so a per-id loop is how a drain
+    turns into HTTP 503. A 404 means that route is not on this gateway yet, and
+    only then does this fall back to one POST per id.
 
     A mark-read failure must NEVER fail the listing — the caller has already seen
     the messages, and losing the read receipt is strictly less bad than losing them.
     """
     base = gateway.rstrip("/")
-    failed = []
+    ids = []
     for dm in messages:
-        if dm.get("read_at"):
-            continue
-        msg_id = dm.get("id")
+        if isinstance(dm, dict):
+            if dm.get("read_at"):
+                continue
+            msg_id = dm.get("id")
+        else:
+            msg_id = dm
         if msg_id is None:
             continue
+        ids.append(msg_id)
+    failed = []
+    for start in range(0, len(ids), _BULK_READ_MAX):
+        chunk = ids[start:start + _BULK_READ_MAX]
         try:
-            status, _ = _post_json(f"{base}/messages/{msg_id}/read", {}, token)
-            if status < 200 or status >= 300:
-                failed.append(msg_id)
+            status, _ = _post_json(f"{base}/messages/read", {"ids": chunk}, token)
         except Exception:  # network, DNS, timeout — never break the listing
-            failed.append(msg_id)
+            failed.extend(chunk)
+            continue
+        if status == 404:
+            for msg_id in chunk:
+                try:
+                    one, _ = _post_json(f"{base}/messages/{msg_id}/read", {}, token)
+                    if one < 200 or one >= 300:
+                        failed.append(msg_id)
+                except Exception:
+                    failed.append(msg_id)
+            continue
+        if status < 200 or status >= 300:
+            failed.extend(chunk)
     if failed:
         print(
             f"swarph mesh inbox: mark-read failed for id(s) {failed} "
             "(messages shown above; they will be re-listed as unread)",
             file=sys.stderr,
         )
+    return failed
 
 
 def _run_inbox(args: argparse.Namespace) -> int:
