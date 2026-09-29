@@ -64,12 +64,40 @@ STATE_DIR="${1:-${SWARPH_STATE_DIR:-}}"
 SD=()
 [ -n "$STATE_DIR" ] && SD=(--state-dir "$STATE_DIR")
 
+# >>> #960: a fresh channel heartbeat is already a reader. <<<
+# swarph channel-serve writes channel_heartbeat.json beside the inbox every
+# 60s and names no path on its command line, so `monitor status` cannot see
+# it. Starting a pull monitor beside a heartbeat younger than 180s is the
+# duplicate this script exists to prevent. Absent or older: start, as before.
+# A missing python3 is treated as absent (start), never as a failed caller.
+_heartbeat_fresh() {
+  local f="$1"
+  [ -n "$f" ] && [ -f "$f" ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c 'import json,sys,time
+try:
+    ts=float(json.load(open(sys.argv[1],encoding="utf-8")).get("ts") or 0)
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if time.time()-ts < 180 else 1)' "$f"
+}
+
+HB_ROOT="${STATE_DIR:-$HOME/swarph_state/$SELF}"
+HB_FILE=""
+if [ -f "$HB_ROOT/channel_heartbeat.json" ]; then
+  HB_FILE="$HB_ROOT/channel_heartbeat.json"
+elif [ -f "$HB_ROOT/mesh-sidecar/channel_heartbeat.json" ]; then
+  HB_FILE="$HB_ROOT/mesh-sidecar/channel_heartbeat.json"
+fi
+
 "$SW" monitor status --as "$SELF" ${SD[@]+"${SD[@]}"} >/dev/null 2>&1
 case $? in
   0) ;;                                   # running, nothing pending
   1) ;;                                   # running, DMs pending — reported below
-  *) # not running (2) or unknown: start it. Idempotent, so a race is harmless.
-     if "$SW" monitor start --as "$SELF" --deliver pull ${SD[@]+"${SD[@]}"} >/tmp/.swarph-monitor-start.$$ 2>&1; then
+  *) # not running (2) or unknown.
+     if _heartbeat_fresh "$HB_FILE"; then
+       echo "[monitor] channel heartbeat is under 180s old — not starting a monitor"
+     elif "$SW" monitor start --as "$SELF" --deliver pull ${SD[@]+"${SD[@]}"} >/tmp/.swarph-monitor-start.$$ 2>&1; then
        echo "[monitor] started (--deliver pull)"
      else
        # LOUD, not silent: an auto-start that fails quietly rebuilds the exact
