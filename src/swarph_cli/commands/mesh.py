@@ -2673,7 +2673,8 @@ def _monitor_deliver(state: MonitorState) -> None:
                       f"no failure counted",
                       flush=True)
                 continue
-            if led.get("deferred_ticks"):
+            was_stalled = bool(led.get("deferred_ticks"))
+            if was_stalled:
                 led["deferred_ticks"] = 0
             if outcome:
                 led["last_delivered_id"] = observed
@@ -2682,6 +2683,10 @@ def _monitor_deliver(state: MonitorState) -> None:
                 state.deliveries[sink.name] = state.deliveries.get(sink.name, 0) + 1
                 print(f"{state.log_prefix} delivered to {sink.name} up to id {observed}",
                       flush=True)
+                if was_stalled:
+                    from swarph_cli import stall_alert
+                    stall_alert.clear_stall_alert(
+                        state.gateway, state.token, state.self_name)
             else:
                 # A dead sink is VISIBLE instead of silently freezing anything.
                 led["consecutive_failures"] = int(led["consecutive_failures"]) + 1

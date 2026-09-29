@@ -381,8 +381,12 @@ def _legacy_attempt_delivery_removed(state: DaemonState) -> None:
         entries = state.queue.pending()
         block = _render_delivery_block(entries)
         if session_bridge.inject(pane, block):
+            stalled = state.queue.deferred_ticks
             state.queue.remove({e["id"] for e in entries})
             state.queue.reset_deferred()
+            if stalled:
+                stall_alert.clear_stall_alert(
+                    state.gateway, state.token, state.self_name)
         # inject failure → leave queued, retry next tick (no counter bump —
         # the cell was idle; a send failure is transient, not a stall).
     except Exception as exc:  # noqa: BLE001 — bridge must never crash the loop
