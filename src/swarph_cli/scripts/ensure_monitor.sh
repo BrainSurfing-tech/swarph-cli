@@ -85,14 +85,32 @@ age=time.time()-ts
 if age < -30 or age >= 180:
     raise SystemExit(1)
 pid=data.get("pid")
-if pid is not None:
-    try:
-        os.kill(int(pid), 0)
-    except PermissionError:
-        pass
-    except OSError:
-        raise SystemExit(1)
-raise SystemExit(0)' "$f"
+if pid is None:
+    raise SystemExit(0)
+try:
+    pid=int(pid)
+except (TypeError, ValueError):
+    raise SystemExit(1)
+# pid 0 is this process group and pid -1 is every process we can signal.
+# Neither is the channel server. os.kill would report both as alive.
+if pid <= 0:
+    raise SystemExit(1)
+try:
+    os.kill(pid, 0)
+except PermissionError:
+    pass
+except OSError:
+    raise SystemExit(1)
+try:
+    raw=open("/proc/%s/cmdline" % pid, "rb").read()
+except OSError:
+    # No command line to read (macOS, or a pid we may not inspect).
+    # A live pid still counts, which is the check this host can make.
+    raise SystemExit(0)
+text=raw.replace(b"\x00", b" ").decode("utf-8", "replace")
+if "channel-serve" in text or "swarph_cli.channel" in text:
+    raise SystemExit(0)
+raise SystemExit(1)' "$f"
 }
 
 HB_ROOT="${STATE_DIR:-$HOME/swarph_state/$SELF}"
