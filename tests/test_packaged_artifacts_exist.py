@@ -45,7 +45,10 @@ def test_file_exists_in_the_package_tree(rel, why):
 @pytest.mark.parametrize("rel,why", REQUIRED, ids=[r for r, _ in REQUIRED])
 def test_file_is_declared_as_package_data(rel, why):
     """Existing in src/ is NOT enough — it must be declared or the wheel omits it."""
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # py3.10
+        import tomli as tomllib
     cfg = tomllib.loads((PKG.parent.parent / "pyproject.toml").read_text())
     patterns = cfg["tool"]["setuptools"]["package-data"]["swarph_cli"]
     suffix = pathlib.Path(rel).suffix

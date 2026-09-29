@@ -32,7 +32,10 @@ def test_version_matches_the_packaged_version():
     agree, which is what its name promised all along.
     """
     import pathlib
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # py3.10
+        import tomli as tomllib
 
     import swarph_cli
 
