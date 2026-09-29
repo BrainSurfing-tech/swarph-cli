@@ -114,8 +114,8 @@ def test_a_timestamp_within_skew_stays_fresh(tmp_path):
 
 
 def test_a_fresh_heartbeat_with_a_dead_pid_starts(tmp_path):
-    pid_max = int(Path("/proc/sys/kernel/pid_max").read_text())
-    proc, calls = _run_payload(tmp_path, {"ts": time.time(), "pid": pid_max + 1})
+    # Above any host pid_max. macOS has no /proc, so the dead pid cannot come from there.
+    proc, calls = _run_payload(tmp_path, {"ts": time.time(), "pid": 2**31 - 1})
     assert proc.returncode == 0
     assert "monitor start" in calls
 
