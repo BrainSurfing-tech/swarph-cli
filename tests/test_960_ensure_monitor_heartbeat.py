@@ -121,6 +121,46 @@ def test_a_fresh_heartbeat_with_a_dead_pid_starts(tmp_path):
 
 
 def test_a_fresh_heartbeat_with_a_live_pid_skips(tmp_path):
-    proc, calls = _run_payload(tmp_path, {"ts": time.time(), "pid": os.getpid()})
+    """A live channel-server process still suppresses the start.
+
+    Where /proc is missing the command line cannot be checked, so any live pid
+    still counts, which is what this host can see.
+    """
+    child = None
+    if os.path.isdir("/proc/self"):
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)", "channel-serve"])
+        pid = child.pid
+    else:
+        pid = os.getpid()
+    try:
+        proc, calls = _run_payload(tmp_path, {"ts": time.time(), "pid": pid})
+    finally:
+        if child is not None:
+            child.kill()
+            child.wait(timeout=5)
     assert proc.returncode == 0
     assert "monitor start" not in calls
+
+
+def test_pid_zero_starts(tmp_path):
+    proc, calls = _run_payload(tmp_path, {"ts": time.time(), "pid": 0})
+    assert proc.returncode == 0
+    assert "monitor start" in calls
+
+
+def test_pid_minus_one_starts(tmp_path):
+    proc, calls = _run_payload(tmp_path, {"ts": time.time(), "pid": -1})
+    assert proc.returncode == 0
+    assert "monitor start" in calls
+
+
+def test_an_unrelated_live_pid_starts_when_its_command_line_is_readable(tmp_path):
+    if not os.path.isdir("/proc/self"):
+        pytest.skip("command-line check is not available")
+    parent = os.getppid()
+    text = open(f"/proc/{parent}/cmdline", "rb").read().replace(b"\x00", b" ").decode()
+    assert "channel-serve" not in text
+    proc, calls = _run_payload(tmp_path, {"ts": time.time(), "pid": parent})
+    assert proc.returncode == 0
+    assert "monitor start" in calls
