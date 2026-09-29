@@ -1,0 +1,40 @@
+  ┃   3 line three
+  ┃   4
+  ┃
+
+     NO-MESH-TOOL-HERE
+
+     ▣  Build · DeepSeek V4 Pro (New) · 9.1s
+
+  ┃
+  ┃  check mesh: swarph_dm_unread
+  ┃
+
+  ┃
+  ┃  $ ls
+  ┃
+  ┃  AGENTS.md
+  ┃  notes.md
+  ┃
+
+  ┃
+  ┃  # Wrote notes.md
+  ┃
+  ┃   1 line one
+  ┃   2 line two
+  ┃   3 line three
+  ┃   4
+  ┃
+
+     NO-MESH-TOOL-HERE
+
+     ▣  Build · DeepSeek V4 Pro (New) · 6.4s
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · DeepSeek V4 Pro (New) OpenCode Go
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   /tmp/claude-1000/-home-ubuntu-drop-on-meta-edge/d7cba227-9da7-4d92-92da-8d32b827949a/ 14.2K (1%) · $0 ctrl+p
+   scratchpad/oc/sacG/ws                                                                                 commands
+

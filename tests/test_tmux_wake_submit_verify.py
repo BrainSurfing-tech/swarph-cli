@@ -602,6 +602,86 @@ _OPENCODE_FINISHED = """\
 """
 
 
+def test_live_idle_footer_is_clear_and_not_running(tmux):
+    """The 07:10Z pane: composer empty, transcript full of ┃ rows, footer
+    cwd on the ┃ row above the mode row, finished header `· 3m 4s`.
+    0.69.1 returns that path as composer text and treats the header as
+    still running."""
+    from pathlib import Path
+    fixture = (Path(__file__).resolve().parent / "fixtures"
+               / "opencode-pane-idle-footer-0710.txt")
+    text = fixture.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    assert any("Found the real blocker" in ln and ln.strip().startswith("┃")
+               for ln in lines)
+    _calls, state = tmux
+    state["captures"] = [text]
+    assert mesh._opencode_input(lines) == ""
+    assert mesh._composer_state("sac") == "clear"
+    assert mesh._agent_running("sac") is False
+
+
+def test_drop_six_captures_split_the_footer():
+    """A wrapped cwd is a run of spaces, not a fixed number of rows.
+    Measured by drop-on-meta-edge on sacW 220x55 (card #961, #612)."""
+    from pathlib import Path
+    fix = Path(__file__).resolve().parent / "fixtures"
+    wide = (fix / "opencode-961" / "W2_turn2.txt").read_text(encoding="utf-8")
+    narrow = (fix / "opencode-961" / "G3_turn2.txt").read_text(encoding="utf-8")
+    live = (fix / "opencode-pane-idle-footer-0710.txt").read_text(encoding="utf-8")
+    assert mesh._opencode_input(wide.splitlines()) == ""
+    assert mesh._opencode_input(live.splitlines()) == ""
+    assert mesh._opencode_input(narrow.splitlines()) == ""
+    typed_narrow = "\n".join([
+        "                       ┃",
+        "                       ┃  hello from a human",
+        "                       ┃",
+        "                       ┃  Build · DeepSeek V4 Pro (New) OpenCode Go",
+    ])
+    assert mesh._opencode_input(typed_narrow.splitlines()) == "hello from a human"
+    overlay = (
+        "  ┃  hello from a human" + (" " * 150)
+        + "meta-edge/d7cba227-9da7-4d92-92da-"
+    )
+    typed_wide = "\n".join([
+        "  ┃",
+        overlay,
+        "  ┃  Build · DeepSeek V4 Pro (New) OpenCode Go" + (" " * 40)
+        + "feat/sacrificial-612",
+    ])
+    assert mesh._opencode_input(typed_wide.splitlines()) == "hello from a human"
+    holding = "\n".join([
+        "┃",
+        "┃  check mesh: swarph_dm_unread",
+        "┃",
+        "┃  Build · DeepSeek V4 Pro (New) OpenCode Go",
+    ])
+    assert mesh._opencode_input(holding.splitlines()) == "check mesh: swarph_dm_unread"
+    # A wide pane keeps the sidebar on the ▣ row, past the duration.
+    sidebar = "▣  Build · DeepSeek V4.1 Flash · 5.1s" + (" " * 40) + "LSPs are disabled"
+    assert mesh._OPENCODE_DONE.search(sidebar)
+    assert mesh._opencode_running([sidebar]) is False
+    assert mesh._opencode_running(["▣  Build · DeepSeek V4 Pro (New)"]) is True
+
+
+def test_wide_empty_box_records_the_wake_outstanding(tmux):
+    """W-D1: the footer showed up after Enter and the old read called the
+    box busy, so the injected wake was reported as a human's line and
+    wake_outstanding stayed unset."""
+    from pathlib import Path
+    wide = (Path(__file__).resolve().parent / "fixtures" / "opencode-961"
+            / "W2_turn2.txt").read_text(encoding="utf-8")
+    calls, state = tmux
+    state["captures"] = [wide]
+    st = _State()
+    assert mesh.TmuxSink("sacW").deliver(st, [], 1) is True
+    assert st.ledger("x")["wake_outstanding"] is True
+    literals = [c for c in calls if "-l" in c]
+    assert literals == [[
+        "tmux", "send-keys", "-t", "sacW", "-l", mesh._OPENCODE_WAKE_PROMPT]]
+    assert enters(calls) == 1
+
+
 def test_opencode_idle_box_is_a_clear_composer(tmux):
     calls, state = tmux
     state["captures"] = [_OPENCODE_IDLE]
