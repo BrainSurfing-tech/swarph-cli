@@ -80,14 +80,24 @@ def _validate(board: dict):
         assert sess["tone"] in ("needs", "done", "")
         assert 2 <= len(sess["where"]) <= 4
         for q in sess["questions"]:
-            for field in ("id", "to", "title", "options"):
+            for field in ("id", "to", "title", "options", "to_node", "in_session"):
                 assert field in q
+                assert field in schema
+            assert "card" in schema and "obligation" in schema
+            assert q["to_node"] == q["to"]
+            assert isinstance(q["in_session"], bool)
             assert 2 <= len(q["options"]) <= 3
             assert sum(1 for opt in q["options"] if opt.get("rec")) == 1
             for opt in q["options"]:
                 assert opt["label"] and opt["text"]
     for group in board["groups"]:
         assert "title" in group and "items" in group
+
+
+def test_schema_documents_the_four_new_question_fields():
+    schema = (SKILL / "references" / "data-schema.md").read_text(encoding="utf-8")
+    for field in ("to_node", "card", "obligation", "in_session"):
+        assert f"`{field}`" in schema
 
 
 def test_skill_builds_schema_valid_json_without_desktop_tools():
@@ -139,3 +149,88 @@ def test_filling_the_template_does_not_change_the_markup():
     assert template[end:] == filled[filled.find("</script>", start):]
     data = json.loads(filled[filled.find(">", start) + 1:filled.find("</script>", start)])
     _validate(data)
+
+
+def test_envelope_header_and_new_fields():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import build_board
+    board = _run_board()
+    body = build_board.envelope(board)
+    header, payload = body.split("\n", 1)
+    assert header == "SWARPH-BOARD v1"
+    parsed = json.loads(payload)
+    _validate(parsed)
+    droplet = next(s for s in parsed["sessions"] if s["name"] == "droplet")
+    q = droplet["questions"][0]
+    assert q["to_node"] == "droplet"
+    assert q["card"] == 687
+    assert q["obligation"] == 170
+    assert q["in_session"] is False
+    assert "bucket" not in droplet
+
+
+def test_unchanged_board_sends_nothing():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import build_board
+    board = _run_board()
+    sent = []
+    assert build_board.publish_if_changed(board, build_board.envelope(board), sent.append) is False
+    assert sent == []
+    # a clock-only difference is not a change
+    later = json.loads(json.dumps(board))
+    later["updated"] = "2099-01-01 00:00 UTC"
+    assert build_board.publish_if_changed(later, build_board.envelope(board), sent.append) is False
+    assert sent == []
+
+
+def test_a_changed_board_sends_the_envelope_once():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import build_board
+    board = _run_board()
+    changed = json.loads(json.dumps(board))
+    droplet = next(s for s in changed["sessions"] if s["name"] == "droplet")
+    droplet["questions"][0]["title"] = "A different question"
+    sent = []
+    assert build_board.publish_if_changed(changed, build_board.envelope(board), sent.append) is True
+    assert len(sent) == 1
+    assert sent[0].startswith("SWARPH-BOARD v1\n")
+    assert "A different question" in sent[0]
+
+
+def test_deploy_accept_sets_in_session_and_every_question_has_to_node():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import build_board
+    listing = (FIX / "listagents-lab.txt").read_text(encoding="utf-8")
+    rows = json.loads((FIX / "commander-170.json").read_text(encoding="utf-8"))
+    rows.append({
+        "cell": "droplet",
+        "card_id": 9001,
+        "obligation_id": 9001,
+        "title": "Production deploy of the board tab",
+        "accept": "The commander types the production deploy go in that session. This row is a hard gate.",
+        "options": [
+            {"label": "Go", "text": "go", "rec": True},
+            {"label": "Hold", "text": "hold", "rec": False},
+        ],
+    })
+    board = build_board.build(listing, rows)
+    questions = []
+    for sess in board["sessions"]:
+        questions.extend(sess["questions"])
+    assert questions
+    assert all(q.get("to_node") for q in questions)
+    deploy = next(q for q in questions if q["title"] == "Production deploy of the board tab")
+    retire = next(q for q in questions if q["obligation"] == 170)
+    assert deploy["in_session"] is True
+    assert deploy["to_node"] == "droplet"
+    assert deploy["card"] == 9001
+    assert retire["in_session"] is False
+
+
+def test_an_answer_dm_drops_that_question():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import build_board
+    rows = json.loads((FIX / "commander-170.json").read_text(encoding="utf-8"))
+    title = rows[0]["title"]
+    kept = build_board.drop_answered(rows, [f"Re: {title}\nRetire.\n"])
+    assert kept == []

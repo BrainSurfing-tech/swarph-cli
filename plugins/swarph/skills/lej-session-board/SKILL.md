@@ -26,13 +26,22 @@ Each cell section lists that cell's open rows that wait on the commander. A ques
 
 Build the JSON with `scripts/build_board.py`. It reads a `ListAgents` listing and a JSON file of those rows. It does not send anything.
 
-## 3. Publish
+## 3. Publish one DM
 
-Fill `board-data` in a copy of `assets/board-template.html`. Publish with `Artifact` (`title`: "LEJ Session Board", `icon`: "list") from the manager session only. Republish the same path so the URL stays.
+`scripts/build_board.py` builds the JSON. The manager sends the commander **one** DM, `kind=status`, whose content is the envelope from `envelope()`:
 
-## 4. Relay
+```
+SWARPH-BOARD v1
+{ ...board JSON... }
+```
 
-The user pastes blocks that start with a session name and a `Re:` line. `SendMessage` each block to that name, and add "relayed from the manager session". A relayed yes approves building, not deploying. A production deploy needs the user's "go" typed in the session that deploys.
+Send it only when that JSON changed. `publish_if_changed` compares the previous envelope and calls the sender only on a change. The `updated` clock is not a change. An unchanged board sends nothing.
+
+Do not call `Artifact` with a live roster or live board rows. A test run or a CI run must not send this DM to the mesh. Publishing real mesh data is a failure.
+
+## 4. Answers
+
+An answer DM whose body has a line `Re: <title>` (cc the manager) drops that question. `drop_answered` removes the matching row before the next board. A relayed yes approves building, not deploying. A question whose accept names a deploy or a hard gate has `in_session: true`: the go is typed in that session, and the app does not send it.
 
 ## Files
 

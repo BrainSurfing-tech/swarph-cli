@@ -55,6 +55,15 @@ def _bucket(peer: dict, waiting: bool) -> str:
     return "in_progress"
 
 
+_IN_SESSION = re.compile(r"hard[- ]gate|\bdeploy", re.IGNORECASE)
+_ANSWER = re.compile(r"(?m)^Re: (.+)$")
+
+
+def _in_session(row: dict) -> bool:
+    """A deploy or hard-gate named in the accept is answered inside that session."""
+    return _IN_SESSION.search(row.get("accept") or "") is not None
+
+
 def _questions(rows: list[dict]) -> list[dict]:
     out = []
     for row in rows:
@@ -72,14 +81,59 @@ def _questions(rows: list[dict]) -> list[dict]:
                 {"label": "Ask for a narrower question", "text": f"Ask the cell to narrow obligation #{row['obligation_id']} before the commander decides.", "rec": False},
                 {"label": "Park it", "text": f"Park card #{row['card_id']} and say what changed.", "rec": False},
             ]
-        out.append({
+        question = {
             "id": f"obl-{row['obligation_id']}",
             "to": row["cell"],
+            "to_node": row["cell"],
             "title": row["title"],
             "note": row.get("note") or f"card #{row['card_id']} obligation #{row['obligation_id']}",
+            "in_session": _in_session(row),
             "options": options,
-        })
+        }
+        if row.get("card_id") is not None:
+            question["card"] = row["card_id"]
+        if row.get("obligation_id") is not None:
+            question["obligation"] = row["obligation_id"]
+        out.append(question)
     return out
+
+
+def drop_answered(rows: list[dict], messages: list[str]) -> list[dict]:
+    """Drop a row whose title was answered by a DM line `Re: <title>`."""
+    answered = set()
+    for message in messages:
+        for match in _ANSWER.finditer(message or ""):
+            answered.add(match.group(1).strip())
+    return [row for row in rows if row.get("title") not in answered]
+
+
+def public_board(board: dict) -> dict:
+    """The JSON the commander receives. The sort bucket stays off the wire."""
+    public = json.loads(json.dumps(board))
+    for sess in public.get("sessions") or []:
+        sess.pop("bucket", None)
+    return public
+
+
+def envelope(board: dict) -> str:
+    """ONE status DM body: a header line, then the board JSON."""
+    return "SWARPH-BOARD v1\n" + json.dumps(public_board(board), indent=2, ensure_ascii=False)
+
+
+def _stable(body: str) -> str:
+    text = body.split("\n", 1)[1] if body.startswith("SWARPH-BOARD v1\n") else body
+    data = json.loads(text)
+    data.pop("updated", None)
+    return json.dumps(data, sort_keys=True, ensure_ascii=False)
+
+
+def publish_if_changed(board: dict, previous: str | None, send) -> bool:
+    """Call send(envelope) only when the board JSON changed. The clock is not a change."""
+    body = envelope(board)
+    if previous is not None and _stable(previous) == _stable(body):
+        return False
+    send(body)
+    return True
 
 
 def build(listing: str, rows: list[dict], *, project: str = "~/swarph") -> dict:
