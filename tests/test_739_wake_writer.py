@@ -61,27 +61,61 @@ def test_live_monitor_and_fresh_heartbeat_is_healthy(tmp_path):
     assert writer_verdict(reader_alive=True, monitor_rc=0) == "healthy"
 
 
-def test_enabled_unit_does_not_hand_start_and_a_missing_unit_does(tmp_path):
+def _writers(inbox, run):
+    started = []
+    reported = enforce_writers(
+        {"fixture-cell": inbox},
+        status=lambda _n: 2,
+        start=started.append,
+        run=run,
+    )
+    return reported, started
+
+
+def test_system_scope_enabled_defers_when_user_scope_is_not_found(tmp_path):
+    """System rc 0 and --user rc 4 is lab's gridiron measurement.
+
+    On b56d1f6 only --user is checked, rc 4 is not owned, and the watchdog hand-starts.
+    """
     root = tmp_path / "state"
     inbox = _cell(root, "fixture-cell", fresh=True)
-    cells = {"fixture-cell": inbox}
+    calls = []
 
-    def enabled(argv, **_kwargs):
-        assert argv == ["systemctl", "--user", "is-enabled",
-                        "swarph-monitor@fixture-cell.service"]
+    def run(argv, **_kwargs):
+        calls.append(list(argv))
+        if "--user" in argv:
+            return subprocess.CompletedProcess(argv, 4)
         return subprocess.CompletedProcess(argv, 0)
 
-    started = []
-    reported = enforce_writers(cells, status=lambda _n: 2, start=started.append, run=enabled)
+    reported, started = _writers(inbox, run)
     assert reported == ["fixture-cell"]
     assert started == []
-    assert systemd_owns_monitor("fixture-cell", run=enabled) is True
+    assert ["systemctl", "is-enabled", "swarph-monitor@fixture-cell.service"] in calls
+    assert ["systemctl", "--user", "is-enabled", "swarph-monitor@fixture-cell.service"] in calls
+    assert systemd_owns_monitor("fixture-cell", run=run) is True
 
-    def absent(argv, **_kwargs):
-        return subprocess.CompletedProcess(argv, 1)
 
-    started = []
-    reported = enforce_writers(cells, status=lambda _n: 2, start=started.append, run=absent)
+def test_user_scope_enabled_unit_defers(tmp_path):
+    root = tmp_path / "state"
+    inbox = _cell(root, "fixture-cell", fresh=True)
+
+    def run(argv, **_kwargs):
+        code = 0 if "--user" in argv else 4
+        return subprocess.CompletedProcess(argv, code)
+
+    reported, started = _writers(inbox, run)
+    assert reported == ["fixture-cell"]
+    assert started == []
+
+
+def test_both_scopes_not_found_hand_starts(tmp_path):
+    root = tmp_path / "state"
+    inbox = _cell(root, "fixture-cell", fresh=True)
+
+    def run(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 4)
+
+    reported, started = _writers(inbox, run)
     assert reported == ["fixture-cell"]
     assert started == ["fixture-cell"]
 

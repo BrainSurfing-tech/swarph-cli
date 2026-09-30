@@ -34,18 +34,26 @@ def writer_verdict(*, reader_alive: bool, monitor_rc: int,
 def systemd_owns_monitor(cell: str, run=None) -> bool:
     """True when an enabled swarph-monitor@<cell> unit supervises the writer.
 
-    Same rule as gridiron mesh_wake.sh at ab256f6: defer to systemd when it
-    owns the unit, hand-start only when nothing supervises it.
+    Lab's monitors are system units. `systemctl --user is-enabled` returns
+    not-found (rc 4) for those, while `systemctl is-enabled` returns enabled.
+    Defer when either scope is enabled. Hand-start only when both are
+    not-enabled or not-found.
     """
     unit = f"swarph-monitor@{cell}.service"
-    argv = ["systemctl", "--user", "is-enabled", unit]
     runner = run if run is not None else subprocess.run
-    try:
-        proc = runner(argv, capture_output=True, text=True,
-                      encoding="utf-8", errors="replace", check=False)
-    except FileNotFoundError:
-        return False
-    return proc.returncode == 0
+    owned = False
+    for argv in (
+        ["systemctl", "is-enabled", unit],
+        ["systemctl", "--user", "is-enabled", unit],
+    ):
+        try:
+            proc = runner(argv, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", check=False)
+        except FileNotFoundError:
+            continue
+        if proc.returncode == 0:
+            owned = True
+    return owned
 
 
 def _inbox_advanced(inbox: str, rec: dict) -> bool:
