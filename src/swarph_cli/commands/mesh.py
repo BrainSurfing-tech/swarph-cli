@@ -2323,8 +2323,12 @@ def _grok_block_reason(lines: list[str]) -> Optional[str]:
     above an idle screen, are not that screen.
     """
     screen = lines[-_GROK_SCREEN_ROWS:]
+    # Opencode draws its transcript in ┃ rows, so a quoted sentence there is
+    # not the grok modal. The modal identifies itself (Upgrade to SuperGrok)
+    # or the pane is already grok.
     modal = "\n".join(ln for ln in screen if "┃" in ln).lower()
-    if "you hit your free usage limit" in modal:
+    if ("you hit your free usage limit" in modal
+            and (_is_grok_pane(screen) or "upgrade to supergrok" in modal)):
         return "grok-usage-limit"
     if not _is_grok_pane(screen):
         return None

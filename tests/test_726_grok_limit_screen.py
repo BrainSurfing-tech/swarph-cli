@@ -26,6 +26,16 @@ def test_cursor_transcript_quoting_both_limits_is_not_blocked():
     assert mesh._grok_block_reason(pane) is None
 
 
+def test_opencode_transcript_quoting_the_usage_limit_is_not_blocked():
+    src = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "opencode-pane-idle-footer-0710.txt"
+    pane = src.read_text(encoding="utf-8").splitlines()
+    # Inside the current screen, on a ┃ transcript row, not a grok modal.
+    pane.insert(len(pane) - 8, "  ┃  You hit your free usage limit")
+    assert mesh._is_opencode_pane(pane) is True
+    assert mesh._is_grok_pane(pane) is False
+    assert mesh._grok_block_reason(pane) is None
+
+
 def test_grok_rate_limit_and_usage_modal_still_defer():
     rate = lines(FIX723, "rate-limit.txt")
     usage = lines(FIX723, "usage-limit.txt")
