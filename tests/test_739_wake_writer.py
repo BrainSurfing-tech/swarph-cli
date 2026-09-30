@@ -384,5 +384,7 @@ def test_main_sends_one_writer_down_dm_and_does_not_start(tmp_path):
     text = log.read_text(encoding="utf-8")
     assert text.count("mesh send drop-on-meta-edge") == 1
     assert "mesh send lab-ovh" not in text
+    assert "--as wake-watchdog" not in text
+    assert "token-file" not in text
     assert "monitor start" not in text
     assert "gridiron" not in text
