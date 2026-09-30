@@ -16,6 +16,97 @@ from typing import Iterable
 GAP_SECONDS = 60
 
 
+def writer_verdict(*, reader_alive: bool, monitor_rc: int,
+                   inbox_advanced: bool = True, gateway_newer: bool = False) -> str:
+    """The heartbeat is the reader. The pull monitor is the writer of inbox.log.
+
+    A live reader with monitor status 2, or a reader whose inbox stopped growing
+    while the gateway still has newer rows, is writer-down. A live monitor with
+    a fresh heartbeat is healthy.
+    """
+    if not reader_alive:
+        return "reader-down"
+    if monitor_rc == 2 or ((not inbox_advanced) and gateway_newer):
+        return "writer-down"
+    return "healthy"
+
+
+def systemd_owns_monitor(cell: str, run=None) -> bool:
+    """True when an enabled swarph-monitor@<cell> unit supervises the writer.
+
+    Same rule as gridiron mesh_wake.sh at ab256f6: defer to systemd when it
+    owns the unit, hand-start only when nothing supervises it.
+    """
+    unit = f"swarph-monitor@{cell}.service"
+    argv = ["systemctl", "--user", "is-enabled", unit]
+    runner = run if run is not None else subprocess.run
+    try:
+        proc = runner(argv, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        return False
+    return proc.returncode == 0
+
+
+def _inbox_advanced(inbox: str, rec: dict) -> bool:
+    """First observation is not a stall. A later unchanged size is."""
+    try:
+        size = os.path.getsize(inbox)
+    except OSError:
+        return True
+    prev = rec.get("inbox_bytes")
+    rec["inbox_bytes"] = size
+    if prev is None:
+        return True
+    return size != prev
+
+
+def _gateway_newer(inbox: str) -> bool:
+    """True when gateway_head.json names a newer id than cursor.json last_msg_id.
+
+    Absent files are not a stall. This does not call the gateway.
+    """
+    side = Path(inbox).parent
+    try:
+        head = json.loads((side / "gateway_head.json").read_text(encoding="utf-8"))
+        cursor = json.loads((side / "cursor.json").read_text(encoding="utf-8"))
+        newest = int(head["id"])
+        local = int(cursor.get("last_msg_id") or 0)
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+    return newest > local
+
+
+def enforce_writers(cells: dict[str, str], *, status, start, run=None,
+                    state: dict | None = None) -> list[str]:
+    """Report cells whose reader is up and whose writer is down.
+
+    Hand-start the pull monitor only when no enabled unit owns it.
+    """
+    reported = []
+    state = state if state is not None else {}
+    for name, inbox in cells.items():
+        if not _channel_alive(inbox):
+            continue
+        rec = state.setdefault(name, {})
+        try:
+            rc = int(status(name))
+        except (TypeError, ValueError, OSError):
+            continue
+        verdict = writer_verdict(
+            reader_alive=True,
+            monitor_rc=rc,
+            inbox_advanced=_inbox_advanced(inbox, rec),
+            gateway_newer=_gateway_newer(inbox),
+        )
+        if verdict != "writer-down":
+            continue
+        reported.append(name)
+        if systemd_owns_monitor(name, run=run):
+            continue
+        start(name)
+    return reported
+
+
 def _channel_alive(inbox: str, now: float | None = None) -> bool:
     """A channel server writes channel_heartbeat.json beside the inbox every 60 s.
 
@@ -167,6 +258,24 @@ def main(argv: list[str] | None = None) -> int:
         print("wake_watchdog: escalation peer equals the sender; refusing to send",
               file=sys.stderr)
         return 2
+    swarph = _swarph_bin()
+
+    def _status(name: str, _sw: str = swarph) -> int:
+        proc = subprocess.run(
+            [_sw, "monitor", "status", "--as", name],
+            capture_output=True, text=True, check=False)
+        return proc.returncode
+
+    def _start(name: str, _sw: str = swarph) -> None:
+        if args.dry_run:
+            return
+        subprocess.run(
+            [_sw, "monitor", "start", "--as", name, "--deliver", "pull"],
+            check=False)
+
+    reported = enforce_writers(cells, status=_status, start=_start, state=state)
+    for name in reported:
+        print(f"writer-down {name}", flush=True)
     save_state(state_path, state)
     if args.dry_run:
         for name, inbox in cells.items():
