@@ -138,6 +138,47 @@ def test_fc_blank_rows_still_read_as_an_idle_cursor_pane(monkeypatch):
     assert sum(1 for c in calls if "Enter" in c) == 1
 
 
+def _drop_pane(name):
+    from pathlib import Path
+    root = Path(__file__).resolve().parent / "fixtures" / "cursor-quotes-grok-775"
+    return (root / name).read_text(encoding="utf-8")
+
+
+def test_a_cursor_pane_quoting_a_grok_box_stays_idle_and_wakes_once(monkeypatch):
+    """Fails at fa297a3: a │/❯ pair anywhere classified the pane as grok."""
+    for name in (
+        "idle_detector_source_diff.txt",
+        "idle_diff_grok_row_test.txt",
+        "idle_own_test_hunk.txt",
+    ):
+        text = _drop_pane(name)
+        calls = _record(monkeypatch, text)
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        assert mesh._is_grok_pane(lines) is False, name
+        assert mesh._is_cursor_composer(lines) is True, name
+        assert mesh._composer_state("drop") == "clear", name
+        assert mesh.TmuxSink("drop").deliver(_State({}), [], 1) is True, name
+        assert _wakes(calls, "drop") == [
+            ["tmux", "send-keys", "-t", "drop", "-l", mesh._WAKE_PROMPT]], name
+        assert sum(1 for c in calls if "Enter" in c) == 1, name
+
+
+def test_a_running_cursor_pane_quoting_a_grok_box_defers(monkeypatch):
+    """Fails at fa297a3: the same pair woke a running cursor with the grok prompt."""
+    for name in (
+        "running_diff_grok_box_with_footer.txt",
+        "running_grok_row_hunk.txt",
+        "running_quoted_empty_grok_box.txt",
+    ):
+        text = _drop_pane(name)
+        calls = _record(monkeypatch, text)
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        assert mesh._is_cursor_composer(lines) is True, name
+        assert mesh._is_grok_pane(lines) is False, name
+        assert mesh.TmuxSink("drop").deliver(_State({}), [], 1) is None, name
+        assert not any(len(c) > 1 and c[1] == "send-keys" for c in calls), name
+
+
 def test_opencode_mentioning_grok_is_not_grok():
     src = Path(__file__).resolve().parent / "fixtures" / "opencode-pane-idle-footer-0710.txt"
     pane = src.read_text(encoding="utf-8").splitlines()

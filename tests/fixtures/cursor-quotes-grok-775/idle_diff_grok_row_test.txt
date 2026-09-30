@@ -1,0 +1,58 @@
+    Edited test_961_cursor_grok_footer.py +37 -17
+
+    ▎  """card #961 — a Cursor footer that names a Grok model is still Cursor.
+    ▎
+    ▎  These assertions fail on main: ``_is_grok_pane`` matches the substring
+    ▎- ``Grok 4.``, so the pane is not a clear Cursor composer and deliver
+    ▎- sends no wake.
+    ▎+ ``Grok 4.``, so the pane is classified as grok, the composer is unread,
+    ▎+ and deliver sends no wake.
+    ▎  """
+    ▎- from swarph_cli.commands import mesh
+    ▎+ from __future__ import annotations
+    ▎
+    ▎- # Read-only capture of cursor-lin, 2026-09-30: the composer, then the footer.
+    ▎ … truncated (69 more lines) · ctrl+r to review
+
+  $ cd /home/ubuntu/worktrees/swarph-cli-961-cursor-footer && python3 -c "
+    from swarph_cli.commands import mesh 4.4s
+    … 3 input + 16 output lines hidden · ctrl+o to expand
+    ============================= 115 passed in 0.83s ==============================
+
+  $ cd /home/ubuntu/worktrees/swarph-cli-961-cursor-footer
+    git stash push -u -m '961-wip' -- src/swarph_cli/commands/mesh.py tests/test_961_cursor_grok_footer.py 3.7s
+    … 3 input + 22 output lines hidden · ctrl+o to expand
+    no changes added to commit (use "git add" and/or "git commit -a")
+    Dropped refs/stash@{0} (c285c1105918aced46f43bf32b76d3c2bde3a535)
+
+    Edited test_961_cursor_grok_footer.py +13
+
+    ▎+ def test_a_cursor_row_above_the_grok_composer_keeps_the_grok_wake(monkeypatch):
+    ▎+     pane = _grok_idle_lines()
+    ▎+     idx = next(i for i, ln in enumerate(pane) if "│" in ln and "❯" in ln)
+    ▎+     pane.insert(idx, "→ Add a follow-up")
+    ▎+     assert mesh._is_grok_pane(pane) is True
+    ▎+     assert mesh._is_cursor_composer(pane) is False
+    ▎+     calls = _record(monkeypatch, "\n".join(pane))
+
+  $ cd /home/ubuntu/worktrees/swarph-cli-961-cursor-footer
+    cp src/swarph_cli/commands/mesh.py /tmp/mesh-961.py 4.3s
+    … 5 input + 39 output lines hidden · ctrl+o to expand
+    ============================== 3 passed in 0.08s ===============================
+
+  $ cd /home/ubuntu/worktrees/swarph-cli-961-cursor-footer
+    git log -5 --oneline 4.1s
+    … 2 input + 48 output lines hidden · ctrl+o to expand
+
+     def _grok_input(lines: list[str]) -> Optional[str]:
+
+    Tip: Use /plan to iterate on an implementation plan before code changes.
+
+
+  → Add a follow-up
+
+
+  1 task
+  Grok 4.7 256K High Fast · 22% · 203 files edited                                                                                                                                                                           Run Everything
+  ~
+

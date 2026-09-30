@@ -2295,39 +2295,63 @@ def _opencode_composer_state(lines: list[str]) -> Optional[str]:
     return "busy"
 
 
+def _is_grok_composer_row(lines: list[str], index: int) -> bool:
+    """A grok composer is one row: stripped text starts with ``│`` and
+    contains ``❯``, and the next row starts with ``╰``. A cursor diff hunk
+    (``▎``) never counts, and a pair anywhere else on the screen does not."""
+    row = lines[index].strip()
+    if row.startswith("▎") or not (row.startswith("│") and "❯" in row):
+        return False
+    if index + 1 >= len(lines):
+        return False
+    nxt = lines[index + 1].strip()
+    return nxt.startswith("╰") and not nxt.startswith("▎")
+
+
+def _is_cursor_composer_row(line: str) -> bool:
+    row = line.strip()
+    return row.startswith("→ Add a follow-up") and not row.startswith("▎")
+
+
+def _bottom_tui(lines: list[str]) -> "str | None":
+    """Who owns the bottom-most composer row in the non-empty tail.
+
+    ``"cursor"`` or ``"grok"``. A match above that tail is scrollback.
+    The lower composer wins, so a quoted grok box above ``→ Add a follow-up``
+    does not take the pane.
+    """
+    tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
+    for i in range(len(tail) - 1, -1, -1):
+        if _is_cursor_composer_row(tail[i]):
+            return "cursor"
+        if _is_grok_composer_row(tail, i):
+            return "grok"
+    return None
+
+
 def _is_cursor_composer(lines: list[str]) -> bool:
     """The cursor composer ROW, not a quote of its placeholder.
 
-    The row is the last composer marker inside the bottom tail, the same
-    row ``_composer_state`` reads. Its stripped text has to start with
-    ``→ Add a follow-up``. A mention of that placeholder anywhere else
-    in the pane is not the composer.
+    The row is the bottom-most composer inside the non-empty tail, the
+    same row ``_composer_state`` reads. Its stripped text has to start
+    with ``→ Add a follow-up``. A mention of that placeholder anywhere
+    else in the pane is not the composer.
     """
-    if not lines or _is_grok_pane(lines):
-        return False
-    row = _composer_line(_nonempty_tail(lines, _CURSOR_COMPOSER_TAIL))
-    return bool(row and row.startswith("→ Add a follow-up"))
+    return bool(lines) and _bottom_tui(lines) == "cursor"
 
 
 def _is_grok_pane(lines: list[str]) -> bool:
-    """The grok TUI, by its own structure. A model name is not a grok pane.
+    """The grok TUI, by the composer row at the bottom of the pane.
 
     Cursor's footer can read ``Grok 4.7``. That string is not the test.
-    Grok is the ``│ ❯`` input row, a ``Grok Build`` banner, or the box
-    footer (``╰`` … ``always-approve``). Those win over a scrollback line
-    that quotes cursor's ``Add a follow-up`` placeholder, including a
-    ``→ Add a follow-up`` row sitting above the grok box. A history ``❯``
-    without the box bar is not the composer. A usage-limit modal drops
-    those and is recognized by ``_grok_block_reason``.
+    A grok composer is a ``│ ❯`` row immediately followed by ``╰``, and
+    only when that pair is the bottom-most composer in the non-empty tail.
+    A ``│``/``❯`` pair or a ``╰`` / ``always-approve`` pair anywhere else,
+    including a cursor diff hunk that starts with ``▎``, is not a grok pane.
+    A history ``❯`` without the box bar is not the composer. A usage-limit
+    modal drops the box and is recognized by ``_grok_block_reason``.
     """
-    for ln in lines:
-        if ln.strip().startswith("Grok Build"):
-            return True
-        if "│" in ln and "❯" in ln:
-            return True
-        if "╰" in ln and "always-approve" in ln:
-            return True
-    return False
+    return bool(lines) and _bottom_tui(lines) == "grok"
 
 
 def _grok_input(lines: list[str]) -> Optional[str]:
@@ -2459,10 +2483,21 @@ def _agent_running(target: str) -> Optional[bool]:
         return _opencode_running(lines)
     if _is_grok_pane(lines):
         return _grok_running(lines)
-    composer = _composer_line(lines)
-    if composer is None:
+    composer = _composer_line(_nonempty_tail(lines, _CURSOR_COMPOSER_TAIL))
+    if composer is None or not composer.startswith("→"):
         return None
-    return _CURSOR_RUN_HINT in composer
+    if _CURSOR_RUN_HINT in composer:
+        return True
+    # cursor-lin 2026-09-30 draws a Thinking row above the composer while a
+    # turn runs, and the composer placeholder stays on screen. A ▎ hunk
+    # that quotes the word does not count.
+    for ln in _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL):
+        stripped = ln.strip()
+        if stripped.startswith("▎") or stripped.startswith("→"):
+            continue
+        if "Thinking" in stripped:
+            return True
+    return False
 
 
 def _composer_state(target: str) -> Optional[str]:
