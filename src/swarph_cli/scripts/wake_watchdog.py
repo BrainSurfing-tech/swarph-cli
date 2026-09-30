@@ -41,7 +41,8 @@ def systemd_owns_monitor(cell: str, run=None) -> bool:
     argv = ["systemctl", "--user", "is-enabled", unit]
     runner = run if run is not None else subprocess.run
     try:
-        proc = runner(argv, capture_output=True, text=True, check=False)
+        proc = runner(argv, capture_output=True, text=True,
+                      encoding="utf-8", errors="replace", check=False)
     except FileNotFoundError:
         return False
     return proc.returncode == 0
@@ -263,7 +264,8 @@ def main(argv: list[str] | None = None) -> int:
     def _status(name: str, _sw: str = swarph) -> int:
         proc = subprocess.run(
             [_sw, "monitor", "status", "--as", name],
-            capture_output=True, text=True, check=False)
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            check=False)
         return proc.returncode
 
     def _start(name: str, _sw: str = swarph) -> None:
@@ -271,6 +273,7 @@ def main(argv: list[str] | None = None) -> int:
             return
         subprocess.run(
             [_sw, "monitor", "start", "--as", name, "--deliver", "pull"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
             check=False)
 
     reported = enforce_writers(cells, status=_status, start=_start, state=state)
