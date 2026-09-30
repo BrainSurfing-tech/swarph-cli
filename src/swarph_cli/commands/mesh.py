@@ -2976,8 +2976,11 @@ def _monitor_loop(state: MonitorState) -> int:
         try:
             _monitor_iteration(state)
         except KeyboardInterrupt:
+            # An interrupt during an iteration is not a clean return. Swallowing
+            # it and returning 0 made _run_pinned delete monitor.pid, so the
+            # watchdog then reported the cell unsupervised.
             state.shutdown_requested = True
-            break
+            raise
         except Exception as exc:
             print(f"{state.log_prefix} iteration error: {type(exc).__name__}: {exc}",
                   file=sys.stderr)

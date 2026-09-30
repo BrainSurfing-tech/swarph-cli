@@ -111,6 +111,39 @@ def test_a_swarph_monitor_cgroup_is_recorded_and_a_foreign_one_is_not(monkeypatc
     assert rec["supervisor"] == "task:Named"
 
 
+def test_interrupt_inside_the_real_loop_keeps_the_supervisor(monkeypatch, tmp_path):
+    """Fails at 8b4d11f on an assertion.
+
+    KeyboardInterrupt raised inside the real iteration used to be swallowed,
+    the loop returned 0, and _run_pinned deleted monitor.pid. The loop itself
+    is not patched.
+    """
+    def raise_inside(_state):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(mesh, "_monitor_iteration", raise_inside)
+    state = mesh.MonitorState(
+        self_name="fixture-cell", state_dir=tmp_path,
+        gateway="http://gateway.test", token="tok", sinks=[])
+    pidfile = tmp_path / "monitor.pid"
+    with pytest.raises(KeyboardInterrupt):
+        monitor._run_pinned(state, pidfile, "fixture-cell", [], 30,
+                            supervisor="swarph-monitor.service")
+    assert pidfile.exists()
+    rec = json.loads(pidfile.read_text(encoding="utf-8"))
+    assert rec["supervisor"] == "swarph-monitor.service"
+
+    rec["pid"] = 4000000
+    pidfile.write_text(json.dumps(rec), encoding="utf-8")
+    _env(monkeypatch)
+    monkeypatch.setattr(mesh, "_monitor_iteration", lambda _state: None)
+    monkeypatch.setattr(monitor, "_verify_self_is_registered",
+                        lambda *a, **k: (True, "registered"))
+    assert _run(["start", "--once"], tmp_path) == 0
+    reclaimed = json.loads(pidfile.read_text(encoding="utf-8"))
+    assert reclaimed["pid"] == os.getpid()
+
+
 def test_sigint_and_an_exception_leave_the_recorded_supervisor(monkeypatch, tmp_path):
     """Unwinding used to unlink monitor.pid, so the watchdog then said unsupervised."""
     pidfile = tmp_path / "monitor.pid"
