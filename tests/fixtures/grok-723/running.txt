@@ -1,0 +1,52 @@
+
+  sandbox:workspace /tmp/gro… ⠧ MCP (1/3) │ 9.7K / 256K │
+
+
+     ❯ draft-not-submitted                      2:34 AM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ⠧ Waiting…                            0.0s ⇣9.71k [✗]
+
+  ╭─────────────────────────────────────────────────────╮
+  │ ❯                                                   │
+  ╰───────────────── Grok 4.7 (xhigh) · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+Enter:
+

@@ -1481,6 +1481,18 @@ class TmuxSink(Sink):
 
     def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
         led = state.ledger(self.name)
+        # #723: a rate-limit or usage-limit screen is not deliverable. An
+        # empty composer beside "Retry failed: rate limit" used to inject
+        # again, and the 1.0.44 upgrade modal (no Grok footer) used to
+        # return False and log DELIVERY FAILED. Defer with a named reason
+        # and send nothing.
+        pane = _capture_pane_lines(self.target)
+        if pane:
+            reason = _grok_block_reason(pane)
+            if reason:
+                print(f"[monitor] {self.name}: {reason} — deferring, zero keys",
+                      flush=True)
+                return None
         # #620: a wake's job is done the moment a TURN is observed running —
         # the cell is awake, whoever woke it (our injected wake fired, or
         # the human typed). Both older clearing paths miss the zombie
@@ -2270,11 +2282,12 @@ def _opencode_composer_state(lines: list[str]) -> Optional[str]:
 
 
 def _is_grok_pane(lines: list[str]) -> bool:
-    """Grok Build 1.0.41 composer, measured on a sacrificial TUI.
+    """Grok Build composer, measured on sacrificial 1.0.41 and 0.2.51 TUIs.
 
-    The footer names ``Grok 4.`` inside the box. History also draws a ``❯``
-    for the submitted prompt; that row has no box bar, so it is not the
-    composer.
+    The footer names ``Grok 4.`` inside the box, or the splash prints
+    ``Grok Build``. History also draws a ``❯`` for the submitted prompt;
+    that row has no box bar, so it is not the composer. A usage-limit
+    modal drops both of those and is recognized by ``_grok_block_reason``.
     """
     return any("Grok 4." in ln or ln.strip().startswith("Grok Build") for ln in lines)
 
@@ -2293,20 +2306,50 @@ def _grok_input(lines: list[str]) -> Optional[str]:
     return after.strip()
 
 
+def _grok_block_reason(lines: list[str]) -> Optional[str]:
+    """A rate or usage limit is not an idle composer and not a dead pane.
+
+    0.2.51 draws ``Retry failed: You've hit the rate limit for your plan``
+    under an empty ``│ ❯`` box, with no spinner. 1.0.44 draws a ``┃`` modal
+    ``You hit your free usage limit`` and drops the Grok footer entirely.
+    Either screen used to look clear (inject again) or unreadable
+    (DELIVERY FAILED). Return a stable reason token, or None.
+    """
+    blob = "\n".join(lines).lower()
+    if "you hit your free usage limit" in blob:
+        return "grok-usage-limit"
+    if "rate limit" in blob:
+        return "grok-rate-limit"
+    if "usage limit" in blob:
+        return "grok-usage-limit"
+    if "retry failed" in blob:
+        return "grok-retry-failed"
+    return None
+
+
 def _grok_running(lines: list[str]) -> bool:
     """True only while the turn is in progress.
 
-    ``Waiting for response`` is the running footer. ``Worked for Ns`` is a
-    finished turn left on screen; reading that as running is the one-shot
-    bug (the next DM never wakes).
+    1.0.41/1.0.44: ``Waiting for response``. 0.2.51: ``Waiting…`` at the
+    start of the turn, then a tool row whose footer is ``Ctrl+c:cancel``
+    for as long as the turn lasts. ``Worked for`` / ``Thought for`` stay
+    on screen after the turn and must not count as running.
     """
-    return any("Waiting for response" in ln for ln in lines)
+    for ln in lines:
+        if "Waiting for response" in ln or "Waiting…" in ln or "Waiting..." in ln:
+            return True
+        if "Ctrl+c:cancel" in ln:
+            return True
+    return False
 
 
 def _grok_turn_finished(lines: list[str]) -> bool:
-    if _grok_running(lines):
+    if _grok_running(lines) or _grok_block_reason(lines):
         return False
-    return any("Worked for" in ln for ln in lines)
+    return any(
+        "Worked for" in ln or "Thought for" in ln or "Turn cancelled" in ln
+        for ln in lines
+    )
 
 
 def _grok_in_progress(target: str) -> bool:
