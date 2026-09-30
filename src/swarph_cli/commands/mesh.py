@@ -2136,6 +2136,12 @@ _COMPOSER_PLACEHOLDERS = ("Add a follow-up", "Ask Codex to do anything")
 #: running agent into an idle one forever.
 _CURSOR_RUN_HINT = "ctrl+c to stop"
 
+#: How many non-empty rows at the bottom can hold the cursor composer.
+#: Measured on cursor-lin 2026-09-30: the composer is the 4th non-empty row
+#: from the bottom (composer, task count, model footer, tilde). A quote of
+#: that row higher in the pane is scrollback, not the composer.
+_CURSOR_COMPOSER_TAIL = 6
+
 
 def _only_wake_text(content: str) -> bool:
     """True when the composer holds wake text and nothing else.
@@ -2282,22 +2288,30 @@ def _opencode_composer_state(lines: list[str]) -> Optional[str]:
 
 
 def _is_cursor_composer(lines: list[str]) -> bool:
-    """Cursor's composer. Checked before any grok rule so a model name cannot win."""
-    return any("Add a follow-up" in ln for ln in lines)
+    """The cursor composer ROW, not a quote of its placeholder.
+
+    The row is the last composer marker inside the bottom tail, the same
+    row ``_composer_state`` reads. Its stripped text has to start with
+    ``→ Add a follow-up``. A mention of that placeholder anywhere else
+    in the pane is not the composer.
+    """
+    if not lines or _is_grok_pane(lines):
+        return False
+    row = _composer_line(lines[-_CURSOR_COMPOSER_TAIL:])
+    return bool(row and row.startswith("→ Add a follow-up"))
 
 
 def _is_grok_pane(lines: list[str]) -> bool:
     """The grok TUI, by its own structure. A model name is not a grok pane.
 
-    Cursor's footer can read ``Grok 4.7``. That pane is recognized first by
-    ``Add a follow-up``, so the model name cannot win. Grok itself is the
-    ``│ ❯`` input row, a ``Grok Build`` banner, or the box footer
-    (``╰`` … ``always-approve``). A history ``❯`` without the box bar is
-    not the composer. A usage-limit modal drops those and is recognized by
-    ``_grok_block_reason``.
+    Cursor's footer can read ``Grok 4.7``. That string is not the test.
+    Grok is the ``│ ❯`` input row, a ``Grok Build`` banner, or the box
+    footer (``╰`` … ``always-approve``). Those win over a scrollback line
+    that quotes cursor's ``Add a follow-up`` placeholder, including a
+    ``→ Add a follow-up`` row sitting above the grok box. A history ``❯``
+    without the box bar is not the composer. A usage-limit modal drops
+    those and is recognized by ``_grok_block_reason``.
     """
-    if _is_cursor_composer(lines):
-        return False
     for ln in lines:
         if ln.strip().startswith("Grok Build"):
             return True
@@ -2468,6 +2482,12 @@ def _composer_state(target: str) -> Optional[str]:
     if _is_grok_pane(lines):
         return _grok_composer_state(lines)
     composer = _composer_line(lines)
+    if composer is not None and composer.startswith("→"):
+        # A cursor marker above the bottom tail is a quoted row. The
+        # composer itself is off-screen, so this pane is not readable.
+        composer = _composer_line(lines[-_CURSOR_COMPOSER_TAIL:])
+        if composer is None or not composer.startswith("→"):
+            return None
     if composer is None:
         return None
     content = composer[1:].strip()

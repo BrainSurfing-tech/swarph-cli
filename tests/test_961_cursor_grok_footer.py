@@ -63,6 +63,58 @@ def test_an_idle_cursor_pane_with_a_grok_footer_gets_one_wake(monkeypatch):
     assert led["wake_outstanding"] is True
 
 
+def _grok_idle_lines():
+    from pathlib import Path
+    src = Path(__file__).resolve().parent / "fixtures" / "grok-723" / "idle.txt"
+    return src.read_text(encoding="utf-8").splitlines()
+
+
+def _wakes(calls, target):
+    return [c for c in calls if c[:4] == ["tmux", "send-keys", "-t", target] and "-l" in c]
+
+
+def test_a_grok_pane_quoting_the_cursor_placeholder_keeps_the_grok_wake(monkeypatch):
+    pane = _grok_idle_lines()
+    pane.insert(0, 'note: cursor renders "Add a follow-up" as its composer')
+    assert mesh._is_grok_pane(pane) is True
+    calls = _record(monkeypatch, "\n".join(pane))
+    assert mesh.TmuxSink("grok-sac").deliver(_State({}), [], 1) is True
+    assert _wakes(calls, "grok-sac") == [
+        ["tmux", "send-keys", "-t", "grok-sac", "-l", mesh._GROK_WAKE_PROMPT]]
+    assert mesh._GROK_WAKE_PROMPT != mesh._WAKE_PROMPT
+
+
+def test_a_cursor_row_above_the_grok_composer_keeps_the_grok_wake(monkeypatch):
+    pane = _grok_idle_lines()
+    idx = next(i for i, ln in enumerate(pane) if "│" in ln and "❯" in ln)
+    pane.insert(idx, "→ Add a follow-up")
+    assert mesh._is_grok_pane(pane) is True
+    assert mesh._is_cursor_composer(pane) is False
+    calls = _record(monkeypatch, "\n".join(pane))
+    assert mesh.TmuxSink("grok-sac").deliver(_State({}), [], 1) is True
+    sent = _wakes(calls, "grok-sac")
+    assert sent == [["tmux", "send-keys", "-t", "grok-sac", "-l", mesh._GROK_WAKE_PROMPT]]
+    assert sent[0][-1] != mesh._WAKE_PROMPT
+
+
+def test_a_quoted_placeholder_with_the_composer_off_screen_sends_nothing(monkeypatch):
+    pane = [
+        "→ Add a follow-up",
+        'the output quotes "Add a follow-up" while the composer is gone',
+    ]
+    pane += ["scrollback"] * 20
+    pane += [
+        "2 tasks",
+        "Grok 4.7 256K High Fast · 1% · 1 files edited",
+        "~",
+    ]
+    assert mesh._is_cursor_composer(pane) is False
+    calls = _record(monkeypatch, "\n".join(pane))
+    assert mesh.TmuxSink("cursor-lin-sac").deliver(_State({}), [], 1) is False
+    assert _wakes(calls, "cursor-lin-sac") == []
+    assert not any("Enter" in c for c in calls)
+
+
 def test_opencode_mentioning_grok_is_not_grok():
     src = Path(__file__).resolve().parent / "fixtures" / "opencode-pane-idle-footer-0710.txt"
     pane = src.read_text(encoding="utf-8").splitlines()
