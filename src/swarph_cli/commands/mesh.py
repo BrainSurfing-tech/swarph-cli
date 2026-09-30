@@ -2281,15 +2281,31 @@ def _opencode_composer_state(lines: list[str]) -> Optional[str]:
     return "busy"
 
 
-def _is_grok_pane(lines: list[str]) -> bool:
-    """Grok Build composer, measured on sacrificial 1.0.41 and 0.2.51 TUIs.
+def _is_cursor_composer(lines: list[str]) -> bool:
+    """Cursor's composer. Checked before any grok rule so a model name cannot win."""
+    return any("Add a follow-up" in ln for ln in lines)
 
-    The footer names ``Grok 4.`` inside the box, or the splash prints
-    ``Grok Build``. History also draws a ``❯`` for the submitted prompt;
-    that row has no box bar, so it is not the composer. A usage-limit
-    modal drops both of those and is recognized by ``_grok_block_reason``.
+
+def _is_grok_pane(lines: list[str]) -> bool:
+    """The grok TUI, by its own structure. A model name is not a grok pane.
+
+    Cursor's footer can read ``Grok 4.7``. That pane is recognized first by
+    ``Add a follow-up``, so the model name cannot win. Grok itself is the
+    ``│ ❯`` input row, a ``Grok Build`` banner, or the box footer
+    (``╰`` … ``always-approve``). A history ``❯`` without the box bar is
+    not the composer. A usage-limit modal drops those and is recognized by
+    ``_grok_block_reason``.
     """
-    return any("Grok 4." in ln or ln.strip().startswith("Grok Build") for ln in lines)
+    if _is_cursor_composer(lines):
+        return False
+    for ln in lines:
+        if ln.strip().startswith("Grok Build"):
+            return True
+        if "│" in ln and "❯" in ln:
+            return True
+        if "╰" in ln and "always-approve" in ln:
+            return True
+    return False
 
 
 def _grok_input(lines: list[str]) -> Optional[str]:
