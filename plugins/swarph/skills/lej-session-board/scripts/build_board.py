@@ -55,7 +55,8 @@ def _bucket(peer: dict, waiting: bool) -> str:
     return "in_progress"
 
 
-_IN_SESSION = re.compile(r"hard[- ]gate|\bdeploy", re.IGNORECASE)
+# Whole words only. "deployment" is not a deploy, and "redeploy" is its own word.
+_IN_SESSION = re.compile(r"hard[- ]gate|\bredeploy\b|\bdeploy\b", re.IGNORECASE)
 _ANSWER = re.compile(r"(?m)^Re: (.+)$")
 
 
@@ -98,11 +99,17 @@ def _questions(rows: list[dict]) -> list[dict]:
     return out
 
 
-def drop_answered(rows: list[dict], messages: list[str]) -> list[dict]:
-    """Drop a row whose title was answered by a DM line `Re: <title>`."""
+def drop_answered(rows: list[dict], messages: list[tuple[str, str]], *, commander: str) -> list[dict]:
+    """Drop a row only when the commander answered it.
+
+    messages are (from_node, body) pairs. A `Re: <title>` line from any other
+    cell leaves the question on the board.
+    """
     answered = set()
-    for message in messages:
-        for match in _ANSWER.finditer(message or ""):
+    for from_node, body in messages:
+        if from_node != commander:
+            continue
+        for match in _ANSWER.finditer(body or ""):
             answered.add(match.group(1).strip())
     return [row for row in rows if row.get("title") not in answered]
 

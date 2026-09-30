@@ -251,5 +251,41 @@ def test_an_answer_dm_drops_that_question():
     import build_board
     rows = json.loads((FIX / "commander-170.json").read_text(encoding="utf-8"))
     title = rows[0]["title"]
-    kept = build_board.drop_answered(rows, [f"Re: {title}\nRetire.\n"])
+    kept = build_board.drop_answered(
+        rows, [("commander", f"Re: {title}\nRetire.\n")], commander="commander")
     assert kept == []
+
+
+def test_only_the_commander_can_drop_a_question():
+    """A Re: line from any other cell must leave the question up.
+
+    On 61c5f49 drop_answered took bare bodies and dropped the row for any sender.
+    """
+    sys.path.insert(0, str(SCRIPT.parent))
+    import build_board
+    rows = json.loads((FIX / "commander-170.json").read_text(encoding="utf-8"))
+    title = rows[0]["title"]
+    body = f"Re: {title}\nRetire.\n"
+    kept = build_board.drop_answered(rows, [("lab-ovh", body)], commander="commander")
+    assert len(kept) == 1
+    assert kept[0]["title"] == title
+    cleared = build_board.drop_answered(rows, [("commander", body)], commander="commander")
+    assert cleared == []
+
+
+def test_redeploy_is_in_session_and_deployment_notes_are_not():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import build_board
+    assert build_board._in_session({"accept": "redeploy the gateway"}) is True
+    assert build_board._in_session({"accept": "deployment notes for the board"}) is False
+    assert build_board._in_session({"accept": "production deploy go"}) is True
+
+
+def test_skill_step_4_names_the_sender_and_the_trigger_words():
+    text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    step = text.split("## 4. Answers", 1)[1].split("## ", 1)[0]
+    assert "from_node" in step
+    assert "commander" in step
+    assert "any other cell" in step
+    for word in ("deploy", "redeploy", "hard gate"):
+        assert word in step

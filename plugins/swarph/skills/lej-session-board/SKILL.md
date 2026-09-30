@@ -41,7 +41,11 @@ Do not call `Artifact` with a live roster or live board rows. A test run or a CI
 
 ## 4. Answers
 
-An answer DM whose body has a line `Re: <title>` (cc the manager) drops that question. `drop_answered` removes the matching row before the next board. A relayed yes approves building, not deploying. A question whose accept names a deploy or a hard gate has `in_session: true`: the go is typed in that session, and the app does not send it.
+Drop a question only when the answer's `from_node` is the commander and the body has a line `Re: <title>`. A `Re:` line from any other cell does not drop it. `drop_answered` takes `(from_node, body)` pairs and the commander's name.
+
+`in_session` is true when the row's accept names one of these trigger words: `deploy`, `redeploy`, or a hard gate (`hard gate` or `hard-gate`). Each of `deploy` and `redeploy` is a whole word. `deployment` is not a trigger. The go is typed in that session, and the app does not send it.
+
+A relayed yes approves building, not deploying.
 
 ## Files
 
