@@ -14,5 +14,5 @@ Environment=SWARPH_BOARD_TO=commander
 Environment=SWARPH_READ_TOKEN_FILE=%h/.config/swarph/lab-ovh.peer_token
 Environment=SWARPH_BOARD_CELLS=lab-ovh
 Environment=SWARPH_BOARD_STATE=%h/.config/swarph/board-publisher.last
-Environment=PATH=~/.local/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/python3 ${SWARPH_BOARD_SCRIPT} --live --token-file ${SWARPH_TOKEN_FILE} --read-token-file ${SWARPH_READ_TOKEN_FILE} --as ${SWARPH_SELF} --to ${SWARPH_BOARD_TO} --cells ${SWARPH_BOARD_CELLS} --state-file ${SWARPH_BOARD_STATE}

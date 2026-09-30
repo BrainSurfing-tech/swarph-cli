@@ -41,7 +41,7 @@ Do not call `Artifact` with a live roster or live board rows. A test run or a CI
 
 ## 4. Answers
 
-Drop a question only when the answer's `from_node` is the commander and the body has a line `Re: <title>`. A `Re:` line from any other cell does not drop it. `drop_answered` takes `(from_node, body)` pairs and the commander's name.
+The manual fixture (`--messages-file`) drops a question only when the answer's `from_node` is the commander and the body has a line `Re: <title>`. A `Re:` line from any other cell does not drop it. `drop_answered` takes `(from_node, body)` pairs and the commander's name. The timer does not use this path.
 
 `in_session` is true when the row's accept names one of these trigger words: `deploy`, `redeploy`, or a hard gate (`hard gate` or `hard-gate`). Each of `deploy` and `redeploy` is a whole word. `deployment` is not a trigger. The go is typed in that session, and the app does not send it.
 
@@ -51,7 +51,7 @@ A relayed yes approves building, not deploying.
 
 A user timer runs `scripts/publish_board.py` every 5 minutes. The unit files in `deploy/` are templates. Do not install them from a test or from CI.
 
-The timer does not call `ListAgents`. The roster is `swarph monitor status` for each cell plus `tmux has-session`. The tmux name for `lab-ovh` is `lab`. Questions are open obligation rows whose accept starts with `[commander]`. The holder is the cell that receives the answer. The timer reads those rows and the commander's `Re:` DMs with `--as lab-ovh`. A failed read sends nothing. A row that is closed, or answered by the commander's `Re: <title>` DM, is gone on the next run. `publish_if_changed` sends nothing when the board is unchanged.
+The timer does not call `ListAgents` and it does not read the inbox. The roster is `swarph monitor status` for each cell plus `tmux has-session`. The tmux name for `lab-ovh` is `lab`. Questions are open obligation rows whose accept starts with `[commander]`. The holder is the cell that receives the answer. The timer lists those rows with `--as lab-ovh --status open`. A question leaves the board when that row is closed. A `Re:` DM does not remove it. A failed read sends nothing. `publish_if_changed` sends nothing when the board is unchanged. The unit PATH uses `%h` only.
 
 The send uses `--token-file` with a path. The token value is not an argument. The service identity must not be the recipient: a self-send is refused.
 

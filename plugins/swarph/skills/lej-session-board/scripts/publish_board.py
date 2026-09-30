@@ -212,7 +212,11 @@ def run_once(
     token_file: str,
     send,
 ) -> tuple[bool, str]:
-    """Build one board and send only when it changed. send sees the path, not the token."""
+    """Build one board and send only when it changed. send sees the path, not the token.
+
+    ``messages`` is the manual fixture only (``--messages-file``). The timer
+    does not pass replies. A live question leaves when its obligation row closes.
+    """
     if sender == recipient:
         raise SelfSend(f"{sender} would send the board to itself")
     path = str(token_file or "")
@@ -233,7 +237,7 @@ def run_once(
 
 
 def read_argv(*, cells: list[str], read_token_file: str, read_as: str = READ_AS) -> list[list[str]]:
-    """Reads only. Monitor status, tmux, open obligations, and the commander's DMs."""
+    """Reads only. Monitor status, tmux, and open obligations. No inbox."""
     path = str(read_token_file or "")
     if not _is_path(path):
         raise ValueError("read token-file must be a path, not a token value")
@@ -247,14 +251,6 @@ def read_argv(*, cells: list[str], read_token_file: str, read_as: str = READ_AS)
         "--token-file", path,
         "--status", "open",
         "--json",
-    ])
-    argv.append([
-        "swarph", "mesh", "inbox",
-        "--as", read_as,
-        "--token-file", path,
-        "--peek",
-        "--json",
-        "--limit", "50",
     ])
     return argv
 
@@ -271,22 +267,6 @@ def _require_json(proc, label: str):
         raise ReadFailed(f"{label} returned invalid JSON") from exc
 
 
-def commander_replies(payload, *, commander: str, copy_to: str = READ_AS) -> list[tuple[str, str]]:
-    """DMs from the commander that were addressed or copied to lab-ovh."""
-    messages = payload if isinstance(payload, list) else (payload or {}).get("messages") or []
-    found = []
-    for message in messages:
-        sender = message.get("from_node") or message.get("from") or ""
-        target = message.get("to_node") or message.get("to") or ""
-        copied = str(message.get("cc") or "")
-        if sender != commander:
-            continue
-        if target != copy_to and copy_to not in copied:
-            continue
-        found.append((sender, message.get("content") or message.get("body") or ""))
-    return found
-
-
 def live_once(
     *,
     cells: list[str],
@@ -296,31 +276,38 @@ def live_once(
     token_file: str,
     commander: str,
     previous: str | None,
-    messages: list[tuple[str, str]],
     runner,
     send,
+    messages: list[tuple[str, str]] | None = None,
 ) -> bool:
-    """One timer pass. runner stands in for swarph and tmux. send stands in for the DM."""
+    """One timer pass. Reads no inbox. A question leaves only when its row closes.
+
+    ``messages`` is ignored. The manual ``--messages-file`` fixture is the only
+    Re: path, and the timer does not call it.
+    """
+    del messages
     statuses = []
     tmux_sessions = set()
     rows: list[dict] = []
-    fetched: list[tuple[str, str]] | None = None
+    saw_list = False
     for argv in read_argv(cells=cells, read_token_file=read_token_file):
+        joined = " ".join(argv)
+        if "inbox" in argv or "/messages" in joined:
+            raise ReadFailed("the timer must not read the inbox")
         if argv[:3] == ["swarph", "monitor", "status"]:
             statuses.append(runner(argv).stdout or "")
         elif argv[:2] == ["tmux", "has-session"]:
             if runner(argv).returncode == 0:
                 tmux_sessions.add(argv[-1])
-        elif argv[:3] == ["swarph", "mesh", "inbox"]:
-            fetched = commander_replies(_require_json(runner(argv), "inbox"), commander=commander)
         else:
             payload = _require_json(runner(argv), "obligations list")
             rows = payload if isinstance(payload, list) else payload.get("obligations") or []
-    if fetched is None:
-        raise ReadFailed("inbox was not read")
+            saw_list = True
+    if not saw_list:
+        raise ReadFailed("obligations list was not read")
     changed, _body = run_once(
         rows=rows,
-        messages=fetched,
+        messages=[],
         statuses=statuses,
         tmux_sessions=tmux_sessions,
         previous=previous,
@@ -340,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--to", dest="recipient", required=True)
     p.add_argument("--commander", default="commander")
     p.add_argument("--rows-file")
-    p.add_argument("--messages-file")
+    p.add_argument("--messages-file", help="manual fixture only; the timer does not read replies")
     p.add_argument("--status-file")
     p.add_argument("--tmux", default="")
     p.add_argument("--previous-file")
@@ -394,7 +381,7 @@ def run_command(argv):
 
 
 def _main_live(args) -> int:
-    """Timer entry. Reads obligations and the commander's DMs, then sends only on change."""
+    """Timer entry. Reads open obligations only. Sends only when the board changed."""
     cells = [cell for cell in args.cells.split(",") if cell]
     if not args.read_token_file:
         print("live publish needs --read-token-file (a path)", file=sys.stderr)

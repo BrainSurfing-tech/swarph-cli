@@ -85,7 +85,7 @@ def test_roster_is_monitor_status_and_tmux_without_a_listing_tool():
     assert any(item.startswith("tmux has-session -t lab ") or item == "tmux has-session -t lab" for item in flat)
     assert any(item.startswith("tmux has-session -t science-claude") for item in flat)
     assert any("--as lab-ovh" in item and "--status open" in item for item in flat)
-    assert any(item.startswith("swarph mesh inbox --as lab-ovh") for item in flat)
+    assert all("inbox" not in item and "/messages" not in item for item in flat)
     assert all("ListAgents" not in item for item in flat)
     assert pub._supervised("swarph-monitor.service", "lab-ovh")
     assert pub._supervised("swarph-monitor@lab-ovh.service", "lab-ovh")
@@ -179,8 +179,6 @@ def test_stub_runner_never_dms_and_the_unit_is_not_installed():
             return _Proc(_status(argv[-1]))
         if argv[:2] == ["tmux", "has-session"]:
             return _Proc("", 0)
-        if argv[:3] == ["swarph", "mesh", "inbox"]:
-            return _Proc(json.dumps({"messages": []}))
         return _Proc(json.dumps([_row("Ship the timer", "do it")]))
 
     sent = []
@@ -197,12 +195,15 @@ def test_stub_runner_never_dms_and_the_unit_is_not_installed():
         send=lambda body, **_k: sent.append(body),
     )
     assert sent
+    assert all("inbox" not in argv and "/messages" not in " ".join(argv) for argv in calls)
     assert all(argv[:3] != ["swarph", "mesh", "send"] for argv in calls)
     assert "ListAgents" not in json.dumps(calls)
     service = (DEPLOY / "swarph-board-publisher.service").read_text(encoding="utf-8")
     timer = (DEPLOY / "swarph-board-publisher.timer").read_text(encoding="utf-8")
     assert "--token-file ${SWARPH_TOKEN_FILE}" in service
-    assert "~/.local/bin" in service
+    assert "%h/.local/bin" in service
+    path_line = next(line for line in service.splitlines() if line.startswith("Environment=PATH="))
+    assert "~" not in path_line
     assert "OnUnitActiveSec=5min" in timer
     assert "super-secret" not in service
     try:
@@ -240,10 +241,9 @@ def test_real_obligation_shape_and_a_prose_mention_does_not_count():
     assert "cell" not in REAL_OBLIGATION
 
 
-def test_live_entry_drops_a_commander_reply_and_a_failed_read_sends_nothing(tmp_path, monkeypatch):
+def test_live_entry_drops_a_closed_row_and_a_failed_read_sends_nothing(tmp_path, monkeypatch):
     pub = _load()
     calls = []
-    inbox = {"messages": []}
     rows = [
         _row("Route the queue", "send it", cell="science-claude", obligation_id=746),
         _row("Already closed", "done", state="closed:pass", obligation_id=2),
@@ -256,14 +256,14 @@ def test_live_entry_drops_a_commander_reply_and_a_failed_read_sends_nothing(tmp_
 
     def runner(argv):
         calls.append(list(argv))
+        assert "inbox" not in argv
+        assert "/messages" not in " ".join(argv)
         if argv[:3] == ["swarph", "mesh", "send"]:
             return _Proc("sent", 0)
         if argv[:3] == ["swarph", "monitor", "status"]:
             return _Proc(_status(argv[-1], supervisor="swarph-monitor.service"))
         if argv[:2] == ["tmux", "has-session"]:
             return _Proc("", 0)
-        if argv[:3] == ["swarph", "mesh", "inbox"]:
-            return _Proc(json.dumps(inbox))
         if argv[:4] == ["swarph", "board", "obligations", "list"]:
             assert "--as" in argv and argv[argv.index("--as") + 1] == "lab-ovh"
             assert "--status" in argv and argv[argv.index("--status") + 1] == "open"
@@ -285,16 +285,12 @@ def test_live_entry_drops_a_commander_reply_and_a_failed_read_sends_nothing(tmp_
     first = (tmp_path / "board.last.body").read_text(encoding="utf-8")
     assert "Route the queue" in first
     assert "Already closed" not in first
-    inbox["messages"] = [{
-        "from_node": "commander",
-        "to_node": "lab-ovh",
-        "cc": "lab-ovh",
-        "content": "Re: Route the queue\n",
-    }]
+    rows[0] = _row("Route the queue", "send it", cell="science-claude", obligation_id=746, state="closed:pass")
     state.write_text(first, encoding="utf-8")
     assert pub.main(base) == 0
     second = (tmp_path / "board.last.body").read_text(encoding="utf-8")
     assert "Route the queue" not in second
+    assert all("inbox" not in argv for argv in calls)
 
     calls.clear()
 
@@ -302,8 +298,6 @@ def test_live_entry_drops_a_commander_reply_and_a_failed_read_sends_nothing(tmp_
         calls.append(list(argv))
         if argv[:4] == ["swarph", "board", "obligations", "list"]:
             return _Proc("nope", 500)
-        if argv[:3] == ["swarph", "mesh", "inbox"]:
-            return _Proc(json.dumps({"messages": []}))
         if argv[:3] == ["swarph", "monitor", "status"]:
             return _Proc(_status("lab-ovh"))
         if argv[:2] == ["tmux", "has-session"]:
@@ -313,3 +307,5 @@ def test_live_entry_drops_a_commander_reply_and_a_failed_read_sends_nothing(tmp_
     monkeypatch.setattr(pub, "run_command", failing)
     assert pub.main(base) == 1
     assert all(argv[:3] != ["swarph", "mesh", "send"] for argv in calls)
+    assert all("inbox" not in argv for argv in calls)
+    assert not hasattr(pub, "commander_replies")
