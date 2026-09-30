@@ -17,6 +17,7 @@ from swarph_cli.scripts import wake_watchdog
 from swarph_cli.scripts.wake_watchdog import (
     enforce_writers,
     mesh_send,
+    recorded_supervisor,
     supervisor_from_cgroup,
     systemd_owns_monitor,
     writer_alert,
@@ -169,6 +170,35 @@ def test_fake_cgroup_files_read_the_non_template_units_as_supervised(tmp_path):
     session.write_text("0::/user.slice/user@1000.service\n", encoding="utf-8")
     assert supervisor_from_cgroup(session.read_text(encoding="utf-8")) == "unsupervised"
     assert writer_alert("fixture-cell", None).endswith("unsupervised")
+
+
+def test_the_alert_names_the_supervisor_recorded_in_the_pidfile(tmp_path):
+    """Fails when the recorded-supervisor read is removed.
+
+    The pid in the file is 1. Opening that process's control group would
+    name init, not these units. The file is what survives the monitor.
+    """
+    root = tmp_path / "state"
+    units = {
+        "lab-ovh": "swarph-monitor.service",
+        "gemini-researcher": "swarph-monitor-gemini-researcher.service",
+        "fixture-cell": "scratch-761.service",
+    }
+    for cell, unit in units.items():
+        side = root / cell / "mesh-sidecar"
+        side.mkdir(parents=True)
+        (side / "monitor.pid").write_text(json.dumps({
+            "pid": 1,
+            "supervisor": unit,
+        }), encoding="utf-8")
+        assert recorded_supervisor(root, cell) == unit
+        assert f"supervised by {unit}" in writer_alert(cell, recorded_supervisor(root, cell))
+    assert "/proc/" not in SRC.read_text(encoding="utf-8")
+    bare = root / "nobody" / "mesh-sidecar"
+    bare.mkdir(parents=True)
+    (bare / "monitor.pid").write_text(json.dumps({"pid": 1}), encoding="utf-8")
+    assert recorded_supervisor(root, "nobody") is None
+    assert writer_alert("nobody", recorded_supervisor(root, "nobody")).endswith("unsupervised")
 
 
 def test_ownership_changes_the_alert_when_the_cgroup_names_nothing():

@@ -42,7 +42,7 @@ def writer_transition(down: bool, rec: dict) -> bool:
 
 
 def supervisor_from_cgroup(text: str | None) -> str:
-    """The unit leaf monitor status derives from /proc/<pid>/cgroup.
+    """The unit leaf of a cgroup listing, the same rule monitor status uses.
 
     A swarph-monitor service, including the non-template names
     swarph-monitor.service and swarph-monitor-<cell>.service, is the
@@ -60,9 +60,9 @@ def supervisor_from_cgroup(text: str | None) -> str:
     return "unsupervised"
 
 
-def writer_alert(cell: str, cgroup: str | None, *, owned: bool = False) -> str:
-    """Name the cgroup unit, or the enabled template unit, or unsupervised."""
-    who = supervisor_from_cgroup(cgroup)
+def writer_alert(cell: str, recorded: str | None, *, owned: bool = False) -> str:
+    """Name the supervisor recorded at start, or the enabled template unit."""
+    who = _alert_supervisor(recorded)
     if who == "unsupervised" and owned:
         who = f"swarph-monitor@{cell}.service"
     if who == "unsupervised":
@@ -232,14 +232,40 @@ def _timer_lines() -> list[str]:
         ["systemctl", "--user", "list-timers", "--all", "--no-legend"]).splitlines()
 
 
-def _cgroup_for(root: Path, cell: str) -> str | None:
-    """Cgroup of the monitor pidfile, the same leaf monitor status reads."""
+def _alert_supervisor(recorded: str | None) -> str:
+    """A unit name recorded at start, or a cgroup blob from an older test.
+
+    A plain unit name is trusted: the monitor wrote it from its own cgroup
+    while the pid was still its own. Cgroup text is parsed the same way.
+    """
+    if not recorded or not str(recorded).strip():
+        return "unsupervised"
+    text = str(recorded).strip()
+    if "/" in text or "\n" in text:
+        return supervisor_from_cgroup(text)
+    if text.startswith("user@"):
+        return "unsupervised"
+    return text
+
+
+def recorded_supervisor(root: Path, cell: str) -> str | None:
+    """The supervisor field of monitor.pid.
+
+    The pid in that file may be dead, and a dead pid can be reused by an
+    unrelated process. The field was written at start and still answers.
+    This function does not open a process listing.
+    """
     pidfile = root / cell / "mesh-sidecar" / "monitor.pid"
     try:
-        pid = int(pidfile.read_text(encoding="utf-8").strip())
-        return Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
+        rec = json.loads(pidfile.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(rec, dict):
+        return None
+    who = rec.get("supervisor")
+    if isinstance(who, str) and who.strip():
+        return who.strip()
+    return None
 
 
 def mesh_send(swarph: str, to: str, sender: str, content: str,
@@ -314,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
         owned = bool(state.get(name, {}).get("systemd_owned"))
         sent = mesh_send(
             swarph, escalate or "", sender,
-            writer_alert(name, _cgroup_for(root, name), owned=owned),
+            writer_alert(name, recorded_supervisor(root, name), owned=owned),
             "")
         if sent == 0:
             state.setdefault(name, {})["writer_down"] = True
