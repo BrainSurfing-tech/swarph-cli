@@ -1,0 +1,18 @@
+# Template only. This file is not installed by the skill or by CI.
+[Unit]
+Description=Publish the SWARPH-BOARD from open [commander] rows
+Documentation=https://github.com/BrainSurfing-tech/swarph-cli
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SWARPH_BOARD_SCRIPT=%h/swarph-cli/plugins/swarph/skills/lej-session-board/scripts/publish_board.py
+Environment=SWARPH_TOKEN_FILE=%h/.config/swarph/service-board-publisher.token
+Environment=SWARPH_SELF=board-publisher
+Environment=SWARPH_BOARD_TO=commander
+Environment=SWARPH_READ_TOKEN_FILE=%h/.config/swarph/lab-ovh.peer_token
+Environment=SWARPH_BOARD_CELLS=lab-ovh
+Environment=SWARPH_BOARD_STATE=%h/.config/swarph/board-publisher.last
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 ${SWARPH_BOARD_SCRIPT} --live --token-file ${SWARPH_TOKEN_FILE} --read-token-file ${SWARPH_READ_TOKEN_FILE} --as ${SWARPH_SELF} --to ${SWARPH_BOARD_TO} --cells ${SWARPH_BOARD_CELLS} --state-file ${SWARPH_BOARD_STATE}
