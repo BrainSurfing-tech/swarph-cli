@@ -95,16 +95,32 @@ def test_send_again_after_drain(monkeypatch, fake_state):
     assert len(calls) == 2
 
 
-def test_named_failure_ingress_unavailable(monkeypatch, fake_state, capsys):
+def test_named_failure_sender_ingress_unavailable(monkeypatch, fake_state, capsys):
     monkeypatch.setattr(
         mesh, "_muse_send",
-        lambda session, text: (False, "target ingress unavailable: "
-                                      "external agent ingress is unavailable"),
+        lambda session, text: (False, "sender ingress unavailable: sending "
+                                      "process lacks the gate"),
     )
     sink = mesh.MuseSink("sac-961-ingress-2")
     assert sink.deliver(fake_state, [_dm(101)], 101) is False
     out = capsys.readouterr().out
-    assert "ingress" in out
+    assert "sender" in out
+
+
+def test_muse_send_maps_target_closed_to_target_reason():
+    class Proc:
+        returncode = 1
+        stdout = "session-message send failed: external_agent_ingress_closed\n"
+        stderr = ""
+
+    ok, reason = mesh._muse_send(
+        "s", "t",
+        _run=lambda *a, **k: Proc(),
+        _which=lambda name: "/bin/muse",
+    )
+    assert ok is False
+    assert "target" in reason
+    assert "sender" not in reason
 
 
 def test_named_failure_unverified_receipt(monkeypatch, fake_state, capsys):
@@ -129,7 +145,7 @@ def test_muse_send_maps_ingress_text_to_named_failure(tmp_path):
         _which=lambda name: "/bin/muse",
     )
     assert ok is False
-    assert "ingress" in reason
+    assert "sender" in reason
 
 
 def test_muse_send_maps_nonzero_exit_to_named_failure():

@@ -1539,8 +1539,20 @@ def _muse_send(session: str, text: str, *,
     out = ((getattr(proc, "stdout", None) or "")
            + "\n" + (getattr(proc, "stderr", None) or ""))
     if "external agent ingress is unavailable" in out:
-        return (False, "target ingress unavailable: "
-                       "external agent ingress is unavailable")
+        # Fires when the SENDING process lacks the gate (measured: sender
+        # gate off, any target) — never the target. Say so, or the operator
+        # debugs the wrong session (#844 review).
+        return (False, "sender ingress unavailable: sending process lacks "
+                       "MUSE_EXPERIMENTAL_EXTERNAL_AGENT_INGRESS=on "
+                       "(external agent ingress is unavailable)")
+    if "external_agent_ingress_closed" in out:
+        # The target session runs without the ingress gate (observed by
+        # drop-on-meta-edge on throwaway sessions, #844; this shell path
+        # surfaces unverified_target_receipt first, so this branch is pinned
+        # by unit mapping until a sender path emits it end to end).
+        return (False, "target ingress closed: target session runs without "
+                       "MUSE_EXPERIMENTAL_EXTERNAL_AGENT_INGRESS=on "
+                       "(external_agent_ingress_closed)")
     if "unverified_target_receipt" in out:
         return (False, "send refused (unverified_target_receipt): "
                        "the runtime admits session messages only from the "
