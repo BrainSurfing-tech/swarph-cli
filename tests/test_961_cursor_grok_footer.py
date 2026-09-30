@@ -115,6 +115,29 @@ def test_a_quoted_placeholder_with_the_composer_off_screen_sends_nothing(monkeyp
     assert not any("Enter" in c for c in calls)
 
 
+def test_fc_blank_rows_still_read_as_an_idle_cursor_pane(monkeypatch):
+    """Fails at 34d2bbf: the tail was the raw last N lines, and the blanks
+    pushed '→ Add a follow-up' out of that window."""
+    from pathlib import Path
+    raw = (Path(__file__).resolve().parent / "fixtures" / "cursor-fc-bottom.txt").read_text(encoding="utf-8").splitlines()
+    assert "" in raw
+    assert raw[0].strip() == "→ Add a follow-up"
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda _t: raw)
+    monkeypatch.setattr(mesh.subprocess, "run", fake_run)
+    monkeypatch.setattr(mesh.time, "sleep", lambda _s: None)
+    assert mesh._is_cursor_composer(raw) is True
+    assert mesh._composer_state("fc") == "clear"
+    assert mesh.TmuxSink("fc").deliver(_State({}), [], 1) is True
+    assert _wakes(calls, "fc") == [["tmux", "send-keys", "-t", "fc", "-l", mesh._WAKE_PROMPT]]
+    assert sum(1 for c in calls if "Enter" in c) == 1
+
+
 def test_opencode_mentioning_grok_is_not_grok():
     src = Path(__file__).resolve().parent / "fixtures" / "opencode-pane-idle-footer-0710.txt"
     pane = src.read_text(encoding="utf-8").splitlines()

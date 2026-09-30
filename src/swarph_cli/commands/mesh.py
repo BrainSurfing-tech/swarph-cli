@@ -2139,8 +2139,16 @@ _CURSOR_RUN_HINT = "ctrl+c to stop"
 #: How many non-empty rows at the bottom can hold the cursor composer.
 #: Measured on cursor-lin 2026-09-30: the composer is the 4th non-empty row
 #: from the bottom (composer, task count, model footer, tilde). A quote of
-#: that row higher in the pane is scrollback, not the composer.
+#: that row higher in the pane is scrollback, not the composer. Blank rows
+#: between those chrome lines do not count: a raw tail of N lines drops the
+#: composer off the window when the screen interleaves blanks.
 _CURSOR_COMPOSER_TAIL = 6
+
+
+def _nonempty_tail(lines: list[str], n: int) -> list[str]:
+    """The last ``n`` rows that contain text. Blank rows are not rows."""
+    filled = [ln for ln in lines if ln.strip()]
+    return filled[-n:]
 
 
 def _only_wake_text(content: str) -> bool:
@@ -2297,7 +2305,7 @@ def _is_cursor_composer(lines: list[str]) -> bool:
     """
     if not lines or _is_grok_pane(lines):
         return False
-    row = _composer_line(lines[-_CURSOR_COMPOSER_TAIL:])
+    row = _composer_line(_nonempty_tail(lines, _CURSOR_COMPOSER_TAIL))
     return bool(row and row.startswith("→ Add a follow-up"))
 
 
@@ -2485,7 +2493,7 @@ def _composer_state(target: str) -> Optional[str]:
     if composer is not None and composer.startswith("→"):
         # A cursor marker above the bottom tail is a quoted row. The
         # composer itself is off-screen, so this pane is not readable.
-        composer = _composer_line(lines[-_CURSOR_COMPOSER_TAIL:])
+        composer = _composer_line(_nonempty_tail(lines, _CURSOR_COMPOSER_TAIL))
         if composer is None or not composer.startswith("→"):
             return None
     if composer is None:
