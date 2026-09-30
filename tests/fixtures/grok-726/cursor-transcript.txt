@@ -1,0 +1,22 @@
+  Grok 0.2.51 now has its own pane readings, taken from a sacrificial session.
+
+  • An idle splash (Grok Build  0.2.51, empty composer) is clear.
+  • Typed text in the composer stays busy.
+  • A running turn is Waiting… plus a Ctrl+c:cancel footer, so an empty box is not treated as idle.
+  • Retry failed: … rate limit and the You hit your free usage limit modal defer with a named log reason (grok-rate-limit or grok-usage-limit) and
+    zero keys, instead of injecting again or logging DELIVERY FAILED.
+
+  ⠘⠆ Running  11.37k tokens
+    Tip: Use /plan to plan execution and reach the right outcome faster.
+
+  → Add a follow-up                                                                                                                         ctrl+c to stop
+
+
+ Models matching "kimi"                                                                                                                       Max mode: OFF
+
+ Filter: kimi
+
+ →  Kimi K3                  Max (Tab to modify)
+    Kimi K2.7 Code
+
+ Type to filter • Enter to select • Tab to edit

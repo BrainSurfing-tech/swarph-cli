@@ -2306,23 +2306,35 @@ def _grok_input(lines: list[str]) -> Optional[str]:
     return after.strip()
 
 
-def _grok_block_reason(lines: list[str]) -> Optional[str]:
-    """A rate or usage limit is not an idle composer and not a dead pane.
+# One grok screen, measured on the live 0.2.51 pane (52 rows). Lines above
+# this window are scrollback. A transcript that merely quotes the limit
+# strings is not the limit screen.
+_GROK_SCREEN_ROWS = 52
 
-    0.2.51 draws ``Retry failed: You've hit the rate limit for your plan``
-    under an empty ``│ ❯`` box, with no spinner. 1.0.44 draws a ``┃`` modal
-    ``You hit your free usage limit`` and drops the Grok footer entirely.
-    Either screen used to look clear (inject again) or unreadable
-    (DELIVERY FAILED). Return a stable reason token, or None.
+
+def _grok_block_reason(lines: list[str]) -> Optional[str]:
+    """A rate or usage limit screen is not an idle composer and not a dead pane.
+
+    Match the screen by where it is drawn, not by a quote anywhere in the
+    capture. 1.0.44 draws a ``┃`` modal ``You hit your free usage limit``
+    (no Grok footer). 0.2.51 draws a status line that starts ``Retry failed:``
+    on the current screen, under the composer. A cursor transcript that
+    quotes those sentences, and a grok scrollback that still contains them
+    above an idle screen, are not that screen.
     """
-    blob = "\n".join(lines).lower()
-    if "you hit your free usage limit" in blob:
+    screen = lines[-_GROK_SCREEN_ROWS:]
+    modal = "\n".join(ln for ln in screen if "┃" in ln).lower()
+    if "you hit your free usage limit" in modal:
         return "grok-usage-limit"
-    if "rate limit" in blob:
-        return "grok-rate-limit"
-    if "usage limit" in blob:
-        return "grok-usage-limit"
-    if "retry failed" in blob:
+    if not _is_grok_pane(screen):
+        return None
+    for ln in screen:
+        stripped = ln.strip()
+        low = stripped.lower()
+        if not stripped.startswith("Retry failed:"):
+            continue
+        if "rate limit" in low:
+            return "grok-rate-limit"
         return "grok-retry-failed"
     return None
 
