@@ -13,8 +13,10 @@ from pathlib import Path
 
 import pytest
 
+from swarph_cli.scripts import wake_watchdog
 from swarph_cli.scripts.wake_watchdog import (
     enforce_writers,
+    mesh_send,
     systemd_owns_monitor,
     writer_verdict,
 )
@@ -125,11 +127,54 @@ def test_three_down_runs_alert_once_and_a_recovery_arms_the_next(tmp_path):
         )
 
     assert once(2) == ["fixture-cell"]
+    state["fixture-cell"]["writer_down"] = True
     assert once(2) == []
     assert once(2) == []
     assert once(0) == []
     assert state["fixture-cell"]["writer_down"] is False
     assert once(2) == ["fixture-cell"]
+
+
+def test_a_lost_send_is_not_marked_alerted(tmp_path):
+    root = tmp_path / "state"
+    inbox = _cell(root, "fixture-cell", fresh=True)
+    state = {}
+    first = enforce_writers(
+        {"fixture-cell": inbox}, status=lambda _n: 2, run=_absent, state=state)
+    assert first == ["fixture-cell"]
+    assert state["fixture-cell"].get("writer_down") is not True
+    again = enforce_writers(
+        {"fixture-cell": inbox}, status=lambda _n: 2, run=_absent, state=state)
+    assert again == ["fixture-cell"]
+
+
+def test_a_self_send_is_refused_and_logged(capsys):
+    rc = mesh_send("swarph", "lab-ovh", "lab-ovh", "fixture-cell: writer-down",
+                   "/tmp/service-wake-watchdog.token")
+    assert rc == 2
+    assert "refusing self-send to lab-ovh" in capsys.readouterr().err
+
+
+def test_the_token_argv_carries_the_path_and_not_the_value(tmp_path, monkeypatch):
+    secret = "sentinel-token-value-not-a-real-token"
+    path = tmp_path / "service-wake-watchdog.token"
+    path.write_text(secret + "\n", encoding="utf-8")
+    recorded = []
+
+    def fake_run(argv, **_kwargs):
+        recorded.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(wake_watchdog.subprocess, "run", fake_run)
+    rc = mesh_send("swarph", "lab-ovh", "wake-watchdog", "fixture-cell: writer-down",
+                   str(path))
+    assert rc == 0
+    argv = recorded[0]
+    assert argv[0:4] == ["swarph", "mesh", "send", "lab-ovh"]
+    assert "--as" in argv and "wake-watchdog" in argv
+    assert "--token-file" in argv
+    assert str(path) in argv
+    assert secret not in argv
 
 
 @pytest.mark.skipif(
@@ -160,12 +205,18 @@ def test_main_sends_one_writer_down_dm_and_does_not_start(tmp_path):
         "STUB_LOG": str(log),
     }
     env.pop("SWARPH_SELF", None)
-    cmd = [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog", "--as", "lab-ovh"]
+    token = tmp_path / "service-wake-watchdog.token"
+    secret = "sentinel-token-value-not-a-real-token"
+    token.write_text(secret + "\n", encoding="utf-8")
+    cmd = [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
+           "--as", "wake-watchdog", "--token-file", str(token)]
     for _ in range(3):
         proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
         assert proc.returncode == 0
     text = log.read_text(encoding="utf-8")
     assert text.count("mesh send lab-ovh") == 1
+    assert f"--token-file {token}" in text
+    assert secret not in text
+    assert "--as wake-watchdog" in text
     assert "monitor start" not in text
-    assert "writer-down" in text
     assert "gridiron" not in text

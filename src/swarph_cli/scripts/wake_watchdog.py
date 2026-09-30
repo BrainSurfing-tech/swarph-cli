@@ -30,12 +30,15 @@ def writer_verdict(*, reader_alive: bool, monitor_rc: int) -> str:
 
 
 def writer_transition(down: bool, rec: dict) -> bool:
-    """True only on the edge into writer-down. A healthy pass clears it."""
-    was = bool(rec.get("writer_down"))
-    rec["writer_down"] = bool(down)
+    """True only on the edge into writer-down.
+
+    A healthy pass clears the flag. A down pass does not set it: the caller
+    marks the alert only after the DM returns 0, so a lost send is retried.
+    """
     if not down:
+        rec["writer_down"] = False
         return False
-    return not was
+    return not bool(rec.get("writer_down"))
 
 
 def systemd_owns_monitor(cell: str, run=None) -> bool:
@@ -201,6 +204,20 @@ def _timer_lines() -> list[str]:
         ["systemctl", "--user", "list-timers", "--all", "--no-legend"]).splitlines()
 
 
+def mesh_send(swarph: str, to: str, sender: str, content: str,
+             token_file: str = "") -> int:
+    """Send one FYI. A self-send is refused and logged. The token is a path."""
+    if sender and to and sender == to:
+        print(f"wake_watchdog: refusing self-send to {to}", file=sys.stderr)
+        return 2
+    argv = [swarph, "mesh", "send", to, "--as", sender, "--kind", "fyi",
+            "--content", content]
+    if token_file:
+        argv.extend(["--token-file", token_file])
+    proc = subprocess.run(argv, check=False)
+    return proc.returncode
+
+
 def _swarph_bin() -> str:
     explicit = os.environ.get("SWARPH_BIN", "")
     if explicit:
@@ -220,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--escalate",
                    default=os.environ.get("WAKE_WATCHDOG_ESCALATE", "drop-on-meta-edge"),
                    help="awake peer who also gets the outage DM (default: drop-on-meta-edge)")
+    p.add_argument("--token-file", default="",
+                   help="bearer token file for the service identity; the path is passed through, never the value")
     args = p.parse_args(argv)
     root = Path(os.environ.get("SWARPH_STATE_ROOT", os.path.expanduser("~/swarph_state")))
     state_path = Path(os.environ.get(
@@ -249,14 +268,16 @@ def main(argv: list[str] | None = None) -> int:
 
     reported = enforce_writers(cells, status=_status, state=state)
     save_state(state_path, state)
+    token_file = (args.token_file or "").strip()
     for name in reported:
         print(f"writer-down {name}", flush=True)
         if args.dry_run or not sender:
             continue
-        subprocess.run(
-            [swarph, "mesh", "send", "lab-ovh", "--as", sender, "--kind", "fyi",
-             "--content", f"{name}: writer-down"],
-            check=False)
+        sent = mesh_send(
+            swarph, "lab-ovh", sender, f"{name}: writer-down", token_file)
+        if sent == 0:
+            state.setdefault(name, {})["writer_down"] = True
+            save_state(state_path, state)
     if args.dry_run:
         for name, inbox in cells.items():
             if not (_watching(inbox, cmdlines) or _timer_watched(name, timers)
@@ -271,22 +292,20 @@ def main(argv: list[str] | None = None) -> int:
     rc = 0
     for name in alert:
         print(f"outage {name}", flush=True)
-        dm = subprocess.run(
-            [swarph, "mesh", "send", name, "--as", sender, "--kind", "fyi",
-             "--content", "your DM wake is dead, re-arm"],
-            check=False)
+        dm_rc = mesh_send(
+            swarph, name, sender, "your DM wake is dead, re-arm", token_file)
+        dm_ok = dm_rc == 0
         card = subprocess.run(
             [swarph, "board", "cards", "say", "729", "--as", sender,
              "--to", name, "--content", f"{name}: DM wake is dead, re-arm"],
             check=False)
         esc_ok = True
         if escalate and escalate != name:
-            esc = subprocess.run(
-                [swarph, "mesh", "send", escalate, "--as", sender, "--kind", "fyi",
-                 "--content", f"{name}: DM wake is dead, re-arm"],
-                check=False)
-            esc_ok = esc.returncode == 0
-        if dm.returncode == 0 and card.returncode == 0 and esc_ok:
+            esc_rc = mesh_send(
+                swarph, escalate, sender, f"{name}: DM wake is dead, re-arm",
+                token_file)
+            esc_ok = esc_rc == 0
+        if dm_ok and card.returncode == 0 and esc_ok:
             state[name]["outage"] = True
             save_state(state_path, state)
         else:
