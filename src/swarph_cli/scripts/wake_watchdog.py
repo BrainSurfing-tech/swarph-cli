@@ -16,6 +16,108 @@ from typing import Iterable
 GAP_SECONDS = 60
 
 
+def writer_verdict(*, reader_alive: bool, monitor_rc: int) -> str:
+    """The heartbeat is the reader. The pull monitor is the writer of inbox.log.
+
+    A live reader with monitor status 2 is writer-down. A live monitor with a
+    fresh heartbeat is healthy. This does not start a process.
+    """
+    if not reader_alive:
+        return "reader-down"
+    if monitor_rc == 2:
+        return "writer-down"
+    return "healthy"
+
+
+def writer_transition(down: bool, rec: dict) -> bool:
+    """True only on the edge into writer-down.
+
+    A healthy pass clears the flag. A down pass does not set it: the caller
+    marks the alert only after the DM returns 0, so a lost send is retried.
+    """
+    if not down:
+        rec["writer_down"] = False
+        return False
+    return not bool(rec.get("writer_down"))
+
+
+def supervisor_from_cgroup(text: str | None) -> str:
+    """The unit leaf of a cgroup listing, the same rule monitor status uses.
+
+    A swarph-monitor service, including the non-template names
+    swarph-monitor.service and swarph-monitor-<cell>.service, is the
+    supervisor. user@<uid>.service is the session manager, not one.
+    Anything else is unsupervised.
+    """
+    if not text:
+        return "unsupervised"
+    for line in text.splitlines():
+        leaf = line.rsplit("/", 1)[-1].strip()
+        if not leaf.endswith(".service") or leaf.startswith("user@"):
+            continue
+        if leaf.startswith("swarph-monitor"):
+            return leaf
+    return "unsupervised"
+
+
+def writer_alert(cell: str, recorded: str | None, *, owned: bool = False) -> str:
+    """Name the supervisor recorded at start, or the enabled template unit."""
+    who = _alert_supervisor(recorded)
+    if who == "unsupervised" and owned:
+        who = f"swarph-monitor@{cell}.service"
+    if who == "unsupervised":
+        return f"{cell}: writer-down, unsupervised"
+    return f"{cell}: writer-down, supervised by {who}"
+
+
+def systemd_owns_monitor(cell: str, run=None) -> bool:
+    """True when either scope has an enabled swarph-monitor@<cell> unit.
+
+    That result is part of the writer-down alert when the cgroup names no
+    swarph-monitor leaf. This function does not start a process.
+    """
+    unit = f"swarph-monitor@{cell}.service"
+    runner = run if run is not None else subprocess.run
+    owned = False
+    for argv in (
+        ["systemctl", "is-enabled", unit],
+        ["systemctl", "--user", "is-enabled", unit],
+    ):
+        try:
+            proc = runner(argv, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", check=False)
+        except FileNotFoundError:
+            continue
+        if proc.returncode == 0:
+            owned = True
+    return owned
+
+
+def enforce_writers(cells: dict[str, str], *, status, run=None,
+                    state: dict | None = None) -> list[str]:
+    """Cells that just transitioned to writer-down.
+
+    Both systemd scopes are still checked. Nothing here starts a monitor.
+    Supervision stays with the unit. One name is returned per down edge.
+    """
+    alert = []
+    state = state if state is not None else {}
+    for name, inbox in cells.items():
+        if not _channel_alive(inbox):
+            continue
+        try:
+            rc = int(status(name))
+        except (TypeError, ValueError, OSError):
+            continue
+        rec_owned = systemd_owns_monitor(name, run=run)
+        verdict = writer_verdict(reader_alive=True, monitor_rc=rc)
+        rec = state.setdefault(name, {})
+        rec["systemd_owned"] = rec_owned
+        if writer_transition(verdict == "writer-down", rec):
+            alert.append(name)
+    return alert
+
+
 def _channel_alive(inbox: str, now: float | None = None) -> bool:
     """A channel server writes channel_heartbeat.json beside the inbox every 60 s.
 
@@ -130,6 +232,56 @@ def _timer_lines() -> list[str]:
         ["systemctl", "--user", "list-timers", "--all", "--no-legend"]).splitlines()
 
 
+def _alert_supervisor(recorded: str | None) -> str:
+    """A unit name recorded at start, or a cgroup blob from an older test.
+
+    A plain unit name is trusted: the monitor wrote it from its own cgroup
+    while the pid was still its own. Cgroup text is parsed the same way.
+    """
+    if not recorded or not str(recorded).strip():
+        return "unsupervised"
+    text = str(recorded).strip()
+    if "/" in text or "\n" in text:
+        return supervisor_from_cgroup(text)
+    if text.startswith("user@"):
+        return "unsupervised"
+    return text
+
+
+def recorded_supervisor(root: Path, cell: str) -> str | None:
+    """The supervisor field of monitor.pid.
+
+    The pid in that file may be dead, and a dead pid can be reused by an
+    unrelated process. The field was written at start and still answers.
+    This function does not open a process listing.
+    """
+    pidfile = root / cell / "mesh-sidecar" / "monitor.pid"
+    try:
+        rec = json.loads(pidfile.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict):
+        return None
+    who = rec.get("supervisor")
+    if isinstance(who, str) and who.strip():
+        return who.strip()
+    return None
+
+
+def mesh_send(swarph: str, to: str, sender: str, content: str,
+             token_file: str = "") -> int:
+    """Send one FYI. A self-send is refused and logged. The token is a path."""
+    if sender and to and sender == to:
+        print(f"wake_watchdog: refusing self-send to {to}", file=sys.stderr)
+        return 2
+    argv = [swarph, "mesh", "send", to, "--as", sender, "--kind", "fyi",
+            "--content", content]
+    if token_file:
+        argv.extend(["--token-file", token_file])
+    proc = subprocess.run(argv, check=False)
+    return proc.returncode
+
+
 def _swarph_bin() -> str:
     explicit = os.environ.get("SWARPH_BIN", "")
     if explicit:
@@ -149,6 +301,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--escalate",
                    default=os.environ.get("WAKE_WATCHDOG_ESCALATE", "drop-on-meta-edge"),
                    help="awake peer who also gets the outage DM (default: drop-on-meta-edge)")
+    p.add_argument("--token-file", default="",
+                   help="bearer token file for the service identity; the path is passed through, never the value")
     args = p.parse_args(argv)
     root = Path(os.environ.get("SWARPH_STATE_ROOT", os.path.expanduser("~/swarph_state")))
     state_path = Path(os.environ.get(
@@ -167,7 +321,30 @@ def main(argv: list[str] | None = None) -> int:
         print("wake_watchdog: escalation peer equals the sender; refusing to send",
               file=sys.stderr)
         return 2
+    swarph = _swarph_bin()
+
+    def _status(name: str, _sw: str = swarph) -> int:
+        proc = subprocess.run(
+            [_sw, "monitor", "status", "--as", name],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            check=False)
+        return proc.returncode
+
+    reported = enforce_writers(cells, status=_status, state=state)
     save_state(state_path, state)
+    token_file = (args.token_file or "").strip()
+    for name in reported:
+        print(f"writer-down {name}", flush=True)
+        if args.dry_run or not sender:
+            continue
+        owned = bool(state.get(name, {}).get("systemd_owned"))
+        sent = mesh_send(
+            swarph, escalate or "", sender,
+            writer_alert(name, recorded_supervisor(root, name), owned=owned),
+            "")
+        if sent == 0:
+            state.setdefault(name, {})["writer_down"] = True
+            save_state(state_path, state)
     if args.dry_run:
         for name, inbox in cells.items():
             if not (_watching(inbox, cmdlines) or _timer_watched(name, timers)
@@ -182,22 +359,21 @@ def main(argv: list[str] | None = None) -> int:
     rc = 0
     for name in alert:
         print(f"outage {name}", flush=True)
-        dm = subprocess.run(
-            [swarph, "mesh", "send", name, "--as", sender, "--kind", "fyi",
-             "--content", "your DM wake is dead, re-arm"],
-            check=False)
-        card = subprocess.run(
-            [swarph, "board", "cards", "say", "729", "--as", sender,
-             "--to", name, "--content", f"{name}: DM wake is dead, re-arm"],
-            check=False)
+        dm_rc = mesh_send(
+            swarph, name, sender, "your DM wake is dead, re-arm", token_file)
+        dm_ok = dm_rc == 0
+        card_argv = [swarph, "board", "cards", "say", "729", "--as", sender,
+                     "--to", name, "--content", f"{name}: DM wake is dead, re-arm"]
+        if token_file:
+            card_argv.extend(["--token-file", token_file])
+        card = subprocess.run(card_argv, check=False)
         esc_ok = True
         if escalate and escalate != name:
-            esc = subprocess.run(
-                [swarph, "mesh", "send", escalate, "--as", sender, "--kind", "fyi",
-                 "--content", f"{name}: DM wake is dead, re-arm"],
-                check=False)
-            esc_ok = esc.returncode == 0
-        if dm.returncode == 0 and card.returncode == 0 and esc_ok:
+            esc_rc = mesh_send(
+                swarph, escalate, sender, f"{name}: DM wake is dead, re-arm",
+                token_file)
+            esc_ok = esc_rc == 0
+        if dm_ok and card.returncode == 0 and esc_ok:
             state[name]["outage"] = True
             save_state(state_path, state)
         else:

@@ -78,6 +78,8 @@ def test_main_guard_is_required():
     unit = Path("deploy/wake-watchdog.service").read_text(encoding="utf-8")
     assert "PYTHONPATH" not in unit
     assert "--as lab-ovh" in unit
+    assert "--escalate drop-on-meta-edge" in unit
+    assert "token-file" not in unit
     assert "Environment=MESH_GATEWAY_URL=http://100.64.189.91:8788" in unit
 
 

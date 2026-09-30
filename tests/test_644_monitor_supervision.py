@@ -76,6 +76,38 @@ def test_pidfile_records_supervisor_when_given(tmp_path):
     assert rec["supervisor"] == "task:Swarph cursor-win Monitor"
 
 
+def test_start_records_the_cgroup_unit_and_keeps_it_after_the_process(monkeypatch, tmp_path):
+    """A scratch transient unit is written at start from this process's cgroup.
+
+    The pidfile is what a later watchdog reads. The key stays when the
+    process is gone; this test does not open another process's listing.
+    """
+    _env(monkeypatch)
+    monkeypatch.setattr(monitor, "_verify_self_is_registered",
+                        lambda *a, **k: (True, "registered"))
+    monkeypatch.setattr(mesh, "_monitor_iteration", lambda state: None)
+    monkeypatch.setattr(
+        monitor, "_read_cgroup",
+        lambda pid: "0::/user.slice/scratch-761.service\n")
+    assert _run(["start", "--once"], tmp_path) == 0
+    rec = json.loads((tmp_path / "monitor.pid").read_text(encoding="utf-8"))
+    assert rec["supervisor"] == "scratch-761.service"
+    assert rec["pid"] == os.getpid()
+
+
+def test_start_does_not_record_the_session_manager(monkeypatch, tmp_path):
+    _env(monkeypatch)
+    monkeypatch.setattr(monitor, "_verify_self_is_registered",
+                        lambda *a, **k: (True, "registered"))
+    monkeypatch.setattr(mesh, "_monitor_iteration", lambda state: None)
+    monkeypatch.setattr(
+        monitor, "_read_cgroup",
+        lambda pid: "0::/user.slice/user@1000.service\n")
+    assert _run(["start", "--once"], tmp_path) == 0
+    rec = json.loads((tmp_path / "monitor.pid").read_text(encoding="utf-8"))
+    assert "supervisor" not in rec
+
+
 def test_pidfile_omits_supervisor_key_when_not_given(tmp_path):
     """Absent means ORPHAN — a MISSING key, not an empty string, so a reader
     never has to guess whether '' is a claim."""

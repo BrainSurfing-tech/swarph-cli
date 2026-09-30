@@ -326,6 +326,34 @@ def _read_cgroup(pid: int) -> "str | None":
         return None
 
 
+def _service_leaf(text: "str | None") -> "str | None":
+    """The .service leaf of a cgroup, or None.
+
+    user@<uid>.service is the session manager, not a supervisor. The leaf
+    keeps its .service suffix so a later reader can name the unit after
+    this process is gone.
+    """
+    if not text:
+        return None
+    for line in text.splitlines():
+        leaf = line.rsplit("/", 1)[-1].strip()
+        if leaf.endswith(".service") and not leaf.startswith("user@"):
+            return leaf
+    return None
+
+
+def _supervisor_for_pidfile(explicit: "str | None") -> "str | None":
+    """What start writes into monitor.pid.
+
+    An explicit claim wins. Otherwise read this process's own cgroup now,
+    while the pid is still ours. A later status must not open /proc/<pid>
+    for a dead monitor: that pid may have been reused.
+    """
+    if explicit:
+        return explicit
+    return _service_leaf(_read_cgroup(os.getpid()))
+
+
 def _derive_systemd_unit(pid: "int | None") -> "str | None":
     """The supervisor Linux already knows (#344 review): Windows has no
     pid→task map so the pidfile CLAIM is the whole answer there, but on
@@ -589,10 +617,11 @@ def _cmd_start(args: argparse.Namespace) -> int:
         )
         return 0
 
+    recorded = _supervisor_for_pidfile(supervisor)
     if args.once:
         mesh.write_pidfile(
             pidfile, self_name=self_name, sinks=sinks, poll_s=args.poll_s,
-            supervisor=supervisor,
+            supervisor=recorded,
         )
         mesh._monitor_iteration(state)
         return 0
@@ -602,10 +631,10 @@ def _cmd_start(args: argparse.Namespace) -> int:
             print("swarph monitor: no fork() on this platform — running in the "
                   "foreground", file=sys.stderr)
         return _run_pinned(state, pidfile, self_name, sinks, args.poll_s,
-                           supervisor=supervisor)
+                           supervisor=recorded)
 
     return _start_detached(state, pidfile, self_name, sinks, args.poll_s,
-                           supervisor=supervisor)
+                           supervisor=recorded)
 
 
 def _run_pinned(state, pidfile: Path, self_name: str, sinks: list, poll_s: int,
