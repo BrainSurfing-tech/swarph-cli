@@ -77,3 +77,14 @@ def manifest_path(role: str) -> Path:
     validate_role(role)
     base = captures_dir()
     return _assert_contained(base / f"{role}.json", base)
+
+
+def card_preimage_path() -> Path:
+    """Append-only log of card text REPLACED by ``board cards edit`` on this box.
+
+    Not role-scoped (no ``validate_role``): the writer is the CLI itself, not a
+    capture role, and the file is one per machine on purpose — it answers "what
+    did an edit issued FROM HERE destroy", which is the only question a local
+    file can honestly answer. See ``_write_card_preimage`` in commands/board.py.
+    """
+    return _swarph_state() / "board-card-preimages.jsonl"
