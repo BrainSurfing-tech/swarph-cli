@@ -1,0 +1,24 @@
+
+  sandbox:workspace /tmp/grok-715-sacrifice           20K / 256K │ [Dashboard]
+
+
+     ❯ Reply with exactly PONG. Do not use tools.                   10:17 PM   █
+                                                                               █
+                                                                               █
+     ◆ Thought for 0.1s                                                        █
+                                                                               █
+     PONG                                                           10:17 PM   █
+                                                                               █
+     Worked for 2.0s                                                           █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+                                                                               █
+
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                        │
+  ╰─────────────────────────────────── Grok 4.7 Fast (low) · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+x:shortcuts
+
