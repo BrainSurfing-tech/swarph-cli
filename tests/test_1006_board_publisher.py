@@ -17,15 +17,25 @@ def _load():
     return module
 
 
-def _row(title, accept, state="open", cell="lab-ovh", obligation_id=1, card_id=1006):
+def _row(title, rest="do it", state="open", cell="lab-ovh", obligation_id=1, card_id=1006, *, tagged=True):
+    accept = f"[commander] {title} | {rest}" if tagged else rest
     return {
-        "title": title,
+        "id": obligation_id,
+        "holder": cell,
+        "card_id": card_id,
         "accept": accept,
         "state": state,
-        "cell": cell,
-        "obligation_id": obligation_id,
-        "card_id": card_id,
     }
+
+
+# Copied verbatim from GET /board/obligations on 2026-09-30. No title, no cell.
+REAL_OBLIGATION = {
+    "id": 1,
+    "holder": "droplet",
+    "card_id": 307,
+    "accept": None,
+    "state": "closed:unknown",
+}
 
 
 def _status(name, running=True, supervisor="systemd:swarph-monitor@lab-ovh.service"):
@@ -37,10 +47,10 @@ def _status(name, running=True, supervisor="systemd:swarph-monitor@lab-ovh.servi
 def test_commander_tag_and_closed_or_answered_rows_drop():
     pub = _load()
     rows = [
-        _row("Ship the timer [commander]", "do it"),
-        _row("Ordinary build", "no tag here"),
-        _row("Closed call [commander]", "still tagged", state="closed:pass", obligation_id=2),
-        _row("Answered call", "keep [commander]", obligation_id=3),
+        _row("Ship the timer", "do it"),
+        _row("Ordinary build", "a prose mention of [commander] is not a tag", tagged=False),
+        _row("Closed call", "still tagged", state="closed:pass", obligation_id=2),
+        _row("Answered call", "keep it", obligation_id=3),
     ]
     messages = [("lab-ovh", "Re: Answered call\n"), ("commander", "Re: Answered call\n")]
     sent = []
@@ -48,7 +58,7 @@ def test_commander_tag_and_closed_or_answered_rows_drop():
         rows=rows,
         messages=messages,
         statuses=[_status("lab-ovh")],
-        tmux_sessions={"lab-ovh"},
+        tmux_sessions={"lab"},
         previous=None,
         commander="commander",
         sender="board-publisher",
@@ -59,7 +69,7 @@ def test_commander_tag_and_closed_or_answered_rows_drop():
     assert changed is True
     data = json.loads(body.split("\n", 1)[1])
     titles = [q["title"] for sess in data["sessions"] for q in sess["questions"]]
-    assert titles == ["Ship the timer [commander]"]
+    assert titles == ["Ship the timer"]
     assert "Ordinary build" not in body
     assert "Closed call" not in body
     assert "Answered call" not in body
@@ -72,8 +82,13 @@ def test_roster_is_monitor_status_and_tmux_without_a_listing_tool():
     argv = pub.read_argv(cells=["lab-ovh", "science-claude"], read_token_file="/etc/swarph/read.token")
     flat = [" ".join(item) for item in argv]
     assert any(item.startswith("swarph monitor status --as lab-ovh") for item in flat)
+    assert any(item.startswith("tmux has-session -t lab ") or item == "tmux has-session -t lab" for item in flat)
     assert any(item.startswith("tmux has-session -t science-claude") for item in flat)
+    assert any("--as lab-ovh" in item and "--status open" in item for item in flat)
+    assert any(item.startswith("swarph mesh inbox --as lab-ovh") for item in flat)
     assert all("ListAgents" not in item for item in flat)
+    assert pub._supervised("swarph-monitor.service", "lab-ovh")
+    assert pub._supervised("swarph-monitor@lab-ovh.service", "lab-ovh")
     info = pub.parse_monitor_status(_status("lab-ovh", running=False, supervisor=""))
     assert info["running"] is False
     roster = pub.attach_tmux([info], set())
@@ -82,12 +97,12 @@ def test_roster_is_monitor_status_and_tmux_without_a_listing_tool():
 
 def test_unchanged_board_sends_nothing_across_three_runs():
     pub = _load()
-    rows = [_row("Ship the timer [commander]", "do it")]
+    rows = [_row("Ship the timer", "do it")]
     kwargs = dict(
         rows=rows,
         messages=[],
         statuses=[_status("lab-ovh")],
-        tmux_sessions={"lab-ovh"},
+        tmux_sessions={"lab"},
         commander="commander",
         sender="board-publisher",
         recipient="commander",
@@ -164,7 +179,9 @@ def test_stub_runner_never_dms_and_the_unit_is_not_installed():
             return _Proc(_status(argv[-1]))
         if argv[:2] == ["tmux", "has-session"]:
             return _Proc("", 0)
-        return _Proc(json.dumps([_row("Ship the timer [commander]", "do it")]))
+        if argv[:3] == ["swarph", "mesh", "inbox"]:
+            return _Proc(json.dumps({"messages": []}))
+        return _Proc(json.dumps([_row("Ship the timer", "do it")]))
 
     sent = []
     pub.live_once(
@@ -180,11 +197,12 @@ def test_stub_runner_never_dms_and_the_unit_is_not_installed():
         send=lambda body, **_k: sent.append(body),
     )
     assert sent
-    assert all(argv[0] != "swarph" or argv[1] != "mesh" for argv in calls)
+    assert all(argv[:3] != ["swarph", "mesh", "send"] for argv in calls)
     assert "ListAgents" not in json.dumps(calls)
     service = (DEPLOY / "swarph-board-publisher.service").read_text(encoding="utf-8")
     timer = (DEPLOY / "swarph-board-publisher.timer").read_text(encoding="utf-8")
     assert "--token-file ${SWARPH_TOKEN_FILE}" in service
+    assert "~/.local/bin" in service
     assert "OnUnitActiveSec=5min" in timer
     assert "super-secret" not in service
     try:
@@ -196,3 +214,102 @@ def test_stub_runner_never_dms_and_the_unit_is_not_installed():
         proc = None
     if proc is not None:
         assert proc.returncode != 0
+
+
+def test_real_obligation_shape_and_a_prose_mention_does_not_count():
+    pub = _load()
+    prose = {
+        "id": 839,
+        "holder": "cursor-lin",
+        "card_id": 1006,
+        "state": "open",
+        "accept": "PASS=a prose mention of [commander] inside the sentence does not count",
+    }
+    tagged = {
+        "id": 1,
+        "holder": "droplet",
+        "card_id": 307,
+        "accept": "[commander] Retire the guard | PASS=the droplet removes it",
+        "state": "open",
+    }
+    kept = pub.commander_rows([REAL_OBLIGATION, prose, tagged])
+    assert [row["title"] for row in kept] == ["Retire the guard"]
+    assert kept[0]["cell"] == "droplet"
+    assert kept[0]["obligation_id"] == 1
+    assert "title" not in REAL_OBLIGATION
+    assert "cell" not in REAL_OBLIGATION
+
+
+def test_live_entry_drops_a_commander_reply_and_a_failed_read_sends_nothing(tmp_path, monkeypatch):
+    pub = _load()
+    calls = []
+    inbox = {"messages": []}
+    rows = [
+        _row("Route the queue", "send it", cell="science-claude", obligation_id=746),
+        _row("Already closed", "done", state="closed:pass", obligation_id=2),
+    ]
+
+    class _Proc:
+        def __init__(self, stdout="", returncode=0):
+            self.stdout = stdout
+            self.returncode = returncode
+
+    def runner(argv):
+        calls.append(list(argv))
+        if argv[:3] == ["swarph", "mesh", "send"]:
+            return _Proc("sent", 0)
+        if argv[:3] == ["swarph", "monitor", "status"]:
+            return _Proc(_status(argv[-1], supervisor="swarph-monitor.service"))
+        if argv[:2] == ["tmux", "has-session"]:
+            return _Proc("", 0)
+        if argv[:3] == ["swarph", "mesh", "inbox"]:
+            return _Proc(json.dumps(inbox))
+        if argv[:4] == ["swarph", "board", "obligations", "list"]:
+            assert "--as" in argv and argv[argv.index("--as") + 1] == "lab-ovh"
+            assert "--status" in argv and argv[argv.index("--status") + 1] == "open"
+            return _Proc(json.dumps(rows))
+        return _Proc("", 1)
+
+    monkeypatch.setattr(pub, "run_command", runner)
+    state = tmp_path / "board.last"
+    base = [
+        "--live",
+        "--token-file", str(tmp_path / "service.token"),
+        "--read-token-file", str(tmp_path / "read.token"),
+        "--as", "board-publisher",
+        "--to", "commander",
+        "--cells", "lab-ovh",
+        "--state-file", str(state),
+    ]
+    assert pub.main(base) == 0
+    first = (tmp_path / "board.last.body").read_text(encoding="utf-8")
+    assert "Route the queue" in first
+    assert "Already closed" not in first
+    inbox["messages"] = [{
+        "from_node": "commander",
+        "to_node": "lab-ovh",
+        "cc": "lab-ovh",
+        "content": "Re: Route the queue\n",
+    }]
+    state.write_text(first, encoding="utf-8")
+    assert pub.main(base) == 0
+    second = (tmp_path / "board.last.body").read_text(encoding="utf-8")
+    assert "Route the queue" not in second
+
+    calls.clear()
+
+    def failing(argv):
+        calls.append(list(argv))
+        if argv[:4] == ["swarph", "board", "obligations", "list"]:
+            return _Proc("nope", 500)
+        if argv[:3] == ["swarph", "mesh", "inbox"]:
+            return _Proc(json.dumps({"messages": []}))
+        if argv[:3] == ["swarph", "monitor", "status"]:
+            return _Proc(_status("lab-ovh"))
+        if argv[:2] == ["tmux", "has-session"]:
+            return _Proc("", 0)
+        return _Proc("", 0)
+
+    monkeypatch.setattr(pub, "run_command", failing)
+    assert pub.main(base) == 1
+    assert all(argv[:3] != ["swarph", "mesh", "send"] for argv in calls)

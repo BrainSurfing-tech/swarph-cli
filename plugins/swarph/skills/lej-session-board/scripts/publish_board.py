@@ -24,6 +24,15 @@ class SelfSend(RuntimeError):
     """The service identity would DM itself."""
 
 
+class ReadFailed(RuntimeError):
+    """A gateway read failed. The timer must send nothing."""
+
+
+# tmux session names are not always the cell name.
+TMUX_FOR_CELL = {"lab-ovh": "lab"}
+READ_AS = "lab-ovh"
+
+
 def _is_path(value: str) -> bool:
     text = str(value or "")
     return "/" in text or "\\" in text
@@ -52,17 +61,55 @@ def parse_monitor_status(text: str) -> dict:
     return {"name": name, "running": running, "supervisor": supervisor}
 
 
+def tmux_session(cell: str) -> str:
+    return TMUX_FOR_CELL.get(cell, cell)
+
+
+def _supervised(supervisor: str, cell: str) -> bool:
+    text = supervisor or ""
+    if "swarph-monitor.service" in text and "swarph-monitor@" not in text:
+        return True
+    return f"swarph-monitor@{cell}.service" in text or "swarph-monitor.service" in text
+
+
+def commander_title(accept: str) -> str | None:
+    """Title only when the accept starts with the tag. A later mention is prose."""
+    text = accept or ""
+    if not text.startswith(_TAG):
+        return None
+    rest = text[len(_TAG):].lstrip()
+    cut = len(rest)
+    for marker in ("|", "PASS="):
+        found = rest.find(marker)
+        if found >= 0:
+            cut = min(cut, found)
+    return rest[:cut].strip()
+
+
 def commander_rows(rows: list[dict]) -> list[dict]:
-    """Open rows whose title or accept carries the [commander] tag."""
+    """Open GET /board/obligations rows whose accept starts with [commander].
+
+    The real row has id, holder, card_id, accept, and state. It has no title,
+    no cell, and no obligation_id. The holder is the cell that gets the answer.
+    """
     kept = []
     for row in rows:
         state = str(row.get("state") or row.get("status") or "open")
         if state.startswith("closed"):
             continue
-        title = row.get("title") or ""
-        accept = row.get("accept") or ""
-        if _TAG in title or _TAG in accept:
-            kept.append(row)
+        title = commander_title(row.get("accept") or "")
+        if title is None:
+            continue
+        holder = row.get("holder") or row.get("cell") or ""
+        kept.append({
+            "title": title,
+            "accept": row.get("accept") or "",
+            "cell": holder,
+            "holder": holder,
+            "card_id": row.get("card_id"),
+            "obligation_id": row.get("id", row.get("obligation_id")),
+            "state": state,
+        })
     return kept
 
 
@@ -78,7 +125,7 @@ def build_roster(roster: list[dict], rows: list[dict], *, project: str = "~/swar
         if not name:
             continue
         qs = build_board._questions(by_cell.get(name, []))
-        unit = str(item.get("supervisor") or "").startswith("systemd:")
+        unit = _supervised(str(item.get("supervisor") or ""), name)
         up = bool(item.get("running") and item.get("tmux") and unit)
         if up and qs:
             state, tone = "Waiting on the commander.", "needs"
@@ -131,7 +178,7 @@ def attach_tmux(roster: list[dict], tmux_sessions: set[str]) -> list[dict]:
     out = []
     for item in roster:
         row = dict(item)
-        row["tmux"] = row.get("name") in tmux_sessions
+        row["tmux"] = tmux_session(row.get("name") or "") in tmux_sessions
         out.append(row)
     return out
 
@@ -164,7 +211,7 @@ def run_once(
     recipient: str,
     token_file: str,
     send,
-) -> bool:
+) -> tuple[bool, str]:
     """Build one board and send only when it changed. send sees the path, not the token."""
     if sender == recipient:
         raise SelfSend(f"{sender} would send the board to itself")
@@ -185,20 +232,59 @@ def run_once(
     return build_board.publish_if_changed(board, previous, _send), build_board.envelope(board)
 
 
-def read_argv(*, cells: list[str], read_token_file: str) -> list[list[str]]:
-    """Reads only. Monitor status, tmux, and the obligation list."""
+def read_argv(*, cells: list[str], read_token_file: str, read_as: str = READ_AS) -> list[list[str]]:
+    """Reads only. Monitor status, tmux, open obligations, and the commander's DMs."""
     path = str(read_token_file or "")
     if not _is_path(path):
         raise ValueError("read token-file must be a path, not a token value")
     argv = []
     for cell in cells:
         argv.append(["swarph", "monitor", "status", "--as", cell])
-        argv.append(["tmux", "has-session", "-t", cell])
+        argv.append(["tmux", "has-session", "-t", tmux_session(cell)])
     argv.append([
         "swarph", "board", "obligations", "list",
-        "--token-file", path, "--json",
+        "--as", read_as,
+        "--token-file", path,
+        "--status", "open",
+        "--json",
+    ])
+    argv.append([
+        "swarph", "mesh", "inbox",
+        "--as", read_as,
+        "--token-file", path,
+        "--peek",
+        "--json",
+        "--limit", "50",
     ])
     return argv
+
+
+def _require_json(proc, label: str):
+    if getattr(proc, "returncode", 0):
+        raise ReadFailed(f"{label} exited {proc.returncode}")
+    text = (getattr(proc, "stdout", None) or "").strip()
+    if not text:
+        raise ReadFailed(f"{label} returned empty stdout")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ReadFailed(f"{label} returned invalid JSON") from exc
+
+
+def commander_replies(payload, *, commander: str, copy_to: str = READ_AS) -> list[tuple[str, str]]:
+    """DMs from the commander that were addressed or copied to lab-ovh."""
+    messages = payload if isinstance(payload, list) else (payload or {}).get("messages") or []
+    found = []
+    for message in messages:
+        sender = message.get("from_node") or message.get("from") or ""
+        target = message.get("to_node") or message.get("to") or ""
+        copied = str(message.get("cc") or "")
+        if sender != commander:
+            continue
+        if target != copy_to and copy_to not in copied:
+            continue
+        found.append((sender, message.get("content") or message.get("body") or ""))
+    return found
 
 
 def live_once(
@@ -218,19 +304,23 @@ def live_once(
     statuses = []
     tmux_sessions = set()
     rows: list[dict] = []
+    fetched: list[tuple[str, str]] | None = None
     for argv in read_argv(cells=cells, read_token_file=read_token_file):
         if argv[:3] == ["swarph", "monitor", "status"]:
             statuses.append(runner(argv).stdout or "")
         elif argv[:2] == ["tmux", "has-session"]:
             if runner(argv).returncode == 0:
                 tmux_sessions.add(argv[-1])
+        elif argv[:3] == ["swarph", "mesh", "inbox"]:
+            fetched = commander_replies(_require_json(runner(argv), "inbox"), commander=commander)
         else:
-            listed = runner(argv)
-            payload = json.loads(listed.stdout or "[]")
+            payload = _require_json(runner(argv), "obligations list")
             rows = payload if isinstance(payload, list) else payload.get("obligations") or []
+    if fetched is None:
+        raise ReadFailed("inbox was not read")
     changed, _body = run_once(
         rows=rows,
-        messages=messages,
+        messages=fetched,
         statuses=statuses,
         tmux_sessions=tmux_sessions,
         previous=previous,
@@ -298,8 +388,13 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def run_command(argv):
+    """The timer's process runner. Tests replace this; they do not DM a cell."""
+    return subprocess.run(argv, capture_output=True, text=True, check=False)
+
+
 def _main_live(args) -> int:
-    """Timer entry. Tests do not call this. They pass a stub runner to live_once."""
+    """Timer entry. Reads obligations and the commander's DMs, then sends only on change."""
     cells = [cell for cell in args.cells.split(",") if cell]
     if not args.read_token_file:
         print("live publish needs --read-token-file (a path)", file=sys.stderr)
@@ -309,33 +404,34 @@ def _main_live(args) -> int:
     if state and state.is_file():
         previous = state.read_text(encoding="utf-8")
 
-    def runner(argv):
-        return subprocess.run(argv, capture_output=True, text=True, check=False)
-
     def send(body, *, token_file, sender, recipient):
-        content = Path(args.state_file + ".body") if args.state_file else None
+        content = Path(str(state) + ".body") if state is not None else None
         if content is None:
             print("live publish needs --state-file", file=sys.stderr)
             raise SystemExit(2)
         content.write_text(body, encoding="utf-8")
-        proc = runner(send_argv(
+        proc = run_command(send_argv(
             token_file=token_file, sender=sender, recipient=recipient, content_file=str(content),
         ))
         if proc.returncode != 0:
             raise SystemExit(proc.returncode)
 
-    changed = live_once(
-        cells=cells,
-        read_token_file=args.read_token_file,
-        sender=args.sender,
-        recipient=args.recipient,
-        token_file=args.token_file,
-        commander=args.commander,
-        previous=previous,
-        messages=[],
-        runner=runner,
-        send=send,
-    )
+    try:
+        changed = live_once(
+            cells=cells,
+            read_token_file=args.read_token_file,
+            sender=args.sender,
+            recipient=args.recipient,
+            token_file=args.token_file,
+            commander=args.commander,
+            previous=previous,
+            messages=[],
+            runner=run_command,
+            send=send,
+        )
+    except ReadFailed as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     if state is not None and changed:
         state.write_text(Path(str(state) + ".body").read_text(encoding="utf-8"), encoding="utf-8")
     print(f"sent={int(changed)} changed={str(changed).lower()}")

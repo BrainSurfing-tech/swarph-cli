@@ -51,7 +51,7 @@ A relayed yes approves building, not deploying.
 
 A user timer runs `scripts/publish_board.py` every 5 minutes. The unit files in `deploy/` are templates. Do not install them from a test or from CI.
 
-The timer does not call `ListAgents`. The roster is `swarph monitor status` for each cell plus `tmux has-session`. Questions are open obligation rows whose title or accept contains `[commander]`. A row that is closed, or answered by the commander's `Re: <title>` DM, is gone on the next run. `publish_if_changed` sends nothing when the board is unchanged.
+The timer does not call `ListAgents`. The roster is `swarph monitor status` for each cell plus `tmux has-session`. The tmux name for `lab-ovh` is `lab`. Questions are open obligation rows whose accept starts with `[commander]`. The holder is the cell that receives the answer. The timer reads those rows and the commander's `Re:` DMs with `--as lab-ovh`. A failed read sends nothing. A row that is closed, or answered by the commander's `Re: <title>` DM, is gone on the next run. `publish_if_changed` sends nothing when the board is unchanged.
 
 The send uses `--token-file` with a path. The token value is not an argument. The service identity must not be the recipient: a self-send is refused.
 
