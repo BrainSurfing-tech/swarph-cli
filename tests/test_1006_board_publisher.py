@@ -115,6 +115,13 @@ def test_token_file_is_a_path_and_a_self_send_is_refused(tmp_path):
         content_file=str(tmp_path / "body.txt"),
     )
     assert str(path) in argv
+    windows = pub.send_argv(
+        token_file=r"C:\swarph\service-board-publisher.token",
+        sender="board-publisher",
+        recipient="commander",
+        content_file=r"C:\swarph\body.txt",
+    )
+    assert r"C:\swarph\service-board-publisher.token" in windows
     assert secret not in argv
     assert secret not in " ".join(argv)
     try:

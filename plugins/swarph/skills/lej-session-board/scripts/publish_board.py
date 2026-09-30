@@ -24,6 +24,11 @@ class SelfSend(RuntimeError):
     """The service identity would DM itself."""
 
 
+def _is_path(value: str) -> bool:
+    text = str(value or "")
+    return "/" in text or "\\" in text
+
+
 _TAG = "[commander]"
 
 
@@ -136,7 +141,7 @@ def send_argv(*, token_file: str, sender: str, recipient: str, content_file: str
     if sender == recipient:
         raise SelfSend(f"{sender} would send the board to itself")
     path = str(token_file or "")
-    if "/" not in path:
+    if not _is_path(path):
         raise ValueError("token-file must be a path, not a token value")
     return [
         "swarph", "mesh", "send", recipient,
@@ -164,7 +169,7 @@ def run_once(
     if sender == recipient:
         raise SelfSend(f"{sender} would send the board to itself")
     path = str(token_file or "")
-    if "/" not in path:
+    if not _is_path(path):
         raise ValueError("token-file must be a path, not a token value")
     roster = attach_tmux(
         [parse_monitor_status(text) for text in statuses],
@@ -183,7 +188,7 @@ def run_once(
 def read_argv(*, cells: list[str], read_token_file: str) -> list[list[str]]:
     """Reads only. Monitor status, tmux, and the obligation list."""
     path = str(read_token_file or "")
-    if "/" not in path:
+    if not _is_path(path):
         raise ValueError("read token-file must be a path, not a token value")
     argv = []
     for cell in cells:
