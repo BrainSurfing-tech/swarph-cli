@@ -77,7 +77,8 @@ def test_main_guard_is_required():
     assert "cursor-lin" not in src
     unit = Path("deploy/wake-watchdog.service").read_text(encoding="utf-8")
     assert "PYTHONPATH" not in unit
-    assert "--as lab-ovh" in unit
+    assert "--as wake-watchdog" in unit
+    assert "--token-file %h/.config/swarph/service-wake-watchdog.token" in unit
     assert "--escalate drop-on-meta-edge" in unit
     assert "Environment=MESH_GATEWAY_URL=http://100.64.189.91:8788" in unit
 

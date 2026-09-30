@@ -60,20 +60,21 @@ def supervisor_from_cgroup(text: str | None) -> str:
     return "unsupervised"
 
 
-def writer_alert(cell: str, cgroup: str | None) -> str:
+def writer_alert(cell: str, cgroup: str | None, *, owned: bool = False) -> str:
+    """Name the cgroup unit, or the enabled template unit, or unsupervised."""
     who = supervisor_from_cgroup(cgroup)
+    if who == "unsupervised" and owned:
+        who = f"swarph-monitor@{cell}.service"
     if who == "unsupervised":
         return f"{cell}: writer-down, unsupervised"
     return f"{cell}: writer-down, supervised by {who}"
 
 
 def systemd_owns_monitor(cell: str, run=None) -> bool:
-    """True when an enabled swarph-monitor@<cell> unit supervises the writer.
+    """True when either scope has an enabled swarph-monitor@<cell> unit.
 
-    Lab's monitors are system units. `systemctl --user is-enabled` returns
-    not-found (rc 4) for those, while `systemctl is-enabled` returns enabled.
-    Defer when either scope is enabled. Hand-start only when both are
-    not-enabled or not-found.
+    That result is part of the writer-down alert when the cgroup names no
+    swarph-monitor leaf. This function does not start a process.
     """
     unit = f"swarph-monitor@{cell}.service"
     runner = run if run is not None else subprocess.run
@@ -108,9 +109,10 @@ def enforce_writers(cells: dict[str, str], *, status, run=None,
             rc = int(status(name))
         except (TypeError, ValueError, OSError):
             continue
-        systemd_owns_monitor(name, run=run)
+        rec_owned = systemd_owns_monitor(name, run=run)
         verdict = writer_verdict(reader_alive=True, monitor_rc=rc)
         rec = state.setdefault(name, {})
+        rec["systemd_owned"] = rec_owned
         if writer_transition(verdict == "writer-down", rec):
             alert.append(name)
     return alert
@@ -309,9 +311,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"writer-down {name}", flush=True)
         if args.dry_run or not sender:
             continue
-        target = escalate or ""
+        owned = bool(state.get(name, {}).get("systemd_owned"))
         sent = mesh_send(
-            swarph, target, sender, writer_alert(name, _cgroup_for(root, name)),
+            swarph, "lab-ovh", sender,
+            writer_alert(name, _cgroup_for(root, name), owned=owned),
             token_file)
         if sent == 0:
             state.setdefault(name, {})["writer_down"] = True
@@ -333,10 +336,11 @@ def main(argv: list[str] | None = None) -> int:
         dm_rc = mesh_send(
             swarph, name, sender, "your DM wake is dead, re-arm", token_file)
         dm_ok = dm_rc == 0
-        card = subprocess.run(
-            [swarph, "board", "cards", "say", "729", "--as", sender,
-             "--to", name, "--content", f"{name}: DM wake is dead, re-arm"],
-            check=False)
+        card_argv = [swarph, "board", "cards", "say", "729", "--as", sender,
+                     "--to", name, "--content", f"{name}: DM wake is dead, re-arm"]
+        if token_file:
+            card_argv.extend(["--token-file", token_file])
+        card = subprocess.run(card_argv, check=False)
         esc_ok = True
         if escalate and escalate != name:
             esc_rc = mesh_send(
