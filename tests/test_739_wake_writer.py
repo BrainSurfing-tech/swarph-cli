@@ -172,31 +172,42 @@ def test_fake_cgroup_files_read_the_non_template_units_as_supervised(tmp_path):
     assert writer_alert("fixture-cell", None).endswith("unsupervised")
 
 
-def test_the_alert_names_the_supervisor_recorded_in_the_pidfile(tmp_path):
-    """Fails when the recorded-supervisor read is removed.
+def test_real_pidfile_json_names_the_recorded_supervisor_not_the_live_unit(tmp_path):
+    """The fixture is what commands/mesh.py writes, not a bare integer.
 
-    The pid in the file is 1. Opening that process's control group would
-    name init, not these units. The file is what survives the monitor.
+    The pid in that file is this live process, whose own unit is a different
+    name. The alert must name the recorded supervisor. Removing that read,
+    or naming the live process's unit instead, fails this test.
     """
+    from swarph_cli.commands.mesh import write_pidfile
+
     root = tmp_path / "state"
     units = {
         "lab-ovh": "swarph-monitor.service",
         "gemini-researcher": "swarph-monitor-gemini-researcher.service",
         "fixture-cell": "scratch-761.service",
     }
+    required = {"cmdline", "emits_heartbeat", "pid", "poll_s", "self",
+                "sinks", "started_at", "supervisor"}
     for cell, unit in units.items():
-        side = root / cell / "mesh-sidecar"
-        side.mkdir(parents=True)
-        (side / "monitor.pid").write_text(json.dumps({
-            "pid": 1,
-            "supervisor": unit,
-        }), encoding="utf-8")
+        path = root / cell / "mesh-sidecar" / "monitor.pid"
+        write_pidfile(path, self_name=cell, sinks=[], poll_s=30, supervisor=unit)
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        assert required <= set(rec)
+        assert isinstance(rec["pid"], int) and rec["pid"] > 0
+        assert rec["supervisor"] == unit
         assert recorded_supervisor(root, cell) == unit
-        assert f"supervised by {unit}" in writer_alert(cell, recorded_supervisor(root, cell))
+        alert = writer_alert(cell, recorded_supervisor(root, cell))
+        assert f"supervised by {unit}" in alert
+        if sys.platform.startswith("linux"):
+            live = Path(f"/proc/{rec['pid']}/cgroup").read_text(encoding="utf-8")
+            leaf = live.splitlines()[-1].rsplit("/", 1)[-1].strip()
+            assert leaf != unit
+            assert leaf not in alert
     assert "/proc/" not in SRC.read_text(encoding="utf-8")
-    bare = root / "nobody" / "mesh-sidecar"
-    bare.mkdir(parents=True)
-    (bare / "monitor.pid").write_text(json.dumps({"pid": 1}), encoding="utf-8")
+    bare = root / "nobody" / "mesh-sidecar" / "monitor.pid"
+    bare.parent.mkdir(parents=True)
+    bare.write_text("1\n", encoding="utf-8")
     assert recorded_supervisor(root, "nobody") is None
     assert writer_alert("nobody", recorded_supervisor(root, "nobody")).endswith("unsupervised")
 
