@@ -215,7 +215,7 @@ def test_a_failed_send_is_retried_on_the_next_run(tmp_path):
     }
     env.pop("SWARPH_SELF", None)
     cmd = [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
-           "--as", "wake-watchdog", "--escalate", "drop-on-meta-edge"]
+           "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
     first = subprocess.run(cmd, env=env, capture_output=True, text=True)
     assert first.returncode == 0
     assert json.loads(state_path.read_text())["fixture-cell"].get("writer_down") is not True
@@ -223,7 +223,8 @@ def test_a_failed_send_is_retried_on_the_next_run(tmp_path):
     assert second.returncode == 0
     assert json.loads(state_path.read_text())["fixture-cell"]["writer_down"] is True
     text = log.read_text(encoding="utf-8")
-    assert text.count("mesh send lab-ovh") == 2
+    assert text.count("mesh send drop-on-meta-edge") == 2
+    assert "mesh send lab-ovh" not in text
 
 
 @pytest.mark.skipif(
@@ -262,7 +263,7 @@ def test_main_does_not_mark_before_send_or_ignore_a_failed_rc(tmp_path):
     env.pop("SWARPH_SELF", None)
     proc = subprocess.run(
         [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
-         "--as", "wake-watchdog", "--escalate", "drop-on-meta-edge"],
+         "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"],
         env=env, capture_output=True, text=True)
     assert proc.returncode == 0
     text = log.read_text(encoding="utf-8")
@@ -375,19 +376,13 @@ def test_main_sends_one_writer_down_dm_and_does_not_start(tmp_path):
         "STUB_LOG": str(log),
     }
     env.pop("SWARPH_SELF", None)
-    token = tmp_path / "service-wake-watchdog.token"
-    secret = "sentinel-token-value-not-a-real-token"
-    token.write_text(secret + "\n", encoding="utf-8")
     cmd = [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
-           "--as", "wake-watchdog", "--token-file", str(token),
-           "--escalate", "drop-on-meta-edge"]
+           "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
     for _ in range(3):
         proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
         assert proc.returncode == 0
     text = log.read_text(encoding="utf-8")
-    assert text.count("mesh send lab-ovh") == 1
-    assert f"--token-file {token}" in text
-    assert secret not in text
-    assert "--as wake-watchdog" in text
+    assert text.count("mesh send drop-on-meta-edge") == 1
+    assert "mesh send lab-ovh" not in text
     assert "monitor start" not in text
     assert "gridiron" not in text

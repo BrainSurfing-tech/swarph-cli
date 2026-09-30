@@ -313,9 +313,9 @@ def main(argv: list[str] | None = None) -> int:
             continue
         owned = bool(state.get(name, {}).get("systemd_owned"))
         sent = mesh_send(
-            swarph, "lab-ovh", sender,
+            swarph, escalate or "", sender,
             writer_alert(name, _cgroup_for(root, name), owned=owned),
-            token_file)
+            "")
         if sent == 0:
             state.setdefault(name, {})["writer_down"] = True
             save_state(state_path, state)
