@@ -41,6 +41,32 @@ def writer_transition(down: bool, rec: dict) -> bool:
     return not bool(rec.get("writer_down"))
 
 
+def supervisor_from_cgroup(text: str | None) -> str:
+    """The unit leaf monitor status derives from /proc/<pid>/cgroup.
+
+    A swarph-monitor service, including the non-template names
+    swarph-monitor.service and swarph-monitor-<cell>.service, is the
+    supervisor. user@<uid>.service is the session manager, not one.
+    Anything else is unsupervised.
+    """
+    if not text:
+        return "unsupervised"
+    for line in text.splitlines():
+        leaf = line.rsplit("/", 1)[-1].strip()
+        if not leaf.endswith(".service") or leaf.startswith("user@"):
+            continue
+        if leaf.startswith("swarph-monitor"):
+            return leaf
+    return "unsupervised"
+
+
+def writer_alert(cell: str, cgroup: str | None) -> str:
+    who = supervisor_from_cgroup(cgroup)
+    if who == "unsupervised":
+        return f"{cell}: writer-down, unsupervised"
+    return f"{cell}: writer-down, supervised by {who}"
+
+
 def systemd_owns_monitor(cell: str, run=None) -> bool:
     """True when an enabled swarph-monitor@<cell> unit supervises the writer.
 
@@ -204,6 +230,16 @@ def _timer_lines() -> list[str]:
         ["systemctl", "--user", "list-timers", "--all", "--no-legend"]).splitlines()
 
 
+def _cgroup_for(root: Path, cell: str) -> str | None:
+    """Cgroup of the monitor pidfile, the same leaf monitor status reads."""
+    pidfile = root / cell / "mesh-sidecar" / "monitor.pid"
+    try:
+        pid = int(pidfile.read_text(encoding="utf-8").strip())
+        return Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+
+
 def mesh_send(swarph: str, to: str, sender: str, content: str,
              token_file: str = "") -> int:
     """Send one FYI. A self-send is refused and logged. The token is a path."""
@@ -273,8 +309,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"writer-down {name}", flush=True)
         if args.dry_run or not sender:
             continue
+        target = escalate or ""
         sent = mesh_send(
-            swarph, "lab-ovh", sender, f"{name}: writer-down", token_file)
+            swarph, target, sender, writer_alert(name, _cgroup_for(root, name)),
+            token_file)
         if sent == 0:
             state.setdefault(name, {})["writer_down"] = True
             save_state(state_path, state)

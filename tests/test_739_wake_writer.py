@@ -17,7 +17,9 @@ from swarph_cli.scripts import wake_watchdog
 from swarph_cli.scripts.wake_watchdog import (
     enforce_writers,
     mesh_send,
+    supervisor_from_cgroup,
     systemd_owns_monitor,
+    writer_alert,
     writer_verdict,
 )
 
@@ -148,6 +150,66 @@ def test_a_lost_send_is_not_marked_alerted(tmp_path):
     assert again == ["fixture-cell"]
 
 
+def test_non_template_monitor_units_read_as_supervised():
+    lab = "0::/system.slice/swarph-monitor.service"
+    gemini = "0::/system.slice/swarph-monitor-gemini-researcher.service"
+    assert supervisor_from_cgroup(lab) == "swarph-monitor.service"
+    assert supervisor_from_cgroup(gemini) == "swarph-monitor-gemini-researcher.service"
+    assert "supervised by swarph-monitor.service" in writer_alert("lab-ovh", lab)
+    assert "supervised by swarph-monitor-gemini-researcher.service" in writer_alert(
+        "gemini-researcher", gemini)
+    session = "0::/user.slice/user@1000.service"
+    assert supervisor_from_cgroup(session) == "unsupervised"
+    assert writer_alert("fixture-cell", None).endswith("unsupervised")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows cannot execute the POSIX swarph stub as argv0",
+)
+def test_a_failed_send_is_retried_on_the_next_run(tmp_path):
+    root = tmp_path / "state"
+    _cell(root, "fixture-cell", fresh=True)
+    stub = tmp_path / "swarph"
+    log = tmp_path / "calls.log"
+    count = tmp_path / "sends"
+    stub.write_text(textwrap.dedent(f"""\
+        #!/bin/sh
+        echo "$@" >> "$STUB_LOG"
+        if [ "$1 $2" = "mesh send" ]; then
+          n=0
+          [ -f "{count}" ] && n=$(cat "{count}")
+          n=$((n+1))
+          echo "$n" > "{count}"
+          [ "$n" = "1" ] && exit 1
+          exit 0
+        fi
+        exit 2
+    """), encoding="utf-8")
+    stub.chmod(0o755)
+    state_path = tmp_path / "wake.json"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.path.abspath("src"),
+        "SWARPH_STATE_ROOT": str(root),
+        "WAKE_WATCHDOG_STATE": str(state_path),
+        "SWARPH_BIN": str(stub),
+        "STUB_LOG": str(log),
+    }
+    env.pop("SWARPH_SELF", None)
+    cmd = [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
+           "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
+    first = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    assert first.returncode == 0
+    assert json.loads(state_path.read_text())["fixture-cell"].get("writer_down") is not True
+    second = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    assert second.returncode == 0
+    assert json.loads(state_path.read_text())["fixture-cell"]["writer_down"] is True
+    text = log.read_text(encoding="utf-8")
+    assert text.count("mesh send drop-on-meta-edge") == 2
+    assert "mesh send lab-ovh" not in text
+
+
 def test_a_self_send_is_refused_and_logged(capsys):
     rc = mesh_send("swarph", "lab-ovh", "lab-ovh", "fixture-cell: writer-down",
                    "/tmp/service-wake-watchdog.token")
@@ -209,14 +271,13 @@ def test_main_sends_one_writer_down_dm_and_does_not_start(tmp_path):
     secret = "sentinel-token-value-not-a-real-token"
     token.write_text(secret + "\n", encoding="utf-8")
     cmd = [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
-           "--as", "wake-watchdog", "--token-file", str(token)]
+           "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
     for _ in range(3):
         proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
         assert proc.returncode == 0
     text = log.read_text(encoding="utf-8")
-    assert text.count("mesh send lab-ovh") == 1
-    assert f"--token-file {token}" in text
+    assert text.count("mesh send drop-on-meta-edge") == 1
+    assert "mesh send lab-ovh" not in text
     assert secret not in text
-    assert "--as wake-watchdog" in text
     assert "monitor start" not in text
     assert "gridiron" not in text
