@@ -248,3 +248,84 @@ def test_opencode_mentioning_grok_is_not_grok():
     pane.append("The model in that session was Grok 4.7")
     assert mesh._is_opencode_pane(pane) is True
     assert mesh._is_grok_pane(pane) is False
+
+
+def _hunt794(name):
+    root = Path(__file__).resolve().parent / "fixtures" / "pr514-hunt-794"
+    return (root / name).read_text(encoding="utf-8")
+
+
+def _one_wake(calls, target):
+    assert _wakes(calls, target) == [
+        ["tmux", "send-keys", "-t", target, "-l", mesh._WAKE_PROMPT]]
+    assert sum(1 for c in calls if "Enter" in c) == 1
+
+
+def test_a_code_echo_of_a_running_spinner_still_gets_one_wake(monkeypatch):
+    """Fails at 1422917: any tail row matching the spinner regex deferred."""
+    text = _hunt794("idle_cursor_code_echo_of_running_spinner.txt")
+    assert "⠘ Running" in text
+    calls = _record(monkeypatch, text)
+    assert mesh._agent_running("r1") is False
+    assert mesh.TmuxSink("r1").deliver(_State({}), [], 1) is True
+    _one_wake(calls, "r1")
+
+
+def test_a_spinner_row_that_is_not_above_the_composer_gets_one_wake(monkeypatch):
+    """Fails at 1422917: a quoted spinner row anywhere in the tail deferred."""
+    text = _hunt794("idle_cursor_quoted_thinking_spinner_row.txt")
+    assert "Thinking" in text
+    calls = _record(monkeypatch, text)
+    assert mesh._agent_running("r2") is False
+    assert mesh.TmuxSink("r2").deliver(_State({}), [], 1) is True
+    _one_wake(calls, "r2")
+
+
+def test_real_midturn_captures_defer(monkeypatch):
+    """The spinner row sits directly above Tip. Working counts, not only
+    Thinking and Running. Zero keys."""
+    for name in (
+        "cap_cursor-lin.txt",
+        "pane_1_armed.txt",
+        "pane_2_dm1.txt",
+        "real_running_cursor_working_spinner.txt",
+    ):
+        text = _hunt794(name)
+        calls = _record(monkeypatch, text)
+        assert mesh._is_cursor_composer(
+            [ln for ln in text.splitlines() if ln.strip()]) is True
+        assert mesh._agent_running(name) is True
+        assert mesh.TmuxSink(name).deliver(_State({}), [], 1) is None
+        assert _sent(calls) == []
+        # The position is the signal. Drop the composer hint and the
+        # Working / Thinking row still defers. Fails at 1422917 for Working.
+        stripped = text.replace(mesh._CURSOR_RUN_HINT, "")
+        calls = _record(monkeypatch, stripped)
+        assert mesh._agent_running(name) is True, name
+        assert mesh.TmuxSink(name).deliver(_State({}), [], 1) is None
+        assert _sent(calls) == []
+
+
+def test_a_real_idle_cursor_pane_still_gets_one_wake(monkeypatch):
+    text = _hunt794("real_idle_cursor_pane_3_gap.txt")
+    calls = _record(monkeypatch, text)
+    assert mesh._agent_running("idle") is False
+    assert mesh.TmuxSink("idle").deliver(_State({}), [], 1) is True
+    _one_wake(calls, "idle")
+
+
+def test_a_tall_opencode_permission_dialog_defers(monkeypatch):
+    """Fails at 1422917: the △ row is the 10th non-empty row, outside the
+    6-row tail, so deliver returned False and counted a failure."""
+    text = _hunt794("o_B1_permission_real_verbatim.txt")
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    assert sum(1 for ln in lines if ln.strip()) >= 8
+    assert any("Permission required" in ln for ln in lines)
+    calls = _record(monkeypatch, text)
+    assert mesh._is_opencode_pane(lines) is True
+    assert mesh._bottom_tui(lines) == "opencode"
+    assert mesh._composer_state("perm") == "busy"
+    led = {"consecutive_failures": 0}
+    assert mesh.TmuxSink("perm").deliver(_State(led), [], 1) is None
+    assert _sent(calls) == []
+    assert led["consecutive_failures"] == 0

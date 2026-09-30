@@ -2136,11 +2136,12 @@ _COMPOSER_PLACEHOLDERS = ("Add a follow-up", "Ask Codex to do anything")
 #: running agent into an idle one forever.
 _CURSOR_RUN_HINT = "ctrl+c to stop"
 
-#: A live cursor turn draws a braille spinner and then ``Thinking`` or
-#: ``Running`` on its own row. The bare word in scrollback or in a comment
-#: is not that row.
+#: A live cursor turn draws a braille spinner and then ``Thinking``,
+#: ``Running``, or ``Working`` on the row directly above the Tip/composer
+#: block. A quote of that row anywhere else, including a code echo, is not
+#: a turn. The match is anchored: stripped text has to start with the glyph.
 _CURSOR_SPINNER_ROW = re.compile(
-    r"[\u2800-\u28FF]+\s*(?:Thinking|Running)\b"
+    r"^[\u2800-\u28FF]+\s*(?:Thinking|Running|Working)\b"
 )
 
 #: How many non-empty rows at the bottom can hold the cursor composer.
@@ -2150,6 +2151,11 @@ _CURSOR_SPINNER_ROW = re.compile(
 #: between those chrome lines do not count: a raw tail of N lines drops the
 #: composer off the window when the screen interleaves blanks.
 _CURSOR_COMPOSER_TAIL = 6
+
+#: The 1.18.33 permission dialog draws ``△ Permission required`` above a
+#: stack of option rows. On the measured screen that row is the 10th
+#: non-empty row from the bottom, outside the composer tail.
+_OPENCODE_PERMISSION_TAIL = 12
 
 
 def _nonempty_tail(lines: list[str], n: int) -> list[str]:
@@ -2347,6 +2353,18 @@ def _bottom_tui(lines: list[str]) -> "str | None":
             return "grok"
         if _is_opencode_composer_row(tail[i]):
             return "opencode"
+    # A permission dialog is taller than the composer tail. Look further
+    # for that one row. A mode row or a cursor/grok composer in the same
+    # stretch is a quote, not a reason to take the pane.
+    wider = _nonempty_tail(lines, _OPENCODE_PERMISSION_TAIL)
+    for i in range(len(wider) - 1, -1, -1):
+        if _is_cursor_composer_row(wider[i]) or _is_grok_composer_row(wider, i):
+            return None
+        if not _is_opencode_composer_row(wider[i]):
+            continue
+        if _opencode_permission_row(wider[i]):
+            return "opencode"
+        return None
     return None
 
 
@@ -2518,20 +2536,28 @@ def _agent_running(target: str) -> Optional[bool]:
         return _opencode_running(lines)
     if _is_grok_pane(lines):
         return _grok_running(lines)
-    composer = _composer_line(_nonempty_tail(lines, _CURSOR_COMPOSER_TAIL))
+    tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
+    composer = _composer_line(tail)
     if composer is None or not composer.startswith("→"):
         return None
     if _CURSOR_RUN_HINT in composer:
         return True
-    # cursor-lin 2026-09-30 draws a braille spinner and then Thinking or
-    # Running on its own row. The bare word in a comment is not that row.
-    for ln in _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL):
-        stripped = ln.strip()
-        if stripped.startswith("▎") or stripped.startswith("→"):
-            continue
-        if _CURSOR_SPINNER_ROW.search(stripped):
-            return True
-    return False
+    # The spinner is the non-empty row directly above the Tip/composer
+    # block: the Tip row when it is present, otherwise the composer.
+    # No other row in the tail can make the pane read as running.
+    idx = None
+    for i in range(len(tail) - 1, -1, -1):
+        if _is_cursor_composer_row(tail[i]):
+            idx = i
+            break
+    if idx is None or idx == 0:
+        return False
+    anchor = idx - 1
+    if tail[anchor].strip().startswith("Tip:"):
+        if anchor == 0:
+            return False
+        anchor -= 1
+    return bool(_CURSOR_SPINNER_ROW.match(tail[anchor].strip()))
 
 
 def _composer_state(target: str) -> Optional[str]:
