@@ -345,13 +345,17 @@ def _service_leaf(text: "str | None") -> "str | None":
 def _supervisor_for_pidfile(explicit: "str | None") -> "str | None":
     """What start writes into monitor.pid.
 
-    An explicit claim wins. Otherwise read this process's own cgroup now,
-    while the pid is still ours. A later status must not open /proc/<pid>
-    for a dead monitor: that pid may have been reused.
+    An explicit claim wins over the cgroup. Otherwise record a unit only
+    when its name says it supervises a monitor (swarph-monitor*.service).
+    A foreign leaf such as claude-tmux@X.service is not a monitor supervisor.
+    The read is this process's own cgroup, taken now, while the pid is ours.
     """
     if explicit:
         return explicit
-    return _service_leaf(_read_cgroup(os.getpid()))
+    leaf = _service_leaf(_read_cgroup(os.getpid()))
+    if leaf and leaf.startswith("swarph-monitor"):
+        return leaf
+    return None
 
 
 def _derive_systemd_unit(pid: "int | None") -> "str | None":
@@ -641,12 +645,16 @@ def _run_pinned(state, pidfile: Path, self_name: str, sinks: list, poll_s: int,
                 supervisor: "str | None" = None) -> int:
     mesh.write_pidfile(pidfile, self_name=self_name, sinks=sinks, poll_s=poll_s,
                        supervisor=supervisor)
+    clean = False
     try:
-        return mesh._monitor_loop(state)
+        result = mesh._monitor_loop(state)
+        clean = True
+        return result
     finally:
-        # Only clear the pidfile if it is still OURS — a racing `start` may have
-        # legitimately reclaimed it, and deleting its record would strand it.
-        if mesh.pidfile_status(pidfile)[0] == "live_ours":
+        # A clean return can drop the file. SIGINT and any other unwind must
+        # not: the recorded supervisor is what the watchdog names after the
+        # process is gone. `monitor stop` still deletes the file itself.
+        if clean and mesh.pidfile_status(pidfile)[0] == "live_ours":
             pidfile.unlink(missing_ok=True)
 
 

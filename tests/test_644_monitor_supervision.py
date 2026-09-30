@@ -76,23 +76,65 @@ def test_pidfile_records_supervisor_when_given(tmp_path):
     assert rec["supervisor"] == "task:Swarph cursor-win Monitor"
 
 
-def test_start_records_the_cgroup_unit_and_keeps_it_after_the_process(monkeypatch, tmp_path):
-    """A scratch transient unit is written at start from this process's cgroup.
-
-    The pidfile is what a later watchdog reads. The key stays when the
-    process is gone; this test does not open another process's listing.
-    """
+def _start_once(monkeypatch, tmp_path, cgroup, extra=()):
     _env(monkeypatch)
     monkeypatch.setattr(monitor, "_verify_self_is_registered",
                         lambda *a, **k: (True, "registered"))
     monkeypatch.setattr(mesh, "_monitor_iteration", lambda state: None)
-    monkeypatch.setattr(
-        monitor, "_read_cgroup",
-        lambda pid: "0::/user.slice/scratch-761.service\n")
-    assert _run(["start", "--once"], tmp_path) == 0
-    rec = json.loads((tmp_path / "monitor.pid").read_text(encoding="utf-8"))
-    assert rec["supervisor"] == "scratch-761.service"
-    assert rec["pid"] == os.getpid()
+    monkeypatch.setattr(monitor, "_read_cgroup", lambda pid: cgroup)
+    assert _run(["start", "--once", *extra], tmp_path) == 0
+    return json.loads((tmp_path / "monitor.pid").read_text(encoding="utf-8"))
+
+
+def test_a_swarph_monitor_cgroup_is_recorded_and_a_foreign_one_is_not(monkeypatch, tmp_path):
+    """Only a swarph-monitor*.service leaf is a monitor supervisor.
+
+    claude-tmux@X.service and any other foreign unit are not recorded.
+    An explicit --supervisor still wins over the cgroup leaf; if it stops
+    winning, the recorded value is the leaf and this assertion fails.
+    """
+    for unit in (
+        "swarph-monitor.service",
+        "swarph-monitor-gemini-researcher.service",
+        "swarph-monitor@fixture-cell.service",
+    ):
+        rec = _start_once(monkeypatch, tmp_path, f"0::/system.slice/{unit}\n")
+        assert rec["supervisor"] == unit
+        (tmp_path / "monitor.pid").unlink()
+    rec = _start_once(
+        monkeypatch, tmp_path, "0::/user.slice/claude-tmux@123.service\n")
+    assert "supervisor" not in rec
+    (tmp_path / "monitor.pid").unlink()
+    rec = _start_once(
+        monkeypatch, tmp_path, "0::/system.slice/swarph-monitor.service\n",
+        extra=("--supervisor", "task:Named"))
+    assert rec["supervisor"] == "task:Named"
+
+
+def test_sigint_and_an_exception_leave_the_recorded_supervisor(monkeypatch, tmp_path):
+    """Unwinding used to unlink monitor.pid, so the watchdog then said unsupervised."""
+    pidfile = tmp_path / "monitor.pid"
+
+    def raise_kbd(_state):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(mesh, "_monitor_loop", raise_kbd)
+    with pytest.raises(KeyboardInterrupt):
+        monitor._run_pinned(object(), pidfile, "fixture-cell", [], 30,
+                            supervisor="swarph-monitor.service")
+    assert json.loads(pidfile.read_text(encoding="utf-8"))["supervisor"] == (
+        "swarph-monitor.service")
+
+    def raise_exc(_state):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mesh, "_monitor_loop", raise_exc)
+    pidfile.unlink()
+    with pytest.raises(RuntimeError):
+        monitor._run_pinned(object(), pidfile, "fixture-cell", [], 30,
+                            supervisor="swarph-monitor-gemini-researcher.service")
+    assert json.loads(pidfile.read_text(encoding="utf-8"))["supervisor"] == (
+        "swarph-monitor-gemini-researcher.service")
 
 
 def test_start_does_not_record_the_session_manager(monkeypatch, tmp_path):
