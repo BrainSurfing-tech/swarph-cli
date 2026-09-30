@@ -28,6 +28,7 @@ from swarph_cli.bench.backends import (
     MeteredGeminiBackend,
     MeteredMistralBackend,
     RuleBackend,
+    SignalBackend,
     SubscriptionBackend,
     TypedHttpBackend,
     HttpBackend,
@@ -65,6 +66,7 @@ def _default_backends() -> dict[str, Backend]:
         "mistral": MeteredMistralBackend(),
         "subscription": subscription,
         "rule": RuleBackend(),
+        "signal": SignalBackend(),
         "typed-http": TypedHttpBackend(),
         # Selectable class for the wiring lock. A real call is provider:<name>,
         # which replaces this with the registry arm. An unresolved name is
@@ -108,6 +110,34 @@ def _format_run_table(result: dict) -> str:
                 f"    {_s(cls):20} n={c['n']:<4} hits={c['hits']:<4} "
                 f"hit_rate={c['hit_rate']:<6} mean_distance={c['mean_distance']}"
             )
+        robust = row.get("robust")
+        if robust:
+            lines.append("  per-cell (robust):")
+            per_cell = robust.get("per_cell") or {}
+            for cls, c in sorted(per_cell.items()):
+                ci = c.get("bootstrap_ci") or {}
+                lines.append(
+                    f"    {_s(cls):24} n={c['n']:<5} "
+                    f"bal_acc={c['balanced_accuracy']} "
+                    f"med_up={c['median_fwd_called_up']} "
+                    f"med_down={c['median_fwd_called_down']} "
+                    f"sep={c['separation']} "
+                    f"ci=[{ci.get('lo')}, {ci.get('hi')}]"
+                )
+            # Pooled sits beside the per-cell table. It is not printed when
+            # the table is empty — a pooled-only line is the failure mode
+            # this scorer exists to prevent.
+            if per_cell and robust.get("pooled"):
+                p = robust["pooled"]
+                ci = p.get("bootstrap_ci") or {}
+                lines.append(
+                    "  pooled (beside the per-cell table): "
+                    f"n={p['n']} bal_acc={p['balanced_accuracy']} "
+                    f"med_up={p['median_fwd_called_up']} "
+                    f"med_down={p['median_fwd_called_down']} "
+                    f"sep={p['separation']} "
+                    f"ci=[{ci.get('lo')}, {ci.get('hi')}]"
+                )
     return "\n".join(lines)
 
 

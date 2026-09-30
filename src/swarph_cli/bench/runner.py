@@ -21,6 +21,7 @@ from .backends import Backend, BackendResult, _redact
 from .prices import cost_usd, is_known, lookup
 from .providers import egress_of_url
 from .quality import score
+from .signal_score import robust_report
 
 
 @dataclass
@@ -55,7 +56,10 @@ def parse_models(arg: str) -> list[ModelSpec]:
                 id=name, backend="provider", provider=name,
                 label=label or f"provider:{name}"))
             continue
-        for prefix, backend in (("typed-http:", "typed-http"), ("rule:", "rule")):
+        # signal:<module:callable> is the deterministic signal-backtest arm
+        # (#213). It carries colons in the payload, same as rule:.
+        for prefix, backend in (
+                ("typed-http:", "typed-http"), ("rule:", "rule"), ("signal:", "signal")):
             if tok.startswith(prefix):
                 specs.append(ModelSpec(id=tok[len(prefix):], backend=backend, label=tok))
                 break
@@ -120,6 +124,7 @@ class ModelBoardRow:
     base_url: str = ""
     path: str = ""
     kind: str = ""
+    robust: Optional[dict] = None
 
 
 def _dispatch(backend: Backend, model_id: str, prompt: str, system: str) -> BackendResult:
@@ -319,6 +324,7 @@ def run_pack(
                 resumed[item["task_id"]] = _taskrow_from_ledger(item)
 
         rows: list[TaskRow] = []
+        signal_obs: list[dict] = []
         arm_spent = 0.0
         arm_stopped = False
         for task in tasks:
@@ -389,6 +395,17 @@ def run_pack(
                 estimated=result.estimated or unknown,
                 text=result.text,
             ))
+            if spec.backend == "signal":
+                meta = task.get("meta") or {}
+                fwd = meta.get("fwd")
+                predicted = sc.get("parsed")
+                signal_obs.append({
+                    "cls": class_of(task),
+                    "date": str(meta.get("date") or ""),
+                    "fwd": float(fwd) if isinstance(fwd, (int, float)) and not isinstance(fwd, bool) else None,
+                    "expected": str(task.get("expected") or ""),
+                    "predicted": str(predicted).strip().upper() if predicted is not None else "",
+                })
         detail[spec.label] = rows
 
         done = [r for r in rows if r.error is None and not r.not_run]
@@ -429,6 +446,7 @@ def run_pack(
             base_url=getattr(backend, "base_url", ""),
             path=getattr(backend, "path", ""),
             kind=getattr(backend, "KIND", ""),
+            robust=robust_report(signal_obs) if spec.backend == "signal" else None,
         ))
 
     board.sort(key=lambda b: (b.mean_distance, b.cost_usd))
@@ -439,7 +457,10 @@ def run_pack(
         "aborted": partial == "aborted",
         "exit_code": 1 if partial else 0,
         "egress_overrides": overrides,
-        "board": [vars(b) for b in board],
+        "board": [
+            {k: v for k, v in vars(b).items() if k != "robust" or v is not None}
+            for b in board
+        ],
         "detail": {label: [vars(r) for r in rows] for label, rows in detail.items()},
     }
     text = _redact(json.dumps(payload), secrets)
