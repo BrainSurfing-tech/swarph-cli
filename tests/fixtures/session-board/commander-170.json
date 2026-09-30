@@ -1,0 +1,27 @@
+[
+  {
+    "cell": "droplet",
+    "card_id": 687,
+    "obligation_id": 170,
+    "step": "spec-review",
+    "title": "P4 Phase 0 — simulated-fill shadow for the rebalancer (gate before any live trim)",
+    "note": "Open spec-review #170 on card #687, assignee droplet. The row says the decision is the commander's (risk lane, commander-gated). Live rebalance_observe rows since 2026-08-31: 0 as of 2026-09-16.",
+    "options": [
+      {
+        "label": "Retire",
+        "text": "RETIRE on card #687: remove risk_rebalancer.py, rebalance_simfill.py, the crontab line, and the dashboard panel. Reason: 0 live rebalance_observe rows since 2026-08-31, as obligation #170 stated on 2026-09-16.",
+        "rec": true
+      },
+      {
+        "label": "Graduate",
+        "text": "GRADUATE on card #687: build and arm the P4 trim on the paper account, with an outcome writer live before arming.",
+        "rec": false
+      },
+      {
+        "label": "Re-date",
+        "text": "RE-DATE on card #687: write a new falsifiable criterion and a date no more than 30 days out, and what the zero live rows changed.",
+        "rec": false
+      }
+    ]
+  }
+]

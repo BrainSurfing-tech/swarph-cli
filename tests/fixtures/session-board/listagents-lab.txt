@@ -1,0 +1,70 @@
+This session is lab-ovh [1e23f6] — the name other sessions use to message it (it is not listed below; a message to it would be a message to yourself).
+
+Peer sessions (67):
+  gridiron [e39eda]  ·  interactive  ·  idle  ·  tmux 80:@95.%95  ·  started 1d ago
+  science-claude [236553]  ·  interactive  ·  idle  ·  tmux science-claude:@117.%117  ·  started 13h ago
+  autonomous wake handling [56730e]  ·  bg  ·  idle  ·  started 19d ago
+  tmp-2f [fb4136]  ·  interactive  ·  busy  ·  tmux gridiron:@118.%118  ·  started 19s ago
+  drop-on-meta-edge [1df9d4]  ·  interactive  ·  idle  ·  tmux drop-on-meta-edge:@93.%93  ·  started 1d ago
+  gridiron [170aa4]  ·  interactive  ·  busy  ·  tmux gridiron:@118.%118  ·  started 13h ago
+  autonomous wake failure [33d385]  ·  bg  ·  idle  ·  started 19d ago
+  workstation-lc [1153f7]  ·  Remote Control  ·  idle
+  droplet [a18714]  ·  Remote Control  ·  idle
+  gpu-wsl [f46eea]  ·  Remote Control  ·  idle
+  Fix floor 2+ saferoom soft-lock and stairs bypass [73a4ae]  ·  cloud  ·  idle
+  Make the floor round clock tick on pass close [e3e6f9]  ·  cloud  ·  idle
+  Fix enemy-turn RNG repeating while HP is unchanged [d3111c]  ·  cloud  ·  idle
+  Close the free-AP refund when a pass hits 0 AP [54abad]  ·  cloud  ·  idle
+  Stop item uid collisions across page reloads [a00891]  ·  cloud  ·  idle
+  Crawlcast game code review [c06230]  ·  cloud  ·  idle
+  science-claude (2) [4103cc]  ·  Remote Control  ·  offline
+  lab (4) [74bc36]  ·  Remote Control  ·  offline
+  workstation-lc (6) [906b59]  ·  Remote Control  ·  offline
+  Card 244 validation and board obligations [75d132]  ·  Remote Control  ·  offline
+  mesh dm read & act [31acad]  ·  Remote Control  ·  offline
+  mesh dm ack & memory [7611b8]  ·  Remote Control  ·  offline
+  autonomous wake card move [35c658]  ·  Remote Control  ·  offline
+  check unread mesh dm [87562b]  ·  Remote Control  ·  offline
+  mesh dm #244 verify [e1e060]  ·  Remote Control  ·  offline
+  mesh dm read dm_wake.py [b8c88a]  ·  Remote Control  ·  offline
+  mesh dm inbox ack [2fcb50]  ·  Remote Control  ·  offline
+  mesh dm sidecar log review [e7da42]  ·  Remote Control  ·  offline
+  mesh dm inbox triage [937b3e]  ·  Remote Control  ·  offline
+  autonomous wake overlap review [d402ab]  ·  Remote Control  ·  offline
+  mesh dm wake handler [57b6a4]  ·  Remote Control  ·  offline
+  mesh dm batch process [f8f969]  ·  Remote Control  ·  offline
+  mesh dm #38035 response [b1c550]  ·  Remote Control  ·  offline
+  dm review pr #37 [4d5287]  ·  Remote Control  ·  offline
+  mesh dm card #244 [e8e0c8]  ·  Remote Control  ·  offline
+  adapter nesting level [183179]  ·  Remote Control  ·  offline
+  check unread mesh dm [261df0]  ·  Remote Control  ·  offline
+  dm highlight log [6b6149]  ·  Remote Control  ·  offline
+  unread mesh dm queue [3cfe26]  ·  Remote Control  ·  offline
+  read mesh dm sidecar [e87371]  ·  Remote Control  ·  offline
+  mesh dm acknowledge [0f2936]  ·  Remote Control  ·  offline
+  mesh dm coordination turn [8dbdef]  ·  Remote Control  ·  offline
+  mesh gateway pr review [5ed096]  ·  Remote Control  ·  offline
+  check autonomous wake messages [35dfaa]  ·  Remote Control  ·  offline
+  mesh wake dm queue [ce1885]  ·  Remote Control  ·  offline
+  mesh dm backlog [640d56]  ·  Remote Control  ·  offline
+  autonomous wake mesh dm [0451de]  ·  Remote Control  ·  offline
+  check mesh dm #37609 [4c7600]  ·  Remote Control  ·  offline
+  mesh dm cards assignment [dc9168]  ·  Remote Control  ·  offline
+  mesh dm catch-up [98ba24]  ·  Remote Control  ·  offline
+  mesh dm review [aebe00]  ·  Remote Control  ·  offline
+  investigate identity spoofing dm [9cfbe6]  ·  Remote Control  ·  offline
+  mesh dm fetch unread [b10449]  ·  Remote Control  ·  offline
+  mesh dm validation [a8e2e3]  ·  Remote Control  ·  offline
+  review mesh obligations [385b86]  ·  Remote Control  ·  offline
+  mesh dm triage [e5d410]  ·  Remote Control  ·  offline
+  workstation-lc (5) [55a590]  ·  Remote Control  ·  offline
+  razorpeter [a83fbb]  ·  Remote Control  ·  offline
+  lab (3) [a90bef]  ·  Remote Control  ·  offline
+  droplet (3) [c57e9d]  ·  Remote Control  ·  offline
+  gridiron [60f261]  ·  Remote Control  ·  offline
+  droplet (2) [9f471d]  ·  Remote Control  ·  offline
+  lab (2) [29cc42]  ·  Remote Control  ·  offline
+  workstation-lc (4) [3fd9da]  ·  Remote Control  ·  offline
+  HEDGE FUND MCP [204c49]  ·  cloud  ·  idle
+  ultrareview: darw007d/hedge-fund-mcp#240 [d1b2eb]  ·  cloud  ·  idle
+  Lead generation model in Graph [195fc2]  ·  cloud  ·  idle
