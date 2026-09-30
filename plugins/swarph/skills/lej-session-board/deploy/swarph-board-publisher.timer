@@ -1,0 +1,14 @@
+# Template only. This file is not installed by the skill or by CI.
+[Unit]
+Description=Publish the SWARPH-BOARD every 5 minutes
+Documentation=https://github.com/BrainSurfing-tech/swarph-cli
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=swarph-board-publisher.service
+
+[Install]
+WantedBy=timers.target

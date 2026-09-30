@@ -47,10 +47,20 @@ Drop a question only when the answer's `from_node` is the commander and the body
 
 A relayed yes approves building, not deploying.
 
+## 5. Auto-publish
+
+A user timer runs `scripts/publish_board.py` every 5 minutes. The unit files in `deploy/` are templates. Do not install them from a test or from CI.
+
+The timer does not call `ListAgents`. The roster is `swarph monitor status` for each cell plus `tmux has-session`. Questions are open obligation rows whose title or accept contains `[commander]`. A row that is closed, or answered by the commander's `Re: <title>` DM, is gone on the next run. `publish_if_changed` sends nothing when the board is unchanged.
+
+The send uses `--token-file` with a path. The token value is not an argument. The service identity must not be the recipient: a self-send is refused.
+
 ## Files
 
 - `assets/board-template.html`: the page. Do not change its markup.
 - `references/data-schema.md`: the JSON fields.
 - `references/coordination-rule.md`: the `CLAUDE.md` block. It addresses sessions by the name `ListAgents` prints.
 - `scripts/build_board.py`: turns a listing and commander-waiting rows into board JSON.
+- `scripts/publish_board.py`: timer publisher. Monitor status and tmux, not `ListAgents`.
+- `deploy/swarph-board-publisher.service` and `.timer`: unit template. Not installed.
 - `LICENSE`: MIT, Copyright (c) 2026 Jonathan Edwards. Keep it with the skill.
