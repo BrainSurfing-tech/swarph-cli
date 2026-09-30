@@ -2136,6 +2136,33 @@ _COMPOSER_PLACEHOLDERS = ("Add a follow-up", "Ask Codex to do anything")
 #: running agent into an idle one forever.
 _CURSOR_RUN_HINT = "ctrl+c to stop"
 
+#: A live cursor turn draws a braille spinner and then ``Thinking``,
+#: ``Running``, or ``Working`` on the row directly above the Tip/composer
+#: block. A quote of that row anywhere else, including a code echo, is not
+#: a turn. The match is anchored: stripped text has to start with the glyph.
+_CURSOR_SPINNER_ROW = re.compile(
+    r"^[\u2800-\u28FF]+\s*(?:Thinking|Running|Working)\b"
+)
+
+#: How many non-empty rows at the bottom can hold the cursor composer.
+#: Measured on cursor-lin 2026-09-30: the composer is the 4th non-empty row
+#: from the bottom (composer, task count, model footer, tilde). A quote of
+#: that row higher in the pane is scrollback, not the composer. Blank rows
+#: between those chrome lines do not count: a raw tail of N lines drops the
+#: composer off the window when the screen interleaves blanks.
+_CURSOR_COMPOSER_TAIL = 6
+
+#: The 1.18.33 permission dialog draws ``△ Permission required`` above a
+#: stack of option rows. On the measured screen that row is the 10th
+#: non-empty row from the bottom, outside the composer tail.
+_OPENCODE_PERMISSION_TAIL = 12
+
+
+def _nonempty_tail(lines: list[str], n: int) -> list[str]:
+    """The last ``n`` rows that contain text. Blank rows are not rows."""
+    filled = [ln for ln in lines if ln.strip()]
+    return filled[-n:]
+
 
 def _only_wake_text(content: str) -> bool:
     """True when the composer holds wake text and nothing else.
@@ -2172,19 +2199,21 @@ def _opencode_permission_row(line: str) -> bool:
     return s.startswith("┃") and "△" in s and "Permission required" in s
 
 
+def _is_opencode_composer_row(line: str) -> bool:
+    """One row of the opencode box: the mode row, the ``╹▀`` border, or the
+    permission dialog. A quote of ``┃ Build ·`` above the tail is not this."""
+    s = line.strip()
+    return s.startswith("╹▀") or _opencode_mode_row(line) or _opencode_permission_row(line)
+
+
 def _is_opencode_pane(lines: list[str]) -> bool:
     """The opencode composer box, measured on 1.18.33.
 
-    The input row is a ``┃`` line. The mode row under it names Build or
-    Plan and a ``·``. The bottom of the box is ``╹▀``. The permission
-    dialog keeps the ``┃`` row and drops the mode row and the border.
-    Cursor and claude do not draw any of these.
+    Decided by ``_bottom_tui``: the mode row, the ``╹▀`` border, or the
+    permission dialog has to be the bottom-most composer in the non-empty
+    tail. A cursor pane that merely quotes ``┃ Build ·`` is not opencode.
     """
-    for ln in lines:
-        s = ln.strip()
-        if s.startswith("╹▀") or _opencode_mode_row(ln) or _opencode_permission_row(ln):
-            return True
-    return False
+    return bool(lines) and _bottom_tui(lines) == "opencode"
 
 
 def _opencode_running(lines: list[str]) -> bool:
@@ -2281,29 +2310,115 @@ def _opencode_composer_state(lines: list[str]) -> Optional[str]:
     return "busy"
 
 
-def _is_grok_pane(lines: list[str]) -> bool:
-    """Grok Build composer, measured on sacrificial 1.0.41 and 0.2.51 TUIs.
+def _is_grok_composer_row(lines: list[str], index: int) -> bool:
+    """A grok composer starts at a ``│ ❯`` row. Continuation rows that also
+    start with ``│`` may sit between it and the ``╰`` footer, which is how
+    a wrapped draft is drawn. A cursor diff hunk (``▎``) never counts."""
+    row = lines[index].strip()
+    if row.startswith("▎") or not (row.startswith("│") and "❯" in row):
+        return False
+    j = index + 1
+    while j < len(lines):
+        nxt = lines[j].strip()
+        if nxt.startswith("▎"):
+            return False
+        if nxt.startswith("╰"):
+            return True
+        if nxt.startswith("│"):
+            j += 1
+            continue
+        return False
+    return False
 
-    The footer names ``Grok 4.`` inside the box, or the splash prints
-    ``Grok Build``. History also draws a ``❯`` for the submitted prompt;
-    that row has no box bar, so it is not the composer. A usage-limit
-    modal drops both of those and is recognized by ``_grok_block_reason``.
+
+def _is_cursor_composer_row(line: str) -> bool:
+    """Any cursor composer row, including a human draft. The empty one
+    reads ``→ Add a follow-up``. A ``▎`` hunk never counts."""
+    row = line.strip()
+    return row.startswith("→") and not row.startswith("▎")
+
+
+def _bottom_tui(lines: list[str]) -> "str | None":
+    """Who owns the bottom-most composer row in the non-empty tail.
+
+    ``"cursor"``, ``"grok"``, or ``"opencode"``. A match above that tail
+    is scrollback. The lower composer wins, so a quoted grok box or a
+    quoted ``┃ Build ·`` row above the cursor composer does not take the pane.
     """
-    return any("Grok 4." in ln or ln.strip().startswith("Grok Build") for ln in lines)
+    tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
+    for i in range(len(tail) - 1, -1, -1):
+        if _is_cursor_composer_row(tail[i]):
+            return "cursor"
+        if _is_grok_composer_row(tail, i):
+            return "grok"
+        if _is_opencode_composer_row(tail[i]):
+            return "opencode"
+    # A permission dialog is taller than the composer tail. Look further
+    # for that one row. A mode row or a cursor/grok composer in the same
+    # stretch is a quote, not a reason to take the pane.
+    wider = _nonempty_tail(lines, _OPENCODE_PERMISSION_TAIL)
+    for i in range(len(wider) - 1, -1, -1):
+        if _is_cursor_composer_row(wider[i]) or _is_grok_composer_row(wider, i):
+            return None
+        if not _is_opencode_composer_row(wider[i]):
+            continue
+        if _opencode_permission_row(wider[i]):
+            return "opencode"
+        return None
+    return None
+
+
+def _is_cursor_composer(lines: list[str]) -> bool:
+    """The cursor composer ROW, not a quote of its placeholder.
+
+    The row is the bottom-most composer inside the non-empty tail, the
+    same row ``_composer_state`` reads. Its stripped text has to start
+    with ``→ Add a follow-up``. A mention of that placeholder anywhere
+    else in the pane is not the composer.
+    """
+    return bool(lines) and _bottom_tui(lines) == "cursor"
+
+
+def _is_grok_pane(lines: list[str]) -> bool:
+    """The grok TUI, by the composer row at the bottom of the pane.
+
+    Cursor's footer can read ``Grok 4.7``. That string is not the test.
+    A grok composer is a ``│ ❯`` row immediately followed by ``╰``, and
+    only when that pair is the bottom-most composer in the non-empty tail.
+    A ``│``/``❯`` pair or a ``╰`` / ``always-approve`` pair anywhere else,
+    including a cursor diff hunk that starts with ``▎``, is not a grok pane.
+    A history ``❯`` without the box bar is not the composer. A usage-limit
+    modal drops the box and is recognized by ``_grok_block_reason``.
+    """
+    return bool(lines) and _bottom_tui(lines) == "grok"
+
+
+def _grok_box_text(lines: list[str], index: int) -> str:
+    """The draft inside a grok box, including ``│`` continuation rows."""
+    after = lines[index].split("❯", 1)[1]
+    if "│" in after:
+        after = after.split("│", 1)[0]
+    parts = [after.strip()]
+    j = index + 1
+    while j < len(lines) and lines[j].strip().startswith("│"):
+        body = lines[j].strip()[1:]
+        if "│" in body:
+            body = body.split("│", 1)[0]
+        parts.append(body.strip())
+        j += 1
+    return " ".join(p for p in parts if p)
 
 
 def _grok_input(lines: list[str]) -> Optional[str]:
-    """Text in the live ``│ ❯`` box, '' when empty, None if no box."""
-    row = None
-    for ln in lines:
-        if "❯" in ln and "│" in ln:
-            row = ln
-    if row is None:
-        return None
-    after = row.split("❯", 1)[1]
-    if "│" in after:
-        after = after.split("│", 1)[0]
-    return after.strip()
+    """Text in the live grok box, '' when empty, None if that box is not
+    the bottom composer. Continuation rows count as part of the draft."""
+    tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
+    for i in range(len(tail) - 1, -1, -1):
+        if _is_cursor_composer_row(tail[i]) or _is_opencode_composer_row(tail[i]):
+            return None
+        if _is_grok_composer_row(tail, i):
+            return _grok_box_text(tail, i)
+    return None
 
 
 # One grok screen, measured on the live 0.2.51 pane (52 rows). Lines above
@@ -2421,10 +2536,28 @@ def _agent_running(target: str) -> Optional[bool]:
         return _opencode_running(lines)
     if _is_grok_pane(lines):
         return _grok_running(lines)
-    composer = _composer_line(lines)
-    if composer is None:
+    tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
+    composer = _composer_line(tail)
+    if composer is None or not composer.startswith("→"):
         return None
-    return _CURSOR_RUN_HINT in composer
+    if _CURSOR_RUN_HINT in composer:
+        return True
+    # The spinner is the non-empty row directly above the Tip/composer
+    # block: the Tip row when it is present, otherwise the composer.
+    # No other row in the tail can make the pane read as running.
+    idx = None
+    for i in range(len(tail) - 1, -1, -1):
+        if _is_cursor_composer_row(tail[i]):
+            idx = i
+            break
+    if idx is None or idx == 0:
+        return False
+    anchor = idx - 1
+    if tail[anchor].strip().startswith("Tip:"):
+        if anchor == 0:
+            return False
+        anchor -= 1
+    return bool(_CURSOR_SPINNER_ROW.match(tail[anchor].strip()))
 
 
 def _composer_state(target: str) -> Optional[str]:
@@ -2452,6 +2585,12 @@ def _composer_state(target: str) -> Optional[str]:
     if _is_grok_pane(lines):
         return _grok_composer_state(lines)
     composer = _composer_line(lines)
+    if composer is not None and composer.startswith("→"):
+        # A cursor marker above the bottom tail is a quoted row. The
+        # composer itself is off-screen, so this pane is not readable.
+        composer = _composer_line(_nonempty_tail(lines, _CURSOR_COMPOSER_TAIL))
+        if composer is None or not composer.startswith("→"):
+            return None
     if composer is None:
         return None
     content = composer[1:].strip()

@@ -1,0 +1,53 @@
+
+  sandbox:workspace /tmp/grok-723-sacrifice
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ╭─────────────────────────────────────────────────────╮
+  │ ❯ draft-not-submitted                               │
+  │   second line of the draft                          │
+  ╰───────────────── Grok 4.7 (xhigh) · always-approve ─╯
+
+  Enter:send  │  Shift+Tab:mode  │  Ctrl+.:shortcuts
+

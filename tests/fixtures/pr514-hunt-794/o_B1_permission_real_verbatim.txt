@@ -1,0 +1,40 @@
+
+  ┃
+  ┃  check mesh: swarph_dm_unread
+  ┃
+
+     + Thought: 476ms
+
+     ✱ Grep "swarph" in ~
+
+     ▣  Build · DeepSeek V4 Pro (New)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃  △ Permission required
+  ┃    ← Access external directory ~
+  ┃
+  ┃  Patterns
+  ┃
+  ┃  - /home/ubuntu/*
+  ┃
+  ┃
+  ┃   Allow once   Allow always   Reject                                 ctrl+f fullscreen  ⇆ select  enter confirm
+  ┃
+
