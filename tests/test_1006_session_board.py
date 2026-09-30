@@ -94,6 +94,25 @@ def _validate(board: dict):
         assert "title" in group and "items" in group
 
 
+def test_skill_maps_a_name_through_the_sessions_file_and_lists_shell():
+    text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    step = text.split("## 1. Take the roster", 1)[1].split("## 2.", 1)[0]
+    assert "~/.claude/sessions/<pid>.json" in step
+    assert "name" in step and "sessionId" in step and "cwd" in step
+    assert "`shell`" in step
+    assert "in progress" in step.lower() or "In progress" in step
+
+
+def test_shell_status_is_in_progress():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import build_board
+    listing = "This session is lab-ovh [1e23f6]\npeer [abc123] · interactive · shell · running a command\n"
+    board = build_board.build(listing, [])
+    sess = next(s for s in board["sessions"] if s["name"] == "peer")
+    assert sess["bucket"] == "in_progress"
+    assert sess["tone"] == ""
+
+
 def test_schema_documents_the_four_new_question_fields():
     schema = (SKILL / "references" / "data-schema.md").read_text(encoding="utf-8")
     for field in ("to_node", "card", "obligation", "in_session"):

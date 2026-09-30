@@ -17,8 +17,8 @@ A test run or a CI run must not call `Artifact` with a live roster or live board
 2. Sort each row:
    - **Stale:** status `offline`. Offline Remote Control rows are leftovers. Report them. Do not archive them. The commander archives those in the app. There is no CLI archive.
    - **Needs follow-up:** the cell has an open swarph row that waits on the commander (the card text matches the intendant's commander gate: commander-gated, held for the commander, or waiting on the commander).
-   - **In progress:** `busy`, or `idle` with no commander-waiting row. It still has a next step of its own.
-3. Judge a local session from its transcript tail, not from a restarted timestamp. The tail is `~/.claude/projects/<dir>/<session-id>.jsonl`. Read the last few `user` and `assistant` turns. A Remote Control or cloud row has no local tail. Ask that session for a status update with `SendMessage`, `to` set to the name `ListAgents` printed.
+   - **In progress:** status `busy`, `shell`, or `idle` with no commander-waiting row. `shell` is in progress. It still has a next step of its own.
+3. Map a ListAgents name to its transcript through `~/.claude/sessions/<pid>.json`. That file carries `name`, `sessionId`, and `cwd`. The transcript is `~/.claude/projects/<cwd-as-dir>/<sessionId>.jsonl`. The bracketed id on the ListAgents row is not a transcript id. Read the last few `user` and `assistant` turns of that file. A Remote Control or cloud row has no local sessions file. Ask that session for a status update with `SendMessage`, `to` set to the name `ListAgents` printed.
 
 ## 2. Questions come from the swarph board
 

@@ -35,7 +35,7 @@ def parse_listing(text: str) -> tuple[dict, list[dict]]:
         if not name_m or len(parts) < 3:
             continue
         status = parts[2]
-        if status not in ("idle", "busy", "offline"):
+        if status not in ("idle", "busy", "offline", "shell"):
             continue
         peers.append({
             "name": name_m.group(1),
@@ -158,6 +158,9 @@ def build(listing: str, rows: list[dict], *, project: str = "~/swarph") -> dict:
             tone = "needs"
         elif peer["status"] == "busy":
             state = "Busy, with a next step of its own."
+            tone = ""
+        elif peer["status"] == "shell":
+            state = "In a shell, with a next step of its own."
             tone = ""
         else:
             state = "Idle, with a next step of its own."
