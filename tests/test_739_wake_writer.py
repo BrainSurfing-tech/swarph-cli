@@ -429,3 +429,51 @@ def test_main_sends_one_writer_down_dm_and_does_not_start(tmp_path):
     assert "token-file" not in text
     assert "monitor start" not in text
     assert "gridiron" not in text
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows cannot execute the POSIX swarph stub as argv0",
+)
+def test_main_names_the_recorded_supervisor_not_the_ownership_fallback(tmp_path):
+    """Fails if main() passes None instead of recorded_supervisor.
+
+    Ownership would then name the template unit. The pidfile names the
+    non-template unit, and that is the string the send must carry.
+    """
+    from swarph_cli.commands.mesh import write_pidfile
+
+    root = tmp_path / "state"
+    _cell(root, "fixture-cell", fresh=True)
+    write_pidfile(
+        root / "fixture-cell" / "mesh-sidecar" / "monitor.pid",
+        self_name="fixture-cell", sinks=[], poll_s=30,
+        supervisor="swarph-monitor.service")
+    stub = tmp_path / "swarph"
+    log = tmp_path / "calls.log"
+    stub.write_text(textwrap.dedent("""\
+        #!/bin/sh
+        echo "$@" >> "$STUB_LOG"
+        case "$1 $2" in
+          "monitor status") exit 2 ;;
+          *) exit 0 ;;
+        esac
+    """), encoding="utf-8")
+    stub.chmod(0o755)
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.path.abspath("src"),
+        "SWARPH_STATE_ROOT": str(root),
+        "WAKE_WATCHDOG_STATE": str(tmp_path / "wake.json"),
+        "SWARPH_BIN": str(stub),
+        "STUB_LOG": str(log),
+    }
+    env.pop("SWARPH_SELF", None)
+    proc = subprocess.run(
+        [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
+         "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"],
+        env=env, capture_output=True, text=True)
+    assert proc.returncode == 0
+    text = log.read_text(encoding="utf-8")
+    assert "supervised by swarph-monitor.service" in text
+    assert "swarph-monitor@fixture-cell.service" not in text
