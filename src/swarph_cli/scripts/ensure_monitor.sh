@@ -64,71 +64,19 @@ STATE_DIR="${1:-${SWARPH_STATE_DIR:-}}"
 SD=()
 [ -n "$STATE_DIR" ] && SD=(--state-dir "$STATE_DIR")
 
-# >>> #960: a fresh channel heartbeat is already a reader. <<<
-# swarph channel-serve writes channel_heartbeat.json beside the inbox every
-# 60s and names no path on its command line, so `monitor status` cannot see
-# it. Starting a pull monitor beside a heartbeat younger than 180s is the
-# duplicate this script exists to prevent. Absent or older: start, as before.
-# A missing python3 is treated as absent (start), never as a failed caller.
-_heartbeat_fresh() {
-  local f="$1"
-  [ -n "$f" ] && [ -f "$f" ] || return 1
-  command -v python3 >/dev/null 2>&1 || return 1
-  python3 -c 'import json,os,sys,time
-try:
-    data=json.load(open(sys.argv[1],encoding="utf-8"))
-    ts=float(data.get("ts") or 0)
-except Exception:
-    raise SystemExit(1)
-age=time.time()-ts
-# A clock a few seconds ahead is still a live writer. An hour ahead is not.
-if age < -30 or age >= 180:
-    raise SystemExit(1)
-pid=data.get("pid")
-if pid is None:
-    raise SystemExit(0)
-try:
-    pid=int(pid)
-except (TypeError, ValueError):
-    raise SystemExit(1)
-# pid 0 is this process group and pid -1 is every process we can signal.
-# Neither is the channel server. os.kill would report both as alive.
-if pid <= 0:
-    raise SystemExit(1)
-try:
-    os.kill(pid, 0)
-except PermissionError:
-    pass
-except OSError:
-    raise SystemExit(1)
-try:
-    raw=open("/proc/%s/cmdline" % pid, "rb").read()
-except OSError:
-    # No command line to read (macOS, or a pid we may not inspect).
-    # A live pid still counts, which is the check this host can make.
-    raise SystemExit(0)
-text=raw.replace(b"\x00", b" ").decode("utf-8", "replace")
-if "channel-serve" in text or "swarph_cli.channel" in text:
-    raise SystemExit(0)
-raise SystemExit(1)' "$f"
-}
-
-HB_ROOT="${STATE_DIR:-$HOME/swarph_state/$SELF}"
-HB_FILE=""
-if [ -f "$HB_ROOT/channel_heartbeat.json" ]; then
-  HB_FILE="$HB_ROOT/channel_heartbeat.json"
-elif [ -f "$HB_ROOT/mesh-sidecar/channel_heartbeat.json" ]; then
-  HB_FILE="$HB_ROOT/mesh-sidecar/channel_heartbeat.json"
-fi
-
+# >>> #960: the heartbeat is the READER, the monitor is the WRITER. <<<
+# channel-serve writes channel_heartbeat.json every 60s and only reads
+# inbox.log. The pull monitor is the only writer of that log. A fresh
+# heartbeat means the reader is up, not the writer. `monitor status` is
+# the check for the writer. Not running: start one, even when the
+# heartbeat is fresh. Running (status 0 or 1): start nothing. A second
+# monitor is the duplicate. The heartbeat file is not that check.
 "$SW" monitor status --as "$SELF" ${SD[@]+"${SD[@]}"} >/dev/null 2>&1
 case $? in
   0) ;;                                   # running, nothing pending
   1) ;;                                   # running, DMs pending — reported below
-  *) # not running (2) or unknown.
-     if _heartbeat_fresh "$HB_FILE"; then
-       echo "[monitor] channel heartbeat is under 180s old — not starting a monitor"
-     elif "$SW" monitor start --as "$SELF" --deliver pull ${SD[@]+"${SD[@]}"} >/tmp/.swarph-monitor-start.$$ 2>&1; then
+  *) # not running (2) or unknown. The heartbeat does not cover this.
+     if "$SW" monitor start --as "$SELF" --deliver pull ${SD[@]+"${SD[@]}"} >/tmp/.swarph-monitor-start.$$ 2>&1; then
        echo "[monitor] started (--deliver pull)"
      else
        # LOUD, not silent: an auto-start that fails quietly rebuilds the exact
