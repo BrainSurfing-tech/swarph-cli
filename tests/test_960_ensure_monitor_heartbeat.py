@@ -1,9 +1,8 @@
-"""#960: a fresh channel heartbeat is a reader. Do not start a monitor beside it.
+"""#960: a fresh channel heartbeat is the reader, not the writer.
 
-channel-serve writes channel_heartbeat.json beside the inbox and puts nothing
-on its command line, so monitor status reports "not running" while the channel
-is alive. On main, that status is enough to start a second reader. The head
-starts only when the file is absent or older than 180s.
+channel-serve writes channel_heartbeat.json and only reads inbox.log. The
+pull monitor is the only writer. A fresh heartbeat must not stop that
+monitor from starting. A live monitor (status 0) still starts nothing.
 """
 from __future__ import annotations
 
@@ -61,11 +60,14 @@ def _run(tmp_path: Path, *, age: float | None):
     return proc, calls
 
 
-def test_fresh_heartbeat_does_not_start(tmp_path):
+def test_fresh_heartbeat_with_no_monitor_starts(tmp_path):
+    """The shim exits 2, so no monitor is running. A 10s-old heartbeat
+    still has to start the pull monitor. On main this asserts the opposite.
+    """
     proc, calls = _run(tmp_path, age=10)
     assert proc.returncode == 0
-    assert "monitor start" not in calls
-    assert "under 180s" in proc.stdout
+    assert "monitor start" in calls
+    assert "under 180s" not in proc.stdout
 
 
 def test_stale_heartbeat_still_starts(tmp_path):
@@ -107,10 +109,10 @@ def test_a_future_timestamp_an_hour_ahead_starts(tmp_path):
     assert "monitor start" in calls
 
 
-def test_a_timestamp_within_skew_stays_fresh(tmp_path):
+def test_a_timestamp_within_skew_still_starts_when_no_monitor(tmp_path):
     proc, calls = _run_payload(tmp_path, {"ts": time.time() + 10})
     assert proc.returncode == 0
-    assert "monitor start" not in calls
+    assert "monitor start" in calls
 
 
 def test_a_fresh_heartbeat_with_a_dead_pid_starts(tmp_path):
@@ -120,12 +122,8 @@ def test_a_fresh_heartbeat_with_a_dead_pid_starts(tmp_path):
     assert "monitor start" in calls
 
 
-def test_a_fresh_heartbeat_with_a_live_pid_skips(tmp_path):
-    """A live channel-server process still suppresses the start.
-
-    Where /proc is missing the command line cannot be checked, so any live pid
-    still counts, which is what this host can see.
-    """
+def test_a_fresh_heartbeat_with_a_live_reader_pid_still_starts(tmp_path):
+    """A live channel-serve pid is the reader. It does not stand in for the monitor."""
     child = None
     if os.path.isdir("/proc/self"):
         child = subprocess.Popen(
@@ -140,7 +138,40 @@ def test_a_fresh_heartbeat_with_a_live_pid_skips(tmp_path):
             child.kill()
             child.wait(timeout=5)
     assert proc.returncode == 0
+    assert "monitor start" in calls
+
+
+def test_fresh_heartbeat_and_a_live_monitor_starts_nothing(tmp_path):
+    """Status 0 is the writer. A fresh heartbeat beside it must not start a second one."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    shim = bindir / "swarph"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$*\" >> \"$FAKE_LOG\"\n"
+        "case \"$*\" in\n"
+        "  *'monitor status'*) exit 0 ;;\n"
+        "  *) exit 2 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    log = tmp_path / "calls.log"
+    side = tmp_path / "state" / "mesh-sidecar"
+    side.mkdir(parents=True)
+    (side / "channel_heartbeat.json").write_text(
+        json.dumps({"ts": time.time()}), encoding="utf-8")
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+    env["SWARPH_SELF"] = "cursor-lin"
+    env["SWARPH_STATE_DIR"] = str(tmp_path / "state")
+    env["FAKE_LOG"] = str(log)
+    proc = subprocess.run(
+        [_bash(), str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60)
+    calls = log.read_text(encoding="utf-8") if log.exists() else ""
+    assert proc.returncode == 0
     assert "monitor start" not in calls
+    assert "monitor status" in calls
 
 
 def test_pid_zero_starts(tmp_path):
