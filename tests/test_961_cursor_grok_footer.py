@@ -179,6 +179,69 @@ def test_a_running_cursor_pane_quoting_a_grok_box_defers(monkeypatch):
         assert not any(len(c) > 1 and c[1] == "send-keys" for c in calls), name
 
 
+def _hunt(name):
+    from pathlib import Path
+    root = Path(__file__).resolve().parent / "fixtures" / "pr514-hunt-783"
+    return (root / name).read_text(encoding="utf-8")
+
+
+def _sent(calls):
+    return [c for c in calls if len(c) > 1 and c[1] == "send-keys"]
+
+
+def test_an_idle_comment_that_says_thinking_still_gets_one_wake(monkeypatch):
+    """Fails at f92a51a: the bare word Thinking in the tail deferred the wake."""
+    text = _hunt("idle_cursor_tail_row_mentions_Thinking.txt")
+    assert "Thinking" in text
+    calls = _record(monkeypatch, text)
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    assert mesh._is_cursor_composer(lines) is True
+    assert mesh._agent_running("idle") is False
+    assert mesh._composer_state("idle") == "clear"
+    assert mesh.TmuxSink("idle").deliver(_State({}), [], 1) is True
+    assert _wakes(calls, "idle") == [
+        ["tmux", "send-keys", "-t", "idle", "-l", mesh._WAKE_PROMPT]]
+    assert sum(1 for c in calls if "Enter" in c) == 1
+
+
+def test_a_running_cursor_quoting_opencode_defers(monkeypatch):
+    """Fails at f92a51a: a quoted ┃ Build · row made the pane opencode."""
+    text = _hunt("running_cursor_quotes_opencode_mode_row.txt")
+    calls = _record(monkeypatch, text)
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    assert mesh._is_opencode_pane(lines) is False
+    assert mesh._is_cursor_composer(lines) is True
+    assert mesh._bottom_tui(lines) == "cursor"
+    assert mesh.TmuxSink("run").deliver(_State({}), [], 1) is None
+    assert _sent(calls) == []
+
+
+def test_a_cursor_draft_under_a_quoted_grok_box_defers(monkeypatch):
+    """Fails at f92a51a: the quoted box was the bottom composer, so the
+    grok wake was appended to the human draft."""
+    text = _hunt("cursor_draft_under_quoted_grok_box_contrived.txt")
+    calls = _record(monkeypatch, text)
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    assert mesh._is_grok_pane(lines) is False
+    assert mesh._bottom_tui(lines) == "cursor"
+    assert mesh._composer_state("draft") == "busy"
+    assert mesh.TmuxSink("draft").deliver(_State({}), [], 1) is None
+    assert _sent(calls) == []
+
+
+def test_a_wrapped_grok_draft_defers_instead_of_failing(monkeypatch):
+    """Fails at f92a51a: a │ continuation between ❯ and ╰ was not a grok
+    box, so deliver returned False and the sink was counted dead."""
+    text = _hunt("g2_723_typed_two_rows.txt")
+    calls = _record(monkeypatch, text)
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    assert mesh._is_grok_pane(lines) is True
+    assert "second line" in (mesh._grok_input(lines) or "")
+    assert mesh._grok_composer_state(lines) == "busy"
+    assert mesh.TmuxSink("grok").deliver(_State({}), [], 1) is None
+    assert _sent(calls) == []
+
+
 def test_opencode_mentioning_grok_is_not_grok():
     src = Path(__file__).resolve().parent / "fixtures" / "opencode-pane-idle-footer-0710.txt"
     pane = src.read_text(encoding="utf-8").splitlines()

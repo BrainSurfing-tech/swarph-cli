@@ -2136,6 +2136,13 @@ _COMPOSER_PLACEHOLDERS = ("Add a follow-up", "Ask Codex to do anything")
 #: running agent into an idle one forever.
 _CURSOR_RUN_HINT = "ctrl+c to stop"
 
+#: A live cursor turn draws a braille spinner and then ``Thinking`` or
+#: ``Running`` on its own row. The bare word in scrollback or in a comment
+#: is not that row.
+_CURSOR_SPINNER_ROW = re.compile(
+    r"[\u2800-\u28FF]+\s*(?:Thinking|Running)\b"
+)
+
 #: How many non-empty rows at the bottom can hold the cursor composer.
 #: Measured on cursor-lin 2026-09-30: the composer is the 4th non-empty row
 #: from the bottom (composer, task count, model footer, tilde). A quote of
@@ -2186,19 +2193,21 @@ def _opencode_permission_row(line: str) -> bool:
     return s.startswith("┃") and "△" in s and "Permission required" in s
 
 
+def _is_opencode_composer_row(line: str) -> bool:
+    """One row of the opencode box: the mode row, the ``╹▀`` border, or the
+    permission dialog. A quote of ``┃ Build ·`` above the tail is not this."""
+    s = line.strip()
+    return s.startswith("╹▀") or _opencode_mode_row(line) or _opencode_permission_row(line)
+
+
 def _is_opencode_pane(lines: list[str]) -> bool:
     """The opencode composer box, measured on 1.18.33.
 
-    The input row is a ``┃`` line. The mode row under it names Build or
-    Plan and a ``·``. The bottom of the box is ``╹▀``. The permission
-    dialog keeps the ``┃`` row and drops the mode row and the border.
-    Cursor and claude do not draw any of these.
+    Decided by ``_bottom_tui``: the mode row, the ``╹▀`` border, or the
+    permission dialog has to be the bottom-most composer in the non-empty
+    tail. A cursor pane that merely quotes ``┃ Build ·`` is not opencode.
     """
-    for ln in lines:
-        s = ln.strip()
-        if s.startswith("╹▀") or _opencode_mode_row(ln) or _opencode_permission_row(ln):
-            return True
-    return False
+    return bool(lines) and _bottom_tui(lines) == "opencode"
 
 
 def _opencode_running(lines: list[str]) -> bool:
@@ -2296,29 +2305,39 @@ def _opencode_composer_state(lines: list[str]) -> Optional[str]:
 
 
 def _is_grok_composer_row(lines: list[str], index: int) -> bool:
-    """A grok composer is one row: stripped text starts with ``│`` and
-    contains ``❯``, and the next row starts with ``╰``. A cursor diff hunk
-    (``▎``) never counts, and a pair anywhere else on the screen does not."""
+    """A grok composer starts at a ``│ ❯`` row. Continuation rows that also
+    start with ``│`` may sit between it and the ``╰`` footer, which is how
+    a wrapped draft is drawn. A cursor diff hunk (``▎``) never counts."""
     row = lines[index].strip()
     if row.startswith("▎") or not (row.startswith("│") and "❯" in row):
         return False
-    if index + 1 >= len(lines):
+    j = index + 1
+    while j < len(lines):
+        nxt = lines[j].strip()
+        if nxt.startswith("▎"):
+            return False
+        if nxt.startswith("╰"):
+            return True
+        if nxt.startswith("│"):
+            j += 1
+            continue
         return False
-    nxt = lines[index + 1].strip()
-    return nxt.startswith("╰") and not nxt.startswith("▎")
+    return False
 
 
 def _is_cursor_composer_row(line: str) -> bool:
+    """Any cursor composer row, including a human draft. The empty one
+    reads ``→ Add a follow-up``. A ``▎`` hunk never counts."""
     row = line.strip()
-    return row.startswith("→ Add a follow-up") and not row.startswith("▎")
+    return row.startswith("→") and not row.startswith("▎")
 
 
 def _bottom_tui(lines: list[str]) -> "str | None":
     """Who owns the bottom-most composer row in the non-empty tail.
 
-    ``"cursor"`` or ``"grok"``. A match above that tail is scrollback.
-    The lower composer wins, so a quoted grok box above ``→ Add a follow-up``
-    does not take the pane.
+    ``"cursor"``, ``"grok"``, or ``"opencode"``. A match above that tail
+    is scrollback. The lower composer wins, so a quoted grok box or a
+    quoted ``┃ Build ·`` row above the cursor composer does not take the pane.
     """
     tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
     for i in range(len(tail) - 1, -1, -1):
@@ -2326,6 +2345,8 @@ def _bottom_tui(lines: list[str]) -> "str | None":
             return "cursor"
         if _is_grok_composer_row(tail, i):
             return "grok"
+        if _is_opencode_composer_row(tail[i]):
+            return "opencode"
     return None
 
 
@@ -2354,18 +2375,32 @@ def _is_grok_pane(lines: list[str]) -> bool:
     return bool(lines) and _bottom_tui(lines) == "grok"
 
 
-def _grok_input(lines: list[str]) -> Optional[str]:
-    """Text in the live ``│ ❯`` box, '' when empty, None if no box."""
-    row = None
-    for ln in lines:
-        if "❯" in ln and "│" in ln:
-            row = ln
-    if row is None:
-        return None
-    after = row.split("❯", 1)[1]
+def _grok_box_text(lines: list[str], index: int) -> str:
+    """The draft inside a grok box, including ``│`` continuation rows."""
+    after = lines[index].split("❯", 1)[1]
     if "│" in after:
         after = after.split("│", 1)[0]
-    return after.strip()
+    parts = [after.strip()]
+    j = index + 1
+    while j < len(lines) and lines[j].strip().startswith("│"):
+        body = lines[j].strip()[1:]
+        if "│" in body:
+            body = body.split("│", 1)[0]
+        parts.append(body.strip())
+        j += 1
+    return " ".join(p for p in parts if p)
+
+
+def _grok_input(lines: list[str]) -> Optional[str]:
+    """Text in the live grok box, '' when empty, None if that box is not
+    the bottom composer. Continuation rows count as part of the draft."""
+    tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
+    for i in range(len(tail) - 1, -1, -1):
+        if _is_cursor_composer_row(tail[i]) or _is_opencode_composer_row(tail[i]):
+            return None
+        if _is_grok_composer_row(tail, i):
+            return _grok_box_text(tail, i)
+    return None
 
 
 # One grok screen, measured on the live 0.2.51 pane (52 rows). Lines above
@@ -2488,14 +2523,13 @@ def _agent_running(target: str) -> Optional[bool]:
         return None
     if _CURSOR_RUN_HINT in composer:
         return True
-    # cursor-lin 2026-09-30 draws a Thinking row above the composer while a
-    # turn runs, and the composer placeholder stays on screen. A ▎ hunk
-    # that quotes the word does not count.
+    # cursor-lin 2026-09-30 draws a braille spinner and then Thinking or
+    # Running on its own row. The bare word in a comment is not that row.
     for ln in _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL):
         stripped = ln.strip()
         if stripped.startswith("▎") or stripped.startswith("→"):
             continue
-        if "Thinking" in stripped:
+        if _CURSOR_SPINNER_ROW.search(stripped):
             return True
     return False
 
