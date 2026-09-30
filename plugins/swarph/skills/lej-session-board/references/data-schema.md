@@ -34,6 +34,10 @@ The board page renders from the JSON in `<script type="application/json" id="boa
 | `title` | The question. Copy puts the session's `name`, then `Re: <title>`, then the reply. |
 | `note` | Optional context. Keep it under three lines. |
 | `options` | Two or three `{ "label", "text", "rec" }`. `label` is what the user reads, `text` is the full reply the session gets, and `rec: true` marks the recommended option, which is selected by default. |
+| `to_node` | The cell that receives the decision. The app sends the answer DM to this name. |
+| `card` | Optional. The swarph card id this question refers to. |
+| `obligation` | Optional. The swarph obligation id this question refers to. |
+| `in_session` | `true` when the choice must be made inside that session (a deploy or a hard gate named in the row's accept). The app shows it as answer-in-session and does not send. |
 
 ## Group
 

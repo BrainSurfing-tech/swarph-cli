@@ -17,8 +17,8 @@ A test run or a CI run must not call `Artifact` with a live roster or live board
 2. Sort each row:
    - **Stale:** status `offline`. Offline Remote Control rows are leftovers. Report them. Do not archive them. The commander archives those in the app. There is no CLI archive.
    - **Needs follow-up:** the cell has an open swarph row that waits on the commander (the card text matches the intendant's commander gate: commander-gated, held for the commander, or waiting on the commander).
-   - **In progress:** `busy`, or `idle` with no commander-waiting row. It still has a next step of its own.
-3. Judge a local session from its transcript tail, not from a restarted timestamp. The tail is `~/.claude/projects/<dir>/<session-id>.jsonl`. Read the last few `user` and `assistant` turns. A Remote Control or cloud row has no local tail. Ask that session for a status update with `SendMessage`, `to` set to the name `ListAgents` printed.
+   - **In progress:** status `busy`, `shell`, or `idle` with no commander-waiting row. `shell` is in progress. It still has a next step of its own.
+3. Map a ListAgents name to its transcript through `~/.claude/sessions/<pid>.json`. That file carries `name`, `sessionId`, and `cwd`. The transcript is `~/.claude/projects/<cwd-as-dir>/<sessionId>.jsonl`. The bracketed id on the ListAgents row is not a transcript id. Read the last few `user` and `assistant` turns of that file. A Remote Control or cloud row has no local sessions file. Ask that session for a status update with `SendMessage`, `to` set to the name `ListAgents` printed.
 
 ## 2. Questions come from the swarph board
 
@@ -26,13 +26,26 @@ Each cell section lists that cell's open rows that wait on the commander. A ques
 
 Build the JSON with `scripts/build_board.py`. It reads a `ListAgents` listing and a JSON file of those rows. It does not send anything.
 
-## 3. Publish
+## 3. Publish one DM
 
-Fill `board-data` in a copy of `assets/board-template.html`. Publish with `Artifact` (`title`: "LEJ Session Board", `icon`: "list") from the manager session only. Republish the same path so the URL stays.
+`scripts/build_board.py` builds the JSON. The manager sends the commander **one** DM, `kind=status`, whose content is the envelope from `envelope()`:
 
-## 4. Relay
+```
+SWARPH-BOARD v1
+{ ...board JSON... }
+```
 
-The user pastes blocks that start with a session name and a `Re:` line. `SendMessage` each block to that name, and add "relayed from the manager session". A relayed yes approves building, not deploying. A production deploy needs the user's "go" typed in the session that deploys.
+Send it only when that JSON changed. `publish_if_changed` compares the previous envelope and calls the sender only on a change. The `updated` clock is not a change. An unchanged board sends nothing.
+
+Do not call `Artifact` with a live roster or live board rows. A test run or a CI run must not send this DM to the mesh. Publishing real mesh data is a failure.
+
+## 4. Answers
+
+Drop a question only when the answer's `from_node` is the commander and the body has a line `Re: <title>`. A `Re:` line from any other cell does not drop it. `drop_answered` takes `(from_node, body)` pairs and the commander's name.
+
+`in_session` is true when the row's accept names one of these trigger words: `deploy`, `redeploy`, or a hard gate (`hard gate` or `hard-gate`). Each of `deploy` and `redeploy` is a whole word. `deployment` is not a trigger. The go is typed in that session, and the app does not send it.
+
+A relayed yes approves building, not deploying.
 
 ## Files
 
