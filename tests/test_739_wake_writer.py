@@ -11,6 +11,8 @@ import textwrap
 import time
 from pathlib import Path
 
+import pytest
+
 from swarph_cli.scripts.wake_watchdog import (
     enforce_writers,
     systemd_owns_monitor,
@@ -104,6 +106,10 @@ def test_stale_inbox_with_a_newer_gateway_head_is_writer_down(tmp_path):
                           inbox_advanced=False, gateway_newer=True) == "writer-down"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows cannot execute the POSIX swarph stub as argv0; the report is covered by enforce_writers",
+)
 def test_main_prints_writer_down_without_touching_a_live_cell(tmp_path):
     root = tmp_path / "state"
     _cell(root, "fixture-cell", fresh=True)
