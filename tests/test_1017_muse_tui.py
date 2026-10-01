@@ -56,10 +56,26 @@ def test_idle_empty_muse_composer_is_woken_once(monkeypatch):
     assert mesh.TmuxSink("muse-1017-sac").deliver(_State(led), [], 1) is True
     keys = _keys(calls)
     assert keys == [
-        ["tmux", "send-keys", "-t", "muse-1017-sac", "-l", mesh._WAKE_PROMPT],
+        ["tmux", "send-keys", "-t", "muse-1017-sac", "-l", mesh._MUSE_WAKE_PROMPT],
         ["tmux", "send-keys", "-t", "muse-1017-sac", "Enter"],
     ]
     assert led["wake_outstanding"] is True
+    assert "swarph_dm_unread" in mesh._MUSE_WAKE_PROMPT
+
+
+def test_echo_model_label_is_still_muse_and_wakes_once(monkeypatch):
+    """Drop #927: a status row that is not muse-spark must still be muse.
+    Fails on main, where the status check requires the model name."""
+    pane = _pane("idle.txt").replace("muse-spark-1.3-contributor", "echo")
+    pane = pane.replace("echo · high · /tmp/muse-1017-ws · YOLO", "echo · ~/x · YOLO")
+    assert "muse-spark" not in pane
+    assert mesh._bottom_tui(pane.splitlines()) == "muse"
+    calls = _record(monkeypatch, pane)
+    assert mesh.TmuxSink("muse-1017-sac").deliver(_State({}), [], 1) is True
+    sent = _keys(calls)
+    assert sent[0][-1] == mesh._MUSE_WAKE_PROMPT
+    assert "swarph_dm_unread" in sent[0][-1]
+    assert sent[1:] == [["tmux", "send-keys", "-t", "muse-1017-sac", "Enter"]]
 
 
 def test_muse_draft_defers_with_a_named_reason(monkeypatch, tmp_path, capsys):

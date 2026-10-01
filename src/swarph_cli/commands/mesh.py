@@ -2183,6 +2183,9 @@ _OPENCODE_WAKE_PROMPT = "check mesh: swarph_dm_unread"
 # Grok's TUI has the same shape (#715, grok 1.0.41): no push channel, so
 # the wake is one line naming the pull tool and no DM body.
 _GROK_WAKE_PROMPT = "check mesh: swarph_dm_unread"
+# Muse 1.4.1 has no push channel either. The wake names the pull tool,
+# same text the grok and opencode sinks inject.
+_MUSE_WAKE_PROMPT = "check mesh: swarph_dm_unread"
 # A finished turn keeps its ▣ header and adds a duration.
 # Short turns read `· 3.3s` (drop-on-meta-edge, 1.18.33, card #961 post
 # 54557). A longer idle turn reads `· 3m 4s` (opencode pane, 2026-09-29
@@ -2320,7 +2323,7 @@ def _only_wake_text(content: str) -> bool:
     human's line.
     """
     rest = content
-    for prompt in (_GROK_WAKE_PROMPT, _OPENCODE_WAKE_PROMPT, _WAKE_PROMPT):
+    for prompt in (_MUSE_WAKE_PROMPT, _GROK_WAKE_PROMPT, _OPENCODE_WAKE_PROMPT, _WAKE_PROMPT):
         rest = rest.replace(prompt, "")
     return rest.strip() == ""
 
@@ -2492,8 +2495,13 @@ def _is_muse_rule(line: str) -> bool:
 
 
 def _is_muse_status(line: str) -> bool:
-    """The status under the lower rule. Measured: ``muse-spark-… · … · YOLO``."""
-    return "muse-spark" in line and "·" in line
+    """A status row under the lower rule.
+
+    Measured muse-spark is ``model · effort · path · YOLO``. An echo
+    provider is ``echo · ~/x · YOLO``. The anchor is two or more `` · ``
+    separators, not the model name. A model switch must not blind the sink.
+    """
+    return line.count(" · ") >= 2
 
 
 def _is_muse_composer_row(lines: list[str], index: int) -> bool:
@@ -2734,6 +2742,8 @@ def _wake_prompt_for(lines: Optional[list[str]]) -> str:
         return _GROK_WAKE_PROMPT
     if lines and _is_opencode_pane(lines):
         return _OPENCODE_WAKE_PROMPT
+    if lines and _is_muse_pane(lines):
+        return _MUSE_WAKE_PROMPT
     return _WAKE_PROMPT
 
 
