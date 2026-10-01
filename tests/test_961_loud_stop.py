@@ -9,8 +9,11 @@ refusal and this file fails.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import time
+
+import pytest
 
 from swarph_cli.commands import wake_hook_output as who
 
@@ -61,6 +64,18 @@ def test_claude_cursor_and_codex_stay_the_bare_pipeline(monkeypatch, capsys, tmp
         assert "dm_notify_filter" in ctx
 
 
+def _gnu_timeout() -> bool:
+    """coreutils timeout. macOS has no such binary; a stand-in returns at once."""
+    if shutil.which("timeout") is None:
+        return False
+    proc = subprocess.run(
+        ["timeout", "--version"],
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode == 0 and "GNU coreutils" in (proc.stdout or "")
+
+
 def test_a_two_second_cap_prints_exactly_one_expired_line(monkeypatch, capsys, tmp_path):
     """Run the emitted command with the duration swapped to 2s.
 
@@ -71,6 +86,8 @@ def test_a_two_second_cap_prints_exactly_one_expired_line(monkeypatch, capsys, t
     script = _timeout_line(ctx).replace("590m", "2s", 1)
     assert "590m" not in script
     assert inbox.is_file()
+    if not _gnu_timeout():
+        pytest.skip("the 2s run needs GNU coreutils timeout")
     started = time.monotonic()
     proc = subprocess.run(
         ["sh", "-c", script],
