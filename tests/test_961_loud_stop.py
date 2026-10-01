@@ -64,8 +64,12 @@ def test_claude_cursor_and_codex_stay_the_bare_pipeline(monkeypatch, capsys, tmp
         assert "dm_notify_filter" in ctx
 
 
-def _gnu_timeout() -> bool:
-    """coreutils timeout. macOS has no such binary; a stand-in returns at once."""
+def _coreutils_timeout() -> bool:
+    """A coreutils timeout that honors ``-k`` and a duration.
+
+    GNU and uutils both do. A macOS stand-in returns at once, so the
+    elapsed check would fail for the wrong reason.
+    """
     if shutil.which("timeout") is None:
         return False
     proc = subprocess.run(
@@ -73,7 +77,8 @@ def _gnu_timeout() -> bool:
         capture_output=True,
         text=True,
     )
-    return proc.returncode == 0 and "GNU coreutils" in (proc.stdout or "")
+    text = f"{proc.stdout or ''}{proc.stderr or ''}".lower()
+    return proc.returncode == 0 and "coreutils" in text
 
 
 def test_a_two_second_cap_prints_exactly_one_expired_line(monkeypatch, capsys, tmp_path):
@@ -86,8 +91,8 @@ def test_a_two_second_cap_prints_exactly_one_expired_line(monkeypatch, capsys, t
     script = _timeout_line(ctx).replace("590m", "2s", 1)
     assert "590m" not in script
     assert inbox.is_file()
-    if not _gnu_timeout():
-        pytest.skip("the 2s run needs GNU coreutils timeout")
+    if not _coreutils_timeout():
+        pytest.skip("the 2s run needs a coreutils timeout")
     started = time.monotonic()
     proc = subprocess.run(
         ["sh", "-c", script],
