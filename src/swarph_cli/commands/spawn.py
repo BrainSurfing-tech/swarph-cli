@@ -64,7 +64,7 @@ _BANNER = """\
 _USAGE = """\
 Usage:
   swarph spawn [<role-or-path>] [--onboarding PATH-OR-URL]
-               [--dry-run] [--no-starter] [--print-id]
+               [--dry-run] [--no-starter] [--print-id] [--print-resolved]
                [-- provider-extra-args...]
 
 Resolution (first match wins):
@@ -146,6 +146,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--print-id",
         action="store_true",
         help="Print resolved session-id to stdout before exec.",
+    )
+    p.add_argument(
+        "--print-resolved",
+        action="store_true",
+        help="Print the resolved provider argv + swarph-added env as JSON "
+        "and exit without exec (channel validation runs first; an invalid "
+        "channel exits non-zero naming the field). Named --print-resolved, "
+        "not --print, because argparse prefix-matching would route a bare "
+        "--print to --print-id and proceed to a REAL launch.",
     )
     p.add_argument(
         "--new-instance",
@@ -377,6 +386,95 @@ def _set_live_pin_safe(role: str) -> None:
               file=sys.stderr)
 
 
+#: cell.yaml `channel:` values valid per provider. "off"/absent means no
+#: channel for every provider. Anything else on an unlisted provider fails
+#: closed (a channel the provider cannot consume would start a deaf cell).
+_CLAUDE_CHANNELS = frozenset({"allowlisted", "dev"})
+_MUSE_CHANNELS = frozenset({"ingress"})
+
+
+def _resolve_channel(cell: Cell) -> str:
+    """Effective channel mode: $SWARPH_CHANNEL wins (incl. "off"), else the
+    cell.yaml `channel` field (kept by swarph-shared in the forward-compat
+    `extra` bag), else "" (absent). Never launches anything; callers validate.
+    """
+    env_mode = os.environ.get("SWARPH_CHANNEL") or ""
+    if env_mode:
+        return env_mode
+    extra = getattr(cell, "extra", None) or {}
+    value = extra.get("channel", "") if isinstance(extra, dict) else ""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise CellError(
+            f"cell.yaml: 'channel' must be a string; got "
+            f"{type(value).__name__}."
+        )
+    return value
+
+
+def _channel_marketplace_dir() -> Path:
+    """Install location of the `swarph` Claude marketplace (the allowlist).
+
+    Resolved through ~/.claude/plugins/known_marketplaces.json, the same
+    registry claude reads — never a second hardcoded copy that drifts.
+    """
+    registry = Path.home() / ".claude" / "plugins" / "known_marketplaces.json"
+    try:
+        data = json.loads(registry.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise CellError(
+            f"cell.yaml: channel 'allowlisted' needs the swarph marketplace, "
+            f"but its registry is unreadable: {registry} ({exc})."
+        ) from exc
+    try:
+        location = data["swarph"]["installLocation"]
+    except (KeyError, TypeError) as exc:
+        raise CellError(
+            f"cell.yaml: channel 'allowlisted' needs the swarph marketplace, "
+            f"but it is not registered in {registry}."
+        ) from exc
+    path = Path(location)
+    if not path.is_dir():
+        raise CellError(
+            f"cell.yaml: channel 'allowlisted' needs the swarph marketplace "
+            f"at {path}, which is not a directory."
+        )
+    return path
+
+
+def _validate_channel(cell: Cell, mode: str) -> str:
+    """Fail closed on any channel mode the provider cannot consume.
+
+    Returns the mode unchanged. "" and "off" are valid everywhere (no-op).
+    Raises CellError naming the field (and the file, for a missing
+    marketplace) so the operator fixes config, never debugs a deaf cell.
+    """
+    if mode in ("", "off"):
+        return mode
+    provider = cell.provider
+    if provider == "claude":
+        if mode not in _CLAUDE_CHANNELS:
+            raise CellError(
+                f"cell.yaml: 'channel' {mode!r} is not valid for provider "
+                f"'claude'. Valid values: {sorted(_CLAUDE_CHANNELS | {'off'})}."
+            )
+        if mode == "allowlisted":
+            _channel_marketplace_dir()
+        return mode
+    if provider == "muse":
+        if mode not in _MUSE_CHANNELS:
+            raise CellError(
+                f"cell.yaml: 'channel' {mode!r} is not valid for provider "
+                f"'muse'. Valid values: {sorted(_MUSE_CHANNELS | {'off'})}."
+            )
+        return mode
+    raise CellError(
+        f"cell.yaml: 'channel' {mode!r} is only valid for providers "
+        f"'claude' and 'muse'; provider is {provider!r}."
+    )
+
+
 def _build_claude_argv(
     cell: Cell,
     session_id: str,
@@ -400,7 +498,7 @@ def _build_claude_argv(
             argv.extend(["--append-system-prompt", starter])
 
     argv.extend(passthrough)
-    mode = os.environ.get("SWARPH_CHANNEL") or ""
+    mode = _validate_channel(cell, _resolve_channel(cell))
     if mode == "allowlisted":
         argv.extend(["--channels", "plugin:swarph@swarph"])
     elif mode == "dev":
@@ -447,7 +545,10 @@ def _spawn_env_base(cell: Cell) -> dict[str, str]:
     env = scrub_env_for_subprocess()
     env["SWARPH_SPAWN"] = "1"
     env["SWARPH_SELF"] = cell.name
-    mode = os.environ.get("SWARPH_CHANNEL") or ""
+    mode = _resolve_channel(cell)
+    # NOTE: the marketplace/validity gate lives in _validate_channel, which
+    # _build_claude_argv (and the muse env builder) run. This base stays a
+    # pure reflection of the resolved mode so every provider's env agrees.
     if mode in {"allowlisted", "dev"}:
         env["SWARPH_CHANNEL_CELL"] = cell.name
     else:
@@ -472,6 +573,22 @@ def _claude_env(cell: Cell) -> dict[str, str]:
     # feedback_modal_stalls_cell_wake). Suppresses ONLY the survey; does NOT
     # touch telemetry / auto-update / error reporting.
     env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] = "1"
+    return env
+
+
+def _muse_env(cell: Cell) -> dict[str, str]:
+    """Launch env for an interactive ``muse`` session.
+
+    Claude billing scrub + identity stamp (shared), plus the external-agent
+    ingress gate when the cell takes the `ingress` channel. The gate must be
+    in the environment AT SESSION LAUNCH — it cannot be enabled mid-session
+    (measured on card #961: list/send without it reads "external agent
+    ingress is unavailable"). `_validate_channel` already ran at the
+    run_spawn choke point; the mode read here agrees with it by construction.
+    """
+    env = _claude_env(cell)
+    if _resolve_channel(cell) == "ingress":
+        env["MUSE_EXPERIMENTAL_EXTERNAL_AGENT_INGRESS"] = "on"
     return env
 
 
@@ -2706,6 +2823,8 @@ class MuseMembrane(ClaudeMembrane):
 
     name = "muse"
 
+    env_builder = staticmethod(_muse_env)
+
     def apply_task_injection(self, cell: Cell, argv: list[str], text: str) -> None:
         # muse has no --append-system-prompt; the prompt is POSITIONAL. Appended
         # only when this is a FRESH session — `muse resume` takes no prompt, so
@@ -3184,6 +3303,16 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
     was_generated = False
     effective_role: Optional[str] = None
 
+    # Channel gate BEFORE session minting: an invalid channel mode must fail
+    # before load_or_create_session_id persists anything (a refused spawn
+    # must not leave a minted sidecar behind). One choke point for every
+    # provider; builders below see only validated modes.
+    try:
+        _validate_channel(cell, _resolve_channel(cell))
+    except CellError as exc:
+        print(f"swarph spawn: {exc}", file=sys.stderr)
+        return 1
+
     if membrane.uses_pinned_session():
         # When user typed a slot-role (e.g. `swarph spawn drop-on-meta-edge-2`)
         # the cell.yaml resolved to the BASE file (drop-on-meta-edge.yaml) so
@@ -3263,6 +3392,18 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
             new_instance=args.new_instance,
             effective_role=effective_role,
         )
+        return 0
+
+    if args.print_resolved:
+        # Resolved-launch capture: argv + the env keys swarph adds, as JSON
+        # on stdout, then exit BEFORE resolve_binary — no binary needed, no
+        # session started. Banner stays on stderr so stdout parses clean.
+        # env_added is a DIFF against the parent env (not the full env) so
+        # no secret the operator exported leaks into the capture.
+        built_env = membrane.spawn_env(cell)
+        added = {k: v for k, v in built_env.items()
+                 if os.environ.get(k) != v}
+        print(json.dumps({"argv": spawn_argv, "env_added": added}))
         return 0
 
     provider_bin = membrane.resolve_binary()
