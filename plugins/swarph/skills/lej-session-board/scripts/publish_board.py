@@ -39,6 +39,7 @@ def _is_path(value: str) -> bool:
 
 
 _TAG = "[commander]"
+_IN_SESSION_MARK = "[in-session]"
 
 
 def parse_monitor_status(text: str) -> dict:
@@ -78,6 +79,8 @@ def commander_title(accept: str) -> str | None:
     if not text.startswith(_TAG):
         return None
     rest = text[len(_TAG):].lstrip()
+    if rest.startswith(_IN_SESSION_MARK):
+        rest = rest[len(_IN_SESSION_MARK):].lstrip()
     cut = len(rest)
     for marker in ("|", "PASS="):
         found = rest.find(marker)

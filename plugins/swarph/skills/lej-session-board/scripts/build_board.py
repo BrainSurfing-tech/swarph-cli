@@ -61,8 +61,15 @@ _ANSWER = re.compile(r"(?m)^Re: (.+)$")
 
 
 def _in_session(row: dict) -> bool:
-    """A deploy or hard-gate named in the accept is answered inside that session."""
-    return _IN_SESSION.search(row.get("accept") or "") is not None
+    """A deploy or hard-gate named in the accept is answered inside that session.
+
+    An accept that starts ``[commander][in-session]`` is in-session even when
+    those words are absent. The keyword fallback stays.
+    """
+    accept = row.get("accept") or ""
+    if accept.startswith("[commander][in-session]"):
+        return True
+    return _IN_SESSION.search(accept) is not None
 
 
 def _questions(rows: list[dict]) -> list[dict]:
