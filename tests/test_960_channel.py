@@ -163,10 +163,22 @@ def test_a_fresh_channel_heartbeat_counts_as_a_watcher(tmp_path, monkeypatch):
     assert _watching(str(inbox), [cmd]) is False
 
 
-def test_spawn_channel_flag_is_off_unless_asked(monkeypatch):
+def test_spawn_channel_flag_is_off_unless_asked(monkeypatch, tmp_path):
     class Cell:
         role = "lin"
+        provider = "claude"
+        extra = {}
 
+    # Fail-closed (#1013): an allowlisted mode needs the marketplace on disk,
+    # so plant a fake registry in the hermetic HOME for the env legs below.
+    market = tmp_path / "swarph-marketplace"
+    market.mkdir()
+    plugdir = Path.home() / ".claude" / "plugins"
+    plugdir.mkdir(parents=True, exist_ok=True)
+    (plugdir / "known_marketplaces.json").write_text(
+        json.dumps({"swarph": {"installLocation": str(market)}}),
+        encoding="utf-8",
+    )
     monkeypatch.delenv("SWARPH_CHANNEL", raising=False)
     argv = _build_claude_argv(Cell(), "sid-960", True, [])
     assert "--channels" not in argv
