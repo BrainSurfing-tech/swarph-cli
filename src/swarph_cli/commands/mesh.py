@@ -1482,6 +1482,7 @@ class TmuxSink(Sink):
 
     def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
         led = state.ledger(self.name)
+        self.failure_reason = None
         # #723: a rate-limit or usage-limit screen is not deliverable. An
         # empty composer beside "Retry failed: rate limit" used to inject
         # again, and the 1.0.44 upgrade modal (no Grok footer) used to
@@ -1619,6 +1620,7 @@ class TmuxSink(Sink):
                     # Human text shares the composer (possibly merged into our
                     # wake) — an Enter here submits THEIR line (#403's shape).
                     return None
+                self.failure_reason = _sink_failure_detail(self.target)
                 return False  # pane unreadable: keep the failure loud
         # Fresh path, gated on the OBSERVED composer (gpt-ops REVISE, #312):
         # "wake" — wake text already sits ALONE in the composer (a monitor
@@ -1647,6 +1649,7 @@ class TmuxSink(Sink):
         if composer == "busy":
             return None
         if composer != "clear":
+            self.failure_reason = _sink_failure_detail(self.target)
             return False
         # #619: never inject mid-turn. A wake into a RUNNING TUI lands in
         # cursor's follow-up queue, which is input-gated (measured live
@@ -1656,6 +1659,13 @@ class TmuxSink(Sink):
         # after the turn ends injects into an IDLE composer, where Enter
         # submits immediately. Cost: <= one poll interval of delay.
         if _agent_running(self.target):
+            seen = _capture_pane_lines(self.target)
+            if seen and _muse_running(seen):
+                print(
+                    f"[monitor] {self.name}: muse turn in progress — "
+                    "deferring, zero keys",
+                    flush=True,
+                )
             return None
         # Module-global lookup on purpose: the sidecar regression suites patch
         # `mesh._tmux_wake`, and a `from`-import here would silently bypass them.
@@ -2475,12 +2485,38 @@ def _is_cursor_composer_row(line: str) -> bool:
     return row.startswith("→") and not row.startswith("▎")
 
 
+def _is_muse_rule(line: str) -> bool:
+    """A muse composer rule is a run of ``─``, measured on 1.4.1."""
+    s = line.strip()
+    return len(s) >= 8 and "─" in s and set(s) <= {"─"}
+
+
+def _is_muse_status(line: str) -> bool:
+    """The status under the lower rule. Measured: ``muse-spark-… · … · YOLO``."""
+    return "muse-spark" in line and "·" in line
+
+
+def _is_muse_composer_row(lines: list[str], index: int) -> bool:
+    """The live muse composer is a ``❯`` row between two rules, with the
+    model status under the lower rule. A transcript ``❯`` above that box
+    has no rule on both sides, so it is history."""
+    row = lines[index].strip()
+    if not row.startswith("❯"):
+        return False
+    if index == 0 or index + 1 >= len(lines):
+        return False
+    if not (_is_muse_rule(lines[index - 1]) and _is_muse_rule(lines[index + 1])):
+        return False
+    return any(_is_muse_status(ln) for ln in lines[index + 2:index + 6])
+
+
 def _bottom_tui(lines: list[str]) -> "str | None":
     """Who owns the bottom-most composer row in the non-empty tail.
 
-    ``"cursor"``, ``"grok"``, or ``"opencode"``. A match above that tail
-    is scrollback. The lower composer wins, so a quoted grok box or a
-    quoted ``┃ Build ·`` row above the cursor composer does not take the pane.
+    ``"cursor"``, ``"grok"``, ``"opencode"``, or ``"muse"``. A match above
+    that tail is scrollback. The lower composer wins, so a quoted grok box
+    or a quoted ``┃ Build ·`` row above the cursor composer does not take
+    the pane.
     """
     tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
     for i in range(len(tail) - 1, -1, -1):
@@ -2490,12 +2526,15 @@ def _bottom_tui(lines: list[str]) -> "str | None":
             return "grok"
         if _is_opencode_composer_row(tail[i]):
             return "opencode"
+        if _is_muse_composer_row(tail, i):
+            return "muse"
     # A permission dialog is taller than the composer tail. Look further
     # for that one row. A mode row or a cursor/grok composer in the same
     # stretch is a quote, not a reason to take the pane.
     wider = _nonempty_tail(lines, _OPENCODE_PERMISSION_TAIL)
     for i in range(len(wider) - 1, -1, -1):
-        if _is_cursor_composer_row(wider[i]) or _is_grok_composer_row(wider, i):
+        if (_is_cursor_composer_row(wider[i]) or _is_grok_composer_row(wider, i)
+                or _is_muse_composer_row(wider, i)):
             return None
         if not _is_opencode_composer_row(wider[i]):
             continue
@@ -2645,12 +2684,70 @@ def _grok_composer_state(lines: list[str]) -> Optional[str]:
     return "busy"
 
 
+def _is_muse_pane(lines: list[str]) -> bool:
+    """Muse 1.4.1: the ``❯`` row between two rules is the bottom composer."""
+    return bool(lines) and _bottom_tui(lines) == "muse"
+
+
+def _muse_input(lines: list[str]) -> Optional[str]:
+    """Text after the live ``❯``, '' when that row is empty, None if the
+    bottom composer is not muse. A transcript ``❯`` above the rules is not
+    this row."""
+    tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
+    for i in range(len(tail) - 1, -1, -1):
+        if (_is_cursor_composer_row(tail[i]) or _is_grok_composer_row(tail, i)
+                or _is_opencode_composer_row(tail[i])):
+            return None
+        if _is_muse_composer_row(tail, i):
+            return tail[i].strip()[1:].strip()
+    return None
+
+
+def _muse_composer_state(lines: list[str]) -> Optional[str]:
+    text = _muse_input(lines)
+    if text is None:
+        return None
+    if not text:
+        return "clear"
+    if _only_wake_text(text):
+        return "wake"
+    return "busy"
+
+
+def _muse_running(lines: list[str]) -> bool:
+    """A muse turn in progress. 1.4.1 draws ``esc to interrupt`` on the
+    status row above the composer (``Double checking (Ns · esc to interrupt)``).
+    The card also names a ``Thinking`` row; either one means a keystroke
+    would land in the turn, not the idle composer. The phrase leaves the
+    visible screen when the turn ends."""
+    if not _is_muse_pane(lines):
+        return False
+    for ln in lines:
+        s = ln.strip()
+        if "esc to interrupt" in s or s == "Thinking" or s.startswith("Thinking "):
+            return True
+    return False
+
+
 def _wake_prompt_for(lines: Optional[list[str]]) -> str:
     if lines and _is_grok_pane(lines):
         return _GROK_WAKE_PROMPT
     if lines and _is_opencode_pane(lines):
         return _OPENCODE_WAKE_PROMPT
     return _WAKE_PROMPT
+
+
+def _sink_failure_detail(target: str) -> str:
+    """Why a delivery returned False.
+
+    A captured pane with no known composer is an unrecognised TUI. A missing
+    pane stays the old 'probably gone' line. Callers print this phrase as
+    the failure line.
+    """
+    lines = _capture_pane_lines(target)
+    if lines and _bottom_tui(lines) is None and _composer_line(lines) is None:
+        return "unrecognised TUI"
+    return "the sink is probably gone (session restart / renamed target)"
 
 
 def _agent_running(target: str) -> Optional[bool]:
@@ -2673,6 +2770,8 @@ def _agent_running(target: str) -> Optional[bool]:
         return _opencode_running(lines)
     if _is_grok_pane(lines):
         return _grok_running(lines)
+    if _is_muse_pane(lines):
+        return _muse_running(lines)
     tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
     composer = _composer_line(tail)
     if composer is None or not composer.startswith("→"):
@@ -2721,6 +2820,8 @@ def _composer_state(target: str) -> Optional[str]:
         return _opencode_composer_state(lines)
     if _is_grok_pane(lines):
         return _grok_composer_state(lines)
+    if _is_muse_pane(lines):
+        return _muse_composer_state(lines)
     composer = _composer_line(lines)
     if composer is not None and composer.startswith("→"):
         # A cursor marker above the bottom tail is a quoted row. The
@@ -3125,10 +3226,12 @@ def _monitor_deliver(state: MonitorState) -> None:
             else:
                 # A dead sink is VISIBLE instead of silently freezing anything.
                 led["consecutive_failures"] = int(led["consecutive_failures"]) + 1
+                detail = getattr(sink, "failure_reason", None) or (
+                    "the sink is probably gone (session restart / renamed target)"
+                )
                 print(f"{state.log_prefix} DELIVERY FAILED to {sink.name} "
                       f"({led['consecutive_failures']} consecutive) -- DMs up to "
-                      f"id {observed} were still observed and archived; the sink "
-                      f"is probably gone (session restart / renamed target)",
+                      f"id {observed} were still observed and archived; {detail}",
                       file=sys.stderr, flush=True)
             changed = True
 
