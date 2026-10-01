@@ -309,3 +309,40 @@ def test_live_entry_drops_a_closed_row_and_a_failed_read_sends_nothing(tmp_path,
     assert all(argv[:3] != ["swarph", "mesh", "send"] for argv in calls)
     assert all("inbox" not in argv for argv in calls)
     assert not hasattr(pub, "commander_replies")
+
+
+def test_in_session_marker_sets_the_flag_and_strips_the_title():
+    """An accept starting [commander][in-session] Re-login... builds
+    in_session=true and a title without the marker. A plain [commander]
+    row with no deploy or hard-gate words stays false. On main the title
+    keeps [in-session] and the flag stays false.
+    """
+    pub = _load()
+    listing = (ROOT / "tests" / "fixtures" / "session-board" / "listagents-lab.txt").read_text(encoding="utf-8")
+    rows = pub.commander_rows([
+        {
+            "id": 5,
+            "holder": "droplet",
+            "card_id": 1006,
+            "state": "open",
+            "accept": "[commander][in-session] Re-login to the board | PASS=the commander re-logs",
+        },
+        {
+            "id": 6,
+            "holder": "droplet",
+            "card_id": 1006,
+            "state": "open",
+            "accept": "[commander] Note the weather today | PASS=nothing",
+        },
+    ])
+    board = pub.build_board.build(listing, rows)
+    questions = [
+        q for sess in board["sessions"] if sess["name"] == "droplet" for q in sess["questions"]
+    ]
+    marked = next(q for q in questions if q["obligation"] == 5)
+    plain = next(q for q in questions if q["obligation"] == 6)
+    assert marked["in_session"] is True
+    assert marked["title"] == "Re-login to the board"
+    assert "[in-session]" not in marked["title"]
+    assert "[commander]" not in marked["title"]
+    assert plain["in_session"] is False
