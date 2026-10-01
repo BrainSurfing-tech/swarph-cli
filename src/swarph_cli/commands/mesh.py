@@ -1932,6 +1932,117 @@ class MuseSink(Sink):
         return f"{count} DM{plural} not yet delivered to {self.name}"
 
 
+_CODEX_SEND_TIMEOUT_S = 120.0
+
+
+def _codex_send(thread: str, text: str, *,
+                _run=subprocess.run,
+                _which=shutil.which,
+                _timeout: float = _CODEX_SEND_TIMEOUT_S,
+                ) -> tuple:
+    """One `codex queue --thread <thread> --message <text>`.
+
+    Returns (True, "") on a verified queue, else (False, NAMED reason).
+    Every refusal is named — non-zero exit, missing binary, launch/timeout
+    failure — so a dead wake path reads as a reason, never as silence.
+    `_run`/`_which` are injectable so the result mapping is testable without
+    a codex binary on PATH. Unlike `muse session-message send`, codex queue
+    is a same-box queue file write: no ingress gate, no peer approval.
+    """
+    prog = _which("codex")
+    if not prog:
+        return (False, "codex binary not found on PATH")
+    argv = [prog, "queue", "--thread", thread, "--message", text]
+    try:
+        proc = _run(argv, capture_output=True, text=True,
+                    timeout=_timeout)
+    except FileNotFoundError:
+        return (False, "codex binary not found on PATH")
+    except subprocess.TimeoutExpired:
+        return (False,
+                f"codex queue timed out after {_timeout:.0f}s")
+    except OSError as exc:
+        return (False, f"codex queue failed to launch: {exc}")
+    if getattr(proc, "returncode", 1) != 0:
+        out = ((getattr(proc, "stdout", None) or "")
+               + "\n" + (getattr(proc, "stderr", None) or ""))
+        snippet = out.strip().splitlines()
+        detail = snippet[-1][:200] if snippet else "no output"
+        return (False,
+                f"codex queue exited "
+                f"{getattr(proc, 'returncode', '?')}: {detail}")
+    return (True, "")
+
+
+class CodexSink(Sink):
+    """Wake the live gpt-ops session with `codex queue` instead of typing.
+
+    Edge-triggered on the drain like MuseSink: while `wake_outstanding`
+    stands (gateway unread > 0), further deliveries report delivered with NO
+    new send; the next delivery after the drain sends again. There is no
+    composer to read — codex queues into the session, it does not type —
+    so there is no politeness gate, only the outstanding flag plus the
+    gateway drain check. A refused or failed send returns False with a NAMED
+    reason printed loud; it never advances the cursor in silence.
+    """
+
+    is_push = True
+
+    def __init__(self, thread: str):
+        super().__init__(f"codex:{thread}")
+        self.thread = thread
+
+    def _prompt(self, dms: list) -> str:
+        # Full bodies cross: this prompt IS the delivery, and the cell must
+        # answer the message it actually received, not a 160-char preview.
+        lines = [
+            f"You have {len(dms)} new mesh DM(s). "
+            "Read each and act per your standing instructions.",
+            "",
+        ]
+        for dm in dms:
+            lines.append(
+                f"--- id={dm.get('id')} from={dm.get('from_node')} "
+                f"kind={dm.get('kind')} ---"
+            )
+            lines.append(dm.get("content") or "")
+            lines.append("")
+        return "\n".join(lines)
+
+    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
+        led = state.ledger(self.name)
+        if led.get("wake_outstanding"):
+            # Lazy: watchdog imports mesh module-level, so the reverse must
+            # not. None (gateway error) reads as NOT-drained — re-arming on
+            # an unreadable drain signal would re-open the stack.
+            from swarph_cli.commands.watchdog import _gateway_unread_count
+            if _gateway_unread_count(state.gateway, state.self_name,
+                                     state.token) != 0:
+                print(f"[monitor] {self.name}: delivery reported on a STANDING wake "
+                      f"(no send this poll)", flush=True)
+                return True
+            led["wake_outstanding"] = False  # drained since — re-arm
+        if not dms:
+            # Nothing recoverable to hand over (log rotated) — do NOT claim
+            # a delivery; the ledger stays and the gap stays visible.
+            print(f"[monitor] {self.name}: {up_to_id} observed but no body "
+                  f"recoverable from inbox.log for the owed range", flush=True)
+            return False
+        # Module-global lookup on purpose: the sidecar regression suites patch
+        # `mesh._codex_send`, and a `from`-import here would silently bypass them.
+        ok, reason = _codex_send(self.thread, self._prompt(dms))
+        if ok:
+            led["wake_outstanding"] = True
+            led["last_wake_injected_at"] = time.time()
+            return True
+        print(f"[monitor] {self.name}: codex send FAILED: {reason}", flush=True)
+        return False
+
+    def pending_label(self, count: int) -> str:
+        plural = "s" if count != 1 else ""
+        return f"{count} DM{plural} not yet delivered to {self.name}"
+
+
 def parse_sink(spec: str) -> Sink:
     """`--deliver SINK` -> Sink. Unknown or held specs RAISE; nothing no-ops."""
     if spec == "pull":
@@ -1966,6 +2077,13 @@ def parse_sink(spec: str) -> Sink:
                 "sink 'muse:' needs a session, e.g. muse:<session-uuid>"
             )
         return MuseSink(session)
+    if spec.startswith("codex:"):
+        thread = spec[len("codex:"):]
+        if not thread:
+            raise MonitorSinkError(
+                "sink 'codex:' needs a thread, e.g. codex:<session-uuid>"
+            )
+        return CodexSink(thread)
     if spec.startswith("webhook:"):
         # HELD by the commander: outward-facing egress, and a build greenlight
         # does not clear an egress gate. It must EXIT, not silently no-op — a
@@ -1978,7 +2096,8 @@ def parse_sink(spec: str) -> Sink:
         )
     raise MonitorSinkError(
         f"unknown sink {spec!r}; expected pull, none, stdout, tmux:<target>, "
-        "tmux-notify:<target>, cursor-print:<cell>, or muse:<session>"
+        "tmux-notify:<target>, cursor-print:<cell>, muse:<session>, "
+        "or codex:<thread>"
     )
 
 
