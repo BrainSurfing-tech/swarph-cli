@@ -7,9 +7,9 @@ design), not by which harness happens to be detected:
 * ``claude`` / ``codex`` → ARM-INSTRUCTION: the session-start hook emits
   the watch pipeline (``tail -F inbox.log | dm_notify_filter``) as session
   context so the agent arms it as a background watch.
-* ``cursor`` → VERIFY-AND-REPORT: the wake already lives in swarph (the
-  monitor's push sink); the hook verifies it at every session start and
-  says loudly when the cell has no wake path.
+* ``cursor`` → ARM-INSTRUCTION, same tail pipeline as claude/codex, written
+  to ``~/.cursor/hooks.json``. The wake is the session-armed tail. A
+  missing or stale sidecar inbox.log is said loudly in the session context.
 * unknown / undetectable harness → LOUD REFUSAL: nonzero exit, nothing
   written. A silent no-op here would manufacture exactly the
   armed-looking-but-deaf cell this card exists to eliminate.
@@ -271,9 +271,10 @@ Usage:
 
 
 Installs the silent-wake session-start hook (board card #482). The product
-depends on where the wake lives: claude/codex get an arm-instruction (the
-tail -F inbox.log | dm_notify_filter watch), cursor gets verify-and-report
-of the swarph monitor's push sink. Unknown harnesses are refused loudly.
+depends on where the wake lives: claude, codex, and cursor get an
+arm-instruction (the tail -F inbox.log | dm_notify_filter watch). Cursor
+emits that pipeline as session context and says loudly when the sidecar
+inbox.log is missing or stale. Unknown harnesses are refused loudly.
 --cell is refused with --scope user (card #527): a baked cell name in a
 box-global file arms one cell's wake for every session on the box and
 silently evicts the last installed cell's. Omit --cell and the hook
@@ -444,7 +445,7 @@ def run_install_wake_hook(argv: Optional[list[str]] = None) -> int:
         product = (
             "arm-instruction (the session-start hook emits the "
             "tail -F inbox.log | dm_notify_filter watch as session context)"
-            if harness in ("claude", "codex", "muse")
+            if harness in ("claude", "codex", "muse", "cursor")
             else "verify-and-report (the session-start hook checks the "
             "swarph monitor's push sink and says loudly if none exists)"
         )

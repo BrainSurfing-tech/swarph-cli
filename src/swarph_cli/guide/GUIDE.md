@@ -190,7 +190,7 @@ run:
 | harness | what you get | config it writes |
 |---|---|---|
 | `claude`, `codex` | the session-start hook emits a watch pipeline as session context, and you arm it as a background watch | `~/.claude/settings.json`, `~/.codex/hooks.json` |
-| `cursor` | the wake already lives in swarph's monitor push sink, so the hook VERIFIES it every session start and says loudly when there is no wake path | `~/.cursor/hooks.json` |
+| `cursor` | the wake is the session-armed tail: the session-start hook emits the same watch pipeline as claude/codex (the cell's mesh-sidecar/inbox.log through the unbuffered filter) and says loudly when that inbox.log is missing or stale | `~/.cursor/hooks.json` |
 
 Idempotent. `--dry-run` shows what would change without writing. `--uninstall` removes it.
 

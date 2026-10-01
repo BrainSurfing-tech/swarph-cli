@@ -137,8 +137,7 @@ def test_ensure_cell_plugin_never_raises_even_if_unwritable(tmp_path, monkeypatc
 
 def test_opencode_is_an_ARM_harness_not_a_verify_harness():
     """The wake lives in the harness for opencode (arm-instruction emitted as the
-    tail -F inbox.log | dm_notify_filter watch), not in a swarph monitor push
-    sink the way cursor is."""
+    tail -F inbox.log | dm_notify_filter watch)."""
     assert "opencode" in _ARM_HARNESSES
     instruction = _arm_instruction("opencode-1", "install-time --cell")
     assert "tail" in instruction and "inbox.log" in instruction
