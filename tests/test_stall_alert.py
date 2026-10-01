@@ -2,12 +2,23 @@ import swarph_cli.stall_alert as st
 
 
 def test_is_alert_tick_backoff_sequence():
-    fire = [n for n in range(1, 100) if st.is_alert_tick(n)]
-    assert fire == [6, 12, 24, 48, 96]
+    fire = [n for n in range(1, 500) if st.is_alert_tick(n)]
+    assert fire[:4] == [60, 120, 240, 480]
 
 
 def test_is_alert_tick_below_threshold():
     assert not any(st.is_alert_tick(n) for n in range(0, 6))
+
+
+def test_first_alert_is_60_after_the_measured_drains():
+    """7 of 7 stall rows on 2026-09-30/10-01 drained in 7-25 min. 6 ticks
+    is 3 min and must not fire. Fails on main, where 6 is the first tick."""
+    for n in (6, 12, 24, 48):
+        assert st.is_alert_tick(n) is False
+    assert st.is_alert_tick(60) is True
+    assert st.is_alert_tick(120) is True
+    assert st.is_alert_tick(240) is True
+    assert st.is_alert_tick(180) is False
 
 
 class _Board:

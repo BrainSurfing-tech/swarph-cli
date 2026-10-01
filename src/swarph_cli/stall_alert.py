@@ -1,6 +1,9 @@
 """stall_alert — surface a cell whose live session is perpetually busy so its
-undelivered DMs don't rot silently. Exponential backoff (6,12,24,48…) prevents
+undelivered DMs don't rot silently. Exponential backoff (60,120,240,480…) prevents
 the linear-flood failure (the 145-DM incident, feedback_modal_stalls_cell_wake).
+Measured 2026-09-30/10-01: 7 of 7 stall rows fired on busy builder cells that
+drained on their own within 7-25 min. The first alert waits 60 ticks (30 min
+at the 30s poll) so a long build is not paged at 3 min.
 
 Card #989: the surface is one obligation held by lab-ovh, never a DM to
 commander. A second stall tick while that row is open opens nothing new. A
@@ -15,7 +18,7 @@ import urllib.parse
 import urllib.request
 from swarph_cli.console_safe import print_safe
 
-_STALL_FIRST = 6  # first alert after this many consecutive deferred ticks
+_STALL_FIRST = 60  # first alert after this many consecutive deferred ticks
 _CARD = 989
 _HOLDER = "lab-ovh"
 # lab-ovh's own stall cannot escalate to lab-ovh. Another orchestrator holds it.
@@ -25,7 +28,12 @@ _PREFIX = f"STALL card #{_CARD}"
 
 
 def is_alert_tick(deferred_ticks: int) -> bool:
-    """True exactly at 6, 12, 24, 48, 96 … — first at _STALL_FIRST, doubling."""
+    """True exactly at 60, 120, 240, 480 … — first at _STALL_FIRST, doubling.
+
+    Measured 2026-09-30/10-01: 7 of 7 stall rows fired on busy builder cells
+    that drained on their own within 7-25 min. At 6 ticks (3 min on a 30s
+    poll) every long build tripped the alert.
+    """
     if deferred_ticks < _STALL_FIRST or deferred_ticks % _STALL_FIRST != 0:
         return False
     k = deferred_ticks // _STALL_FIRST
