@@ -10,10 +10,11 @@ distinction is not WHICH harness, it is WHERE THE WAKE LIVES):
 * ``claude`` / ``codex`` → ARM-INSTRUCTION. The wake lives in the harness:
   emit the watch pipeline (tail -F inbox.log | dm_notify_filter) as
   additionalContext so the agent arms it as a background watch.
-* ``cursor`` → VERIFY-AND-REPORT. The wake lives in swarph (the monitor's
-  push sink, e.g. ``tmux:<cell>``). Query ``swarph monitor status --json``
-  and report armed / NOT armed. Cursor's harness has no persistent-Monitor
-  primitive for a bundle to instruct, so the honest product is verification.
+* ``cursor`` → ARM-INSTRUCTION, same pipeline as claude/codex, emitted in
+  Cursor's ``additional_context`` envelope (the ``~/.cursor/hooks.json``
+  sessionStart shape). The wake is the session-armed tail. A missing or
+  stale ``mesh-sidecar/inbox.log`` is said loudly in that same context;
+  the hook does not report a tmux push sink as the wake.
 * anything else → LOUD REFUSAL: say in the session context that this
   harness has no supported wake path, so a silent gap cannot masquerade
   as armed.
@@ -30,6 +31,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -48,6 +50,8 @@ _KNOWN_HARNESSES = _ARM_HARNESSES + _INJECT_HARNESSES + _VERIFY_HARNESSES
 
 
 _FILTER_MODULE = "swarph_cli.scripts.dm_notify_filter"
+# Same default as `swarph monitor arm-check --max-age-s` (15 minutes).
+_INBOX_MAX_AGE_S = 15 * 60
 
 
 def _read_stdin_payload() -> dict[str, Any]:
@@ -278,6 +282,49 @@ def _arm_instruction(cell_name: Optional[str], source: str = "unresolved") -> st
     )
 
 
+def _inbox_verdict(cell_name: str) -> str:
+    """Loud line when this cell's sidecar inbox.log is missing or stale.
+
+    The arm instruction tells the session to run ``monitor arm-check``
+    before tailing. Cursor's session context also states the verdict
+    itself, so a missing or stale log is visible without a second command.
+    A fresh log returns "" — nothing extra to say.
+    """
+    path = _sidecar_dir(cell_name) / "inbox.log"
+    if not path.exists():
+        return (
+            f"[swarph silent-wake] INBOX MISSING for {cell_name}: {path} "
+            "is not there. Do NOT claim the wake is armed. The tail below "
+            "waits on a file nothing is writing until the sidecar creates it."
+        )
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError as exc:
+        return (
+            f"[swarph silent-wake] INBOX UNREADABLE for {cell_name}: "
+            f"cannot stat {path}: {exc}. Do NOT claim the wake is armed."
+        )
+    if age > _INBOX_MAX_AGE_S:
+        return (
+            f"[swarph silent-wake] INBOX STALE for {cell_name}: {path} "
+            f"age={int(age)}s > max-age-s={_INBOX_MAX_AGE_S}. "
+            "Do NOT claim the wake is armed. A tail on a log that is not "
+            "moving looks armed and hears nothing."
+        )
+    return ""
+
+
+def _cursor_context(cell_name: Optional[str], source: str) -> str:
+    """Claude/codex pipeline, Cursor envelope, plus the inbox verdict."""
+    instruction = _arm_instruction(cell_name, source)
+    if not cell_name:
+        return instruction
+    verdict = _inbox_verdict(cell_name)
+    if not verdict:
+        return instruction
+    return verdict + "\n" + instruction
+
+
 def _verify_report(cell_name: Optional[str], source: str = "unresolved") -> str:
     if not cell_name:
         return (
@@ -437,6 +484,10 @@ def run_wake_hook_output(argv: Optional[list[str]] = None) -> int:
 
     cell_name, cell_source = _resolve_cell(args.cell)
 
+    if harness == "cursor":
+        return _emit(
+            {"context": _cursor_context(cell_name, cell_source)}, harness=harness
+        )
     if harness in _ARM_HARNESSES:
         return _emit(
             {"context": _arm_instruction(cell_name, cell_source)}, harness=harness

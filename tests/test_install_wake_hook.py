@@ -1,7 +1,7 @@
 """Tests for board card #482: the silent-wake hook bundle.
 
-Covers both renderings (arm-instruction for claude/codex, verify-and-report
-for cursor), the loud-refusal branch, and non-vacuity partners that prove
+Covers both renderings (arm-instruction for claude/codex/cursor, verify-and-report
+for antigravity), the loud-refusal branch, and non-vacuity partners that prove
 the assertions can actually fail.
 """
 
@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -335,74 +337,98 @@ def test_arm_rendering_without_cell_refuses_loudly(monkeypatch, capsys):
     assert "substitute" not in ctx
 
 
-def test_verify_rendering_armed_when_push_sink(monkeypatch, capsys):
-    status = {
-        "running": True,
-        "sinks": [
-            {"name": "tmux:cursor-lin", "is_push": True},
-            {"name": "pull", "is_push": False},
-        ],
-    }
+def _cursor_sidecar(monkeypatch, tmp_path, cell="cursor-lin"):
+    """Point the hook's inbox at a scratch tree. Never the live sidecar."""
+    def _dir(name):
+        return tmp_path / "swarph_state" / name / "mesh-sidecar"
+    monkeypatch.setattr(who, "_sidecar_dir", _dir)
+    return _dir(cell)
+
+
+def test_cursor_emits_the_tail_pipeline(monkeypatch, capsys, tmp_path):
+    """The ~/.cursor/hooks.json session-start product is the same tail
+    pipeline claude/codex emit: resolved cell, unbuffered filter, inbox path.
+    It does not report a tmux push sink as the wake."""
+    sidecar = _cursor_sidecar(monkeypatch, tmp_path)
+    sidecar.mkdir(parents=True)
+    (sidecar / "inbox.log").write_text("fresh\n", encoding="utf-8")
     rc = _run_output(
-        ["--harness", "cursor"], monkeypatch,
-        cell_name="cursor-lin", monitor_json=status,
+        ["--harness", "cursor"], monkeypatch, cell_name="cursor-lin",
     )
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
-    assert "additional_context" in out  # cursor shape, NOT hookSpecificOutput
+    assert "additional_context" in out
     assert "hookSpecificOutput" not in out
-    assert "ARMED" in out["additional_context"]
-    assert "tmux:cursor-lin" in out["additional_context"]
+    ctx = out["additional_context"]
+    inbox = str(sidecar / "inbox.log")
+    assert "tail -n 0 -F" in ctx
+    assert " -u -m " in ctx
+    assert "cursor-lin" in ctx
+    assert inbox in ctx
+    assert "dm_notify_filter" in ctx
+    assert "push sink(s)" not in ctx
+    assert "DM wake ARMED" not in ctx
+    assert "INBOX MISSING" not in ctx
+    assert "INBOX STALE" not in ctx
 
 
-def test_verify_rendering_not_armed_when_no_push_sink(monkeypatch, capsys):
-    status = {"running": True,
-              "sinks": [{"name": "pull", "is_push": False}],
-              "configured_sinks": ["pull"]}
+def test_cursor_says_loudly_when_inbox_is_missing(monkeypatch, capsys, tmp_path):
+    _cursor_sidecar(monkeypatch, tmp_path)
     rc = _run_output(
-        ["--harness", "cursor"], monkeypatch,
-        cell_name="cursor-lin", monitor_json=status,
+        ["--harness", "cursor"], monkeypatch, cell_name="cursor-lin",
     )
     assert rc == 0
     ctx = json.loads(capsys.readouterr().out)["additional_context"]
-    assert "WAKE NOT ARMED" in ctx
-    assert "pull" in ctx
+    assert "INBOX MISSING" in ctx
+    assert "cursor-lin" in ctx
+    assert "inbox.log" in ctx
+    assert "tail -n 0 -F" in ctx
+    assert "push sink(s)" not in ctx
 
 
-def test_verify_rendering_not_armed_when_monitor_down(monkeypatch, capsys):
+def test_cursor_says_loudly_when_inbox_is_stale(monkeypatch, capsys, tmp_path):
+    sidecar = _cursor_sidecar(monkeypatch, tmp_path)
+    sidecar.mkdir(parents=True)
+    inbox = sidecar / "inbox.log"
+    inbox.write_text("old\n", encoding="utf-8")
+    max_age = getattr(who, "_INBOX_MAX_AGE_S", 15 * 60)
+    old = time.time() - max_age - 60
+    os.utime(inbox, (old, old))
     rc = _run_output(
-        ["--harness", "cursor"], monkeypatch,
-        cell_name="cursor-lin", monitor_json={"running": False}, monitor_rc=2,
+        ["--harness", "cursor"], monkeypatch, cell_name="cursor-lin",
     )
     assert rc == 0
     ctx = json.loads(capsys.readouterr().out)["additional_context"]
-    assert "WAKE NOT ARMED" in ctx
+    assert "INBOX STALE" in ctx
+    assert str(inbox) in ctx
+    assert "tail -n 0 -F" in ctx
+    assert "push sink(s)" not in ctx
 
 
-def test_verify_rendering_rc1_means_pending_not_down(monkeypatch, capsys):
-    """`monitor status` exits 1 when DMs are PENDING — that is not a
-    monitor-down signal. Regression guard: the first live fire of this
-    hook misread rc=1 as 'not running' and reported WAKE NOT ARMED in
-    front of a healthy monitor."""
-    status = {"running": True,
-              "sinks": [{"name": "tmux:cursor-lin", "is_push": True}]}
-    rc = _run_output(
-        ["--harness", "cursor"], monkeypatch,
-        cell_name="cursor-lin", monitor_json=status, monitor_rc=1,
+def test_cursor_guide_row_names_the_session_armed_tail():
+    guide = (
+        Path(__file__).resolve().parents[1] / "src" / "swarph_cli" / "guide" / "GUIDE.md"
     )
-    assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)["additional_context"]
-    assert "ARMED" in ctx
-    assert "WAKE NOT ARMED" not in ctx
+    row = next(
+        line for line in guide.read_text(encoding="utf-8").splitlines()
+        if line.startswith("| `cursor` |")
+    )
+    assert "session-armed tail" in row
+    assert "push sink" not in row
+    assert "~/.cursor/hooks.json" in row
+
+
+def _inject_text(raw: str) -> str:
+    return json.loads(raw)["injectSteps"][0]["ephemeralMessage"]
 
 
 def test_verify_rendering_cannot_verify_on_garbage_output(monkeypatch, capsys):
     rc = _run_output(
-        ["--harness", "cursor"], monkeypatch,
+        ["--harness", "antigravity"], monkeypatch,
         cell_name="cursor-lin", monitor_rc=2,
     )
     assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)["additional_context"]
+    ctx = _inject_text(capsys.readouterr().out)
     assert "CANNOT VERIFY" in ctx
 
 
@@ -410,9 +436,9 @@ def test_verify_rendering_is_not_vacuous(monkeypatch, capsys):
     """Partner: the ARMED verdict must require an actual push sink."""
     status = {"running": True,
               "sinks": [{"name": "tmux:cursor-lin", "is_push": True}]}
-    _run_output(["--harness", "cursor"], monkeypatch,
+    _run_output(["--harness", "antigravity"], monkeypatch,
                 cell_name="cursor-lin", monitor_json=status)
-    armed_ctx = json.loads(capsys.readouterr().out)["additional_context"]
+    armed_ctx = _inject_text(capsys.readouterr().out)
     assert "WAKE NOT ARMED" not in armed_ctx
 
 
@@ -431,11 +457,11 @@ def test_unknown_harness_output_is_loud_refusal(monkeypatch, capsys):
 def test_verify_missing_running_field_is_cannot_verify(monkeypatch, capsys):
     """Finding 2: schema drift must not report a specific wrong diagnosis."""
     rc = _run_output(
-        ["--harness", "cursor"], monkeypatch,
+        ["--harness", "antigravity"], monkeypatch,
         cell_name="cursor-lin", monitor_json={"sinks": []},
     )
     assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)["additional_context"]
+    ctx = _inject_text(capsys.readouterr().out)
     assert "CANNOT VERIFY" in ctx
     assert "running" in ctx
     assert "WAKE NOT ARMED" not in ctx
@@ -444,11 +470,11 @@ def test_verify_missing_running_field_is_cannot_verify(monkeypatch, capsys):
 def test_verify_missing_is_push_field_is_cannot_verify(monkeypatch, capsys):
     status = {"running": True, "sinks": [{"name": "tmux:cursor-lin"}]}
     rc = _run_output(
-        ["--harness", "cursor"], monkeypatch,
+        ["--harness", "antigravity"], monkeypatch,
         cell_name="cursor-lin", monitor_json=status,
     )
     assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)["additional_context"]
+    ctx = _inject_text(capsys.readouterr().out)
     assert "CANNOT VERIFY" in ctx
     assert "is_push" in ctx
 
@@ -459,15 +485,33 @@ def test_verify_env_fallback_names_shared_box_risk(monkeypatch, capsys):
     status = {"running": True,
               "sinks": [{"name": "tmux:lab-ovh", "is_push": True}]}
     rc = _run_output(
-        ["--harness", "cursor"], monkeypatch,
+        ["--harness", "antigravity"], monkeypatch,
         cell_name="lab-ovh", cell_source="$SWARPH_SELF",
         monitor_json=status,
     )
     assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)["additional_context"]
+    ctx = _inject_text(capsys.readouterr().out)
     assert "ARMED" in ctx
     assert "$SWARPH_SELF" in ctx
     assert "box owner" in ctx
+
+
+def test_cursor_env_fallback_names_shared_box_risk(monkeypatch, capsys, tmp_path):
+    """The arm path carries the same shared-box warning. A wrong cell's
+    tail is as hazardous as a wrong verdict."""
+    sidecar = _cursor_sidecar(monkeypatch, tmp_path, cell="lab-ovh")
+    sidecar.mkdir(parents=True)
+    (sidecar / "inbox.log").write_text("fresh\n", encoding="utf-8")
+    rc = _run_output(
+        ["--harness", "cursor"], monkeypatch,
+        cell_name="lab-ovh", cell_source="$SWARPH_SELF",
+    )
+    assert rc == 0
+    ctx = json.loads(capsys.readouterr().out)["additional_context"]
+    assert "lab-ovh" in ctx
+    assert "$SWARPH_SELF" in ctx
+    assert "box owner" in ctx
+    assert "tail -n 0 -F" in ctx
 
 
 # ---------------------------------------------------------------------------
@@ -631,11 +675,21 @@ def test_arm_instruction_names_env_provenance_as_shared_box_risk(monkeypatch, ca
 
 
 def test_verify_refusal_names_every_failed_source(monkeypatch, capsys):
+    rc = _run_output(["--harness", "antigravity"], monkeypatch, cell_name=None)
+    assert rc == 0
+    ctx = _inject_text(capsys.readouterr().out)
+    assert "CANNOT VERIFY" in ctx
+    for source in ("tmux", "--cell", "$SWARPH_SELF", "cwd"):
+        assert source in ctx
+
+
+def test_cursor_unresolved_cell_refuses_loudly(monkeypatch, capsys):
     rc = _run_output(["--harness", "cursor"], monkeypatch, cell_name=None)
     assert rc == 0
     ctx = json.loads(capsys.readouterr().out)["additional_context"]
-    assert "CANNOT VERIFY" in ctx
-    for source in ("tmux", "--cell", "$SWARPH_SELF", "cwd"):
+    assert "CANNOT RESOLVE" in ctx
+    assert "push sink(s)" not in ctx
+    for source in ("tmux", "--cell", "$SWARPH_SELF"):
         assert source in ctx
 
 
