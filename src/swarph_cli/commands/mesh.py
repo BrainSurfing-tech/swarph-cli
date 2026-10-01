@@ -23,6 +23,7 @@ import difflib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -1792,6 +1793,135 @@ class CursorPrintSink(Sink):
         return f"{count} DM{plural} not yet delivered to {self.name}"
 
 
+_MUSE_SEND_TIMEOUT_S = 120.0
+
+
+def _muse_send(session: str, text: str, *,
+               _run=subprocess.run,
+               _which=shutil.which,
+               _timeout: float = _MUSE_SEND_TIMEOUT_S,
+               ) -> tuple:
+    """One `muse session-message send --target <session>` with `text` on stdin.
+
+    Returns (True, "") on a verified send, else (False, NAMED reason).
+    Every refusal is named — ingress unavailable, unverified receipt,
+    non-zero exit, missing binary, launch/timeout failure — so a dead wake
+    path reads as a reason, never as silence. `_run`/`_which` are injectable
+    so the result mapping is testable without a muse binary on PATH.
+    """
+    prog = _which("muse")
+    if not prog:
+        return (False, "muse binary not found on PATH")
+    argv = [prog, "session-message", "send", "--target", session]
+    try:
+        proc = _run(argv, input=text, capture_output=True, text=True,
+                    timeout=_timeout)
+    except FileNotFoundError:
+        return (False, "muse binary not found on PATH")
+    except subprocess.TimeoutExpired:
+        return (False,
+                f"muse session-message send timed out after {_timeout:.0f}s")
+    except OSError as exc:
+        return (False, f"muse session-message send failed to launch: {exc}")
+    out = ((getattr(proc, "stdout", None) or "")
+           + "\n" + (getattr(proc, "stderr", None) or ""))
+    if "external agent ingress is unavailable" in out:
+        # Fires when the SENDING process lacks the gate (measured: sender
+        # gate off, any target) — never the target. Say so, or the operator
+        # debugs the wrong session (#844 review).
+        return (False, "sender ingress unavailable: sending process lacks "
+                       "MUSE_EXPERIMENTAL_EXTERNAL_AGENT_INGRESS=on "
+                       "(external agent ingress is unavailable)")
+    if "external_agent_ingress_closed" in out:
+        # The target session runs without the ingress gate (observed by
+        # drop-on-meta-edge on throwaway sessions, #844; this shell path
+        # surfaces unverified_target_receipt first, so this branch is pinned
+        # by unit mapping until a sender path emits it end to end).
+        return (False, "target ingress closed: target session runs without "
+                       "MUSE_EXPERIMENTAL_EXTERNAL_AGENT_INGRESS=on "
+                       "(external_agent_ingress_closed)")
+    if "unverified_target_receipt" in out:
+        return (False, "send refused (unverified_target_receipt): "
+                       "the runtime admits session messages only from the "
+                       "sending session's own model tool, not a shell CLI")
+    if getattr(proc, "returncode", 1) != 0:
+        snippet = out.strip().splitlines()
+        detail = snippet[-1][:200] if snippet else "no output"
+        return (False,
+                f"muse session-message send exited "
+                f"{getattr(proc, 'returncode', '?')}: {detail}")
+    return (True, "")
+
+
+class MuseSink(Sink):
+    """Wake a live muse session with `session-message send` instead of typing.
+
+    Edge-triggered on the drain like TmuxSink: while `wake_outstanding`
+    stands (gateway unread > 0), further deliveries report delivered with NO
+    new send; the next delivery after the drain sends again. There is no
+    composer to read — a muse session has no TUI pane — so there is no
+    politeness gate, only the outstanding flag plus the gateway drain check.
+    A refused or failed send returns False with a NAMED reason printed loud;
+    it never advances the cursor in silence.
+    """
+
+    is_push = True
+
+    def __init__(self, session: str):
+        super().__init__(f"muse:{session}")
+        self.session = session
+
+    def _prompt(self, dms: list) -> str:
+        # Full bodies cross: this prompt IS the delivery, and the cell must
+        # answer the message it actually received, not a 160-char preview.
+        lines = [
+            f"You have {len(dms)} new mesh DM(s). "
+            "Read each and act per your standing instructions.",
+            "",
+        ]
+        for dm in dms:
+            lines.append(
+                f"--- id={dm.get('id')} from={dm.get('from_node')} "
+                f"kind={dm.get('kind')} ---"
+            )
+            lines.append(dm.get("content") or "")
+            lines.append("")
+        return "\n".join(lines)
+
+    def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
+        led = state.ledger(self.name)
+        if led.get("wake_outstanding"):
+            # Lazy: watchdog imports mesh module-level, so the reverse must
+            # not. None (gateway error) reads as NOT-drained — re-arming on
+            # an unreadable drain signal would re-open the stack.
+            from swarph_cli.commands.watchdog import _gateway_unread_count
+            if _gateway_unread_count(state.gateway, state.self_name,
+                                     state.token) != 0:
+                print(f"[monitor] {self.name}: delivery reported on a STANDING wake "
+                      f"(no send this poll)", flush=True)
+                return True
+            led["wake_outstanding"] = False  # drained since — re-arm
+        if not dms:
+            # Nothing recoverable to hand over (log rotated) — do NOT claim
+            # a delivery; the ledger stays and the gap stays visible.
+            print(f"[monitor] {self.name}: {up_to_id} observed but no body "
+                  f"recoverable from inbox.log for the owed range", flush=True)
+            return False
+        # Module-global lookup on purpose: the sidecar regression suites patch
+        # `mesh._muse_send`, and a `from`-import here would silently bypass them.
+        ok, reason = _muse_send(self.session, self._prompt(dms))
+        if ok:
+            led["wake_outstanding"] = True
+            led["last_wake_injected_at"] = time.time()
+            return True
+        print(f"[monitor] {self.name}: muse send FAILED: {reason}", flush=True)
+        return False
+
+    def pending_label(self, count: int) -> str:
+        plural = "s" if count != 1 else ""
+        return f"{count} DM{plural} not yet delivered to {self.name}"
+
+
 def parse_sink(spec: str) -> Sink:
     """`--deliver SINK` -> Sink. Unknown or held specs RAISE; nothing no-ops."""
     if spec == "pull":
@@ -1819,6 +1949,13 @@ def parse_sink(spec: str) -> Sink:
         if not target:
             raise MonitorSinkError("sink 'tmux:' needs a target, e.g. tmux:lab:0.0")
         return TmuxSink(target)
+    if spec.startswith("muse:"):
+        session = spec[len("muse:"):]
+        if not session:
+            raise MonitorSinkError(
+                "sink 'muse:' needs a session, e.g. muse:<session-uuid>"
+            )
+        return MuseSink(session)
     if spec.startswith("webhook:"):
         # HELD by the commander: outward-facing egress, and a build greenlight
         # does not clear an egress gate. It must EXIT, not silently no-op — a
@@ -1831,7 +1968,7 @@ def parse_sink(spec: str) -> Sink:
         )
     raise MonitorSinkError(
         f"unknown sink {spec!r}; expected pull, none, stdout, tmux:<target>, "
-        "or tmux-notify:<target>"
+        "tmux-notify:<target>, cursor-print:<cell>, or muse:<session>"
     )
 
 
