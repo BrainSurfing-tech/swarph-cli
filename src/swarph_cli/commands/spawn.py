@@ -393,14 +393,21 @@ _CLAUDE_CHANNELS = frozenset({"allowlisted", "dev"})
 _MUSE_CHANNELS = frozenset({"ingress"})
 
 
-def _resolve_channel(cell: Cell) -> str:
-    """Effective channel mode: $SWARPH_CHANNEL wins (incl. "off"), else the
-    cell.yaml `channel` field (kept by swarph-shared in the forward-compat
-    `extra` bag), else "" (absent). Never launches anything; callers validate.
-    """
-    env_mode = os.environ.get("SWARPH_CHANNEL") or ""
-    if env_mode:
-        return env_mode
+# Providers whose spawn consumes $SWARPH_CHANNEL. Anything else ignores an
+# inherited value (a Claude cell's shell carries allowlisted; spawning grok
+# from it must not refuse). Measured 2026-10-01: 0.72.0 blamed cell.yaml
+# for that env and exited on grok-researcher.yaml, which has no channel field.
+_ENV_CHANNEL_PROVIDERS = frozenset({"claude", "muse"})
+
+
+def _channel_where(source: str) -> str:
+    """Name the place the mode came from. An env value must not read as cell.yaml."""
+    if source == "env":
+        return "SWARPH_CHANNEL"
+    return "cell.yaml: 'channel'"
+
+
+def _field_channel(cell: Cell) -> str:
     extra = getattr(cell, "extra", None) or {}
     value = extra.get("channel", "") if isinstance(extra, dict) else ""
     if value is None:
@@ -413,64 +420,88 @@ def _resolve_channel(cell: Cell) -> str:
     return value
 
 
-def _channel_marketplace_dir() -> Path:
+def _resolve_channel(cell: Cell) -> tuple[str, str]:
+    """Effective channel mode and where it came from.
+
+    ``$SWARPH_CHANNEL`` wins (incl. "off") only for providers that support
+    it: claude (allowlisted/dev/off) and muse (ingress/off). Other providers
+    ignore the inherited env, as before 0.72.0, and the cell.yaml field is
+    still read. Returns ``(mode, source)`` with source ``env``, ``cell.yaml``,
+    or ``""``. Never launches anything; callers validate.
+    """
+    env_mode = os.environ.get("SWARPH_CHANNEL") or ""
+    provider = getattr(cell, "provider", None)
+    # No provider attribute: the stamp probes construct a name-only cell.
+    # Those are claude-shaped; the env still applies.
+    if env_mode and (provider is None or provider in _ENV_CHANNEL_PROVIDERS):
+        return env_mode, "env"
+    field = _field_channel(cell)
+    return field, ("cell.yaml" if field else "")
+
+
+def _channel_marketplace_dir(source: str = "cell.yaml") -> Path:
     """Install location of the `swarph` Claude marketplace (the allowlist).
 
     Resolved through ~/.claude/plugins/known_marketplaces.json, the same
     registry claude reads — never a second hardcoded copy that drifts.
+    ``source`` names env vs cell.yaml so a missing registry is not blamed
+    on the file when the mode came from ``$SWARPH_CHANNEL``.
     """
+    where = _channel_where(source)
     registry = Path.home() / ".claude" / "plugins" / "known_marketplaces.json"
     try:
         data = json.loads(registry.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise CellError(
-            f"cell.yaml: channel 'allowlisted' needs the swarph marketplace, "
+            f"{where} 'allowlisted' needs the swarph marketplace, "
             f"but its registry is unreadable: {registry} ({exc})."
         ) from exc
     try:
         location = data["swarph"]["installLocation"]
     except (KeyError, TypeError) as exc:
         raise CellError(
-            f"cell.yaml: channel 'allowlisted' needs the swarph marketplace, "
+            f"{where} 'allowlisted' needs the swarph marketplace, "
             f"but it is not registered in {registry}."
         ) from exc
     path = Path(location)
     if not path.is_dir():
         raise CellError(
-            f"cell.yaml: channel 'allowlisted' needs the swarph marketplace "
+            f"{where} 'allowlisted' needs the swarph marketplace "
             f"at {path}, which is not a directory."
         )
     return path
 
 
-def _validate_channel(cell: Cell, mode: str) -> str:
+def _validate_channel(cell: Cell, mode: str, source: str = "cell.yaml") -> str:
     """Fail closed on any channel mode the provider cannot consume.
 
     Returns the mode unchanged. "" and "off" are valid everywhere (no-op).
-    Raises CellError naming the field (and the file, for a missing
-    marketplace) so the operator fixes config, never debugs a deaf cell.
+    Raises CellError naming the source (``SWARPH_CHANNEL`` or the cell.yaml
+    field) and the file, for a missing marketplace, so the operator fixes
+    config, never debugs a deaf cell.
     """
     if mode in ("", "off"):
         return mode
+    where = _channel_where(source)
     provider = cell.provider
     if provider == "claude":
         if mode not in _CLAUDE_CHANNELS:
             raise CellError(
-                f"cell.yaml: 'channel' {mode!r} is not valid for provider "
+                f"{where} {mode!r} is not valid for provider "
                 f"'claude'. Valid values: {sorted(_CLAUDE_CHANNELS | {'off'})}."
             )
         if mode == "allowlisted":
-            _channel_marketplace_dir()
+            _channel_marketplace_dir(source)
         return mode
     if provider == "muse":
         if mode not in _MUSE_CHANNELS:
             raise CellError(
-                f"cell.yaml: 'channel' {mode!r} is not valid for provider "
+                f"{where} {mode!r} is not valid for provider "
                 f"'muse'. Valid values: {sorted(_MUSE_CHANNELS | {'off'})}."
             )
         return mode
     raise CellError(
-        f"cell.yaml: 'channel' {mode!r} is only valid for providers "
+        f"{where} {mode!r} is only valid for providers "
         f"'claude' and 'muse'; provider is {provider!r}."
     )
 
@@ -498,7 +529,8 @@ def _build_claude_argv(
             argv.extend(["--append-system-prompt", starter])
 
     argv.extend(passthrough)
-    mode = _validate_channel(cell, _resolve_channel(cell))
+    mode, source = _resolve_channel(cell)
+    mode = _validate_channel(cell, mode, source)
     if mode == "allowlisted":
         argv.extend(["--channels", "plugin:swarph@swarph"])
     elif mode == "dev":
@@ -545,7 +577,7 @@ def _spawn_env_base(cell: Cell) -> dict[str, str]:
     env = scrub_env_for_subprocess()
     env["SWARPH_SPAWN"] = "1"
     env["SWARPH_SELF"] = cell.name
-    mode = _resolve_channel(cell)
+    mode, _source = _resolve_channel(cell)
     # NOTE: the marketplace/validity gate lives in _validate_channel, which
     # _build_claude_argv (and the muse env builder) run. This base stays a
     # pure reflection of the resolved mode so every provider's env agrees.
@@ -587,7 +619,8 @@ def _muse_env(cell: Cell) -> dict[str, str]:
     run_spawn choke point; the mode read here agrees with it by construction.
     """
     env = _claude_env(cell)
-    if _resolve_channel(cell) == "ingress":
+    mode, _source = _resolve_channel(cell)
+    if mode == "ingress":
         env["MUSE_EXPERIMENTAL_EXTERNAL_AGENT_INGRESS"] = "on"
     return env
 
@@ -3308,7 +3341,8 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
     # must not leave a minted sidecar behind). One choke point for every
     # provider; builders below see only validated modes.
     try:
-        _validate_channel(cell, _resolve_channel(cell))
+        mode, source = _resolve_channel(cell)
+        _validate_channel(cell, mode, source)
     except CellError as exc:
         print(f"swarph spawn: {exc}", file=sys.stderr)
         return 1

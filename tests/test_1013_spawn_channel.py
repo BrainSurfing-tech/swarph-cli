@@ -19,11 +19,11 @@ from swarph_cli.cell import SCHEMA_VERSION_V1
 from swarph_cli.commands.spawn import run_spawn
 
 
-def _cell_yaml(tmp_path: Path, provider: str, channel=None) -> Path:
+def _cell_yaml(tmp_path: Path, provider: str, channel=None, name: str = "probe-cell") -> Path:
     payload = {
         "schema_version": SCHEMA_VERSION_V1,
-        "name": "probe-cell",
-        "role": "probe-cell",
+        "name": name,
+        "role": name,
         "cwd": str(tmp_path),
         "provider": provider,
     }
@@ -175,3 +175,72 @@ def test_allowlisted_missing_allowlist_errors(tmp_path, monkeypatch, capsys):
     assert rc != 0
     assert "known_marketplaces.json" in err or "marketplace" in err.lower()
     assert str(home) in err or "swarph" in err
+
+
+def test_inherited_env_is_ignored_for_grok_and_kept_for_claude(tmp_path, monkeypatch, capsys):
+    """0.72.0 regression. A Claude shell's SWARPH_CHANNEL must not refuse grok.
+
+    (1) allowlisted + grok, no channel field: exit 0, no channel flag, no
+        SWARPH_CHANNEL_CELL. (2) the same env + claude: --channels, as before.
+    On main, (1) exits non-zero blaming cell.yaml.
+    """
+    _registry(tmp_path, monkeypatch, with_swarph=True)
+    monkeypatch.setenv("SWARPH_CHANNEL", "allowlisted")
+    monkeypatch.setenv("SWARPH_CHANNEL_CELL", "lab-ovh")
+    (tmp_path / "grok").mkdir()
+    grok = _cell_yaml(tmp_path / "grok", "grok")
+    rc, argv, env_added = _print(tmp_path, grok, capsys)
+    assert rc == 0
+    assert argv is not None
+    assert not any("channel" in a for a in argv)
+    assert "SWARPH_CHANNEL_CELL" not in env_added
+    assert "lab-ovh" not in json.dumps(env_added)
+
+    (tmp_path / "claude").mkdir()
+    claude = _cell_yaml(tmp_path / "claude", "claude")
+    rc, argv, env_added = _print(tmp_path, claude, capsys)
+    assert rc == 0
+    assert "--channels" in argv and "plugin:swarph@swarph" in argv
+    assert env_added.get("SWARPH_CHANNEL_CELL") == "probe-cell"
+
+
+def test_grok_field_errors_name_cell_yaml(tmp_path, monkeypatch, capsys):
+    """(3) a grok cell.yaml channel: allowlisted is still a hard error, and
+    the text names cell.yaml rather than the env var. Fails on main only if
+    the message stops naming the file; the refusal itself is already there.
+    """
+    _registry(tmp_path, monkeypatch, with_swarph=True)
+    monkeypatch.delenv("SWARPH_CHANNEL", raising=False)
+    p = _cell_yaml(tmp_path, "grok", channel="allowlisted")
+    rc = run_spawn(["--cell", str(p), "--print-resolved"])
+    _, err = capsys.readouterr()
+    assert rc != 0
+    assert "cell.yaml" in err
+    assert "SWARPH_CHANNEL" not in err
+
+
+def test_bogus_env_on_claude_names_the_env_var(tmp_path, monkeypatch, capsys):
+    """(4) SWARPH_CHANNEL=bogus on a claude cell exits non-zero naming the
+    env var. On main the same refusal blames cell.yaml.
+    """
+    _registry(tmp_path, monkeypatch, with_swarph=True)
+    monkeypatch.setenv("SWARPH_CHANNEL", "bogus")
+    p = _cell_yaml(tmp_path, "claude")
+    rc = run_spawn(["--cell", str(p), "--print-resolved"])
+    _, err = capsys.readouterr()
+    assert rc != 0
+    assert "SWARPH_CHANNEL" in err
+
+
+def test_parent_channel_cell_does_not_reach_a_different_cell(tmp_path, monkeypatch, capsys):
+    """(5) SWARPH_CHANNEL_CELL=lab-ovh inherited while spawning science-claude
+    (the live cell is channel allowlisted) yields that cell's own name.
+    """
+    _registry(tmp_path, monkeypatch, with_swarph=True)
+    monkeypatch.delenv("SWARPH_CHANNEL", raising=False)
+    monkeypatch.setenv("SWARPH_CHANNEL_CELL", "lab-ovh")
+    p = _cell_yaml(tmp_path, "claude", channel="allowlisted", name="science-claude")
+    rc, _argv, env_added = _print(tmp_path, p, capsys)
+    assert rc == 0
+    assert env_added.get("SWARPH_CHANNEL_CELL") == "science-claude"
+
