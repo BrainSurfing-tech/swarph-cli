@@ -202,8 +202,12 @@ def test_deferred_tmux_delivery_persists_and_alerts(monkeypatch, tmp_path):
 
     ledger = state.ledger(sink.name)
     assert ledger["deferred_ticks"] == 6
-    assert sent == [("http://gw:8788", "tok", "lab-ovh", 6, 1)]
-    assert _state(tmp_path, [sink]).ledger(sink.name)["deferred_ticks"] == 6
+    assert sent == []  # 6 ticks is 3 min; the measured drains were 7-25 min
+    for _ in range(54):
+        mesh._monitor_iteration(state)
+    assert ledger["deferred_ticks"] == 60
+    assert sent == [("http://gw:8788", "tok", "lab-ovh", 60, 1)]
+    assert _state(tmp_path, [sink]).ledger(sink.name)["deferred_ticks"] == 60
 
 
 def test_successful_delivery_resets_deferred_ticks(monkeypatch, tmp_path):
