@@ -10,6 +10,11 @@ distinction is not WHICH harness, it is WHERE THE WAKE LIVES):
 * ``claude`` / ``codex`` → ARM-INSTRUCTION. The wake lives in the harness:
   emit the watch pipeline (tail -F inbox.log | dm_notify_filter) as
   additionalContext so the agent arms it as a background watch.
+* ``grok`` → the same arm instruction, with the pipeline wrapped in
+  ``timeout -k 5s 590m`` and one ``[MESH WAKE EXPIRED]`` line. Grok caps a
+  background task at 10h (measured 2026-10-01); the wrapper exits 10
+  minutes early so the stop is a wake, not a SIGKILL the session never
+  sees. The duration is one unit: coreutils timeout rejects ``9h50m``.
 * ``cursor`` → ARM-INSTRUCTION, same pipeline as claude/codex, emitted in
   Cursor's ``additional_context`` envelope (the ``~/.cursor/hooks.json``
   sessionStart shape). The wake is the session-armed tail. A missing or
@@ -43,7 +48,7 @@ from swarph_cli.cell import (
     load_cell,
 )
 
-_ARM_HARNESSES = ("claude", "codex", "muse", "opencode")
+_ARM_HARNESSES = ("claude", "codex", "muse", "opencode", "grok")
 _INJECT_HARNESSES = ("antigravity",)
 _VERIFY_HARNESSES = ("cursor",)
 _KNOWN_HARNESSES = _ARM_HARNESSES + _INJECT_HARNESSES + _VERIFY_HARNESSES
@@ -52,6 +57,12 @@ _KNOWN_HARNESSES = _ARM_HARNESSES + _INJECT_HARNESSES + _VERIFY_HARNESSES
 _FILTER_MODULE = "swarph_cli.scripts.dm_notify_filter"
 # Same default as `swarph monitor arm-check --max-age-s` (15 minutes).
 _INBOX_MAX_AGE_S = 15 * 60
+_EXPIRED_LINE = "[MESH WAKE EXPIRED] re-arm the inbox tail now"
+# Harnesses whose background tasks die at a cap. The wrapper is that cap
+# minus 10 minutes, as one unit coreutils timeout accepts. Grok's cap is
+# 10h (grok-researcher, 2026-10-01); "9h50m" is rejected as an invalid
+# time interval on this box.
+_HARNESS_TIMEOUT = {"grok": "590m"}
 
 
 def _read_stdin_payload() -> dict[str, Any]:
@@ -233,7 +244,27 @@ def _provenance_note(source: str) -> str:
     return f" (identity from {source})"
 
 
-def _arm_instruction(cell_name: Optional[str], source: str = "unresolved") -> str:
+def _watch_pipeline(inbox: Path, interpreter: str) -> str:
+    return f'tail -n 0 -F "{inbox}" | "{interpreter}" -u -m {_FILTER_MODULE}'
+
+
+def _loud_stop(pipeline: str, duration: str) -> str:
+    """Self-expire before the harness kills the task, then say so.
+
+    ``-k 5s`` sends KILL if the tail is still up after TERM. A single-quoted
+    ``sh -c`` matches the pipeline, which quotes paths with double quotes.
+    """
+    return (
+        f"timeout -k 5s {duration} sh -c '{pipeline}'; "
+        f"echo '{_EXPIRED_LINE}'"
+    )
+
+
+def _arm_instruction(
+    cell_name: Optional[str],
+    source: str = "unresolved",
+    harness: str = "",
+) -> str:
     interpreter = sys.executable
     if not cell_name:
         # CANNOT-RESOLVE is a LOUD REFUSAL, never a placeholder (card #527
@@ -259,8 +290,10 @@ def _arm_instruction(cell_name: Optional[str], source: str = "unresolved") -> st
         f'"{interpreter}" -m swarph_cli monitor arm-check '
         f'--as {cell_name} --path "{inbox}"'
     )
-    tail = f'tail -n 0 -F "{inbox}"'
-    pipeline = f'{tail} | "{interpreter}" -u -m {_FILTER_MODULE}'
+    pipeline = _watch_pipeline(inbox, interpreter)
+    cap = _HARNESS_TIMEOUT.get(harness)
+    if cap:
+        pipeline = _loud_stop(pipeline, cap)
     return (
         "[swarph silent-wake] This cell's DM wake lives in THIS harness. "
         "BEFORE arming, refuse a missing/stale inbox.log (#729):\n"
@@ -490,7 +523,8 @@ def run_wake_hook_output(argv: Optional[list[str]] = None) -> int:
         )
     if harness in _ARM_HARNESSES:
         return _emit(
-            {"context": _arm_instruction(cell_name, cell_source)}, harness=harness
+            {"context": _arm_instruction(cell_name, cell_source, harness)},
+            harness=harness,
         )
     return _emit(
         {"context": _verify_report(cell_name, cell_source)}, harness=harness
