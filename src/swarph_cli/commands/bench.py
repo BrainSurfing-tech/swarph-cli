@@ -61,10 +61,17 @@ def _default_backends() -> dict[str, Backend]:
     if shutil.which("claude"):
         from swarph_cli.bench.claude_cli import call as claude_call
         subscription = SubscriptionBackend(call_fn=claude_call)
+    # codex on PATH wires its own lane to an isolated `codex exec`. Its own key,
+    # like mistral: `id:subscription` keeps meaning claude.
+    codex = SubscriptionBackend()
+    if shutil.which("codex"):
+        from swarph_cli.bench.codex_cli import call as codex_call
+        codex = SubscriptionBackend(call_fn=codex_call)
     return {
         "metered": MeteredGeminiBackend(),
         "mistral": MeteredMistralBackend(),
         "subscription": subscription,
+        "codex": codex,
         "rule": RuleBackend(),
         "signal": SignalBackend(),
         "typed-http": TypedHttpBackend(),
