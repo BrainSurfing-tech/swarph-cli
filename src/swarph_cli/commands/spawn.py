@@ -581,9 +581,16 @@ def _spawn_env_base(cell: Cell) -> dict[str, str]:
     # NOTE: the marketplace/validity gate lives in _validate_channel, which
     # _build_claude_argv (and the muse env builder) run. This base stays a
     # pure reflection of the resolved mode so every provider's env agrees.
+    # #1022: SWARPH_CHANNEL must be exported too, whatever the mode's source.
+    # channel_opted_in() (channel.py) gates on SWARPH_CHANNEL alone, so a
+    # mode that came from cell.yaml — not from the parent env — left the
+    # session with SWARPH_CHANNEL_CELL set and the channel deaf: the server
+    # never declared claude/channel (droplet 4 days, gridiron on lab).
     if mode in {"allowlisted", "dev"}:
+        env["SWARPH_CHANNEL"] = mode
         env["SWARPH_CHANNEL_CELL"] = cell.name
     else:
+        env.pop("SWARPH_CHANNEL", None)
         env.pop("SWARPH_CHANNEL_CELL", None)
     return env
 

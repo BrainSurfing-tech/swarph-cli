@@ -244,3 +244,28 @@ def test_parent_channel_cell_does_not_reach_a_different_cell(tmp_path, monkeypat
     assert rc == 0
     assert env_added.get("SWARPH_CHANNEL_CELL") == "science-claude"
 
+
+def test_field_channel_exports_swarph_channel_so_serve_is_not_deaf(tmp_path, monkeypatch, capsys):
+    """Card #1022. A mode that came from cell.yaml must reach channel-serve:
+    the spawned env carries SWARPH_CHANNEL=mode (not just SWARPH_CHANNEL_CELL),
+    and channel_opted_in() is True under that env. On 7afd16b the field path
+    set only SWARPH_CHANNEL_CELL, so the server never declared claude/channel
+    and the cell ran deaf (droplet ~4 days, gridiron on lab).
+    """
+    from swarph_cli.channel import channel_opted_in
+
+    _registry(tmp_path, monkeypatch, with_swarph=True)
+    monkeypatch.delenv("SWARPH_CHANNEL", raising=False)
+    p = _cell_yaml(tmp_path, "claude", channel="allowlisted", name="gridiron")
+    rc, argv, env_added = _print(tmp_path, p, capsys)
+    assert rc == 0
+    assert "--channels" in argv and "plugin:swarph@swarph" in argv
+    # The env handed to claude names the mode, whatever its source was.
+    assert env_added.get("SWARPH_CHANNEL") == "allowlisted"
+    assert env_added.get("SWARPH_CHANNEL_CELL") == "gridiron"
+    # And the server's own gate agrees under exactly that env.
+    with monkeypatch.context() as ctx:
+        ctx.setenv("SWARPH_CHANNEL", env_added["SWARPH_CHANNEL"])
+        ctx.setenv("SWARPH_CHANNEL_CELL", env_added["SWARPH_CHANNEL_CELL"])
+        assert channel_opted_in() is True
+
