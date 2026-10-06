@@ -238,6 +238,17 @@ def test_human_draft_composer_still_reads_unknown(monkeypatch):
 
 # ── clause (4): uncaptured chrome reads unknown until fixtured ──────────
 
+@pytest.mark.parametrize("render", ("idle-lin-794-capture",
+                                    "idle-lin-fresh-capture"))
+def test_real_idle_captures_read_idle(monkeypatch, render):
+    """#1100 clause 4: the REAL idle captures — the #794 hunt's pane and
+    the FRESH cursor-lin capture (2026-10-06, a 3 s chain caught the
+    idle window the moment the previous turn ended; 561 consecutive
+    identical reads) — read positively idle, byte-for-byte."""
+    _pin(monkeypatch, _pane(render))
+    assert mesh._agent_running("sac") is False
+
+
 def test_uncaptured_cursor_win_chrome_reads_unknown(monkeypatch):
     """cursor-win's idle-shaped chrome — the ▄▄▄/▀▀▀ rows and the
     combined task+footer+path row (busy-win-midturn minus the spinner
@@ -358,7 +369,8 @@ def test_answered_wake_1084_render_gets_zero_keys(pane, capsys, row):
         assert "deferring" in out and "zero keys" in out
 
 
-@pytest.mark.parametrize("render", ("idle-lin", "idle-lin-794-capture"))
+@pytest.mark.parametrize("render", ("idle-lin", "idle-lin-794-capture",
+                                    "idle-lin-fresh-capture"))
 def test_answered_wake_positive_idle_still_types(pane, render):
     """The other arm of clause 5: a POSITIVE idle read — every
     bottom-region row a captured form — still types after an answered

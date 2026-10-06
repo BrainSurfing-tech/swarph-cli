@@ -206,9 +206,13 @@ def test_unmeasured_spinner_verb_is_unknown(monkeypatch):
 
 # ── clause (2): real idle renders still type promptly ────────────────────
 
-#: Real idle captures: the measured signature shape, and the #794 hunt's
-#: real cursor-lin idle pane (byte-for-byte). Both must type promptly.
-_REAL_IDLE = ("idle-lin", "idle-lin-794-capture")
+#: Real idle captures: the measured signature shape, the #794 hunt's real
+#: cursor-lin idle pane (byte-for-byte), and the FRESH cursor-lin idle
+#: capture (2026-10-06, taken by a 3 s capture chain the moment the
+#: previous turn ended — 561 consecutive identical idle reads). All three
+#: must type promptly, after an answered wake AND after a restart (#1100
+#: clause 4).
+_REAL_IDLE = ("idle-lin", "idle-lin-794-capture", "idle-lin-fresh-capture")
 
 
 @pytest.mark.parametrize("render", _REAL_IDLE)

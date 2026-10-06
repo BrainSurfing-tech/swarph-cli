@@ -1,0 +1,72 @@
+    ▎      monkeypatch.setattr(subprocess, "run", _guarded_run)
+
+  $ cd /home/ubuntu/worktrees/swarph-1010-idle-spent && PYTHONPATH=src python3 -m pytest tests/test_tmux_wake_idle_allowlist.py
+    tests/test_tmux_wake_unrecognised_busy.py -q -p no:cacheprovider 2>&1 | tail -2 && git add -A && git status --short 1.6s
+    … 16 output lines hidden · ctrl+o to expand
+    M  tests/test_tmux_wake_runstate_defer.py
+    M  tests/test_tmux_wake_unrecognised_busy.py
+
+  $ cd /home/ubuntu/worktrees/swarph-1010-idle-spent && git commit --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" -m "card #1010 / #1100:
+    idle is an ALLOWLIST of the raw bottom region
+     1.1s
+    … 30 input + 5 output lines hidden · ctrl+o to expand
+    a784ad1 card #1010 / #1100: idle is an ALLOWLIST of the raw bottom region
+    74bfa09 card #1010 / #1083: idle is a POSITIVE signature; the bound counts from first sight
+
+  Committed. Now consume the inbox (standing job) and post a progress card-say:
+
+  $ swarph mesh inbox --as cursor-lin --consume --unread --json 2>&1 | head -40 736ms
+    … 2 output lines hidden · ctrl+o to expand
+      "n": 0
+    }
+
+  $ swarph board cards say 1010 --as cursor-lin --content "#1100 progress (cursor-lin): the allowlist rework is IMPLEMENTED and committed locally (a784ad1
+    on feat/1010-idle-spent-wake, not yet pushed): _capture_pane_lines_raw (blanks are geometry — the #794 4-blank gap), _agent_running rewritten on the
+    raw region (measured spinner = busy, blank/Tip-chrome gap + bare composer + task/footer/terminal chrome = idle, everything else UNKNOWN; the denylist
+    helpers removed outright), clause 2 (unknown hold with no wake in play, bound from first sight), clause 3 (our own unsubmitted wake text recognised —
+    nudge goes promptly). Full suite green: 3620 passed. Red proof on 74bfa09: 27 failed, clean named-row assertion failures — the property (both
+    placements, ≥200 adversarial rows), 9 of the 10 #1084 renders in the answered state, clause 2 both arms, both clause-3 nudges, the cursor-win ▄▀
+    chrome probe. Remaining before push: the FRESH cursor-lin idle capture fixture (clause 4) — a 3s capture chain is armed; the idle window opens when
+    this turn ends, so the fixture lands on the next poll. Then push to PR 534, CI, evidence, close." 970ms
+    posted id=62474 onto card #1010 (to lab-ovh; project owner_orchestrator)
+
+  $ ls /tmp/1100-captures/fast/ | wc -l; ps aux | grep -c "[i]dle-\$i\|[s]eq 1 1200"; pgrep -f "seq 1 1200" | wc -l 605ms
+    … 1 output lines hidden · ctrl+o to expand
+    3
+    3
+
+  Inbox: empty. Standing job #1100 (card #1010 rework, due 18:37Z) — major progress this poll:
+
+  Implemented and committed locally (a784ad1, not yet pushed):
+  • Raw capture seam — _capture_pane_lines_raw: blanks are geometry (the #794 capture's 4-blank gap above the composer; the flattened view was #1084's
+    root cause).
+  • Allowlist classifier — idle only when every raw bottom-region row matches a captured form: blank-or-Tip gap, bare placeholder composer, task →
+    footer → terminal chrome in order. Measured spinner verbs read busy; everything else is unknown. The denylist is deleted outright
+    (_cursor_busy_shaped, glyph/cancel regexes — dead code removed).
+  • Clause 2 — unknown holds with no wake in play (the wiped-state path typed immediately at 74bfa09), bound from first sight, loud.
+  • Clause 3 — our own unsubmitted wake text (→ check mesh, stacked double) is recognised; the Enter nudge goes promptly.
+  • Two real-geometry discoveries fixed en route: the Tip: row is measured idle chrome (#783's verified-idle capture shows it in the gap — allowlisted
+    exactly), and real captures disagree only on blank placement between chrome rows (walk skips blanks; hyphenated model names like GPT-5.5 now match
+    the footer form).
+
+  Verification:
+  • Full suite: 3620 passed, 0 failed.
+  • Red proof on 74bfa09: 27 failed — clean, named-row assertion failures on every accept clause: the ≥200 adversarial property (both placements), 9
+    of the 10 #1084 renders in the answered state, both clause-2 arms, both clause-3 nudges, the cursor-win ▄▀ chrome probe. The one green (⠘⠆
+    Running) is the measured spinner — correctly busy at both heads.
+
+  Remaining: the fresh cursor-lin idle capture (clause 4) — the pane never idles while I work, so a 3-second capture chain is armed and the idle window
+  opens the moment this turn ends; next poll it becomes the fixture, then push to PR 534 → CI → evidence → close #1100. Progress note posted on card
+  #1010 (msg 62474).
+
+
+
+
+  → Add a follow-up
+
+
+  1 task
+  GLM 5.3 High · 89% · 105 files edited                                                                                                     Run Everything
+  ~
+
+
