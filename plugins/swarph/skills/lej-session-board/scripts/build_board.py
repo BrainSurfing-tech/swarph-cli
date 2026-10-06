@@ -72,23 +72,40 @@ def _in_session(row: dict) -> bool:
     return _IN_SESSION.search(accept) is not None
 
 
+# card #291 ruling_1157 (1): tap-closable commander rows (holder commander,
+# step build or step-less) render as yes/no with the FIXED mapping
+# yes=pass, no=fail. Every other option is display-only (outcome None)
+# and closes nothing — no prose option closes PASS by default.
+_TAP_YES = {"label": "Yes", "text": "yes", "rec": True, "outcome": "pass"}
+_TAP_NO = {"label": "No", "text": "no", "rec": False, "outcome": "fail"}
+
+
+def _tap_closable(row: dict) -> bool:
+    holder = row.get("holder") or row.get("cell") or ""
+    return holder == "commander" and row.get("step") in (None, "build")
+
+
 def _questions(rows: list[dict]) -> list[dict]:
     out = []
     for row in rows:
-        options = []
-        for opt in row.get("options") or []:
-            options.append({
-                "label": opt["label"],
-                "text": opt["text"],
-                "rec": bool(opt.get("rec")),
-            })
-        if not options:
-            title = row["title"]
-            options = [
-                {"label": "Answer on the card", "text": f"Record the commander's decision on card #{row['card_id']}: {title}", "rec": True},
-                {"label": "Ask for a narrower question", "text": f"Ask the cell to narrow obligation #{row['obligation_id']} before the commander decides.", "rec": False},
-                {"label": "Park it", "text": f"Park card #{row['card_id']} and say what changed.", "rec": False},
-            ]
+        if _tap_closable(row):
+            options = [dict(_TAP_YES), dict(_TAP_NO)]
+        else:
+            options = []
+            for opt in row.get("options") or []:
+                options.append({
+                    "label": opt["label"],
+                    "text": opt["text"],
+                    "rec": bool(opt.get("rec")),
+                    "outcome": None,
+                })
+            if not options:
+                title = row["title"]
+                options = [
+                    {"label": "Answer on the card", "text": f"Record the commander's decision on card #{row['card_id']}: {title}", "rec": True, "outcome": None},
+                    {"label": "Ask for a narrower question", "text": f"Ask the cell to narrow obligation #{row['obligation_id']} before the commander decides.", "rec": False, "outcome": None},
+                    {"label": "Park it", "text": f"Park card #{row['card_id']} and say what changed.", "rec": False, "outcome": None},
+                ]
         question = {
             "id": f"obl-{row['obligation_id']}",
             "to": row["cell"],

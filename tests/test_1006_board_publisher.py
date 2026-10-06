@@ -346,3 +346,77 @@ def test_in_session_marker_sets_the_flag_and_strips_the_title():
     assert "[in-session]" not in marked["title"]
     assert "[commander]" not in marked["title"]
     assert plain["in_session"] is False
+
+
+def _commander_obligation(oid, holder="commander", step="build", accept="PASS=x | FAIL=y", title="Do it"):
+    return {
+        "id": oid,
+        "holder": holder,
+        "card_id": 291,
+        "state": "open",
+        "step": step,
+        "accept": f"[commander] {title} | {accept}",
+    }
+
+
+def test_tap_closable_commander_rows_render_yes_no():
+    """card #291 ruling_1157 (1): a tap-closable commander row (build or
+    step-less) renders as yes/no with the fixed mapping yes=pass, no=fail —
+    even when the row carries its own prose options."""
+    pub = _load()
+    rows = pub.commander_rows([
+        _commander_obligation(1, step="build"),
+        _commander_obligation(2, step=None),
+    ])
+    assert [r["step"] for r in rows] == ["build", None]
+    by_cell = {}
+    for row in rows:
+        row["title"] = "Do it"
+        row["options"] = [{"label": "Prose", "text": "discuss first", "rec": True}]
+        by_cell.setdefault(row["cell"], []).append(row)
+    questions = pub.build_board._questions(by_cell["commander"])
+    assert len(questions) == 2
+    for q in questions:
+        assert [(o["label"], o["text"], o["outcome"]) for o in q["options"]] == [
+            ("Yes", "yes", "pass"),
+            ("No", "no", "fail"),
+        ], "RED: tap-closable rows render yes/no, never row prose"
+
+
+def test_validate_plan_review_rows_keep_display_only_options():
+    """card #291 ruling_1157 (1): validate/plan-review commander rows are
+    NOT taps — their options stay prose and every option carries
+    outcome None (display-only, closes nothing)."""
+    pub = _load()
+    rows = pub.commander_rows([
+        _commander_obligation(3, step="validate"),
+        _commander_obligation(4, step="plan-review"),
+    ])
+    by_cell = {}
+    for row in rows:
+        row["title"] = "Check it"
+        row["options"] = [{"label": "Prose", "text": "discuss first", "rec": True}]
+        by_cell.setdefault(row["cell"], []).append(row)
+    questions = pub.build_board._questions(by_cell["commander"])
+    assert len(questions) == 2
+    for q in questions:
+        assert all(o.get("outcome") is None for o in q["options"]), \
+            "RED: no prose option closes PASS by default"
+        assert [o["label"] for o in q["options"]] == ["Prose"]
+
+
+def test_default_options_are_display_only():
+    """The three fallback prose options carry outcome None on every row."""
+    pub = _load()
+    rows = pub.commander_rows([_commander_obligation(5, step="build")])
+    row = dict(rows[0])
+    row["title"] = "Do it"
+    row.pop("options", None)
+    other = dict(row, cell="drop-on-meta-edge", holder="drop-on-meta-edge")
+    for q in pub.build_board._questions([row, other]):
+        if q["to_node"] == "commander":
+            assert [o["outcome"] for o in q["options"]] == ["pass", "fail"]
+        else:
+            assert [o["label"] for o in q["options"]] == [
+                "Answer on the card", "Ask for a narrower question", "Park it"]
+            assert all(o["outcome"] is None for o in q["options"])
