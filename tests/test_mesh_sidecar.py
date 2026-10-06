@@ -10,6 +10,11 @@ import pytest
 
 from swarph_cli.commands import mesh
 
+#: The real capture seam, taken at import before any autouse fixture pins
+#: it (#1010 strand-only hermeticity): the #533 test below asserts the
+#: leading capture-pane call that its own subprocess stub must serve.
+_REAL_CAPTURE_PANE_LINES = mesh._capture_pane_lines
+
 
 @pytest.fixture(autouse=True)
 def _clean_composer(monkeypatch):
@@ -17,6 +22,15 @@ def _clean_composer(monkeypatch):
     default every composer to OBSERVED-CLEAN so the gate stays out of the
     way. The gate's own matrix lives in test_tmux_wake_submit_verify.py."""
     monkeypatch.setattr(mesh, "_composer_state", lambda t: "clear")
+    # #1010 strand-only hermeticity (#1083): the grok-block probe, the
+    # run-state read and the session-age read inside deliver() reach the
+    # REAL tmux binary when unpatched — a bare CI runner and a box with
+    # live cells must read the suite the same way. A missing pane reads
+    # unreadable at base; False/None keep the same falsy fall-through
+    # these tests pin.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: False)
+    monkeypatch.setattr(mesh, "_tmux_session_created", lambda t: None)
 
 
 def _state(tmp_path: Path) -> mesh.MeshSidecarState:
@@ -49,6 +63,10 @@ def test_tmux_wake_sends_literal_prompt_then_submits_and_verifies(monkeypatch):
         lambda command, **kwargs: calls.append((command, kwargs)) or Result(),
     )
     monkeypatch.setattr(mesh.time, "sleep", lambda _s: None)
+    # #1010 strand-only hermeticity: the autouse fixture pins the capture
+    # seam so no OTHER pane read reaches the real binary; this test's own
+    # subprocess stub serves the leading capture-pane call it asserts.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", _REAL_CAPTURE_PANE_LINES)
     # The verifier is now a projection of the four-way composer state; the
     # autouse fixture stubs that state. Record the consultation instead of
     # expecting a raw capture-pane call in the sequence.

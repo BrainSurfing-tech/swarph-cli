@@ -41,6 +41,11 @@ class _StubState:
 def _rig(monkeypatch, *, composer="clear", unread=3, session_created=None,
          wake_result=True, running=False):
     calls = {"wake": 0, "enter": 0}
+    # #1010 strand-only hermeticity (#1083): deliver() reads the pane for
+    # the grok-block probe before anything else — an unpatched seam reaches
+    # the REAL tmux binary. None = unreadable, behavior-neutral here: these
+    # rigs pin the composer/run-state seams they mean to exercise.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
     monkeypatch.setattr(mesh, "_composer_state", lambda t: composer)
     monkeypatch.setattr(mesh, "_tmux_session_created", lambda t: session_created)
     monkeypatch.setattr(mesh, "_agent_running", lambda t: running)
@@ -198,7 +203,7 @@ def test_flag_stays_when_no_turn_is_observed(monkeypatch):
     state = _owed_state(injected_at=now - 60)
     sink = mesh.TmuxSink("cursor-lin")
 
-    assert sink.deliver(state, [{"id": 9}], 9) is True  # standing wake
+    assert sink.deliver(state, [{"id": 9}], 9) is None  # #1010: held, not delivered
     assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is True
     assert calls["wake"] == 0
 
@@ -213,7 +218,7 @@ def test_unknown_runstate_does_not_clear(monkeypatch):
     state = _owed_state(injected_at=now - 60)
     sink = mesh.TmuxSink("cursor-lin")
 
-    assert sink.deliver(state, [{"id": 9}], 9) is True  # standing, undisturbed
+    assert sink.deliver(state, [{"id": 9}], 9) is None  # #1010: held, flag undisturbed
     assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is True
     assert calls["wake"] == 0
 

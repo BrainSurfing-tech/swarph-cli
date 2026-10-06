@@ -44,6 +44,11 @@ def _rig(monkeypatch, *, composer="clear", unread=3, session_created=None,
          wake_result=True):
     """Pin the four observations deliver() makes; return the call recorders."""
     calls = {"wake": 0, "enter": 0}
+    # #1010 strand-only hermeticity (#1083): deliver() reads the pane for
+    # the grok-block probe before anything else — an unpatched seam reaches
+    # the REAL tmux binary. None = unreadable, behavior-neutral here: these
+    # rigs pin the composer/run-state seams they mean to exercise.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
     monkeypatch.setattr(mesh, "_composer_state", lambda t: composer)
     monkeypatch.setattr(mesh, "_tmux_session_created", lambda t: session_created)
     # #619: pin the run-state seam too — unpatched it reads the LIVE pane,
@@ -95,8 +100,11 @@ def test_same_session_clear_composer_does_not_stack(monkeypatch):
     state = _owed_state(injected_at=now - 60)
     sink = mesh.TmuxSink("cursor-lin")
 
-    assert sink.deliver(state, [], 29101) is True
-    assert calls["wake"] == 0, "same session + clear composer = submitted, not lost"
+    # #1010 strand-only: the hold is not a delivery. None keeps the DM
+    # owed (the monitor does not advance the cursor); still zero keys —
+    # same session + clear composer is not a second injection.
+    assert sink.deliver(state, [], 29101) is None
+    assert calls["wake"] == 0, "same session + clear composer = held, not stacked"
 
 
 def test_unknown_session_age_keeps_the_old_behaviour(monkeypatch):
@@ -110,7 +118,8 @@ def test_unknown_session_age_keeps_the_old_behaviour(monkeypatch):
     state = _owed_state(injected_at=now - 60)
     sink = mesh.TmuxSink("cursor-lin")
 
-    assert sink.deliver(state, [], 29101) is True
+    # #1010: inside the trust window this is the hold, not a delivery.
+    assert sink.deliver(state, [], 29101) is None
     assert calls["wake"] == 0
 
 
@@ -154,20 +163,22 @@ def test_fresh_path_anchors_the_injection_timestamp(monkeypatch):
 
 
 def test_standing_wake_delivery_report_is_logged(monkeypatch, capsys):
-    """The silent-True branch was the ONLY delivery report with zero log
-    lines — a swallowed wake left no trace (cursor-win, 2026-08-26, a
-    40-minute investigation that one log read would have collapsed). The
-    report now names itself and the standing wake's age."""
+    """The standing-wake branch is the only poll with zero keystrokes, so
+    its log has to name itself and the wake's age (cursor-win, 2026-08-26:
+    a swallowed wake left no trace). #1010: it reports a HOLD, not a
+    delivery — None, the DM stays owed, and the line says the 600 s bound
+    is what types it."""
     now = time.time()
     calls = _rig(monkeypatch, session_created=now - 3600)
     state = _owed_state(injected_at=now - 60)
     sink = mesh.TmuxSink("cursor-lin")
 
-    assert sink.deliver(state, [], 29101) is True
+    assert sink.deliver(state, [], 29101) is None
     assert calls["wake"] == 0
     out = capsys.readouterr().out
-    assert "STANDING wake" in out
-    assert "no keystroke this poll" in out
+    assert "standing wake inside its 600s trust window" in out
+    assert "DM held owed" in out
+    assert "zero keys this poll" in out
     assert re.search(r"injected \d+s ago", out), out
 
 

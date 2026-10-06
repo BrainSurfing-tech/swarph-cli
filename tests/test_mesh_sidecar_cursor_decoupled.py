@@ -28,6 +28,15 @@ def _clean_composer(monkeypatch):
     default every composer to OBSERVED-CLEAN so the gate stays out of the
     way. The gate's own matrix lives in test_tmux_wake_submit_verify.py."""
     monkeypatch.setattr(mesh, "_composer_state", lambda t: "clear")
+    # #1010 strand-only hermeticity (#1083): the grok-block probe, the
+    # run-state read and the session-age read inside deliver() reach the
+    # REAL tmux binary when unpatched — a bare CI runner and a box with
+    # live cells must read the suite the same way. A missing pane reads
+    # unreadable at base; False/None keep the same falsy fall-through
+    # these tests pin.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: False)
+    monkeypatch.setattr(mesh, "_tmux_session_created", lambda t: None)
 
 
 def _state(tmp_path, wake_min_interval_s=0):

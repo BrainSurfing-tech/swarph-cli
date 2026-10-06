@@ -38,6 +38,11 @@ class _StubState:
 def _rig(monkeypatch, *, composer="clear", unread=3, session_created=None,
          wake_result=True):
     calls = {"wake": 0, "enter": 0}
+    # #1010 strand-only hermeticity (#1083): deliver() reads the pane for
+    # the grok-block probe before anything else — an unpatched seam reaches
+    # the REAL tmux binary. None = unreadable, behavior-neutral here: these
+    # rigs pin the composer/run-state seams they mean to exercise.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
     monkeypatch.setattr(mesh, "_composer_state", lambda t: composer)
     monkeypatch.setattr(mesh, "_tmux_session_created", lambda t: session_created)
     # #619: pin the run-state seam too — unpatched it reads the LIVE pane,
@@ -89,7 +94,9 @@ def test_fresh_wake_does_not_stack(monkeypatch):
     state = _owed_state(injected_at=now - 60)  # 1 min old, bound is 10
     sink = mesh.TmuxSink("cursor-lin")
 
-    assert sink.deliver(state, [{"id": 9}], 9) is True
+    # #1010: inside the window the DM is held owed (None), not reported
+    # delivered — and still not stacked.
+    assert sink.deliver(state, [{"id": 9}], 9) is None
     assert calls["wake"] == 0
 
 
