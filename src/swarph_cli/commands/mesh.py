@@ -1501,10 +1501,14 @@ class TmuxSink(Sink):
     def __init__(self, target: str):
         super().__init__(f"tmux:{target}")
         self.target = target
+        # #1077 clause (5): the engine's DEFERRED line names the REAL cause
+        # — a mid-turn deferral must not print "composer holds human text".
+        self.deferred_reason = None
 
     def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
         led = state.ledger(self.name)
         self.failure_reason = None
+        self.deferred_reason = None
         # #723: a rate-limit or usage-limit screen is not deliverable. An
         # empty composer beside "Retry failed: rate limit" used to inject
         # again, and the 1.0.44 upgrade modal (no Grok footer) used to
@@ -1514,6 +1518,7 @@ class TmuxSink(Sink):
         if pane:
             reason = _grok_block_reason(pane)
             if reason:
+                self.deferred_reason = reason
                 print(f"[monitor] {self.name}: {reason} — deferring, zero keys",
                       flush=True)
                 return None
@@ -1533,7 +1538,11 @@ class TmuxSink(Sink):
             # Opencode keeps the finished ▣ header on screen, so a deferral
             # during the turn must not clear the flag: the next idle poll
             # still owes a wake. Cursor's #620 clear stays.
-            if _opencode_in_progress(self.target) or _grok_in_progress(self.target):
+            if _opencode_in_progress(self.target):
+                self.deferred_reason = "opencode turn in progress — flag kept"
+                return None
+            if _grok_in_progress(self.target):
+                self.deferred_reason = "grok turn in progress — flag kept"
                 return None
             led["wake_outstanding"] = False
         if led.get("wake_outstanding"):
@@ -1553,6 +1562,7 @@ class TmuxSink(Sink):
                     # — the nudge would convert a submittable draft into a
                     # wake that never fires. Defer to the first idle poll.
                     if _agent_running(self.target):
+                        self.deferred_reason = _DEFER_MIDTURN
                         return None
                     # #1077: an Enter into an UNREADABLE runstate is the
                     # same keystroke hazard — hold zero keys on unknown.
@@ -1564,6 +1574,7 @@ class TmuxSink(Sink):
                     # Human text shares the composer (possibly merged into
                     # our wake) — an Enter here submits THEIR line (#403's
                     # shape).
+                    self.deferred_reason = "composer holds human text"
                     return None
                 if composer != "clear":
                     self.failure_reason = _sink_failure_detail(self.target)
@@ -1618,6 +1629,7 @@ class TmuxSink(Sink):
             # #619: nudging while the agent runs queues the text instead of
             # submitting it — and the queue is input-gated. Defer to idle.
             if _agent_running(self.target):
+                self.deferred_reason = _DEFER_MIDTURN
                 return None
             # #1077: an Enter into an UNREADABLE runstate is still a
             # keystroke — hold zero keys on unknown within the bound.
@@ -1631,8 +1643,10 @@ class TmuxSink(Sink):
                 if "last_wake_injected_at" not in led:
                     _stamp_wake(led)
                 return True
+            self.failure_reason = "the Enter nudge failed (tmux send-keys error)"
             return False
         if composer == "busy":
+            self.deferred_reason = "composer holds human text"
             return None
         if composer != "clear":
             self.failure_reason = _sink_failure_detail(self.target)
@@ -1647,11 +1661,14 @@ class TmuxSink(Sink):
         if _agent_running(self.target):
             seen = _capture_pane_lines(self.target)
             if seen and _muse_running(seen):
+                self.deferred_reason = "muse turn in progress"
                 print(
                     f"[monitor] {self.name}: muse turn in progress — "
                     "deferring, zero keys",
                     flush=True,
                 )
+            else:
+                self.deferred_reason = _DEFER_MIDTURN
             return None
         # #1077: an UNKNOWN run state is not idle — a TUI answering under a
         # busy render the detector does not know must not be typed into
@@ -1667,6 +1684,9 @@ class TmuxSink(Sink):
             # 5): the wake text never submitted as ours. DEFER — the cursor
             # must NOT advance, or the wake is silently lost when the human
             # never sends their line.
+            self.deferred_reason = (
+                "the human adopted the composer mid-settle — the wake "
+                "never submitted as ours")
             return None
         if ok:
             led["wake_outstanding"] = True
@@ -1678,6 +1698,12 @@ class TmuxSink(Sink):
         # the next poll retries the inject (and the failure stays loud).
         if _wake_still_pending(self.target) is True:
             led["wake_outstanding"] = True
+            # #1077 clause (5): the sink is ALIVE — the wake sits in the
+            # composer unsubmitted. The old fallback made the engine print
+            # "the sink is probably gone", naming the wrong cause.
+            self.failure_reason = (
+                "wake text observably stuck in the composer — the sink is "
+                "alive; a nudge is owed next poll")
         return False
 
     def _holds_for_unknown_runstate(self, led: dict) -> bool:
@@ -1688,6 +1714,7 @@ class TmuxSink(Sink):
         detail = _unknown_runstate_hold(self.target, led)
         if detail is None:
             return False
+        self.deferred_reason = f"runstate not positively recognised ({detail})"
         print(
             f"[monitor] {self.name}: runstate not positively recognised "
             f"({detail}) — deferring, zero keys",
@@ -2326,6 +2353,11 @@ _OPENCODE_DONE = re.compile(
 # forever — the wake stays owed instead.
 _WAKE_SETTLE_S = 0.6
 _WAKE_SUBMIT_ATTEMPTS = 4
+# #1077 clause (5): the deferral the engine logs for a MID-TURN cell —
+# never the human-text line; the human is not involved.
+_DEFER_MIDTURN = (
+    "cell mid-turn — a keystroke would land in the input-gated follow-up "
+    "queue")
 # (#1010 removed _WAKE_STALE_S, the ten-minute trust bound: a wake is
 # standing only while OBSERVED — unsubmitted text or a mid-turn cell — and
 # an idle pane at an empty prompt spends it immediately, so there is no
@@ -3380,8 +3412,14 @@ def _monitor_deliver(state: MonitorState) -> None:
                         state.gateway, state.token, state.self_name, ticks, len(dms)
                     )
                 changed = True
+                # #1077 clause (5): name the REAL cause. A mid-turn
+                # deferral is not "composer holds human text"; the sink
+                # reports why it deferred, and the fallback covers sinks
+                # that defer without a reason.
+                cause = getattr(sink, "deferred_reason", None) \
+                    or "deferred by the sink"
                 print(f"{state.log_prefix} delivery DEFERRED for {sink.name} "
-                      f"(composer holds human text); wake stays owed, "
+                      f"({cause}); wake stays owed, "
                       f"no failure counted",
                       flush=True)
                 continue

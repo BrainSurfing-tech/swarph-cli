@@ -18,8 +18,12 @@ from swarph_cli.commands import mesh
 def _clean_composer(monkeypatch):
     """These tests pin ledger/cursor mechanics, not the politeness gate —
     default every composer to OBSERVED-CLEAN so the gate stays out of the
-    way. The gate's own matrix lives in test_tmux_wake_submit_verify.py."""
+    way. The gate's own matrix lives in test_tmux_wake_submit_verify.py.
+    _agent_running is pinned for the same reason: unpatched it reads the
+    LIVE pane named by the target, and a mid-turn live cell (or a mid-Pondering
+    one, #1077) defers the wake exactly like the gate would."""
     monkeypatch.setattr(mesh, "_composer_state", lambda t: "clear")
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: False)
 
 
 def _state(tmp_path, wake_min_interval_s=0):
