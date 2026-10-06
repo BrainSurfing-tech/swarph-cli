@@ -1474,6 +1474,17 @@ class TmuxSink(Sink):
     suppresses a delivery without the pane being re-read — which also
     means a monitor restart cannot carry standing state on faith.
 
+    IDLE IS OBSERVED TOO, NEVER ASSUMED (#1077, #1073 round 2): a clear
+    composer alone does not prove the turn ended — a TUI can answer under
+    a busy render the running detector does not positively know, and
+    #1010's spent rule typed the next DM into that running turn (measured
+    by science-claude at 6c4180b). An UNKNOWN run state (_agent_running
+    None) holds ZERO keystrokes — inject and nudge both — for
+    _WAKE_TURN_BOUND_S after the wake was injected; past the bound the
+    strand risk outweighs the mid-turn risk and the sink types, loudly.
+    With no wake of ours in play the historical contract stands: unknown
+    reads as not-running (a claude cell has no running detector at all).
+
     POLITENESS GATE (commander, 2026-08-24, same day): even a verified wake
     INJECTS BLIND — '-l' appends to whatever sits in the composer, so a wake
     landing mid-keystroke merges into the human's half-typed line. The gate:
@@ -1543,6 +1554,10 @@ class TmuxSink(Sink):
                     # wake that never fires. Defer to the first idle poll.
                     if _agent_running(self.target):
                         return None
+                    # #1077: an Enter into an UNREADABLE runstate is the
+                    # same keystroke hazard — hold zero keys on unknown.
+                    if self._holds_for_unknown_runstate(led):
+                        return None
                     _tmux_enter(self.target)  # one verified nudge, no new text
                     return True
                 if composer == "busy":
@@ -1579,6 +1594,15 @@ class TmuxSink(Sink):
                 # and #616's stale bound (an idle empty prompt no longer
                 # earns a ten-minute trust window: the re-inject is
                 # immediate, not bound-delayed).
+                # #1077 gates the spend on a POSITIVELY idle read: a clear
+                # composer alone does not prove the turn ended — a TUI can
+                # answer under a busy render the detector does not know,
+                # and typing into it lands mid-turn (measured by
+                # science-claude at 6c4180b: the second DM went in). An
+                # unknown run state holds here; a positively-not-running
+                # pane (False) spends exactly as #1010 ruled.
+                if self._holds_for_unknown_runstate(led):
+                    return None
                 led["wake_outstanding"] = False
         # Fresh path, gated on the OBSERVED composer (gpt-ops REVISE, #312):
         # "wake" — wake text already sits ALONE in the composer (a monitor
@@ -1594,6 +1618,10 @@ class TmuxSink(Sink):
             # #619: nudging while the agent runs queues the text instead of
             # submitting it — and the queue is input-gated. Defer to idle.
             if _agent_running(self.target):
+                return None
+            # #1077: an Enter into an UNREADABLE runstate is still a
+            # keystroke — hold zero keys on unknown within the bound.
+            if self._holds_for_unknown_runstate(led):
                 return None
             if _tmux_enter(self.target):
                 led["wake_outstanding"] = True
@@ -1625,6 +1653,12 @@ class TmuxSink(Sink):
                     flush=True,
                 )
             return None
+        # #1077: an UNKNOWN run state is not idle — a TUI answering under a
+        # busy render the detector does not know must not be typed into
+        # while the wake's turn bound runs. Known-idle (False) falls
+        # through; known-busy (True) returned above.
+        if self._holds_for_unknown_runstate(led):
+            return None
         # Module-global lookup on purpose: the sidecar regression suites patch
         # `mesh._tmux_wake`, and a `from`-import here would silently bypass them.
         ok = _tmux_wake(self.target)
@@ -1645,6 +1679,21 @@ class TmuxSink(Sink):
         if _wake_still_pending(self.target) is True:
             led["wake_outstanding"] = True
         return False
+
+    def _holds_for_unknown_runstate(self, led: dict) -> bool:
+        """#1077: hold ZERO keystrokes when the runstate reads UNKNOWN and
+        a wake of ours may still be turning. Loud on every hold — the log
+        names the unrecognised state, and the bound-firing fallthrough
+        (past _WAKE_TURN_BOUND_S) states its bound in the same breath."""
+        detail = _unknown_runstate_hold(self.target, led)
+        if detail is None:
+            return False
+        print(
+            f"[monitor] {self.name}: runstate not positively recognised "
+            f"({detail}) — deferring, zero keys",
+            flush=True,
+        )
+        return True
 
     def pending_label(self, count: int) -> str:
         plural = "s" if count != 1 else ""
@@ -2281,6 +2330,16 @@ _WAKE_SUBMIT_ATTEMPTS = 4
 # standing only while OBSERVED — unsubmitted text or a mid-turn cell — and
 # an idle pane at an empty prompt spends it immediately, so there is no
 # window left to bound.)
+# #1077 restored a DIFFERENT ten-minute bound, for a different question:
+# not "how long can a wake stand" but "how long can a wake's OWN turn keep
+# the pane's runstate unread". While a wake is outstanding and the runstate
+# reads UNKNOWN (_agent_running None — an unrecognised busy render such as
+# '✻ Pondering… (esc to cancel)', or a TUI with no running detector), the
+# sink holds ZERO keystrokes for this long after the wake was injected;
+# past it, the strand risk (a DM never typed — friendly-coder, #1010)
+# outweighs the mid-turn risk and the sink types, loudly. Ten minutes
+# matches the #616 measurement: turns ran well under it.
+_WAKE_TURN_BOUND_S = 600.0
 
 
 def _capture_pane_lines(target: str) -> Optional[list[str]]:
@@ -2369,6 +2428,15 @@ _CURSOR_RUN_HINT = "ctrl+c to stop"
 _CURSOR_SPINNER_ROW = re.compile(
     r"^[\u2800-\u28FF]+\s*(?:Thinking|Running|Working)\b"
 )
+
+#: #1077: a cancel affordance in the LIVE-STATUS slot — '✻ Pondering…
+#: (esc to cancel)', a busy render the spinner rule does not cover — marks
+#: the pane busy-shaped but NOT positively known. The parenthetical anchors
+#: the match: a history quote of the hint ('why does it say ctrl+c to
+#: stop?', measured live in cursor-lin's own scrollback) carries no
+#: parentheses and still reads idle.
+_CURSOR_CANCEL_AFFORDANCE = re.compile(
+    r"\((?:esc|ctrl\+c)\b[^)]{0,60}\)", re.IGNORECASE)
 
 #: How many non-empty rows at the bottom can hold the cursor composer.
 #: Measured on cursor-lin 2026-09-30: the composer is the 4th non-empty row
@@ -2545,6 +2613,28 @@ def _is_cursor_composer_row(line: str) -> bool:
     reads ``→ Add a follow-up``. A ``▎`` hunk never counts."""
     row = line.strip()
     return row.startswith("→") and not row.startswith("▎")
+
+
+def _cursor_status_row(tail: list[str]) -> Optional[str]:
+    """The LIVE-STATUS slot: the non-empty row directly above the Tip/
+    composer block. While a turn runs, cursor draws the spinner there;
+    when the Tip row is present the slot sits above IT (measured live on
+    cursor-lin). None when the composer is the first non-empty row of the
+    tail — no slot in view. Shared by the running detector and the
+    unrecognised-state detail (#1077)."""
+    idx = None
+    for i in range(len(tail) - 1, -1, -1):
+        if _is_cursor_composer_row(tail[i]):
+            idx = i
+            break
+    if idx is None or idx == 0:
+        return None
+    anchor = idx - 1
+    if tail[anchor].strip().startswith("Tip:"):
+        if anchor == 0:
+            return None
+        anchor -= 1
+    return tail[anchor].strip()
 
 
 def _is_muse_rule(line: str) -> bool:
@@ -2811,10 +2901,13 @@ def _agent_running(target: str) -> Optional[bool]:
     follow-up queue, and the queue is input-gated (measured live
     2026-08-26, twice: queued wakes fired only when the human next typed).
     Opencode: ``esc interrupt`` or a ▣ header with no trailing duration.
-    A finished ``· <n>s`` header is idle. None =
-    pane or composer unreadable; callers treat unknown as NOT-running
-    (the composer state was already established by then — this guard
-    only vets the timing).
+    A finished ``· <n>s`` header is idle. None = UNKNOWN — pane or
+    composer unreadable, OR a busy-shaped cursor render the detector
+    does not positively know (a cancel affordance in the live-status
+    slot, #1077: '✻ Pondering… (esc to cancel)'). #1073 round 2: unknown
+    is NOT not-running — while a wake is outstanding the sink holds ZERO
+    keystrokes on it for _WAKE_TURN_BOUND_S, then types loudly; with no
+    wake of ours in play it stays the historical not-running.
     """
     lines = _capture_pane_lines(target)
     if lines is None:
@@ -2834,19 +2927,79 @@ def _agent_running(target: str) -> Optional[bool]:
     # The spinner is the non-empty row directly above the Tip/composer
     # block: the Tip row when it is present, otherwise the composer.
     # No other row in the tail can make the pane read as running.
-    idx = None
-    for i in range(len(tail) - 1, -1, -1):
-        if _is_cursor_composer_row(tail[i]):
-            idx = i
-            break
-    if idx is None or idx == 0:
+    slot = _cursor_status_row(tail)
+    if slot is None:
         return False
-    anchor = idx - 1
-    if tail[anchor].strip().startswith("Tip:"):
-        if anchor == 0:
-            return False
-        anchor -= 1
-    return bool(_CURSOR_SPINNER_ROW.match(tail[anchor].strip()))
+    if _CURSOR_SPINNER_ROW.match(slot):
+        return True
+    # #1077: a row in the LIVE-STATUS slot carrying a cancel affordance
+    # — '✻ Pondering… (esc to cancel)' — is busy-shaped but a render this
+    # detector does not positively know. NOT True (we cannot assert the
+    # turn's state from a render we have never measured) and NOT False (a
+    # cancellation affordance renders only mid-turn; idle panes draw
+    # output there, and output quoting the hint carries no parentheses —
+    # the paren anchors the match). None = unknown, and the sink holds
+    # ZERO keystrokes on unknown while the wake's turn bound runs.
+    if _CURSOR_CANCEL_AFFORDANCE.search(slot):
+        return None
+    return False
+
+
+def _runstate_unknown_detail(target: str) -> str:
+    """Name the unrecognised state for the loud deferral log (#1077) —
+    the log must carry WHAT was seen, not just that reading failed."""
+    lines = _capture_pane_lines(target)
+    if lines is None:
+        return "pane unreadable"
+    tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
+    composer = _composer_line(tail)
+    if composer is None:
+        return "no composer line in the tail"
+    if not composer.startswith("→"):
+        return f"composer row {composer[:48]!r} carries no cursor run-state"
+    slot = _cursor_status_row(tail)
+    if slot is None:
+        return "composer at the top of the tail"
+    return f"live row {slot[:72]!r} not positively recognised"
+
+
+def _unknown_runstate_hold(target: str, led: dict) -> Optional[str]:
+    """#1077 (#1073 round 2): an UNKNOWN run state is not idle.
+
+    Measured by science-claude on a sacrificial pane at 6c4180b: the wake
+    fired, the TUI answered under a busy render the detector does not
+    know ('✻ Pondering… (esc to cancel)' — no spinner, no composer hint),
+    and the #1010 spent rule read the placeholder composer as
+    positively-idle and TYPED the next DM into the running turn. Base
+    typed 0 there — its STANDING claim, for all its strand defects, at
+    least sent no keys into a pane it could not read.
+
+    Rule: while a wake is outstanding, an unknown run state holds ZERO
+    keystrokes — inject AND nudge both — for _WAKE_TURN_BOUND_S after the
+    wake was injected; past the bound the strand risk (a DM never typed,
+    friendly-coder #1010) outweighs the mid-turn risk and the sink types,
+    with a loud line stating the bound fired. No anchor in the ledger
+    (no wake of ours in play — first DM on a claude cell, whose TUI has
+    no running detector and reads None permanently) is the historical
+    contract: type, silently, exactly as every version has.
+
+    Returns the detail string to log when the hold applies, else None.
+    """
+    if _agent_running(target) is not None:
+        return None  # positively classified — True/False, no question
+    injected = led.get("last_wake_injected_at")
+    if injected is None:
+        return None  # no wake of ours in play — unknown is this TUI's steady state
+    detail = _runstate_unknown_detail(target)
+    if time.time() - injected < _WAKE_TURN_BOUND_S:
+        return detail or "runstate unknown"
+    print(
+        f"[monitor] tmux:{target}: wake-turn bound "
+        f"{_WAKE_TURN_BOUND_S:.0f}s fired ({detail or 'runstate unknown'}) "
+        "— typing despite the unrecognised runstate",
+        flush=True,
+    )
+    return None
 
 
 def _composer_state(target: str) -> Optional[str]:

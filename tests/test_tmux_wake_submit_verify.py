@@ -194,13 +194,19 @@ def gate(monkeypatch):
     sink = mesh.TmuxSink("pane")
     # composer: the politeness gate's four-way ("clear"/"wake"/"busy"/None);
     # pending: _wake_still_pending's three-way, still used by the False-split.
-    box = {"unread": 1, "pending": False, "wake_ok": True, "composer": "clear"}
+    box = {"unread": 1, "pending": False, "wake_ok": True, "composer": "clear",
+           "running": False}
     monkeypatch.setattr(mesh, "_tmux_wake",
                         lambda t: calls.__setitem__("wake", calls["wake"] + 1) or box["wake_ok"])
     monkeypatch.setattr(mesh, "_tmux_enter",
                         lambda t: calls.__setitem__("enter", calls["enter"] + 1) or True)
     monkeypatch.setattr(mesh, "_wake_still_pending", lambda t: box["pending"])
     monkeypatch.setattr(mesh, "_composer_state", lambda t: box["composer"])
+    # #1077: the runstate seam must be pinned too — unpatched it reads a
+    # real pane (None on the nonexistent "pane", and a LIVE mid-turn read
+    # when the suite runs on a real cell), and an unknown runstate now
+    # HOLDS zero keystrokes.
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: box["running"])
     monkeypatch.setattr(mesh, "_opencode_in_progress", lambda t: False)
     import swarph_cli.commands.watchdog as wd
     monkeypatch.setattr(wd, "_gateway_unread_count",

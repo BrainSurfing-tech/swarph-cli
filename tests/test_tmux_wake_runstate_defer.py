@@ -191,22 +191,32 @@ def test_no_turn_observation_spends_the_wake_not_keeps_it(monkeypatch):
     assert led["wake_outstanding"] is True  # re-armed by the fresh inject
 
 
-def test_unknown_runstate_spends_like_idle(monkeypatch):
-    """>>> #1010, red on main: main treated an unknown runstate as 'undisturbed
-    standing'. <<< None (pane momentarily unreadable on the run-state read) is
-    NOT a positive turn observation — it cannot keep a wake standing any more
-    than it can clear one. The composer was observed clear and idle-side, so
-    the wake is spent and the next DM is typed; the fresh path re-checks
-    _agent_running and treats unknown as not-running (its documented
-    contract)."""
+def test_unknown_runstate_holds_zero_keystrokes_within_the_turn_bound(monkeypatch, capsys):
+    """>>> #1073 round 2 (#1077), red on 6c4180b: main treated an unknown
+    runstate as 'undisturbed standing', and the #1010 spent rule then read
+    it as positively idle — either way a keystroke could land in a pane
+    whose busy render the detector does not know (science-claude measured
+    '✻ Pondering… (esc to cancel)' at 6c4180b: the second DM went in).
+    <<< None is NOT a positive turn observation, and it is NOT a positive
+    idle observation either: while a wake of ours may still be turning,
+    unknown holds ZERO keystrokes with a loud log naming the state, and
+    the flag stands untouched (neither spent nor spent-claimed)."""
     calls = _rig(monkeypatch, composer="clear", running=False)
     monkeypatch.setattr(mesh, "_agent_running", lambda t: None)
+    # the detail seam must not read a REAL pane — script the fixture render
+    monkeypatch.setattr(mesh, "_capture_pane_lines",
+                        lambda t: ["✻ Pondering… (esc to cancel)",
+                                   "→ Add a follow-up"])
     state = _owed_state(injected_at=time.time() - 60)
     sink = mesh.TmuxSink("cursor-lin")
 
-    assert sink.deliver(state, [{"id": 9}], 9) is True
-    assert calls["wake"] == 1
-    assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is True
+    assert sink.deliver(state, [{"id": 9}], 9) is None  # held, not typed
+    assert calls["wake"] == 0 and calls["enter"] == 0
+    led = state.ledger("tmux:cursor-lin")
+    assert led["wake_outstanding"] is True  # neither spent nor delivered
+    out = capsys.readouterr().out
+    assert "not positively recognised" in out and "zero keys" in out
+    assert "Pondering" in out  # the log NAMES the unrecognised state
 
 
 def test_full_zombie_cycle_fires_the_next_wake(monkeypatch):
