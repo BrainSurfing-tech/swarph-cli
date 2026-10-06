@@ -104,7 +104,7 @@ New automation starts in shadow. The exit date is set when the shadow starts, no
 
 No reminder, no shadow. A dry-run with no deadline is a control that does not exist.
 
-Measured on our system, 2026-10-06: the pull-request auto-merger runs every 10 minutes and stays a dry run unless it is explicitly armed. It logs the merge it would make and does not merge. Graduation is a board decision, due 2026-10-13, after 10 decisions in a row agree with what a person would have done, refusals included.
+Measured on our system, 2026-10-06: the pull-request auto-merger runs every 10 minutes. It was a dry run until 15:30Z that day, when it was armed. From then it merges a pull request whose card's latest validate row is a closed pass naming the full current head, with an approval at that same head, every check green, nothing pending, and a clean merge state. The title has to contain the card number written as `card #N`. A title that only writes `docs(#N)` is skipped. Releases, the merger's own files, and workflow files stay hand-merged.
 
 ## Knowledge
 
