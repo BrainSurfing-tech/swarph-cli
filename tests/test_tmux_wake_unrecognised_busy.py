@@ -139,10 +139,13 @@ def test_tip_idle_is_positively_idle(monkeypatch):
 def test_hint_quoted_without_parens_stays_idle(monkeypatch):
     """The paren anchors the affordance match: cursor-lin's own scrollback
     has discussed 'ctrl+c to stop' mid-output, and that history must not
-    read as an unrecognised busy state."""
+    read as an unrecognised busy state — it never returns True. #1083:
+    it is not positively IDLE either (no measured idle signature in
+    view — no Tip row above the composer), so a pane whose only rows are
+    a quote and the composer reads UNKNOWN: not busy, not asserted idle."""
     lines = ["user: why does it say ctrl+c to stop?", "→ Add a follow-up"]
     monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: lines)
-    assert mesh._agent_running("sac") is False
+    assert mesh._agent_running("sac") is None
 
 
 # ── deliver: the unrecognised busy pane holds ZERO keystrokes ────────────
@@ -205,11 +208,17 @@ def test_monitor_restart_holds_too(pane):
 def test_bound_fires_after_ten_minutes_and_types(pane, capsys):
     """>>> RED on 6c4180b via the log: past the bound the sink must TYPE —
     and must say it did, naming the bound. <<< _WAKE_TURN_BOUND_S is
-    600s: within it the strand risk stays subordinate to the mid-turn
-    risk; past it the DM must not sit undelivered forever (an answered
-    idle wake left untyped is the other FAIL arm)."""
+    600s, and #1083 re-anchored the clock: it counts from FIRST SIGHT of
+    the unknown state (unknown_seen_at), not from the injection. This
+    fixture models the pane unknown since 601s ago (first seen while the
+    wake injected 700s ago was already turning); within the bound the
+    strand risk stays subordinate to the mid-turn risk; past it the DM
+    must not sit undelivered forever (an answered idle wake left untyped
+    is the other FAIL arm)."""
     calls, holder = pane
-    state = _owed(injected_at=time.time() - mesh._WAKE_TURN_BOUND_S - 1)
+    now = time.time()
+    state = _owed(injected_at=now - 700)
+    state.ledger("tmux:sac")["unknown_seen_at"] = now - 601
     assert mesh._WAKE_TURN_BOUND_S == 600.0  # the bound is stated and pinned
     sink = mesh.TmuxSink("sac")
 
@@ -217,6 +226,7 @@ def test_bound_fires_after_ten_minutes_and_types(pane, capsys):
     assert _sent(calls) >= 1                   # typed: the -l inject (plus Enter)
     out = capsys.readouterr().out
     assert "bound" in out and "600" in out    # loud, bound stated
+    assert "first sight" in out                # #1083: the anchor is named
 
 
 def test_no_wake_in_play_unknown_still_types(pane, capsys):

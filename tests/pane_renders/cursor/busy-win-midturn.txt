@@ -1,0 +1,6 @@
+⠘⠆ Running  3.77k tokens
+    Tip: Use subagents to parallelize work and preserve context.
+ ▄▄▄…
+  → Add a follow-upctrl+c to stop
+ ▀▀▀▀…
+  1 task   Grok 4.7 256K High Fast · 79.9% · 1 file editedRun Everything   ~\cursor-win-workspace

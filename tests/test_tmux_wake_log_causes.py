@@ -51,6 +51,9 @@ def _rig(monkeypatch, *, composer="clear", running=False, wake_ok=True,
     monkeypatch.setattr(mesh, "_opencode_in_progress", lambda t: False)
     monkeypatch.setattr(mesh, "_grok_in_progress", lambda t: False)
     monkeypatch.setattr(mesh, "_wake_still_pending", lambda t: pending)
+    # #1083 hermeticity: the grok-block and muse probes read the pane —
+    # an unpatched seam reached the REAL tmux binary.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
     monkeypatch.setattr(watchdog, "_gateway_unread_count",
                         lambda *a, **k: 1)
 

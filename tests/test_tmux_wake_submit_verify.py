@@ -208,6 +208,9 @@ def gate(monkeypatch):
     # HOLDS zero keystrokes.
     monkeypatch.setattr(mesh, "_agent_running", lambda t: box["running"])
     monkeypatch.setattr(mesh, "_opencode_in_progress", lambda t: False)
+    # #1083 hermeticity: the grok-block probe reads the pane — an
+    # unpatched seam reached the REAL tmux binary.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
     import swarph_cli.commands.watchdog as wd
     monkeypatch.setattr(wd, "_gateway_unread_count",
                         lambda g, p, t: box["unread"])

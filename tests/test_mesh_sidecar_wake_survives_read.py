@@ -24,6 +24,9 @@ def _clean_composer(monkeypatch):
     one, #1077) defers the wake exactly like the gate would."""
     monkeypatch.setattr(mesh, "_composer_state", lambda t: "clear")
     monkeypatch.setattr(mesh, "_agent_running", lambda t: False)
+    # #1083 hermeticity: the grok-block probe reads the pane — an
+    # unpatched seam reached the REAL tmux binary.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
 
 
 def _state(tmp_path, wake_min_interval_s=0):

@@ -46,6 +46,8 @@ def _rig(monkeypatch, *, composer="clear", unread=3, wake_result=True,
     calls = {"wake": 0, "enter": 0}
     monkeypatch.setattr(mesh, "_composer_state", lambda t: composer)
     monkeypatch.setattr(mesh, "_agent_running", lambda t: running)
+    # #1083 hermeticity: the grok-block probe reads the pane — pin it.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
     monkeypatch.setattr(watchdog, "_gateway_unread_count",
                         lambda *a, **k: unread)
 

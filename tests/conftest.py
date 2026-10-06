@@ -28,8 +28,12 @@ and its output was read as evidence about it.**
 """
 import os
 import pathlib
+import subprocess
 
 import pytest
+
+#: the real entry, kept before any fixture can patch it
+_REAL_SUBPROCESS_RUN = subprocess.run
 
 _SRC = str(pathlib.Path(__file__).resolve().parents[1] / "src")
 
@@ -182,3 +186,30 @@ def _hermetic_swarph_env(monkeypatch):
     """
     for name in _SWARPH_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+#: #1083: the suite makes ZERO unmocked tmux calls against live panes.
+#: MEASURED 2026-10-06: test_mesh_sidecar_wake_survives_read read the LIVE
+#: grok:0.0 pane whenever its autouse patch list missed a seam — on a box
+#: where that cell was mid-turn, the test deferred and failed for reasons
+#: outside the repo, identically at base and head. The suite's green must
+#: mean the same thing on a bare CI runner and on a box with 12 live cells,
+#: and a test that reaches a real pane is measuring the box, not the code.
+#: A test that genuinely needs the real binary opts in with
+#: @pytest.mark.live_tmux and says so in its body — there is no such test
+#: today.
+@pytest.fixture(autouse=True)
+def _no_unmocked_tmux(request, monkeypatch):
+    if request.node.get_closest_marker("live_tmux"):
+        return
+
+    def _guarded_run(argv, *args, **kwargs):
+        if isinstance(argv, (list, tuple)) and argv and argv[0] == "tmux":
+            raise AssertionError(
+                f"unmocked tmux call in {request.node.nodeid}: "
+                f"{list(argv[:4])} — script the seam (subprocess.run / "
+                "_capture_pane_lines) or mark the test live_tmux with a "
+                "stated reason")
+        return _REAL_SUBPROCESS_RUN(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _guarded_run)

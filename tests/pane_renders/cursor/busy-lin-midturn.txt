@@ -1,0 +1,14 @@
+ │ ○ is the monitor on current version of swarph?                                                                                                       │
+ │ enter steer · ↑ select/edit · esc cancel                                                                                                             │
+ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+ ⠰⠳ Running  173.11k tokens
+
+
+  → Add a follow-up                                                                                                                         ctrl+c to stop
+
+
+  3 tasks
+  GLM 5.3 High · 43% · 88 files edited                                                                                                      Run Everything
+  ~
+

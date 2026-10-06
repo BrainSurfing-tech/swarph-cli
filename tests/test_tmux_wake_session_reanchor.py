@@ -51,6 +51,8 @@ def _rig(monkeypatch, *, composer="clear", unread=3, wake_result=True,
     # pin the run-state seam too — unpatched it reads the LIVE pane,
     # which is mid-turn (running) whenever the suite runs on a real cell.
     monkeypatch.setattr(mesh, "_agent_running", lambda t: running)
+    # #1083 hermeticity: the grok-block probe reads the pane — pin it.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
     monkeypatch.setattr(watchdog, "_gateway_unread_count",
                         lambda *a, **k: unread)
 

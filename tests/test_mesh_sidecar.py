@@ -11,12 +11,20 @@ import pytest
 from swarph_cli.commands import mesh
 
 
+#: The real capture seam, taken at import before any autouse fixture pins
+#: it (#1083): the #533 test asserts the leading capture-pane call that the
+#: module's own subprocess stub must serve and record.
+_REAL_CAPTURE_PANE_LINES = mesh._capture_pane_lines
+
+
 @pytest.fixture(autouse=True)
 def _clean_composer(monkeypatch):
     """These tests pin ledger/cursor mechanics, not the politeness gate —
     default every composer to OBSERVED-CLEAN so the gate stays out of the
-    way. The gate's own matrix lives in test_tmux_wake_submit_verify.py."""
+    way. The gate's own matrix lives in test_tmux_wake_submit_verify.py.
+    The pane capture seam is pinned for hermeticity (#1083)."""
     monkeypatch.setattr(mesh, "_composer_state", lambda t: "clear")
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
 
 
 def _state(tmp_path: Path) -> mesh.MeshSidecarState:
@@ -51,7 +59,12 @@ def test_tmux_wake_sends_literal_prompt_then_submits_and_verifies(monkeypatch):
     monkeypatch.setattr(mesh.time, "sleep", lambda _s: None)
     # The verifier is now a projection of the four-way composer state; the
     # autouse fixture stubs that state. Record the consultation instead of
-    # expecting a raw capture-pane call in the sequence.
+    # expecting a raw capture-pane call in the verify loop. The CAPTURE
+    # seam stays real here (#533 asserts the leading capture-pane): this
+    # test's own subprocess.run stub serves it, so the call is recorded
+    # and hermetic — the autouse pin would swallow it (#1083).
+    monkeypatch.setattr(
+        mesh, "_capture_pane_lines", _REAL_CAPTURE_PANE_LINES)
     seen = []
     monkeypatch.setattr(
         mesh, "_composer_state",

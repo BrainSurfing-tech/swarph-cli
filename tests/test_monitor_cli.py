@@ -33,6 +33,10 @@ def _env(monkeypatch):
     monkeypatch.setenv("SWARPH_SELF", "lab-ovh")
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.delenv("SWARPH_TMUX_TARGET", raising=False)
+    # #1083 hermeticity: every pane named by this rig is synthetic
+    # ("gone:0.0", "lab:0.0" …) — a real capture would miss and return
+    # None anyway; pin the seam so the suite makes ZERO live tmux calls.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
 
 
 def _dm(msg_id, *, frm="droplet", read_at=None):

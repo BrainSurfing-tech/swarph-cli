@@ -28,6 +28,7 @@ def _clean_composer(monkeypatch):
     default every composer to OBSERVED-CLEAN so the gate stays out of the
     way. The gate's own matrix lives in test_tmux_wake_submit_verify.py."""
     monkeypatch.setattr(mesh, "_composer_state", lambda t: "clear")
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
 
 
 def _state(tmp_path, wake_min_interval_s=0):

@@ -44,6 +44,9 @@ def _rig(monkeypatch, *, composer="clear", unread=3, wake_result=True,
     monkeypatch.setattr(mesh, "_composer_state", lambda t: composer)
     monkeypatch.setattr(mesh, "_agent_running", lambda t: running)
     monkeypatch.setattr(mesh, "_opencode_in_progress", lambda t: False)
+    # #1083 hermeticity: the grok-block and muse probes read the pane —
+    # an unpatched seam reached the REAL tmux binary.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
     monkeypatch.setattr(watchdog, "_gateway_unread_count",
                         lambda *a, **k: unread)
 
@@ -134,7 +137,11 @@ def _lines_running():
 
 
 def _lines_idle():
-    return ["some scrollback", "→ Add a follow-up", "Kimi K3 Max · 50%"]
+    # #1083: the POSITIVE idle signature — the Tip row sits directly above
+    # the bare placeholder composer (measured on real idle captures;
+    # tests/pane_renders/cursor/idle-lin.txt).
+    return ["some scrollback", "Tip: mesh is quiet", "→ Add a follow-up",
+            "Kimi K3 Max · 50%"]
 
 
 def test_agent_running_reads_the_composer_row(monkeypatch):
@@ -146,11 +153,14 @@ def test_agent_running_reads_the_composer_row(monkeypatch):
 
 def test_agent_running_ignores_scrollback_quoting_the_hint(monkeypatch):
     """The hint string in HISTORY (a discussion about the TUI — which has
-    literally happened on cursor-lin) must not read as running. Only the
-    composer row counts."""
+    literally happened on cursor-lin) must not read as RUNNING: only the
+    composer row counts. #1083: it is not positively IDLE either — the
+    quote carries no parens (never busy-shaped) but the pane shows no
+    measured idle signature, so it reads UNKNOWN: held while a wake is
+    in play, typed (silently, the historical contract) when none is."""
     lines = ["user: why does it say ctrl+c to stop?", "→ Add a follow-up"]
     monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: lines)
-    assert mesh._agent_running("cursor-lin") is False
+    assert mesh._agent_running("cursor-lin") is None
 
 
 def test_agent_running_unreadable_is_none(monkeypatch):

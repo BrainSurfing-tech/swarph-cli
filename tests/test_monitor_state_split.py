@@ -29,8 +29,11 @@ from swarph_cli.commands import mesh
 def _clean_composer(monkeypatch):
     """These tests pin ledger/cursor mechanics, not the politeness gate —
     default every composer to OBSERVED-CLEAN so the gate stays out of the
-    way. The gate's own matrix lives in test_tmux_wake_submit_verify.py."""
+    way. The gate's own matrix lives in test_tmux_wake_submit_verify.py.
+    The pane capture seam is pinned for hermeticity (#1083): unpatched it
+    reached the REAL tmux binary."""
     monkeypatch.setattr(mesh, "_composer_state", lambda t: "clear")
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
 
 
 def _state(tmp_path, sinks, *, min_interval_s=0, self_name="lab-ovh", replay_limit=50):
