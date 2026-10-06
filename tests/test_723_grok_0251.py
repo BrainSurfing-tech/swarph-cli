@@ -56,7 +56,6 @@ def test_running_0251_is_not_idle(monkeypatch):
     assert "Waiting…" in "\n".join(pane)
     assert "Waiting for response" not in "\n".join(pane)
     assert mesh._grok_running(pane) is True
-    assert mesh._grok_turn_finished(pane) is False
     assert mesh._grok_input(pane) == ""
     outcome, keys = _deliver(
         monkeypatch, pane, {"wake_outstanding": True, "last_wake_injected_at": 1.0})
@@ -71,7 +70,6 @@ def test_finished_0251_thought_for_can_wake_again():
     assert "Worked for" not in text
     assert "Ctrl+c:cancel" not in text
     assert mesh._grok_running(pane) is False
-    assert mesh._grok_turn_finished(pane) is True
     assert mesh._grok_input(pane) == ""
     assert mesh._grok_composer_state(pane) == "clear"
 
@@ -81,10 +79,10 @@ def test_rate_limit_defers_with_named_reason_and_zero_keys(monkeypatch, capsys):
     assert "rate limit" in "\n".join(pane).lower()
     assert mesh._grok_block_reason(pane) == "grok-rate-limit"
     assert mesh._grok_running(pane) is False
-    assert mesh._grok_turn_finished(pane) is False
-    # a previous turn's "Thought for" must not win over the limit screen
+    # a previous turn's "Thought for" must not win over the limit screen:
+    # the block check runs FIRST in deliver(), before any pane-reading logic
     poisoned = pane + ["     ◆ Thought for 2s"]
-    assert mesh._grok_turn_finished(poisoned) is False
+    assert mesh._grok_block_reason(poisoned) == "grok-rate-limit"
     outcome, keys = _deliver(monkeypatch, pane, {})
     assert outcome is None
     assert keys == []

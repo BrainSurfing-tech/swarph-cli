@@ -40,7 +40,6 @@ def test_grok_rate_limit_and_usage_modal_still_defer():
     rate = lines(FIX723, "rate-limit.txt")
     usage = lines(FIX723, "usage-limit.txt")
     assert mesh._grok_block_reason(rate) == "grok-rate-limit"
-    assert mesh._grok_turn_finished(rate) is False
     assert mesh._is_grok_pane(usage) is False
     assert mesh._grok_block_reason(usage) == "grok-usage-limit"
 

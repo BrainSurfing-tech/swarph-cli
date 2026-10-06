@@ -1,6 +1,5 @@
-"""#611: `wake_outstanding` must be re-anchored to the tmux SESSION the wake
-was injected into — a respawned cell was never re-woken, and the ledger
-reported itself current.
+"""#611 history, #1010 present: the wake anchor survives in the LEDGER, but
+the PANE decides whether a wake is standing.
 
 Measured live on cursor-lin, 2026-08-26 07:03-07:34Z: six DMs drained and
 archived, ledger advanced to the newest id, zero failures — and zero wake
@@ -9,11 +8,15 @@ text injected for 31 minutes, because the session had been recreated at
 "wake submitted, awaiting drain". The commander noticed what the ledger
 could not.
 
-The split (one variable had answered two questions): `last_delivery_at` is
-re-anchored by EVERY successful poll, including the silent no-inject path —
-so it cannot date the last injection. `last_wake_injected_at` is set ONLY
-where `_tmux_wake` actually lands. The clear-composer path re-injects when
-the session is NEWER than the last injection, and only then.
+#611's fix re-anchored the flag in SPACE (which pane: re-inject when the
+session is newer than the last injection). #1010 (droplet, 2026-10-06,
+friendly-coder's strand) removed the anchor arithmetic: a wake is standing
+only while OBSERVED — unsubmitted text in the pane, or a mid-turn cell —
+so a respawned session's idle empty prompt is spent like any other and the
+next DM is typed. The anchor timestamp survives (it still dates the ledger
+for humans); it no longer gates anything. The tests that pinned
+'in-window suppression' are rewritten to the spent rule and are red on
+main.
 """
 
 from __future__ import annotations
@@ -40,15 +43,14 @@ class _StubState:
                    "consecutive_failures": 0})
 
 
-def _rig(monkeypatch, *, composer="clear", unread=3, session_created=None,
-         wake_result=True):
-    """Pin the four observations deliver() makes; return the call recorders."""
+def _rig(monkeypatch, *, composer="clear", unread=3, wake_result=True,
+         running=False):
+    """Pin the observations deliver() makes; return the call recorders."""
     calls = {"wake": 0, "enter": 0}
     monkeypatch.setattr(mesh, "_composer_state", lambda t: composer)
-    monkeypatch.setattr(mesh, "_tmux_session_created", lambda t: session_created)
-    # #619: pin the run-state seam too — unpatched it reads the LIVE pane,
+    # pin the run-state seam too — unpatched it reads the LIVE pane,
     # which is mid-turn (running) whenever the suite runs on a real cell.
-    monkeypatch.setattr(mesh, "_agent_running", lambda t: False)
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: running)
     monkeypatch.setattr(watchdog, "_gateway_unread_count",
                         lambda *a, **k: unread)
 
@@ -74,51 +76,52 @@ def _owed_state(injected_at=None):
     return state
 
 
-def test_respawned_session_re_injects_the_owed_wake(monkeypatch):
-    """The measured defect: session born AFTER the last injection means the
-    standing wake died with the old pane — re-inject, still gated."""
+def test_a_respawned_sessions_idle_prompt_types_the_owed_wake(monkeypatch):
+    """The measured defect, re-derived under #1010: the session was born
+    after the last injection, so the flag describes a wake that died with
+    the old pane — and its clear composer is simply an idle empty prompt.
+    The owed DM is typed (main reached the same re-inject via the space
+    anchor; #1010 reaches it via the pane)."""
     now = time.time()
-    calls = _rig(monkeypatch, session_created=now - 60)   # respawned a minute ago
-    state = _owed_state(injected_at=now - 3600)           # wake died with the old pane
+    calls = _rig(monkeypatch, running=False)
+    state = _owed_state(injected_at=now - 3600)  # wake died with the old pane
     sink = mesh.TmuxSink("cursor-lin")
 
     assert sink.deliver(state, [], 29101) is True
-    assert calls["wake"] == 1, "the owed wake must be re-injected into the new session"
+    assert calls["wake"] == 1, "the owed wake must be typed into the new session"
     assert state.ledger("tmux:cursor-lin")["last_wake_injected_at"] > now - 5
 
 
-def test_same_session_clear_composer_does_not_stack(monkeypatch):
-    """The anti-stack property the edge-trigger exists for (#312): a wake
-    injected into THIS session, undrained, earns NO second injection."""
+def test_same_session_idle_empty_prompt_types(monkeypatch):
+    """>>> #1010, red on main: main suppressed the re-inject here — 'same
+    session + clear composer = submitted, not lost' — the exact suppression
+    that stranded friendly-coder. <<< Same session, idle cell, empty prompt:
+    the wake is spent and the next DM is typed."""
     now = time.time()
-    calls = _rig(monkeypatch, session_created=now - 3600)  # session predates the wake
+    calls = _rig(monkeypatch, running=False)
     state = _owed_state(injected_at=now - 60)
     sink = mesh.TmuxSink("cursor-lin")
 
     assert sink.deliver(state, [], 29101) is True
-    assert calls["wake"] == 0, "same session + clear composer = submitted, not lost"
+    assert calls["wake"] == 1
 
 
-def test_unknown_session_age_keeps_the_old_behaviour(monkeypatch):
-    """session_created unreadable while capture-pane answered is a state we
-    decline to act on FOR THE RESPAWN CHECK — no blind keystrokes. (#616
-    narrows this: the TIME bound needs only the clock, so a stale wake still
-    re-injects with age unknown; this test pins a wake INSIDE the trust
-    window, where unknown age alone must not trigger anything.)"""
-    now = time.time()
-    calls = _rig(monkeypatch, session_created=None)
-    state = _owed_state(injected_at=now - 60)
+def test_unknown_session_age_is_irrelevant_the_pane_decides(monkeypatch):
+    """>>> #1010, red on main: unknown session age kept the old behaviour
+    (no re-inject). <<< The anchor arithmetic is gone; the composer
+    observation decides, and an idle empty prompt types."""
+    calls = _rig(monkeypatch, running=False)
+    state = _owed_state(injected_at=time.time() - 60)
     sink = mesh.TmuxSink("cursor-lin")
 
     assert sink.deliver(state, [], 29101) is True
-    assert calls["wake"] == 0
+    assert calls["wake"] == 1
 
 
 def test_pre_upgrade_ledger_self_heals(monkeypatch):
-    """A ledger written before this fix has no last_wake_injected_at. Default
-    0 makes any real session newer — the first poll after the upgrade
-    re-injects the owed wake. Exactly today's cursor-lin shape."""
-    calls = _rig(monkeypatch, session_created=time.time() - 300)
+    """A ledger written before the anchor split has no
+    last_wake_injected_at. The pane decides: an idle empty prompt types."""
+    calls = _rig(monkeypatch, running=False)
     state = _owed_state()  # no last_wake_injected_at key at all
     sink = mesh.TmuxSink("cursor-lin")
 
@@ -126,23 +129,24 @@ def test_pre_upgrade_ledger_self_heals(monkeypatch):
     assert calls["wake"] == 1
 
 
-def test_re_inject_deferral_propagates(monkeypatch):
-    """The human adopting the composer mid-settle during the RE-inject defers
-    exactly as on the fresh path — the wake stays owed, no failure counted."""
-    now = time.time()
-    calls = _rig(monkeypatch, session_created=now - 60, wake_result=None)
-    state = _owed_state(injected_at=now - 3600)
+def test_spent_retype_deferral_propagates(monkeypatch):
+    """The human adopting the composer mid-settle during the spent re-type
+    defers exactly as on the fresh path — the wake stays owed, no failure
+    counted."""
+    _rig(monkeypatch, running=False, wake_result=None)
+    state = _owed_state(injected_at=time.time() - 3600)
     sink = mesh.TmuxSink("cursor-lin")
 
     assert sink.deliver(state, [], 29101) is None
-    assert calls["wake"] == 1
+    assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is not True
 
 
 def test_fresh_path_anchors_the_injection_timestamp(monkeypatch):
     """last_wake_injected_at is set where the wake LANDS, not where the
-    ledger happens to advance — the split that makes the re-anchor possible."""
+    ledger happens to advance — the split that keeps the ledger honest for
+    the humans reading it."""
     now = time.time()
-    calls = _rig(monkeypatch, session_created=now - 3600)
+    calls = _rig(monkeypatch, running=False)
     state = _StubState()  # no wake_outstanding: the fresh path
     sink = mesh.TmuxSink("cursor-lin")
 
@@ -153,35 +157,26 @@ def test_fresh_path_anchors_the_injection_timestamp(monkeypatch):
     assert led["last_wake_injected_at"] > now - 5
 
 
-def test_standing_wake_delivery_report_is_logged(monkeypatch, capsys):
-    """The silent-True branch was the ONLY delivery report with zero log
-    lines — a swallowed wake left no trace (cursor-win, 2026-08-26, a
-    40-minute investigation that one log read would have collapsed). The
-    report now names itself and the standing wake's age."""
-    now = time.time()
-    calls = _rig(monkeypatch, session_created=now - 3600)
-    state = _owed_state(injected_at=now - 60)
+def test_no_standing_claim_is_printed_anymore_because_none_is_made(monkeypatch,
+                                                                   capsys):
+    """>>> #1010, red on main: the STANDING-wake delivery report (delivered
+    with zero keystrokes, logged so the lie was at least visible) is gone
+    because the claim itself is gone — an idle empty prompt types. <<< The
+    scenario that used to log 'STANDING wake' now injects."""
+    calls = _rig(monkeypatch, running=False)
+    state = _owed_state(injected_at=time.time() - 60)
     sink = mesh.TmuxSink("cursor-lin")
 
     assert sink.deliver(state, [], 29101) is True
-    assert calls["wake"] == 0
+    assert calls["wake"] == 1
     out = capsys.readouterr().out
-    assert "STANDING wake" in out
-    assert "no keystroke this poll" in out
-    assert re.search(r"injected \d+s ago", out), out
+    assert "STANDING wake" not in out
+    assert "injected" not in out  # no stale-age prose either
 
 
-def test_standing_wake_without_anchor_reinjects(monkeypatch, capsys):
-    """SUPERSEDED BY #616: this test used to pin a 'predates the ledger
-    anchor' standing report for a pre-anchor ledger with unknown session age.
-    #616 makes an undated wake ALWAYS stale (now - 0 > _WAKE_STALE_S), so the
-    scenario now RE-INJECTS — closing #327's acknowledged hole (unknown age +
-    no anchor = stuck forever) and retiring the log arm, which would print a
-    nonsense epoch-sized age if it could still be reached. The standing
-    report keeps only its honest form: a dated anchor inside the trust
-    window. The stale-path twin of this scenario is pinned again in
-    test_tmux_wake_stale.py::test_undated_wake_is_always_stale."""
-    calls = _rig(monkeypatch, session_created=None)
+def test_undated_wake_retypes_without_a_standing_report(monkeypatch, capsys):
+    """An undated flag (pre-anchor ledger) is spent like any other."""
+    calls = _rig(monkeypatch, running=False)
     state = _owed_state()  # no last_wake_injected_at key at all
     sink = mesh.TmuxSink("cursor-lin")
 
@@ -190,12 +185,11 @@ def test_standing_wake_without_anchor_reinjects(monkeypatch, capsys):
     assert "STANDING wake" not in capsys.readouterr().out
 
 
-def test_reinject_path_does_not_claim_a_standing_wake(monkeypatch, capsys):
-    """A re-injection IS fresh evidence — it must not wear the standing-wake
-    wording, or the log line loses its meaning."""
-    now = time.time()
-    calls = _rig(monkeypatch, session_created=now - 60)
-    state = _owed_state(injected_at=now - 3600)
+def test_retype_does_not_claim_a_standing_wake(monkeypatch, capsys):
+    """A re-type IS fresh evidence — it must not wear standing-wake wording
+    (which no longer exists) and the log must stay silent."""
+    calls = _rig(monkeypatch, running=False)
+    state = _owed_state(injected_at=time.time() - 3600)
     sink = mesh.TmuxSink("cursor-lin")
 
     assert sink.deliver(state, [], 29101) is True

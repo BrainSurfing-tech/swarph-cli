@@ -38,14 +38,12 @@ class _StubState:
                    "consecutive_failures": 0})
 
 
-def _rig(monkeypatch, *, composer="clear", unread=3, session_created=None,
-         wake_result=True, running=False):
+def _rig(monkeypatch, *, composer="clear", unread=3, wake_result=True,
+         running=False):
     calls = {"wake": 0, "enter": 0}
     monkeypatch.setattr(mesh, "_composer_state", lambda t: composer)
-    monkeypatch.setattr(mesh, "_tmux_session_created", lambda t: session_created)
     monkeypatch.setattr(mesh, "_agent_running", lambda t: running)
     monkeypatch.setattr(mesh, "_opencode_in_progress", lambda t: False)
-    monkeypatch.setattr(mesh, "_opencode_turn_finished_target", lambda t: False)
     monkeypatch.setattr(watchdog, "_gateway_unread_count",
                         lambda *a, **k: unread)
 
@@ -96,26 +94,16 @@ def test_fresh_inject_fires_when_idle(monkeypatch):
     assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is True
 
 
-def test_stale_reinject_defers_while_running(monkeypatch):
-    now = time.time()
-    calls = _rig(monkeypatch, composer="clear", session_created=now - 7200,
-                 running=True)
-    state = _owed_state(injected_at=now - mesh._WAKE_STALE_S - 60)
+def test_outstanding_wake_defers_while_running(monkeypatch):
+    """#1010 cut of the old stale/respawn legs: a flag plus a mid-turn cell
+    defers whatever the wake's age — the suppression question is decided by
+    the pane, never by the clock or the session."""
+    calls = _rig(monkeypatch, composer="clear", running=True)
+    state = _owed_state(injected_at=1.0)
     sink = mesh.TmuxSink("cursor-lin")
 
     assert sink.deliver(state, [{"id": 9}], 9) is None
-    assert calls["wake"] == 0  # the stale wake is retried next poll, not queued
-
-
-def test_respawn_reinject_defers_while_running(monkeypatch):
-    now = time.time()
-    calls = _rig(monkeypatch, composer="clear", session_created=now - 30,
-                 running=True)
-    state = _owed_state(injected_at=now - 3600)
-    sink = mesh.TmuxSink("cursor-lin")
-
-    assert sink.deliver(state, [{"id": 9}], 9) is None
-    assert calls["wake"] == 0
+    assert calls["wake"] == 0  # retried next poll, not queued mid-turn
 
 
 def test_wake_nudge_defers_while_running(monkeypatch):
@@ -177,10 +165,8 @@ def test_running_observation_clears_the_zombie_flag(monkeypatch):
     flag still stands with a fresh anchor. The running observation must
     clear it — the cell is awake, the wake's job is done — and the fresh
     path then defers (#619) instead of claiming a standing wake."""
-    now = time.time()
-    calls = _rig(monkeypatch, composer="clear", session_created=now - 7200,
-                 running=True)
-    state = _owed_state(injected_at=now - 60)  # fresh anchor, inside window
+    calls = _rig(monkeypatch, composer="clear", running=True)
+    state = _owed_state(injected_at=time.time() - 60)  # fresh anchor
     sink = mesh.TmuxSink("cursor-lin")
 
     assert sink.deliver(state, [{"id": 9}], 9) is None  # deferred, not "standing"
@@ -189,43 +175,47 @@ def test_running_observation_clears_the_zombie_flag(monkeypatch):
     assert calls["wake"] == 0 and calls["enter"] == 0
 
 
-def test_flag_stays_when_no_turn_is_observed(monkeypatch):
-    """Idle + fresh anchor + no running observation: the wake is plausibly
-    still pending — the standing path must NOT be disturbed."""
-    now = time.time()
-    calls = _rig(monkeypatch, composer="clear", session_created=now - 7200,
-                 running=False)
-    state = _owed_state(injected_at=now - 60)
+def test_no_turn_observation_spends_the_wake_not_keeps_it(monkeypatch):
+    """>>> #1010, red on main: main kept the flag here — 'the wake is
+    plausibly still pending' — and the next DM was claimed delivered on the
+    STANDING wake with zero keystrokes while the cell idled at an empty
+    prompt. <<< Idle + clear + no running observation means the wake is
+    SPENT: the flag drops and the next DM is typed."""
+    calls = _rig(monkeypatch, composer="clear", running=False)
+    state = _owed_state(injected_at=time.time() - 60)
     sink = mesh.TmuxSink("cursor-lin")
 
-    assert sink.deliver(state, [{"id": 9}], 9) is True  # standing wake
-    assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is True
-    assert calls["wake"] == 0
+    assert sink.deliver(state, [{"id": 9}], 9) is True
+    led = state.ledger("tmux:cursor-lin")
+    assert calls["wake"] == 1          # the next DM was TYPED
+    assert led["wake_outstanding"] is True  # re-armed by the fresh inject
 
 
-def test_unknown_runstate_does_not_clear(monkeypatch):
-    """None (pane momentarily unreadable) is not a firing observation —
-    only a positively-observed turn clears the flag."""
-    now = time.time()
-    calls = _rig(monkeypatch, composer="clear", session_created=now - 7200,
-                 running=False)
+def test_unknown_runstate_spends_like_idle(monkeypatch):
+    """>>> #1010, red on main: main treated an unknown runstate as 'undisturbed
+    standing'. <<< None (pane momentarily unreadable on the run-state read) is
+    NOT a positive turn observation — it cannot keep a wake standing any more
+    than it can clear one. The composer was observed clear and idle-side, so
+    the wake is spent and the next DM is typed; the fresh path re-checks
+    _agent_running and treats unknown as not-running (its documented
+    contract)."""
+    calls = _rig(monkeypatch, composer="clear", running=False)
     monkeypatch.setattr(mesh, "_agent_running", lambda t: None)
-    state = _owed_state(injected_at=now - 60)
+    state = _owed_state(injected_at=time.time() - 60)
     sink = mesh.TmuxSink("cursor-lin")
 
-    assert sink.deliver(state, [{"id": 9}], 9) is True  # standing, undisturbed
+    assert sink.deliver(state, [{"id": 9}], 9) is True
+    assert calls["wake"] == 1
     assert state.ledger("tmux:cursor-lin")["wake_outstanding"] is True
-    assert calls["wake"] == 0
 
 
 def test_full_zombie_cycle_fires_the_next_wake(monkeypatch):
     """The end-to-end contract: wake fires -> turn runs (flag clears,
     delivery defers) -> turn ends -> next poll injects for real."""
-    now = time.time()
     running = {"v": True}
-    calls = _rig(monkeypatch, composer="clear", session_created=now - 7200)
+    calls = _rig(monkeypatch, composer="clear")
     monkeypatch.setattr(mesh, "_agent_running", lambda t: running["v"])
-    state = _owed_state(injected_at=now - 60)
+    state = _owed_state(injected_at=time.time() - 60)
     sink = mesh.TmuxSink("cursor-lin")
 
     assert sink.deliver(state, [{"id": 9}], 9) is None   # mid-turn: cleared+deferred
@@ -299,9 +289,7 @@ def test_unreadable_drain_signal_never_rearms_per_poll(monkeypatch):
 def test_next_dm_after_the_drain_earns_a_fresh_wake(monkeypatch):
     """The full measured sequence, repaired: wake fires -> drain observed
     per-poll (flag cleared) -> new DM arrives -> fresh path injects."""
-    now = time.time()
-    calls = _rig(monkeypatch, composer="clear", session_created=now - 7200,
-                 running=False)
+    calls = _rig(monkeypatch, composer="clear", running=False)
     state = _MonitorStubState(observed_id=9, delivered_id=9)
     _poll(monkeypatch, state, unread=0)  # the drain is seen, flag clears
 

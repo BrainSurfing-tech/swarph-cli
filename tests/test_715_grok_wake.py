@@ -31,7 +31,6 @@ def test_typed_text_defers():
 def test_running_turn_is_not_idle():
     pane = lines("running.txt")
     assert mesh._grok_running(pane) is True
-    assert mesh._grok_turn_finished(pane) is False
     # the box is empty while the turn runs; empty must not read as "inject"
     assert mesh._grok_input(pane) == ""
 
@@ -40,7 +39,6 @@ def test_finished_turn_reads_idle_so_the_next_dm_can_wake():
     pane = lines("finished.txt")
     assert "Worked for" in "\n".join(pane)
     assert mesh._grok_running(pane) is False
-    assert mesh._grok_turn_finished(pane) is True
     # the submitted prompt stays in history with a bare ❯; the live box is empty
     assert mesh._grok_input(pane) == ""
     assert mesh._grok_composer_state(pane) == "clear"

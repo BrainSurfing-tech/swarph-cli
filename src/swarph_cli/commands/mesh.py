@@ -1463,6 +1463,17 @@ class TmuxSink(Sink):
     observably still HOLDS an unsubmitted wake, the gate sends a single
     verified Enter nudge instead of new text — the anti-stack retry.
 
+    STANDING IS OBSERVED, NEVER ASSUMED (card #1010, 2026-10-06): a wake
+    counts as standing ONLY while the pane shows the injected text
+    unsubmitted (composer "wake") or the cell is mid-turn. A wake observed
+    on an IDLE pane at an EMPTY prompt is SPENT — it submitted, its turn
+    ran and ended — so the next DM is typed, not swallowed. Before #1010
+    a clear composer inside the trust window reported every later DM
+    delivered with ZERO keystrokes while the cell slept (friendly-coder's
+    strand: tail down, typing its only wake). The ledger flag never
+    suppresses a delivery without the pane being re-read — which also
+    means a monitor restart cannot carry standing state on faith.
+
     POLITENESS GATE (commander, 2026-08-24, same day): even a verified wake
     INJECTS BLIND — '-l' appends to whatever sits in the composer, so a wake
     landing mid-keystroke merges into the human's half-typed line. The gate:
@@ -1534,94 +1545,41 @@ class TmuxSink(Sink):
                         return None
                     _tmux_enter(self.target)  # one verified nudge, no new text
                     return True
-                if composer == "clear":
-                    # A finished opencode turn leaves a ▣ header with a
-                    # trailing duration and a clear box. The standing-wake
-                    # claim would swallow every later DM. Inject again.
-                    if (_opencode_turn_finished_target(self.target)
-                            or _grok_turn_finished_target(self.target)):
-                        ok = _tmux_wake(self.target)
-                        if ok:
-                            _stamp_wake(led)
-                            return True
-                        if ok is None:
-                            return None
-                        return False
-                    # #611: a clear composer proves the wake SUBMITTED only if
-                    # the pane it was injected into is still the pane we are
-                    # reading. The ledger flag survives a respawn; the wake
-                    # text does not. Compare the session's birth against the
-                    # last ACTUAL INJECTION (last_wake_injected_at — NOT
-                    # last_delivery_at, which the silent-True path re-anchors
-                    # every poll and which would mask the respawn on the very
-                    # next iteration). A session newer than the last injection
-                    # means the standing wake is unverifiable: re-inject once,
-                    # still politeness-gated, and re-anchor. Unknown session
-                    # age keeps the old behaviour — no blind keystrokes.
-                    created = _tmux_session_created(self.target)
-                    injected_at = float(led.get("last_wake_injected_at", 0))
-                    if created is not None and created > injected_at:
-                        # #619: never re-inject mid-turn — the queue is
-                        # input-gated; defer to the first idle poll.
-                        if _agent_running(self.target):
-                            return None
-                        ok = _tmux_wake(self.target)
-                        if ok:
-                            _stamp_wake(led)
-                            return True
-                        if ok is None:
-                            return None  # human adopted mid-settle: defer
-                        return False     # unreadable: loud failure
-                    # #616: a wake that has not drained the inbox within
-                    # _WAKE_STALE_S of injection is LOST, not pending — the
-                    # follow-up it queued never fired (injected mid-turn and
-                    # raced a human's own line, or the TUI dropped it), and
-                    # the re-arm above (unread == 0) is unreachable for a
-                    # sleeping cell: this deliver() is only entered when a NEW
-                    # DM exists, which makes unread >= 1 by construction.
-                    # Measured live 2026-08-26: one wake lost at 08:49Z to a
-                    # mid-turn injection, every DM after it "delivered" in
-                    # silence. Trust a wake for one bound, then verify by
-                    # retry; re-anchoring on success rate-limits the retry to
-                    # one per bound, and the politeness gate still applies.
-                    # This check must precede the STANDING-wake log below
-                    # (lab-ovh's rebase ruling): a line that says "no
-                    # keystroke this poll" immediately followed by a keystroke
-                    # is the lie both PRs exist to stop.
-                    if time.time() - injected_at > _WAKE_STALE_S:
-                        # #619: a stale re-inject into a RUNNING TUI lands in
-                        # the input-gated queue — lost again, just later.
-                        # Defer; the first idle poll re-injects for real.
-                        if _agent_running(self.target):
-                            return None
-                        ok = _tmux_wake(self.target)
-                        if ok:
-                            _stamp_wake(led)
-                            return True
-                        if ok is None:
-                            return None  # human adopted mid-settle: defer
-                        return False     # unreadable: loud failure
-                    # Wake submitted into THIS session and still inside its
-                    # trust window; re-injecting would only stack. This return
-                    # is the ONLY delivery report backed by no fresh keystroke
-                    # — every other outcome (delivered, failed, deferred)
-                    # announces itself, and this branch's 57 lines had zero
-                    # print() calls. Silence correlated with the lie (#611,
-                    # cursor-win's swallowed wake): say what we are claiming
-                    # and how old the evidence is. (#616 makes #332's
-                    # "injection predates the ledger anchor" arm unreachable
-                    # on this path — an undated wake is always stale — so the
-                    # arm is removed rather than kept as readable-dead code.)
-                    print(f"[monitor] {self.name}: delivery reported on a STANDING wake "
-                          f"(injected {time.time() - injected_at:.0f}s ago, "
-                          f"no keystroke this poll)")
-                    return True
                 if composer == "busy":
-                    # Human text shares the composer (possibly merged into our
-                    # wake) — an Enter here submits THEIR line (#403's shape).
+                    # Human text shares the composer (possibly merged into
+                    # our wake) — an Enter here submits THEIR line (#403's
+                    # shape).
                     return None
-                self.failure_reason = _sink_failure_detail(self.target)
-                return False  # pane unreadable: keep the failure loud
+                if composer != "clear":
+                    self.failure_reason = _sink_failure_detail(self.target)
+                    return False  # pane unreadable: keep the failure loud
+                # composer == "clear" on an IDLE cell. #1010: the wake is
+                # SPENT, not standing. Mid-turn was excluded at the top of
+                # deliver() (a running cell clears the flag, or keeps it for
+                # opencode/grok and defers), and a wake still sitting
+                # UNsubmitted reads "wake" above — the two shapes a standing
+                # wake legitimately holds. What remains here is a cell idling
+                # at an EMPTY prompt with the inbox still undrained: the
+                # wake submitted, the turn it started ran AND ended, and the
+                # cell went back to sleep — it answered without draining, or
+                # a new DM landed after the drain. Measured on friendly-coder
+                # (droplet, card #1010, 2026-10-06): its tail was down,
+                # typing was its only wake, and the branch this replaces
+                # reported every later DM delivered on the STANDING claim
+                # with ZERO keystrokes while the cell slept. Drop the flag
+                # and fall out of the standing branch to the fresh path
+                # below, which TYPEs the next DM — it re-checks the
+                # composer, defers while running, injects only into an
+                # observed idle-clear prompt, and re-anchors
+                # last_wake_injected_at where the wake lands.
+                # This generalizes and subsumes the opencode/grok
+                # finished-turn inject (a finished turn's clear box is simply
+                # the spent shape for those TUIs), #611's respawn re-inject
+                # (a session newer than the anchor is spent like any other),
+                # and #616's stale bound (an idle empty prompt no longer
+                # earns a ten-minute trust window: the re-inject is
+                # immediate, not bound-delayed).
+                led["wake_outstanding"] = False
         # Fresh path, gated on the OBSERVED composer (gpt-ops REVISE, #312):
         # "wake" — wake text already sits ALONE in the composer (a monitor
         # restart loses wake_outstanding; the ledger flag is gone but the
@@ -2319,11 +2277,10 @@ _OPENCODE_DONE = re.compile(
 # forever — the wake stays owed instead.
 _WAKE_SETTLE_S = 0.6
 _WAKE_SUBMIT_ATTEMPTS = 4
-# How long a wake_outstanding flag is trusted without a drain (#616). Long
-# enough that a legitimately queued follow-up survives a marathon agent turn;
-# short enough that a lost wake costs minutes of silence, not hours. The
-# retry self-rate-limits: a successful re-injection re-anchors the clock.
-_WAKE_STALE_S = 600.0
+# (#1010 removed _WAKE_STALE_S, the ten-minute trust bound: a wake is
+# standing only while OBSERVED — unsubmitted text or a mid-turn cell — and
+# an idle pane at an empty prompt spends it immediately, so there is no
+# window left to bound.)
 
 
 def _capture_pane_lines(target: str) -> Optional[list[str]]:
@@ -2502,29 +2459,12 @@ def _opencode_running(lines: list[str]) -> bool:
     return False
 
 
-def _opencode_turn_finished(lines: list[str]) -> bool:
-    """The ▣ header carried a duration and the interrupt hint is gone."""
-    if _opencode_running(lines):
-        return False
-    return any(
-        ln.strip().startswith("▣") and _OPENCODE_DONE.search(ln.strip())
-        for ln in lines
-    )
-
-
 def _opencode_in_progress(target: str) -> bool:
     """In-progress opencode turn. A deferral here keeps wake_outstanding."""
     lines = _capture_pane_lines(target)
     if not lines or not _is_opencode_pane(lines):
         return False
     return _opencode_running(lines)
-
-
-def _opencode_turn_finished_target(target: str) -> bool:
-    lines = _capture_pane_lines(target)
-    if not lines or not _is_opencode_pane(lines):
-        return False
-    return _opencode_turn_finished(lines)
 
 
 def _opencode_row_text(line: str) -> str:
@@ -2777,27 +2717,11 @@ def _grok_running(lines: list[str]) -> bool:
     return False
 
 
-def _grok_turn_finished(lines: list[str]) -> bool:
-    if _grok_running(lines) or _grok_block_reason(lines):
-        return False
-    return any(
-        "Worked for" in ln or "Thought for" in ln or "Turn cancelled" in ln
-        for ln in lines
-    )
-
-
 def _grok_in_progress(target: str) -> bool:
     lines = _capture_pane_lines(target)
     if not lines or not _is_grok_pane(lines):
         return False
     return _grok_running(lines)
-
-
-def _grok_turn_finished_target(target: str) -> bool:
-    lines = _capture_pane_lines(target)
-    if not lines or not _is_grok_pane(lines):
-        return False
-    return _grok_turn_finished(lines)
 
 
 def _grok_composer_state(lines: list[str]) -> Optional[str]:
@@ -2974,36 +2898,6 @@ def _composer_state(target: str) -> Optional[str]:
     if _only_wake_text(content):
         return "wake"
     return "busy"
-
-
-def _tmux_session_created(target: str) -> Optional[float]:
-    """Epoch seconds the target's tmux SESSION was created, or None.
-
-    The re-anchor anchor (#611): `wake_outstanding` persists in the ledger,
-    but the wake it describes lives in a PANE. A respawned session inherits
-    the flag and presents a clear composer that reads exactly like "wake
-    submitted, awaiting drain" — so the flag must be re-anchored to the
-    session it was injected into before it can suppress a re-injection.
-    None = unknown, and unknown keeps the current behaviour (no re-inject):
-    the composer was observed clear, so the only risk of re-injecting blind
-    here is a stacked wake, but a tmux that cannot answer display-message
-    while answering capture-pane is a state we decline to act on, not one
-    we improvise around.
-    """
-    try:
-        r = subprocess.run(
-            ["tmux", "display-message", "-p", "-t", target, "#{session_created}"],
-            capture_output=True, timeout=5,
-            text=True, encoding="utf-8", errors="replace",
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if r.returncode != 0:
-        return None
-    try:
-        return float((r.stdout or "").strip())
-    except ValueError:
-        return None
 
 
 def _tmux_enter(target: str) -> bool:

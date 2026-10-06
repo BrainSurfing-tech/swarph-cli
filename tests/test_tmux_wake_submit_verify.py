@@ -202,7 +202,6 @@ def gate(monkeypatch):
     monkeypatch.setattr(mesh, "_wake_still_pending", lambda t: box["pending"])
     monkeypatch.setattr(mesh, "_composer_state", lambda t: box["composer"])
     monkeypatch.setattr(mesh, "_opencode_in_progress", lambda t: False)
-    monkeypatch.setattr(mesh, "_opencode_turn_finished_target", lambda t: False)
     import swarph_cli.commands.watchdog as wd
     monkeypatch.setattr(wd, "_gateway_unread_count",
                         lambda g, p, t: box["unread"])
@@ -216,15 +215,20 @@ def test_fresh_wake_injects_and_marks_outstanding(gate):
     assert state.ledger("x")["wake_outstanding"] is True
 
 
-def test_outstanding_wake_is_not_stacked_while_undrained(gate):
-    """THE commander's case: submitted wake, unread inbox, more DMs arrive —
-    deliver succeeds (cursor advances) but NOTHING is injected."""
+def test_standing_suppression_only_while_observably_standing(gate):
+    """The commander's anti-stack case, re-cut by #1010: a standing wake
+    suppresses new text ONLY while OBSERVABLY standing — the pane holds the
+    injected text unsubmitted (nudge, never stack). An idle pane at an
+    empty prompt spends the wake, and a mid-turn cell defers — both pinned
+    with a controllable _agent_running in test_tmux_wake_idle_spent.py; the
+    inbox being undrained ALONE no longer suppresses anything."""
     sink, state, calls, box = gate
     sink.deliver(state, [], 1)
+    box["composer"] = "wake"  # the injected wake, observed unsubmitted
     for _ in range(5):
         assert sink.deliver(state, [], 2) is True
-    assert calls["wake"] == 1  # one wake total, not one per batch
-    assert calls["enter"] == 0
+    assert calls["wake"] == 1  # one wake total — nudged, never stacked
+    assert calls["enter"] == 5  # one verified nudge per poll
 
 
 def test_outstanding_unsubmitted_wake_gets_a_nudge_not_new_text(gate):
@@ -245,14 +249,20 @@ def test_drain_re_arms_the_wake(gate):
     assert calls["wake"] == 2  # a fresh cycle earns a fresh wake
 
 
-def test_unreadable_drain_signal_does_not_rearm(gate):
-    """unread=None (gateway error) must read as NOT-drained — re-arming on an
-    unreadable signal re-opens the stack."""
+def test_unreadable_drain_signal_does_not_swallow_the_dm(gate):
+    """unread=None (gateway error) must read as NOT-drained — but under
+    #1010 the re-arm distinction it used to guard is unobservable: every
+    path re-checks the pane, so a wrongly-re-armed flag can no longer stack
+    (fresh inject happens only on an OBSERVED idle-clear composer). What
+    remains load-bearing: an unreadable drain signal must not render as
+    DRAINED, and the pane — not the unreadable signal — decides. An idle
+    clear pane spends the wake and the DM is typed."""
     sink, state, calls, box = gate
     sink.deliver(state, [], 1)
     box["unread"] = None
     assert sink.deliver(state, [], 2) is True
-    assert calls["wake"] == 1
+    assert calls["wake"] == 2        # the pane was read: idle + clear -> typed
+    assert state.ledger("x")["wake_outstanding"] is True
 
 
 def test_unreadable_pane_keeps_the_failure_loud(gate):
@@ -737,7 +747,6 @@ def test_opencode_finished_header_is_not_a_running_turn(tmux):
     calls, state = tmux
     state["captures"] = [_OPENCODE_FINISHED]
     assert mesh._agent_running("sac") is False
-    assert mesh._opencode_turn_finished_target("sac") is True
     assert mesh._composer_state("sac") == "clear"
 
 
