@@ -1483,6 +1483,10 @@ class TmuxSink(Sink):
     def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
         led = state.ledger(self.name)
         self.failure_reason = None
+        # #1010: the deferral cause, named for the monitor's DEFERRED log —
+        # a hardcoded cause is a lie on every path that defers for another
+        # reason (the standing-wake hold defers with a CLEAR composer).
+        self.deferred_reason = None
         # #723: a rate-limit or usage-limit screen is not deliverable. An
         # empty composer beside "Retry failed: rate limit" used to inject
         # again, and the 1.0.44 upgrade modal (no Grok footer) used to
@@ -1601,21 +1605,36 @@ class TmuxSink(Sink):
                         if ok is None:
                             return None  # human adopted mid-settle: defer
                         return False     # unreadable: loud failure
-                    # Wake submitted into THIS session and still inside its
-                    # trust window; re-injecting would only stack. This return
-                    # is the ONLY delivery report backed by no fresh keystroke
-                    # — every other outcome (delivered, failed, deferred)
-                    # announces itself, and this branch's 57 lines had zero
-                    # print() calls. Silence correlated with the lie (#611,
-                    # cursor-win's swallowed wake): say what we are claiming
-                    # and how old the evidence is. (#616 makes #332's
-                    # "injection predates the ledger anchor" arm unreachable
-                    # on this path — an undated wake is always stale — so the
-                    # arm is removed rather than kept as readable-dead code.)
-                    print(f"[monitor] {self.name}: delivery reported on a STANDING wake "
-                          f"(injected {time.time() - injected_at:.0f}s ago, "
-                          f"no keystroke this poll)")
-                    return True
+                    # #1010 STRAND-ONLY (lab's ruling after the 5th FAIL,
+                    # science-claude #1101): this return was the ONLY
+                    # delivery report backed by no fresh keystroke, and it
+                    # STRANDED the DM batch it reported. The ledger cursor
+                    # advanced to the newest id, the monitor then owed
+                    # nothing, and this poll was the last one that would
+                    # ever look at the batch — measured by droplet on
+                    # friendly-coder: its tail was down, typing was its only
+                    # wake, and the standing-wake claim "delivered" every
+                    # DM with ZERO keystrokes while the cell idled at an
+                    # empty prompt, forever. Fix WITHOUT classification:
+                    # report the hold, not a delivery. deliver returns None
+                    # — the cursor does not advance, the batch stays OWED
+                    # and is retried on every poll — and BASE'S OWN stale
+                    # bound below (_WAKE_STALE_S, 600 s from the injection)
+                    # re-injects and types at the first idle poll past it.
+                    # Bounded, loud, never silently dropped; no pane
+                    # classifier is consulted, so every pane keeps base's
+                    # behaviour. The anti-stack property survives: zero
+                    # keystrokes while the window stands.
+                    print(f"[monitor] {self.name}: standing wake inside its "
+                          f"{_WAKE_STALE_S:.0f}s trust window (injected "
+                          f"{time.time() - injected_at:.0f}s ago) — DM held "
+                          f"owed, zero keys this poll; the stale bound "
+                          f"re-injects and types")
+                    self.deferred_reason = (
+                        f"standing wake inside the {_WAKE_STALE_S:.0f}s "
+                        "trust window — DM held owed, the stale bound "
+                        "re-injects and types")
+                    return None
                 if composer == "busy":
                     # Human text shares the composer (possibly merged into our
                     # wake) — an Enter here submits THEIR line (#403's shape).
@@ -3333,8 +3352,13 @@ def _monitor_deliver(state: MonitorState) -> None:
                         state.gateway, state.token, state.self_name, ticks, len(dms)
                     )
                 changed = True
+                # #1010: name the deferral's real cause — a hardcoded
+                # "composer holds human text" is a lie on the standing-wake
+                # hold, which defers with a CLEAR composer.
+                detail = getattr(sink, "deferred_reason", None) \
+                    or "composer holds human text"
                 print(f"{state.log_prefix} delivery DEFERRED for {sink.name} "
-                      f"(composer holds human text); wake stays owed, "
+                      f"({detail}); wake stays owed, "
                       f"no failure counted",
                       flush=True)
                 continue

@@ -203,6 +203,14 @@ def gate(monkeypatch):
     monkeypatch.setattr(mesh, "_composer_state", lambda t: box["composer"])
     monkeypatch.setattr(mesh, "_opencode_in_progress", lambda t: False)
     monkeypatch.setattr(mesh, "_opencode_turn_finished_target", lambda t: False)
+    # #1010 strand-only hermeticity (#1083): deliver() reads the pane
+    # (grok-block probe), the run-state and the session age before it
+    # acts — unpatched those reach the REAL tmux binary. A missing pane
+    # reads unreadable at base; False/None keep the same falsy
+    # fall-through these tests pin.
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: False)
+    monkeypatch.setattr(mesh, "_tmux_session_created", lambda t: None)
     import swarph_cli.commands.watchdog as wd
     monkeypatch.setattr(wd, "_gateway_unread_count",
                         lambda g, p, t: box["unread"])
@@ -217,12 +225,13 @@ def test_fresh_wake_injects_and_marks_outstanding(gate):
 
 
 def test_outstanding_wake_is_not_stacked_while_undrained(gate):
-    """THE commander's case: submitted wake, unread inbox, more DMs arrive —
-    deliver succeeds (cursor advances) but NOTHING is injected."""
+    """THE commander's case: submitted wake, unread inbox, more DMs arrive.
+    #1010: those later polls HOLD (None) — nothing is marked delivered
+    while untyped, and NOTHING more is injected. One wake total."""
     sink, state, calls, box = gate
     sink.deliver(state, [], 1)
     for _ in range(5):
-        assert sink.deliver(state, [], 2) is True
+        assert sink.deliver(state, [], 2) is None
     assert calls["wake"] == 1  # one wake total, not one per batch
     assert calls["enter"] == 0
 
@@ -251,7 +260,9 @@ def test_unreadable_drain_signal_does_not_rearm(gate):
     sink, state, calls, box = gate
     sink.deliver(state, [], 1)
     box["unread"] = None
-    assert sink.deliver(state, [], 2) is True
+    # #1010: an unreadable drain does not re-arm, and the standing wake
+    # inside its window holds the DM owed instead of reporting delivery.
+    assert sink.deliver(state, [], 2) is None
     assert calls["wake"] == 1
 
 

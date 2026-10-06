@@ -25,8 +25,15 @@ from swarph_cli.commands import mesh, monitor
 def _clean_composer(monkeypatch):
     """These tests pin CLI/ledger mechanics, not the politeness gate —
     default every composer to OBSERVED-CLEAN so the gate stays out of the
-    way. The gate's own matrix lives in test_tmux_wake_submit_verify.py."""
+    way. The gate's own matrix lives in test_tmux_wake_submit_verify.py.
+    #1010 strand-only hermeticity (#1083): every pane named by this rig
+    is synthetic — an unpatched capture/run-state/session read reaches
+    the REAL tmux binary. A missing pane reads unreadable at base;
+    False/None keep the same falsy fall-through these tests pin."""
     monkeypatch.setattr(mesh, "_composer_state", lambda t: "clear")
+    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: False)
+    monkeypatch.setattr(mesh, "_tmux_session_created", lambda t: None)
 
 
 def _env(monkeypatch):
