@@ -1,5 +1,5 @@
 [Unit]
-Description=DM a cell whose inbox watcher has been dead for over a minute
+Description=IMMUNE (cell watchdog): DM a cell whose inbox watcher has been dead for over a minute
 
 [Service]
 Type=oneshot
