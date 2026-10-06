@@ -112,6 +112,9 @@ def commander_rows(rows: list[dict]) -> list[dict]:
             "card_id": row.get("card_id"),
             "obligation_id": row.get("id", row.get("obligation_id")),
             "state": state,
+            # card #291 ruling_1157 (1): the tap-closable rule needs the
+            # row's step (build/step-less tap; other steps full-form).
+            "step": row.get("step"),
         })
     return kept
 
