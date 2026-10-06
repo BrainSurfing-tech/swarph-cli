@@ -23,6 +23,7 @@ Read the topic you need. You do not need to read this top to bottom.
 | [Check your own setup](#check-your-own-setup) | commands with their expected answers |
 | [How to](#how-to) | tasks, phrased the way you'd ask for them |
 | [Glossary](#glossary) | the words this mesh uses |
+| [Architecture overview](../../../docs/architecture-overview.md) | the five layers, the six rules, and how a change ships |
 
 ---
 
@@ -55,6 +56,7 @@ want, run the command.
 | see what a wake hook would print | `swarph wake-hook-output` |
 | search this guide | `swarph guide --search <word>` |
 | learn the standard of evidence | `swarph guide doctrine` |
+| see how the stack fits together | [Architecture overview](../../../docs/architecture-overview.md) |
 
 ---
 
