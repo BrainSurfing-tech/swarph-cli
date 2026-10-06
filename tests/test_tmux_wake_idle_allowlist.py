@@ -21,9 +21,13 @@ above the composer. Every one must read NOT-idle (True for a measured
 spinner form is fine; False is the FAIL arm).
 
 Clauses 3–5: our OWN unsubmitted wake text is recognised (nudge goes
-promptly, never held to the bound); an uncaptured chrome (cursor-win's
-idle-shaped ▄▀ rows) reads unknown until fixtured; and after an
-ANSWERED wake the next DM types ONLY on a POSITIVE idle read — every
+promptly, never held to the bound); an uncaptured chrome reads unknown
+until fixtured — and the REAL cursor-win idle capture (msg 62604, lab's
+FYI 62609: Windows idle has no status slot, no Tip, no task row; the
+composer sits boxed between full-width ▄/▀ rows, transcript prose may
+sit right above the box and end mid-sentence) reads idle, with its own
+property arm over the box's bottom-region rows; and after an ANSWERED
+wake the next DM types ONLY on a POSITIVE idle read — every
 #1078/#1084 busy render replayed in the ANSWERED state gets 0 keys
 sooner than base's 600 s (absence of a busy marker does not count).
 """
@@ -126,6 +130,15 @@ def _corpus() -> list[str]:
 #: byte-for-byte, the ground truth of the allowlist.
 _IDLE_BASE = "idle-lin-794-capture"
 
+#: The REAL cursor-win idle capture (msg 62604, 2026-10-06, captured
+#: 300 s after the turn ended) — the MEASURED Windows box: box top
+#: directly above the composer, box bottom directly below, model footer
+#: and terminal row under it. No status slot, no Tip row, no task row;
+#: transcript prose sits above the box and can end mid-sentence (wrapped
+#: prose — 62606 fact 3, never a content heuristic). Lab's FYI 62609:
+#: this must read IDLE, or every DM to cursor-win sits the 600 s bound.
+_IDLE_WIN_BASE = "idle-win-real-capture"
+
 
 def _composer_index(raw: list[str]) -> int:
     """The LAST composer row (``→ …``, never a ``▎`` hunk) — plain
@@ -212,6 +225,100 @@ def test_the_1084_replays_each_read_not_idle(monkeypatch):
         assert mesh._agent_running("sac") is not False, row
 
 
+# ── the Windows arm of the property: the MEASURED box ────────────────────
+#: The win capture's bottom-region positions, as offsets from the
+#: composer: the box top directly above it, the box bottom directly
+#: below, then the model footer and the terminal row (msg 62604). A
+#: row that is ITSELF the captured form for its position is not an
+#: adversary — position is part of the form ('Kimi K3 Max · 83.6%' in
+#: the footer slot is just another model footer) — so each placement
+#: filters its position's form out of the corpus. Rows ABOVE the box
+#: top are transcript: wrapped prose may end mid-sentence there (msg
+#: 62606 fact 3), so no content rule can sit on them; the region's
+#: upper edge is the box top.
+_WIN_POSITIONS = (  # name -> offset from the composer (+ is below)
+    ("box-top", -1), ("box-bottom", 1),
+    ("model-footer", 2), ("terminal", 3),
+)
+
+
+def _win_position_form(name: str):
+    forms = {
+        "box-top": mesh._CURSOR_WIN_BOX_TOP,
+        "box-bottom": mesh._CURSOR_WIN_BOX_BOTTOM,
+        "model-footer": mesh._CURSOR_IDLE_FOOTER,
+        "terminal": mesh._CURSOR_IDLE_TERMINAL,
+    }
+    return forms[name]
+
+
+@pytest.mark.parametrize("name,offset", _WIN_POSITIONS)
+def test_no_adversarial_win_box_row_reads_idle(monkeypatch, name, offset):
+    """>>> RED on 03e3c75 (the pre-box head): the box form did not exist
+    there, so the REAL win capture read UNKNOWN and every DM to
+    cursor-win sat the 600 s bound — the exact regression lab's FYI
+    62609 warned about (the sanity read below is the red). <<< THE
+    WINDOWS PROPERTY: every adversarial row replacing ANY bottom-region
+    row of the measured box — the box top, the box bottom, the model
+    footer, the terminal row — breaks the box: unknown (or busy for a
+    measured spinner), never idle."""
+    base = _pane(_IDLE_WIN_BASE)
+    # sanity: the unmutated capture IS the measured box and reads idle
+    _pin(monkeypatch, base)
+    assert mesh._agent_running("sac") is False
+    if not hasattr(mesh, "_cursor_boxed_composer"):
+        pytest.skip("the box-form walk postdates this head")
+    form = _win_position_form(name)
+    corpus = [row for row in _corpus() if not form.match(row)]
+    assert len(corpus) >= 150
+    cidx = _composer_index(base)
+    assert mesh._CURSOR_WIN_BOX_TOP.match(base[cidx - 1]), name
+    assert mesh._CURSOR_WIN_BOX_BOTTOM.match(base[cidx + 1]), name
+
+    for row in corpus:
+        raw = list(base)
+        raw[cidx + offset] = row
+        _pin(monkeypatch, raw)
+        verdict = mesh._agent_running("sac")
+        assert verdict is not False, (
+            f"adversarial row {row!r} in the {name} slot made the "
+            "otherwise-idle win pane read idle"
+        )
+
+
+def test_a_bare_quoted_opencode_mode_row_below_the_composer_is_not_idle(
+        monkeypatch):
+    """>>> RED on 03e3c75 (found by the win property arm): a bare
+    '┃ Build · 12s' row — opencode's mode-row FORM with no ╹▀ border and
+    no △ dialog on the pane — planted below the cursor composer handed
+    the WHOLE pane to the opencode classifier (bottom-most TUI marker
+    wins) and read idle on opencode's say-so. A real opencode render
+    always carries the border or the dialog (the 0710 capture draws ╹▀
+    directly under the mode row), so the bare row is a quote: the scan
+    keeps looking, the cursor composer wins, and the row then fails the
+    chrome walk — unknown, never idle."""
+    raw = list(_pane(_IDLE_WIN_BASE))
+    cidx = _composer_index(raw)
+    raw[cidx + 1] = "┃ Build · 12s"  # replaces the box bottom
+    _pin(monkeypatch, raw)
+    assert mesh._agent_running("sac") is not False
+
+
+def test_win_box_spinner_above_the_box_reads_busy(monkeypatch):
+    """Mid-turn on Windows the status spinner renders ABOVE the box
+    (busy-win-midturn, msg 62281 — spinner, Tip, box top, composer) and
+    the run hint reaches the composer only later: a MEASURED spinner
+    verb in that slot is positively busy even while the composer is
+    still bare. 0 keys, never idle. >>> RED on 03e3c75: the box route
+    did not exist there — the lin gap walk hit the box top and read the
+    pane unknown."""
+    raw = list(_pane(_IDLE_WIN_BASE))
+    cidx = _composer_index(raw)
+    raw[cidx - 3] = "⠘⠆ Running  3.77k tokens"  # the measured slot
+    _pin(monkeypatch, raw)
+    assert mesh._agent_running("sac") is True
+
+
 # ── clause (3): OUR OWN unsubmitted wake text is recognised ─────────────
 
 def test_own_wake_text_composer_reads_not_running(monkeypatch):
@@ -239,21 +346,28 @@ def test_human_draft_composer_still_reads_unknown(monkeypatch):
 # ── clause (4): uncaptured chrome reads unknown until fixtured ──────────
 
 @pytest.mark.parametrize("render", ("idle-lin-794-capture",
-                                    "idle-lin-fresh-capture"))
+                                    "idle-lin-fresh-capture",
+                                    "idle-win-real-capture"))
 def test_real_idle_captures_read_idle(monkeypatch, render):
-    """#1100 clause 4: the REAL idle captures — the #794 hunt's pane and
+    """#1100 clause 4: the REAL idle captures — the #794 hunt's pane,
     the FRESH cursor-lin capture (2026-10-06, a 3 s chain caught the
     idle window the moment the previous turn ended; 561 consecutive
-    identical reads) — read positively idle, byte-for-byte."""
+    identical reads), and the REAL cursor-win capture (msg 62604, lab's
+    FYI 62609: the measured Windows box) — read positively idle,
+    byte-for-byte."""
     _pin(monkeypatch, _pane(render))
     assert mesh._agent_running("sac") is False
 
 
 def test_uncaptured_cursor_win_chrome_reads_unknown(monkeypatch):
-    """cursor-win's idle-shaped chrome — the ▄▄▄/▀▀▀ rows and the
-    combined task+footer+path row (busy-win-midturn minus the spinner
-    and the composer hint) — is a layout NO real idle capture shows:
-    unknown until a real capture is fixtured, never guessed idle.
+    """The #1084 probe shape — the ▄▄▄/▀▀▀ box rows with the
+    task+footer+path chrome COMBINED ON ONE ROW (busy-win-midturn minus
+    the spinner and the composer hint) — is a layout NO real idle
+    capture shows: the real cursor-win capture (msg 62604, now the
+    idle-win-real-capture fixture) carries the model footer and the
+    terminal row on SEPARATE rows. The box rows alone are not a free
+    pass — the chrome walk under them is still an allowlist. Unknown,
+    never guessed idle.
     >>> RED on 74bfa09: this exact shape read idle (science-claude's
     #1084 probe)."""
     raw = [
@@ -370,7 +484,8 @@ def test_answered_wake_1084_render_gets_zero_keys(pane, capsys, row):
 
 
 @pytest.mark.parametrize("render", ("idle-lin", "idle-lin-794-capture",
-                                    "idle-lin-fresh-capture"))
+                                    "idle-lin-fresh-capture",
+                                    "idle-win-real-capture"))
 def test_answered_wake_positive_idle_still_types(pane, render):
     """The other arm of clause 5: a POSITIVE idle read — every
     bottom-region row a captured form — still types after an answered

@@ -2545,7 +2545,7 @@ _CURSOR_IDLE_COMPOSER = re.compile(r"^\s*→ Add a follow-up\s*$")
 _CURSOR_IDLE_TASK = re.compile(r"^\s*\d+ tasks?\s*$")
 _CURSOR_IDLE_FOOTER = re.compile(
     r"^\s*[A-Z0-9][A-Za-z0-9 .+-]*? · \d{1,3}(?:\.\d+)?%"
-    r"(?: · \d+ files? edited)?(?:\s+Run Everything)?\s*$"
+    r"(?: · \d+ files? edited)?(?:\s*Run Everything)?\s*$"
 )
 #: The terminal row under the footer: an absolute path (the #794 capture:
 #: /tmp/claude-1000/…/cursor_run) or cursor's `~`.
@@ -2594,27 +2594,74 @@ _CURSOR_IDLE_CHROME = (_CURSOR_IDLE_TASK, _CURSOR_IDLE_FOOTER,
                       _CURSOR_IDLE_TERMINAL)
 
 
+# ── the MEASURED Windows composer box (#1100 clause 4, cursor-win real
+# idle capture 2026-10-06, msgs 62604/62606): Windows idle has NO status
+# slot, no Tip row and NO task row — the composer sits boxed between a
+# full-width '▄' row (box top, DIRECTLY above the composer) and a
+# full-width '▀' row (box bottom, DIRECTLY below), with the model footer
+# and the terminal row under the box. Transcript prose may sit right
+# above the box top and can end mid-sentence (wrapped prose, NOT
+# streaming — 62606 fact 3: never a content heuristic on it). Mid-turn
+# the status spinner renders ABOVE the box and the composer carries the
+# run hint (busy-win-midturn, msg 62281). The glyphs run the full pane
+# width on a real render; a short run is not chrome — the adversarial
+# corpus plants exactly that, and it must not pass. ───────────────────
+_CURSOR_WIN_BOX_TOP = re.compile(r"^\s*▄{6,}\s*$")
+_CURSOR_WIN_BOX_BOTTOM = re.compile(r"^\s*▀{6,}\s*$")
+
+#: Windows chrome under the box, in order: the model footer (which on the
+#: real capture runs together with the 'Run Everything' button —
+#: '1 file editedRun Everything', no space) then the terminal row. No
+#: task row: none shows on the capture.
+_CURSOR_IDLE_CHROME_WIN = (_CURSOR_IDLE_FOOTER, _CURSOR_IDLE_TERMINAL)
+
+
+def _cursor_boxed_composer(cidx: int, tail: list[str]) -> bool:
+    """True when the composer sits inside the measured Windows box — the
+    box-top row directly above it and the box-bottom row directly below.
+    Both rows must show: one alone is not a box, it is an adversarial row
+    in the lin gap (the property corpus plants it there, and with no
+    '▀' row under the composer the lin branch still rejects it)."""
+    return (cidx >= 1 and cidx + 1 < len(tail)
+            and bool(_CURSOR_WIN_BOX_TOP.match(tail[cidx - 1]))
+            and bool(_CURSOR_WIN_BOX_BOTTOM.match(tail[cidx + 1])))
+
+
 def _cursor_region_allows_idle(cidx: int, tail: list[str]) -> bool:
     """#1100: EVERY bottom-region row must match a form a real idle
-    capture has shown. The gap above the composer must be fully in view
-    (fail closed on a window that cannot show it) and hold at most Tip
-    chrome — never a status; below the composer the task count, the
-    model footer and the terminal row in order, blanks allowed between
-    them, nothing nonblank after."""
-    if cidx < _CURSOR_IDLE_GAP_ROWS:
-        return False  # the gap is not in view — never guess out-of-view rows
-    gap = _cursor_gap_rows(cidx, tail)
-    if gap is None or not all(_CURSOR_IDLE_TIP.match(row) for row in gap):
-        return False  # a status row in the gap is never idle chrome
-    expected = iter(_CURSOR_IDLE_CHROME)
+    capture has shown. Two measured shapes, routed by _cursor_boxed_composer:
+
+    - the Windows box: box-top directly above the composer, box-bottom
+      directly below, then the model footer and the terminal row in
+      order, blanks allowed between, nothing nonblank after. There is no
+      4-row gap on the Windows capture and no task row — the box top IS
+      the region's upper edge, so the lin gap rule does not apply and a
+      short pane is fine (every row the rule checks is in view; rows
+      above the box are transcript, never guessed).
+    - the lin shape: the gap above the composer fully in view (fail
+      closed on a window that cannot show it) holding at most Tip
+      chrome — never a status; below the composer the task count, the
+      model footer and the terminal row in order, blanks allowed
+      between them, nothing nonblank after."""
+    if _cursor_boxed_composer(cidx, tail):
+        expected = iter(_CURSOR_IDLE_CHROME_WIN)
+        rows = tail[cidx + 2:]
+    else:
+        if cidx < _CURSOR_IDLE_GAP_ROWS:
+            return False  # the gap is not in view — never guess out-of-view rows
+        gap = _cursor_gap_rows(cidx, tail)
+        if gap is None or not all(_CURSOR_IDLE_TIP.match(row) for row in gap):
+            return False  # a status row in the gap is never idle chrome
+        expected = iter(_CURSOR_IDLE_CHROME)
+        rows = tail[cidx + 1:]
     form = next(expected, None)
-    for row in tail[cidx + 1:]:
+    for row in rows:
         if not row.strip():
             continue  # blanks between chrome rows are placement noise
         if form is None or not form.match(row):
             return False
         form = next(expected, None)
-    return form is None  # all three chrome forms were found, in order
+    return form is None  # every chrome form was found, in order
 
 
 #: How many non-empty rows at the bottom can hold the cursor composer.
@@ -2833,13 +2880,28 @@ def _bottom_tui(lines: list[str]) -> "str | None":
     the pane.
     """
     tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
+    # #1100: a bare '┃ Build ·' mode row is a QUOTE unless the pane shows
+    # a MEASURED opencode screen form. Every captured 1.18.33 screen
+    # carries one: the idle/holding box draws the ╹▀ border under the mode
+    # row (0710 capture), the running screen draws the ▣ header and 'esc
+    # interrupt' with the border scrolled out of view (#961 sacrificial
+    # capture), and the permission screen's △ row is the whole signal
+    # (the mode row and the border are gone there). So a quoted mode row
+    # — including one planted below a cursor composer, a position real
+    # cursor chrome never occupies — must not hand the pane to the
+    # opencode classifier and read the pane idle on opencode's say-so.
+    opencode_screen = any(
+        ln.strip().startswith("╹▀") or ln.strip().startswith("▣")
+        or "esc interrupt" in ln for ln in tail)
     for i in range(len(tail) - 1, -1, -1):
         if _is_cursor_composer_row(tail[i]):
             return "cursor"
         if _is_grok_composer_row(tail, i):
             return "grok"
         if _is_opencode_composer_row(tail[i]):
-            return "opencode"
+            if _opencode_permission_row(tail[i]) or opencode_screen:
+                return "opencode"
+            continue  # a bare quoted mode row — not a measured screen
         if _is_muse_composer_row(tail, i):
             return "muse"
     # A permission dialog is taller than the composer tail. Look further
@@ -3099,6 +3161,21 @@ def _agent_running(target: str) -> Optional[bool]:
     if not _CURSOR_IDLE_COMPOSER.match(tail[cidx]):
         # a human draft, or a placeholder no real idle capture has shown
         return None
+    # #1100 clause 4 (Windows): the MEASURED composer box — box top
+    # directly above the composer, box bottom directly below (cursor-win
+    # real idle capture, msgs 62604/62606). Windows idle has no status
+    # slot, no Tip and no task row, and transcript prose may sit right
+    # above the box top, ending mid-sentence (wrapped prose, NOT
+    # streaming — 62606 fact 3: never a content heuristic on it). So
+    # above the box only a MEASURED spinner verb reads busy (mid-turn
+    # it renders there — busy-win-midturn; a quote deeper in scrollback
+    # is transcript, out of the scanned window); the box rows and the
+    # chrome under them stay an ALLOWLIST handled below.
+    if _cursor_boxed_composer(cidx, tail):
+        for k in range(2, min(_CURSOR_IDLE_GAP_ROWS + 1, cidx + 1)):
+            if _CURSOR_SPINNER_ROW.match(tail[cidx - k].strip()):
+                return True
+        return False if _cursor_region_allows_idle(cidx, tail) else None
     # The gap above the composer: at real idle entirely blank or carrying
     # only Tip chrome (measured, #783 idle capture); mid-turn the status
     # spinner renders inside it (measured, busy-lin-midturn). A MEASURED
@@ -3144,6 +3221,24 @@ def _runstate_unknown_detail(target: str) -> str:
     composer = tail[cidx].strip()
     if not composer.startswith("→"):
         return f"composer row {composer[:48]!r} carries no cursor run-state"
+    if _cursor_boxed_composer(cidx, tail):
+        # The Windows box: box-top and box-bottom are MEASURED chrome,
+        # not statuses; above the box is transcript. Name the first
+        # non-form row under the box-bottom.
+        labels = ("model-footer", "terminal")
+        forms = list(_CURSOR_IDLE_CHROME_WIN)
+        step = 0
+        for row in tail[cidx + 2:]:
+            if not row.strip():
+                continue
+            if step >= len(forms):
+                return (f"row {row.strip()[:48]!r} after the terminal row — "
+                        "not a captured idle shape")
+            if not forms[step].match(row):
+                return (f"{labels[step]} row {row.strip()[:48]!r} "
+                        "not a captured idle form")
+            step += 1
+        return "chrome rows missing under the box — not a captured idle shape"
     # Name a status row where the gap would be, even when only PART of
     # the gap is in view (a short pane still shows what it shows); a
     # measured spinner is not an unknown state, Tip chrome is not one.
