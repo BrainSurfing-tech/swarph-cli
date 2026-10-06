@@ -1,31 +1,39 @@
-"""#1083 (#1078 rework) — IDLE IS A POSITIVE SIGNATURE, AND THE BOUND
+"""#1083/#1100 — IDLE IS AN ALLOWLIST OF THE BOTTOM REGION, AND THE BOUND
 COUNTS FROM FIRST SIGHT.
 
-Measured by science-claude at 4e920ff: four NOVEL busy renders read as
-positively idle (``_agent_running`` False) — '⠘⠆ Editing  97.46k tokens'
-(a spinner verb the table did not carry), streaming partial text with no
-status row, 'Running tool: bash (press esc to interrupt)' (a verb before
-the key inside the parens), and the French '◐ Réflexion en cours… (Échap
-pour annuler)' — and the sink typed DMs into running turns. Two rules now
-hold:
+Measured by science-claude at 4e920ff (#1078): four NOVEL busy renders
+read as positively idle (``_agent_running`` False) and the sink typed
+DMs into running turns. #1083 made idle a positive signature; #1084 then
+FAILED that rework — the signature's slot was still a DENYLIST, and 9 of
+10 further novel busy renders ('● Compiling 3 files', 'Allow command?
+(y/n)', '⏺ Generando respuesta…', …) read idle again. #1100 (lab-ovh's
+ruling_allowlist_ok): a pane reads idle ONLY when EVERY raw
+bottom-region row matches a form a REAL idle capture has shown. The #794
+capture's geometry is the shape:
 
-1. A pane the detector does not POSITIVELY recognise as idle — a BARE
-   placeholder composer under a plain, COMPLETED slot row, chrome below
-   (the measured idle captures, tests/pane_renders/cursor/, including
-   the real #794-hunt capture idle-lin-794-capture.txt) — is UNKNOWN,
-   never idle.
-2. The hold's bound counts from the FIRST SIGHT of the unknown state
-   (``unknown_seen_at``), not from the last injection (#1078: an old
-   injection fired the bound AT first sight). No ledger anchor at all —
-   the monitor-restart wipe — holds too: OBSERVED wake text or a
-   standing flag is the wake-in-play proof.
+    <output …>                     outside the region, unchecked
+    blank × 4                      the gap — GEOMETRY, not noise
+    "  → Add a follow-up"          the composer, bare placeholder
+    blank × 2
+    "  1 task"                     the task count
+    "  <model> · <pct>%[ · <n> files edited]"   the model footer
+    "  /path… | ~"                 the terminal row
 
-The renders are FILES, one per capture (lab-ovh's ask): a new harness
-render (cursor-win's Windows idle, when it lands) is a new file here and
-a signature decision, not an inline edit in every test. Real captures:
-busy-lin-midturn (cursor-lin, live, 2026-10-06 08:25Z), busy-win-midturn
-(cursor-win's Windows pane via science-claude, msg 62281), idle-lin (the
-measured idle signature) and idle-lin-794-capture (a real cursor-lin
+Mid-turn the status spinner renders INSIDE the gap (measured,
+busy-lin-midturn: '⠰⠳ Running  173.11k tokens' at composer−3) — a
+MEASURED spinner verb (braille-led Thinking/Running/Working/Editing)
+reads positively busy; every other nonblank gap row, and every off-form
+row under the composer, reads UNKNOWN: zero keystrokes for
+_WAKE_TURN_BOUND_S from FIRST SIGHT, then typed loudly. There is NO
+denylist and nothing is 'busy-shaped' — a row either matches a captured
+form or the pane is unknown.
+
+The renders are FILES, one per capture (lab-ovh's ask), read RAW —
+blanks are geometry, and the flattened non-empty view is what made
+output text sit "directly above the composer" (#1084's root cause).
+Real captures: busy-lin-midturn (cursor-lin, live, 2026-10-06 08:25Z),
+busy-win-midturn (cursor-win's Windows pane, msg 62281), idle-lin (the
+measured idle shape, raw) and idle-lin-794-capture (a real cursor-lin
 idle pane from the #794 hunt, byte-for-byte).
 """
 import pathlib
@@ -59,10 +67,10 @@ _NOVEL_UNKNOWN = (
 
 
 def _pane(name: str) -> list[str]:
-    return [
-        ln for ln in (_RENDER_DIR / f"{name}.txt").read_text(encoding="utf-8").splitlines()
-        if ln.strip()
-    ]
+    """The fixture RAW — blanks and trailing space preserved. #1100: the
+    gap above the composer is GEOMETRY; the flattened view is only for
+    callers that want the non-empty pane."""
+    return (_RENDER_DIR / f"{name}.txt").read_text(encoding="utf-8").splitlines()
 
 
 class _StubState:
@@ -119,8 +127,9 @@ def _sent(calls) -> int:
 def test_novel_busy_render_reads_unknown_not_idle(monkeypatch, render):
     """>>> RED on 4e920ff: all three read False (positively idle). <<< A
     render the detector does not positively know is UNKNOWN — never
-    idle."""
-    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: _pane(render))
+    idle. #1100: the busy row sits INSIDE the gap (or the gap is not in
+    view), so the allowlist never sees a captured idle shape."""
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw", lambda t: _pane(render))
     assert mesh._agent_running("sac") is None
 
 
@@ -159,9 +168,10 @@ def test_unknown_hold_keeps_the_flag_and_names_the_render(pane, capsys):
 
 def test_lin_midturn_real_capture_is_positively_busy(monkeypatch):
     """cursor-lin's own live mid-turn capture (2026-10-06 08:25Z): the
-    composer hint and the '⠰⠳ Running' spinner both read positively
-    busy — a green regression guard on both heads."""
-    monkeypatch.setattr(mesh, "_capture_pane_lines",
+    measured '⠰⠳ Running' spinner renders inside the gap — positively
+    busy, zero keys either way. A green regression guard on both
+    heads."""
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw",
                         lambda t: _pane("busy-lin-midturn"))
     assert mesh._agent_running("sac") is True
 
@@ -172,24 +182,25 @@ def test_win_midturn_real_capture_is_positively_busy(monkeypatch):
     substring match, not a column or whitespace anchor, is what catches
     it. The status row reads '⠘⠆ Running  <n> tokens' (no Linux verb
     set difference: Running is measured)."""
-    monkeypatch.setattr(mesh, "_capture_pane_lines",
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw",
                         lambda t: _pane("busy-win-midturn"))
     assert mesh._agent_running("sac") is True
 
 
 def test_editing_spinner_is_measured_busy(monkeypatch):
     """The 'Editing' verb — measured live on cursor-lin (lab-ovh) — is a
-    positively-known spinner row, not a glyph-shaped unknown: True."""
-    monkeypatch.setattr(mesh, "_capture_pane_lines",
+    positively-known spinner row, not an unknown glyph: True."""
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw",
                         lambda t: _pane("busy-editing-spinner"))
     assert mesh._agent_running("sac") is True
 
 
 def test_unmeasured_spinner_verb_is_unknown(monkeypatch):
     """A braille glyph with a verb NO real capture has shown
-    ('⠋ Fetching…') is busy-SHAPED, not positively running: None."""
+    ('⠋ Fetching…') is NOT a captured form — the gap carries a status
+    row the allowlist does not know: unknown, never idle."""
     lines = ["⠋ Fetching…", "→ Add a follow-up", "1 task", "~"]
-    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: lines)
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw", lambda t: lines)
     assert mesh._agent_running("sac") is None
 
 

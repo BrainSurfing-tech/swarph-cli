@@ -24,11 +24,19 @@ from swarph_cli.commands import mesh
 
 @pytest.fixture(autouse=True)
 def _clean_composer(monkeypatch):
-    """These tests pin cursor/ledger decoupling, not the politeness gate —
-    default every composer to OBSERVED-CLEAN so the gate stays out of the
-    way. The gate's own matrix lives in test_tmux_wake_submit_verify.py."""
+    """These tests pin ledger/cursor mechanics, not the politeness or
+    run-state gates — default every composer to OBSERVED-CLEAN and every
+    pane to observed-not-running so both gates stay out of the way.
+    Their matrices live in test_tmux_wake_submit_verify.py and
+    test_tmux_wake_idle_allowlist.py. #1100: at the old head a pinned
+    capture seam (None → unknown) was harmless with no wake in play;
+    the unknown hold now applies whatever the ledger says, so the rig
+    stubs the classifier verdict itself. The capture seams stay pinned
+    for hermeticity (#1083)."""
     monkeypatch.setattr(mesh, "_composer_state", lambda t: "clear")
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: False)
     monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw", lambda t: None)
 
 
 def _state(tmp_path, wake_min_interval_s=0):

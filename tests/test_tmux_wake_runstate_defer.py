@@ -45,8 +45,11 @@ def _rig(monkeypatch, *, composer="clear", unread=3, wake_result=True,
     monkeypatch.setattr(mesh, "_agent_running", lambda t: running)
     monkeypatch.setattr(mesh, "_opencode_in_progress", lambda t: False)
     # #1083 hermeticity: the grok-block and muse probes read the pane —
-    # an unpatched seam reached the REAL tmux binary.
+    # an unpatched seam reached the REAL tmux binary. #1100: the raw seam
+    # too — the classifier and the unknown-state detail read
+    # _capture_pane_lines_raw.
     monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw", lambda t: None)
     monkeypatch.setattr(watchdog, "_gateway_unread_count",
                         lambda *a, **k: unread)
 
@@ -137,34 +140,38 @@ def _lines_running():
 
 
 def _lines_idle():
-    # #1083: the POSITIVE idle signature — the Tip row sits directly above
-    # the bare placeholder composer (measured on real idle captures;
+    # #1100: the REAL raw idle geometry — a 4-blank gap above the bare
+    # placeholder composer, the task count / model footer / terminal
+    # chrome below (measured on real idle captures;
     # tests/pane_renders/cursor/idle-lin.txt).
-    return ["some scrollback", "Tip: mesh is quiet", "→ Add a follow-up",
-            "Kimi K3 Max · 50%"]
+    return ["some scrollback", "", "", "", "",
+            "→ Add a follow-up", "", "",
+            "1 task", "Kimi K3 Max · 50%", "~"]
 
 
 def test_agent_running_reads_the_composer_row(monkeypatch):
-    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: _lines_running())
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw",
+                        lambda t: _lines_running())
     assert mesh._agent_running("cursor-lin") is True
-    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: _lines_idle())
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw",
+                        lambda t: _lines_idle())
     assert mesh._agent_running("cursor-lin") is False
 
 
 def test_agent_running_ignores_scrollback_quoting_the_hint(monkeypatch):
     """The hint string in HISTORY (a discussion about the TUI — which has
     literally happened on cursor-lin) must not read as RUNNING: only the
-    composer row counts. #1083: it is not positively IDLE either — the
-    quote carries no parens (never busy-shaped) but the pane shows no
-    measured idle signature, so it reads UNKNOWN: held while a wake is
-    in play, typed (silently, the historical contract) when none is."""
+    composer row counts. #1100: the quote row lands INSIDE the gap — an
+    off-form row — so the pane reads UNKNOWN: not busy, never asserted
+    idle, and held to the bound whatever the ledger says (#1100
+    clause 2)."""
     lines = ["user: why does it say ctrl+c to stop?", "→ Add a follow-up"]
-    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: lines)
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw", lambda t: lines)
     assert mesh._agent_running("cursor-lin") is None
 
 
 def test_agent_running_unreadable_is_none(monkeypatch):
-    monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw", lambda t: None)
     assert mesh._agent_running("cursor-lin") is None
 
 
@@ -214,7 +221,8 @@ def test_unknown_runstate_holds_zero_keystrokes_within_the_turn_bound(monkeypatc
     calls = _rig(monkeypatch, composer="clear", running=False)
     monkeypatch.setattr(mesh, "_agent_running", lambda t: None)
     # the detail seam must not read a REAL pane — script the fixture render
-    monkeypatch.setattr(mesh, "_capture_pane_lines",
+    # (#1100: the detail reads the RAW pane)
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw",
                         lambda t: ["✻ Pondering… (esc to cancel)",
                                    "→ Add a follow-up"])
     state = _owed_state(injected_at=time.time() - 60)

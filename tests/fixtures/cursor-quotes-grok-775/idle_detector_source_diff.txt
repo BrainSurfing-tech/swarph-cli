@@ -41,8 +41,14 @@
     ▎+         if "│" in ln and "❯" in ln:
     ▎+             return True
      def _grok_input(lines: list[str]) -> Optional[str]:
+
     Tip: Use /plan to iterate on an implementation plan before code changes.
+
+
   → Add a follow-up
+
+
   1 task
   GPT-5.5 272K High · 22% · 203 files edited                                                                                                                                                                           Run Everything
   ~
+

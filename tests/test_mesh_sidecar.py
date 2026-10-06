@@ -15,16 +15,24 @@ from swarph_cli.commands import mesh
 #: it (#1083): the #533 test asserts the leading capture-pane call that the
 #: module's own subprocess stub must serve and record.
 _REAL_CAPTURE_PANE_LINES = mesh._capture_pane_lines
+#: #1100: _capture_pane_lines now derives from the RAW seam, so the #533
+#: test must restore both for its subprocess stub to serve the call.
+_REAL_CAPTURE_PANE_LINES_RAW = mesh._capture_pane_lines_raw
 
 
 @pytest.fixture(autouse=True)
 def _clean_composer(monkeypatch):
-    """These tests pin ledger/cursor mechanics, not the politeness gate —
-    default every composer to OBSERVED-CLEAN so the gate stays out of the
-    way. The gate's own matrix lives in test_tmux_wake_submit_verify.py.
-    The pane capture seam is pinned for hermeticity (#1083)."""
+    """These tests pin ledger/cursor mechanics, not the politeness or
+    run-state gates — default every composer to OBSERVED-CLEAN and every
+    pane to observed-not-running so both gates stay out of the way.
+    The gate's own matrix lives in test_tmux_wake_submit_verify.py.
+    The pane capture seam is pinned for hermeticity (#1083); #1100: the
+    unknown-runstate hold now applies with NO wake in play, so the rig
+    also stubs the classifier verdict itself."""
     monkeypatch.setattr(mesh, "_composer_state", lambda t: "clear")
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: False)
     monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw", lambda t: None)
 
 
 def _state(tmp_path: Path) -> mesh.MeshSidecarState:
@@ -65,6 +73,8 @@ def test_tmux_wake_sends_literal_prompt_then_submits_and_verifies(monkeypatch):
     # and hermetic — the autouse pin would swallow it (#1083).
     monkeypatch.setattr(
         mesh, "_capture_pane_lines", _REAL_CAPTURE_PANE_LINES)
+    monkeypatch.setattr(
+        mesh, "_capture_pane_lines_raw", _REAL_CAPTURE_PANE_LINES_RAW)
     seen = []
     monkeypatch.setattr(
         mesh, "_composer_state",

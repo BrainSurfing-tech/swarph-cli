@@ -37,6 +37,11 @@ def _env(monkeypatch):
     # ("gone:0.0", "lab:0.0" …) — a real capture would miss and return
     # None anyway; pin the seam so the suite makes ZERO live tmux calls.
     monkeypatch.setattr(mesh, "_capture_pane_lines", lambda t: None)
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw", lambda t: None)
+    # #1100: the unknown-runstate hold now applies with no wake in play
+    # (None defers where it used to fall through), so pin the verdict
+    # too — this rig tests the CLI surface, not the classifier.
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: False)
 
 
 def _dm(msg_id, *, frm="droplet", read_at=None):

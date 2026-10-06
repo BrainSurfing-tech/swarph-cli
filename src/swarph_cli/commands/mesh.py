@@ -1481,20 +1481,25 @@ class TmuxSink(Sink):
     suppresses a delivery without the pane being re-read — which also
     means a monitor restart cannot carry standing state on faith.
 
-    IDLE IS OBSERVED TOO, NEVER ASSUMED (#1077, #1073 round 2; #1083 makes it
-    a POSITIVE signature): a clear composer alone does not prove the turn
-    ended — a TUI can answer under a busy render the running detector does
-    not positively know, and #1010's spent rule typed the next DM into that
-    running turn (measured by science-claude at 6c4180b). #1078 found the
-    same hole one layer down: four NOVEL busy renders read as positively
-    idle. Now a pane the detector does not POSITIVELY recognise as idle
-    reads UNKNOWN (_agent_running None) — and an UNKNOWN run state holds
-    ZERO keystrokes — inject and nudge both — for _WAKE_TURN_BOUND_S
-    counted from the FIRST SIGHT of the unknown state (#1083: not from
-    our injection); past the bound the strand risk outweighs the
-    mid-turn risk and the sink types, loudly, once per wake episode.
-    With no wake of ours in play the historical contract stands: unknown
-    reads as not-running (a claude cell has no running detector at all).
+    IDLE IS OBSERVED TOO, NEVER ASSUMED (#1077, #1073 round 2; #1083 made it
+    a positive signature, #1100 made it an ALLOWLIST): a clear composer
+    alone does not prove the turn ended — a TUI can answer under a busy
+    render the running detector does not know, and #1010's spent rule
+    typed the next DM into that running turn (measured by science-claude
+    at 6c4180b). #1078 found the same hole one layer down: four NOVEL
+    busy renders read as positively idle. Now a pane the detector does
+    not POSITIVELY recognise as idle reads UNKNOWN (_agent_running None)
+    — and an UNKNOWN run state holds ZERO keystrokes — inject and nudge
+    both — for _WAKE_TURN_BOUND_S counted from the FIRST SIGHT of the
+    unknown state (#1083: not from our injection); past the bound the
+    strand risk outweighs the mid-turn risk and the sink types, loudly,
+    once per unknown episode. #1100 clause (2): the hold applies with NO
+    wake of ours in play too — at 74bfa09 the no-wake path typed into an
+    unknown render at once (science-claude's wiped-state-dir probe); a
+    claude cell (unknown its steady state) pays the bound ONCE per
+    unknown episode. The ONE exception is OUR OWN unsubmitted wake text
+    sitting in the composer (clause 3): that is our keystroke, already
+    on screen — recognised, and the Enter nudge goes promptly.
 
     POLITENESS GATE (commander, 2026-08-24, same day): even a verified wake
     INJECTS BLIND — '-l' appends to whatever sits in the composer, so a wake
@@ -1725,10 +1730,10 @@ class TmuxSink(Sink):
 
     def _holds_for_unknown_runstate(self, led: dict,
                                      wake_in_play: Optional[bool] = None) -> bool:
-        """#1077/#1083: hold ZERO keystrokes when the runstate reads UNKNOWN
-        and a wake of ours is in play. Loud on every hold — the log names
-        the unrecognised state, and the bound-firing fallthrough states
-        its bound in the same breath."""
+        """#1077/#1083/#1100: hold ZERO keystrokes when the runstate reads
+        UNKNOWN — wake in play or not (#1100 clause 2). Loud on every
+        hold — the log names the unrecognised state, and the
+        bound-firing fallthrough states its bound in the same breath."""
         detail = _unknown_runstate_hold(self.target, led, wake_in_play)
         if detail is None:
             return False
@@ -2395,17 +2400,13 @@ _DEFER_MIDTURN = (
 _WAKE_TURN_BOUND_S = 600.0
 
 
-def _capture_pane_lines(target: str) -> Optional[list[str]]:
-    """The pane's non-empty lines, or None when the pane is UNREADABLE
-    (capture error / non-zero rc). Shared by the wake verifier and the
-    politeness gate — None must always fail closed, never "probably fine".
-
-    NOT a fixed tail window: cursor's TUI renders chrome BELOW the composer
-    (task count, model/status bar, '~' — measured live on cursor-lin
-    2026-08-24: the composer sits 4 non-empty lines from the bottom), so a
-    tail-3 lands entirely in the chrome and reads every cursor pane as
-    unknown. The composer is identified structurally instead — see
-    _composer_line."""
+def _capture_pane_lines_raw(target: str) -> Optional[list[str]]:
+    """The pane's lines EXACTLY as rendered — blanks and trailing spaces
+    preserved, or None when the pane is UNREADABLE. #1100: cursor's
+    bottom region is GEOMETRY (the #794 real idle capture: output, then
+    a 4-blank gap, then the composer — and mid-turn the status spinner
+    renders INSIDE that gap). The non-empty view this module grew up on
+    flattens the gap away, so the classifier must read the raw pane."""
     try:
         r = subprocess.run(
             ["tmux", "capture-pane", "-p", "-t", target],
@@ -2417,7 +2418,24 @@ def _capture_pane_lines(target: str) -> Optional[list[str]]:
         return None
     if r.returncode != 0:
         return None
-    return [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
+    return (r.stdout or "").splitlines()
+
+
+def _capture_pane_lines(target: str) -> Optional[list[str]]:
+    """The pane's non-empty lines, or None when the pane is UNREADABLE
+    (capture error / non-zero rc). Shared by the wake verifier and the
+    politeness gate — None must always fail closed, never "probably fine".
+
+    NOT a fixed tail window: cursor's TUI renders chrome BELOW the composer
+    (task count, model/status bar, '~' — measured live on cursor-lin
+    2026-08-24: the composer sits 4 non-empty lines from the bottom), so a
+    tail-3 lands entirely in the chrome and reads every cursor pane as
+    unknown. The composer is identified structurally instead — see
+    _composer_line."""
+    raw = _capture_pane_lines_raw(target)
+    if raw is None:
+        return None
+    return [ln for ln in raw if ln.strip()]
 
 
 _COMPOSER_MARKERS = (">", "›", "→")
@@ -2486,95 +2504,118 @@ _CURSOR_SPINNER_ROW = re.compile(
     r"^[\u2800-\u28FF]+\s*(?:Thinking|Running|Working|Editing)\b"
 )
 
-#: #1077: a cancel affordance in the LIVE-STATUS slot — '✻ Pondering…
-#: (esc to cancel)', a busy render the spinner rule does not cover — marks
-#: the pane busy-shaped but NOT positively known. The parenthetical anchors
-#: the match: a history quote of the hint ('why does it say ctrl+c to
-#: stop?', measured live in cursor-lin's own scrollback) carries no
-#: parentheses and still reads idle. #1083 broadened the vocabulary for
-#: the #1078 replays — '(press esc to interrupt)' (a verb before the key)
-#: and the French '(Échap pour annuler)' — still ONLY inside parentheses:
-#: the parens are what separate a live affordance from a quote.
-_CURSOR_CANCEL_AFFORDANCE = re.compile(
-    r"\([^)]{0,60}\b(?:esc|ctrl\+c|échap|interrupt|cancel|annuler)\b[^)]{0,40}\)",
-    re.IGNORECASE)
+# ── #1100: idle is an ALLOWLIST of the bottom region ────────────────────
+#: Every bottom-region row as the REAL idle captures show it — raw, blanks
+#: and all (tests/pane_renders/cursor/idle-lin-794-capture.txt, 178 cols;
+#: the #783 hunt's verified-idle capture, Tip chrome in the gap; a fresh
+#: cursor-lin idle capture joins as its own fixture):
+#:
+#:     <output …>                     outside the region, unchecked
+#:     blank × 4                      the gap — GEOMETRY, not noise; at
+#:                                     idle it may carry ONLY the measured
+#:                                     'Tip: …' chrome row (#783 capture,
+#:                                     composer−3, blanks around it)
+#:     "  → Add a follow-up"          the composer, bare placeholder
+#:     blank × 2 (placement varies —
+#:     "  1 task"                     the task count       the walk below
+#:     "  <model> · <pct>%[ · <n> files edited]"   the model footer
+#:     "  /path… | ~"                 the terminal row    skips blanks)
+#:
+#: Mid-turn the status spinner renders INSIDE the gap (busy-lin-midturn,
+#: real: "⠘⠆ Running  173.11k tokens" at composer−3) — a MEASURED spinner
+#: verb is positively busy; any OTHER nonblank gap row is a status the
+#: allowlist does not know: unknown, never idle.
+#:
+#: #1084 FAIL: at 74bfa09 only the composer was checked positively and the
+#: slot was a denylist, so 9 of 10 novel busy renders ('● Compiling 3
+#: files', 'Allow command? (y/n)', '⏺ Generando respuesta…', …) read idle
+#: and were typed into. Busy renders are unbounded; the captured idle
+#: forms are not. A pane reads idle ONLY when EVERY bottom-region row
+#: matches a form a real idle capture has shown — anything else is
+#: UNKNOWN: held to _WAKE_TURN_BOUND_S from first sight, then typed
+#: loudly (lab's delay-over-mistyping decision).
+_CURSOR_RAW_TAIL = 14
 
-#: #1083: a glyph-led live row — a braille-dots spinner whose verb the
-#: measured table above does not carry, or the thinking glyphs measured in
-#: '✻ Pondering…' and '◐ Réflexion en cours…'. Busy-SHAPED, never
-#: positively running (the verb was never measured) and never positively
-#: idle (a glyph sits in the live-status slot): unknown, held to the bound.
-_CURSOR_BUSY_GLYPH = re.compile(r"^(?:[\u2800-\u28FF]+|✻|◐|◑|◒|◓)(?:\s|$)")
+#: The measured gap: 4 blank rows above the composer (idle), fewer only
+#: when the pane itself is shorter than the window — then the classifier
+#: fails closed (unknown), it never guesses out-of-view rows.
+_CURSOR_IDLE_GAP_ROWS = 4
 
-
-def _cursor_busy_shaped(slot: str) -> bool:
-    """#1083: the live-status slot carries a marker a real capture has only
-    ever shown MID-TURN — a cancel affordance in parens, or a spinner/
-    thinking glyph leading the row."""
-    return bool(
-        _CURSOR_CANCEL_AFFORDANCE.search(slot) or _CURSOR_BUSY_GLYPH.match(slot)
-    )
-
-
-def _cursor_positively_idle(tail: list[str], composer: str, cidx: int) -> bool:
-    """#1083: the POSITIVE idle signature, from the REAL idle captures
-    (cursor-lin; the #794 hunt fixtures and
-    tests/pane_renders/cursor/idle-lin.txt): a BARE placeholder composer
-    under a plain, COMPLETED slot row. Anything else — a novel placeholder
-    (a harness whose chrome differs, e.g. cursor-win's), a human draft in
-    the composer, a busy-shaped or mid-streaming slot — is NOT positively
-    idle and reads unknown: per lab-ovh's decision on #1083, an idle
-    render this signature does not yet know is held up to
-    _WAKE_TURN_BOUND_S per DM until its capture is fixtured — noisy, not
-    silent, and never unbounded.
-
-    MEASURED, not guessed: every real idle capture ends its output SHORT
-    of the pane edge — 'ARMED', 'RECEIVED: …', 'mesh: nothing new…' —
-    because a message's final line ends where it ends; the only render
-    whose slot row runs to the pane's right edge is the MID-WRITE
-    streaming frame (captured live on cursor-lin 2026-10-06: the row was
-    cut mid-word at the edge while the response streamed). And in every
-    real capture the composer is never the pane's last row — the task
-    count, model footer and path row sit BELOW it; a pane that ends at
-    the composer is a render no capture has shown.
-    """
-    if composer not in _CURSOR_IDLE_PLACEHOLDERS and composer != "→":
-        return False  # a draft, or a placeholder no capture has shown
-    if cidx == 0:
-        return False  # nothing above the composer in view — cannot assert
-    if cidx == len(tail) - 1:
-        return False  # no chrome below the composer — an unmeasured render
-    return not _cursor_streaming_partial(tail, cidx - 1)
+_CURSOR_IDLE_COMPOSER = re.compile(r"^\s*→ Add a follow-up\s*$")
+_CURSOR_IDLE_TASK = re.compile(r"^\s*\d+ tasks?\s*$")
+_CURSOR_IDLE_FOOTER = re.compile(
+    r"^\s*[A-Z0-9][A-Za-z0-9 .+-]*? · \d{1,3}(?:\.\d+)?%"
+    r"(?: · \d+ files? edited)?(?:\s+Run Everything)?\s*$"
+)
+#: The terminal row under the footer: an absolute path (the #794 capture:
+#: /tmp/claude-1000/…/cursor_run) or cursor's `~`.
+_CURSOR_IDLE_TERMINAL = re.compile(r"^\s*(?:~|/)[^\s]*\s*$")
 
 
-#: The bare composer placeholders a REAL idle capture has shown. An
-#: unlisted placeholder is a novel render: unknown until fixtured (#1083,
-#: lab-ovh's per-harness fixture-file ask).
-_CURSOR_IDLE_PLACEHOLDERS = ("→ Add a follow-up",)
+def _cursor_bottom_region(raw: list[str]) -> Optional[tuple[int, list[str]]]:
+    """(composer index, raw tail) — the composer row located on the RAW
+    pane, blanks preserved (#1100: the gap above it is geometry). None
+    when no composer row is in the window."""
+    tail = raw[-_CURSOR_RAW_TAIL:]
+    for i in range(len(tail) - 1, -1, -1):
+        if _is_cursor_composer_row(tail[i]):
+            return i, tail
+    return None
 
 
-def _cursor_streaming_partial(tail: list[str], slot_idx: int) -> bool:
-    """#1083 (#1078's fourth render): the streaming partial frame — the
-    row directly above the composer runs to the pane's right edge and
-    ends mid-word, the write still in progress. Completed output never
-    looks like this: every measured idle capture's final line ends
-    short of the edge. A wrapped COMPLETE line can reach the edge too —
-    when it is the row at the composer it reads unknown and holds to the
-    bound: noisy, not silent, the decided trade-off.
+def _cursor_gap_rows(cidx: int, tail: list[str]) -> Optional[list[str]]:
+    """The NONBLANK rows inside the gap above the composer — the position
+    where mid-turn the status spinner renders, and where cursor's Tip
+    chrome may linger at idle (measured: the #783 hunt's verified-idle
+    capture carries 'Tip: Use /plan…' at composer−3, blanks around it).
+    None when the gap is not fully in view (#1100: never guess
+    out-of-view rows)."""
+    if cidx < _CURSOR_IDLE_GAP_ROWS:
+        return None
+    return [tail[cidx - k].strip()
+            for k in range(1, _CURSOR_IDLE_GAP_ROWS + 1)
+            if tail[cidx - k].strip()]
 
-    The width floor: a wrap only exists at a real terminal's edge, and
-    no real terminal is narrower than 40 columns — a sub-40 tail is a
-    synthetic rig, whose longest row carries no wrap information (the
-    Tip row of a 4-row test pane must not read as mid-write)."""
-    if slot_idx < 0 or slot_idx >= len(tail):
-        return False
-    row = tail[slot_idx]
-    if not row.strip():
-        return False
-    width = max((len(ln) for ln in tail), default=0)
-    if width < 40:
-        return False
-    return len(row.rstrip()) >= width - 2 and not row.endswith(" ")
+
+#: The Tip row is MEASURED chrome, not a status: it renders inside the gap
+#: both mid-turn (pane_2_dm1, live chains 2026-10-06: Tip above the
+#: spinner) and at a verified-idle pane (#783 capture). No busy render
+#: measured — #1078's, #1084's ten, science-claude's hunts — ever takes
+#: this form, so the row is allowlisted exactly, never as a prefix.
+_CURSOR_IDLE_TIP = re.compile(r"^\s*Tip: \S.*$")
+
+#: The chrome forms under the composer, IN ORDER: the task count, the
+#: model footer, the terminal row. Real captures disagree only on where
+#: the BLANKS sit between them (idle-lin-794: blank blank task footer
+#: terminal; cursor-fc-bottom: blank task blank footer blank terminal), so
+#: the walk skips blanks and requires the three forms in order, with
+#: nothing nonblank after the terminal row.
+_CURSOR_IDLE_CHROME = (_CURSOR_IDLE_TASK, _CURSOR_IDLE_FOOTER,
+                      _CURSOR_IDLE_TERMINAL)
+
+
+def _cursor_region_allows_idle(cidx: int, tail: list[str]) -> bool:
+    """#1100: EVERY bottom-region row must match a form a real idle
+    capture has shown. The gap above the composer must be fully in view
+    (fail closed on a window that cannot show it) and hold at most Tip
+    chrome — never a status; below the composer the task count, the
+    model footer and the terminal row in order, blanks allowed between
+    them, nothing nonblank after."""
+    if cidx < _CURSOR_IDLE_GAP_ROWS:
+        return False  # the gap is not in view — never guess out-of-view rows
+    gap = _cursor_gap_rows(cidx, tail)
+    if gap is None or not all(_CURSOR_IDLE_TIP.match(row) for row in gap):
+        return False  # a status row in the gap is never idle chrome
+    expected = iter(_CURSOR_IDLE_CHROME)
+    form = next(expected, None)
+    for row in tail[cidx + 1:]:
+        if not row.strip():
+            continue  # blanks between chrome rows are placement noise
+        if form is None or not form.match(row):
+            return False
+        form = next(expected, None)
+    return form is None  # all three chrome forms were found, in order
+
 
 #: How many non-empty rows at the bottom can hold the cursor composer.
 #: Measured on cursor-lin 2026-09-30: the composer is the 4th non-empty row
@@ -2751,28 +2792,6 @@ def _is_cursor_composer_row(line: str) -> bool:
     reads ``→ Add a follow-up``. A ``▎`` hunk never counts."""
     row = line.strip()
     return row.startswith("→") and not row.startswith("▎")
-
-
-def _cursor_status_row(tail: list[str]) -> Optional[str]:
-    """The LIVE-STATUS slot: the non-empty row directly above the Tip/
-    composer block. While a turn runs, cursor draws the spinner there;
-    when the Tip row is present the slot sits above IT (measured live on
-    cursor-lin). None when the composer is the first non-empty row of the
-    tail — no slot in view. Shared by the running detector and the
-    unrecognised-state detail (#1077)."""
-    idx = None
-    for i in range(len(tail) - 1, -1, -1):
-        if _is_cursor_composer_row(tail[i]):
-            idx = i
-            break
-    if idx is None or idx == 0:
-        return None
-    anchor = idx - 1
-    if tail[anchor].strip().startswith("Tip:"):
-        if anchor == 0:
-            return None
-        anchor -= 1
-    return tail[anchor].strip()
 
 
 def _is_muse_rule(line: str) -> bool:
@@ -3040,82 +3059,119 @@ def _agent_running(target: str) -> Optional[bool]:
     2026-08-26, twice: queued wakes fired only when the human next typed).
     Opencode: ``esc interrupt`` or a ▣ header with no trailing duration.
     A finished ``· <n>s`` header is idle. None = UNKNOWN — pane or
-    composer unreadable, OR a busy-shaped cursor render the detector
-    does not positively know (a cancel affordance in the live-status
-    slot, #1077: '✻ Pondering… (esc to cancel)'). #1073 round 2: unknown
-    is NOT not-running — while a wake is outstanding the sink holds ZERO
-    keystrokes on it for _WAKE_TURN_BOUND_S, then types loudly; with no
-    wake of ours in play it stays the historical not-running.
+    composer unreadable, OR a cursor bottom-region row that does not
+    match a form a real idle capture has shown (#1100: idle is an
+    ALLOWLIST; at 74bfa09 the slot was a denylist and 9 of 10 novel
+    busy renders read idle). Unknown is NOT not-running: the sink holds
+    ZERO keystrokes on it for _WAKE_TURN_BOUND_S from FIRST SIGHT —
+    with a wake in play (#1073 round 2) and without (#1100 clause 2:
+    the wiped-state path typed into a running render at 74bfa09) — then
+    types loudly.
     """
-    lines = _capture_pane_lines(target)
-    if lines is None:
+    raw = _capture_pane_lines_raw(target)
+    if raw is None:
         return None
+    lines = [ln for ln in raw if ln.strip()]
     if _is_opencode_pane(lines):
         return _opencode_running(lines)
     if _is_grok_pane(lines):
         return _grok_running(lines)
     if _is_muse_pane(lines):
         return _muse_running(lines)
-    tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
-    composer = _composer_line(tail)
-    if composer is None or not composer.startswith("→"):
+    # ── cursor: the bottom region on the RAW pane — blanks are geometry
+    # (#1100); the non-empty view flattens the measured 4-blank gap and
+    # made output text sit "directly above the composer" (#1084). ──────
+    region = _cursor_bottom_region(raw)
+    if region is None:
         return None
+    cidx, tail = region
+    composer = tail[cidx].strip()
     if _CURSOR_RUN_HINT in composer:
         return True
-    # The composer's index in the tail, for the raw-row checks below.
-    cidx = None
-    for i in range(len(tail) - 1, -1, -1):
-        if _is_cursor_composer_row(tail[i]):
-            cidx = i
-            break
-    if cidx is None:
+    # #1100 clause (3): OUR OWN unsubmitted wake text — the Enter nudge
+    # must go PROMPTLY (at 74bfa09 this read unknown and the nudge sat
+    # ~600 s behind the bound). Recognised: the composer holding exactly
+    # the wake prompt (or the measured stacked double 'check meshcheck
+    # mesh', #533) is OUR text sitting unsubmitted — not a running turn.
+    prompt = _wake_prompt_for(lines)
+    if composer in (f"→ {prompt}", f"→ {prompt}{prompt}"):
+        return False
+    if not _CURSOR_IDLE_COMPOSER.match(tail[cidx]):
+        # a human draft, or a placeholder no real idle capture has shown
         return None
-    # The spinner is the non-empty row directly above the Tip/composer
-    # block: the Tip row when it is present, otherwise the composer.
-    # No other row in the tail can make the pane read as running.
-    slot = _cursor_status_row(tail)
-    if slot is not None:
-        if _CURSOR_SPINNER_ROW.match(slot):
+    # The gap above the composer: at real idle entirely blank or carrying
+    # only Tip chrome (measured, #783 idle capture); mid-turn the status
+    # spinner renders inside it (measured, busy-lin-midturn). A MEASURED
+    # spinner verb is positively busy — even when only PART of the gap is
+    # in view (a short pane still shows the spinner). ANY other nonblank
+    # row there is a status the allowlist does not know — unknown, never
+    # idle ('● Compiling', 'Allow command? (y/n)', a tool block, …). And
+    # the IDLE verdict needs the FULL gap in view: never guess the rows
+    # a window cannot show.
+    status_rows = [tail[cidx - k].strip()
+                   for k in range(1, min(_CURSOR_IDLE_GAP_ROWS, cidx) + 1)
+                   if tail[cidx - k].strip()]
+    for row in status_rows:
+        if _CURSOR_SPINNER_ROW.match(row):
             return True
-        # #1077/#1083: a busy-shaped slot (cancel affordance in parens,
-        # a spinner/thinking glyph) is busy but NOT a render the detector
-        # positively knows — None, never True (we assert only what a real
-        # capture has shown) and never False (a glyph in the live-status
-        # slot renders only mid-turn).
-        if _cursor_busy_shaped(slot):
-            return None
-    # #1083 (#1078's fourth render): the streaming partial frame — the
-    # row directly above the composer runs to the pane's right edge
-    # mid-word, the write still in progress. Measured live on cursor-lin
-    # mid-stream 2026-10-06; a completed output line never reaches the
-    # composer (every real idle capture's final line ends short).
-    if _cursor_streaming_partial(tail, cidx - 1):
-        return None
-    # #1083: idle is a POSITIVE signature, not the absence of busy markers
-    # (#1078: four novel busy renders fell through to False and the sink
-    # typed into running turns). A bare placeholder composer under a
-    # plain, COMPLETED slot row is the measured idle render; anything
-    # else — a novel placeholder, a human draft, an unseen chrome — is
-    # unknown: held to the bound per DM, noisy, never unbounded.
-    return False if _cursor_positively_idle(tail, composer, cidx) else None
+        if not _CURSOR_IDLE_TIP.match(row):
+            return None  # a status row the allowlist does not know
+    if cidx < _CURSOR_IDLE_GAP_ROWS:
+        return None  # the gap is not fully in view — never assert idle
+    # EVERY bottom-region row must match a captured idle form (#1100):
+    # the task count, the model footer and the terminal row under the
+    # composer, in order, blanks allowed between — else unknown.
+    return False if _cursor_region_allows_idle(cidx, tail) else None
 
 
 def _runstate_unknown_detail(target: str) -> str:
     """Name the unrecognised state for the loud deferral log (#1077) —
-    the log must carry WHAT was seen, not just that reading failed."""
-    lines = _capture_pane_lines(target)
-    if lines is None:
+    the log must carry WHAT was seen, not just that reading failed.
+    #1100: names the bottom-region row that broke the allowlist — the
+    gap status if one is showing, else the first non-form row under the
+    composer, else the composer itself."""
+    raw = _capture_pane_lines_raw(target)
+    if raw is None:
         return "pane unreadable"
-    tail = _nonempty_tail(lines, _CURSOR_COMPOSER_TAIL)
-    composer = _composer_line(tail)
-    if composer is None:
+    lines = [ln for ln in raw if ln.strip()]
+    region = _cursor_bottom_region(raw)
+    if region is None:
+        if _is_opencode_pane(lines) or _is_grok_pane(lines) \
+                or _is_muse_pane(lines):
+            return "unrecognised TUI run-state"
         return "no composer line in the tail"
+    cidx, tail = region
+    composer = tail[cidx].strip()
     if not composer.startswith("→"):
         return f"composer row {composer[:48]!r} carries no cursor run-state"
-    slot = _cursor_status_row(tail)
-    if slot is None:
-        return "composer at the top of the tail"
-    return f"live row {slot[:72]!r} not positively recognised"
+    # Name a status row where the gap would be, even when only PART of
+    # the gap is in view (a short pane still shows what it shows); a
+    # measured spinner is not an unknown state, Tip chrome is not one.
+    for k in range(1, min(_CURSOR_IDLE_GAP_ROWS, cidx) + 1):
+        row = tail[cidx - k].strip()
+        if not row or _CURSOR_IDLE_TIP.match(row):
+            continue
+        if _CURSOR_SPINNER_ROW.match(row):
+            continue  # positively busy is not an unknown state
+        return f"live status row {row[:72]!r} not a captured idle form"
+    if cidx < _CURSOR_IDLE_GAP_ROWS:
+        return "bottom region not fully in view — not a captured idle shape"
+    if not _CURSOR_IDLE_COMPOSER.match(tail[cidx]):
+        return f"composer {composer[:48]!r} is not a captured idle form"
+    labels = ("task-count", "model-footer", "terminal")
+    forms = list(_CURSOR_IDLE_CHROME)
+    step = 0
+    for row in tail[cidx + 1:]:
+        if not row.strip():
+            continue
+        if step >= len(forms):
+            return (f"row {row.strip()[:48]!r} after the terminal row — "
+                    "not a captured idle shape")
+        if not forms[step].match(row):
+            return (f"{labels[step]} row {row.strip()[:48]!r} "
+                    "not a captured idle form")
+        step += 1
+    return "chrome rows missing under the composer — not a captured idle shape"
 
 
 def _unknown_runstate_hold(target: str, led: dict,
@@ -3141,10 +3197,16 @@ def _unknown_runstate_hold(target: str, led: dict,
     injection anchor — or when the CALLER has OBSERVED wake text in the
     composer (`wake_in_play=True`): a monitor restart can wipe the
     ledger while the keystrokes still sit in the pane (#1010's restart
-    shape), and a wiped anchor must not turn the hold off. With NO wake
-    of ours in play at all the historical contract stands: type,
-    silently, exactly as every version has (a claude cell's TUI has no
-    running detector; unknown is its steady state).
+    shape), and a wiped anchor must not turn the hold off.
+
+    #1100 clause (2): the hold applies with NO wake in play too. At
+    74bfa09 the no-wake path typed 'check mesh'+Enter into an unknown
+    render at once (science-claude's wiped-state-dir probe), which
+    contradicts lab's delay-over-mistyping decision. Unknown holds to
+    the bound from FIRST SIGHT whatever the ledger says; a claude cell's
+    pane (no running detector, unknown its steady state) pays the bound
+    ONCE per unknown episode — `unknown_bound_fired_at` keeps the episode
+    from holding twice, and the loud bound line says what fired.
 
     Returns the detail string to log when the hold applies, else None.
     """
@@ -3154,14 +3216,14 @@ def _unknown_runstate_hold(target: str, led: dict,
         led.pop("unknown_seen_at", None)
         led.pop("unknown_bound_fired_at", None)
         return None
-    if wake_in_play is None:
-        wake_in_play = led.get("last_wake_injected_at") is not None
-    if not wake_in_play:
-        return None  # no wake of ours in play — unknown is this TUI's steady state
     if led.get("unknown_bound_fired_at") is not None:
-        # the bound already fired for THIS wake episode — the wake must
-        # go through; a second hold would strand it forever
+        # the bound already fired for THIS unknown episode — the delivery
+        # must go through; a second hold would strand it forever
         return None
+    # #1100 clause (2): the hold applies whether or not a wake of ours is
+    # in play — the no-wake path typed into an unknown render at once at
+    # 74bfa09. The first-sight clock below is the only clock.
+    _ = wake_in_play
     detail = _runstate_unknown_detail(target)
     now = time.time()
     injected = led.get("last_wake_injected_at")

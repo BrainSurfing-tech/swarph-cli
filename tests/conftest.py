@@ -208,8 +208,8 @@ def _no_unmocked_tmux(request, monkeypatch):
             raise AssertionError(
                 f"unmocked tmux call in {request.node.nodeid}: "
                 f"{list(argv[:4])} — script the seam (subprocess.run / "
-                "_capture_pane_lines) or mark the test live_tmux with a "
-                "stated reason")
+                "_capture_pane_lines / _capture_pane_lines_raw) or mark the "
+                "test live_tmux with a stated reason")
         return _REAL_SUBPROCESS_RUN(argv, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", _guarded_run)

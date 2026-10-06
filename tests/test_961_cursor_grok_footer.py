@@ -13,11 +13,22 @@ import swarph_cli.commands.mesh as mesh
 
 # Read-only capture of the cursor-lin pane, 2026-09-30: the composer row,
 # then the model footer. The rest of the live pane is scrollback and is
-# not part of the classifier.
+# not part of the classifier. #1100: completed to the REAL raw idle
+# geometry the blank-preserving captures show (idle-lin-794-capture) —
+# the original 3-row shape was a flattened minimisation, and blanks are
+# geometry: the 4-row gap above the composer, the chrome below.
 CURSOR_GROK_FOOTER = "\n".join([
     "some earlier scrollback",
+    "",
+    "",
+    "",
+    "",
     "→ Add a follow-up",
+    "",
+    "",
+    "1 task",
     "Grok 4.7 256K High Fast · 66.1% · 196 files edited",
+    "~",
 ])
 
 
@@ -117,15 +128,20 @@ def test_a_quoted_placeholder_with_the_composer_off_screen_sends_nothing(monkeyp
 
 def test_fc_blank_rows_still_read_as_an_idle_cursor_pane(monkeypatch):
     """Fails at 34d2bbf: the tail was the raw last N lines, and the blanks
-    pushed '→ Add a follow-up' out of that window."""
+    pushed '→ Add a follow-up' out of that window. #1100: the fixture is
+    completed to the real geometry (output row + the 4-blank gap above
+    the composer) and the rig scripts BOTH capture seams — the classifier
+    reads the raw pane."""
     from pathlib import Path
     raw = (Path(__file__).resolve().parent / "fixtures" / "cursor-fc-bottom.txt").read_text(encoding="utf-8").splitlines()
     assert "" in raw
-    assert raw[0].strip() == "→ Add a follow-up"
+    assert any(ln.strip() == "→ Add a follow-up" for ln in raw)
     calls = []
 
     def fake_run(argv, **kw):
         calls.append(list(argv))
+        if len(argv) > 1 and argv[1] == "capture-pane":
+            return subprocess.CompletedProcess(argv, 0, stdout="\n".join(raw) + "\n", stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(mesh, "_capture_pane_lines", lambda _t: raw)
@@ -286,7 +302,6 @@ def test_real_midturn_captures_defer(monkeypatch):
     Thinking and Running. Zero keys."""
     for name in (
         "cap_cursor-lin.txt",
-        "pane_1_armed.txt",
         "pane_2_dm1.txt",
         "real_running_cursor_working_spinner.txt",
     ):
@@ -304,6 +319,20 @@ def test_real_midturn_captures_defer(monkeypatch):
         assert mesh._agent_running(name) is True, name
         assert mesh.TmuxSink(name).deliver(_State({}), [], 1) is None
         assert _sent(calls) == []
+
+
+def test_a_scrolled_or_short_pane_reads_unknown_and_still_defers(monkeypatch):
+    """pane_1_armed (#794 hunt): the composer block sits 28 blank rows
+    above the pane's bottom edge, outside the raw 14-row bottom-region
+    window — the pane cannot be positively read. #1100: UNKNOWN (never
+    idle, never busy), and the unknown hold still sends zero keys, so
+    the mid-turn capture keeps deferring exactly as before — only the
+    classifier's name for why changed (fail-closed, not guessed)."""
+    text = _hunt794("pane_1_armed.txt")
+    calls = _record(monkeypatch, text)
+    assert mesh._agent_running("pane_1_armed") is None
+    assert mesh.TmuxSink("pane_1_armed").deliver(_State({}), [], 1) is None
+    assert _sent(calls) == []
 
 
 def test_a_real_idle_cursor_pane_still_gets_one_wake(monkeypatch):

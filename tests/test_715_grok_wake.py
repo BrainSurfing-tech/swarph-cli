@@ -65,6 +65,10 @@ def test_a_running_delivery_sends_zero_keys(monkeypatch):
     pane = lines("running.txt")
     keys = []
     monkeypatch.setattr(mesh, "_capture_pane_lines", lambda _t: pane)
+    # #1100: the running classifier reads the RAW pane — same fixture,
+    # blanks preserved (the grok fixtures carry none, so the view is
+    # identical), so the rig scripts both seams.
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw", lambda _t: pane)
     monkeypatch.setattr(mesh, "_tmux_wake", lambda _t: keys.append("wake") or True)
     monkeypatch.setattr(mesh, "_tmux_enter", lambda _t: keys.append("enter") or True)
     led = {"wake_outstanding": True}
@@ -77,6 +81,7 @@ def test_a_finished_clear_box_injects_again(monkeypatch):
     pane = lines("finished.txt")
     keys = []
     monkeypatch.setattr(mesh, "_capture_pane_lines", lambda _t: pane)
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw", lambda _t: pane)
     monkeypatch.setattr(mesh, "_tmux_wake", lambda _t: keys.append("wake") or True)
     monkeypatch.setattr(mesh, "_tmux_enter", lambda _t: keys.append("enter") or True)
     monkeypatch.setattr(

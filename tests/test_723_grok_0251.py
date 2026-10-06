@@ -27,6 +27,10 @@ class _State:
 def _deliver(monkeypatch, pane, led):
     keys = []
     monkeypatch.setattr(mesh, "_capture_pane_lines", lambda _t: pane)
+    # #1100: the running classifier reads the RAW pane — same fixture
+    # through both seams (the grok fixtures carry no blank rows, so the
+    # non-empty view and the raw view are identical).
+    monkeypatch.setattr(mesh, "_capture_pane_lines_raw", lambda _t: pane)
     monkeypatch.setattr(mesh, "_tmux_wake", lambda _t: keys.append("wake") or True)
     monkeypatch.setattr(mesh, "_tmux_enter", lambda _t: keys.append("enter") or True)
     outcome = mesh.TmuxSink("grok-723-sac").deliver(_State(led), [], 1)
