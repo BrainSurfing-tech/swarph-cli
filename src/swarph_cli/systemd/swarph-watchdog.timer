@@ -1,5 +1,5 @@
 [Unit]
-Description=Run swarph watchdog every 5 minutes (stranded-session recovery)
+Description=Run IMMUNE (cell watchdog): swarph watchdog every 5 minutes (stranded-session recovery)
 Documentation=https://github.com/BrainSurfing-tech/swarph-cli
 Requires=swarph-watchdog.service
 

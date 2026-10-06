@@ -1,4 +1,4 @@
-"""Card #729. Every pass, a cell with nobody reading its inbox is an outage.
+"""IMMUNE (cell watchdog), card #729. Every pass, a cell with nobody reading its inbox is an outage.
 
 One DM per outage. A live watcher clears it, so the next gap can alert again.
 """
@@ -360,17 +360,17 @@ def main(argv: list[str] | None = None) -> int:
     for name in alert:
         print(f"outage {name}", flush=True)
         dm_rc = mesh_send(
-            swarph, name, sender, "your DM wake is dead, re-arm", token_file)
+            swarph, name, sender, "IMMUNE (cell watchdog): your DM wake is dead, re-arm", token_file)
         dm_ok = dm_rc == 0
         card_argv = [swarph, "board", "cards", "say", "729", "--as", sender,
-                     "--to", name, "--content", f"{name}: DM wake is dead, re-arm"]
+                     "--to", name, "--content", f"IMMUNE (cell watchdog) — {name}: DM wake is dead, re-arm"]
         if token_file:
             card_argv.extend(["--token-file", token_file])
         card = subprocess.run(card_argv, check=False)
         esc_ok = True
         if escalate and escalate != name:
             esc_rc = mesh_send(
-                swarph, escalate, sender, f"{name}: DM wake is dead, re-arm",
+                swarph, escalate, sender, f"IMMUNE (cell watchdog) — {name}: DM wake is dead, re-arm",
                 token_file)
             esc_ok = esc_rc == 0
         if dm_ok and card.returncode == 0 and esc_ok:

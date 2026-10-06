@@ -113,7 +113,7 @@ Three memories, plus a curator.
 - **Semantic memory.** Facts, decisions, and lessons, searched by meaning. `swarph brain-ask "<question>"` is the recall. `swarph memory get`, `swarph memory list`, and `swarph memory links` are the exact-name navigation. `swarph brain serve` runs the brain server.
 - **Code graph.** Symbols, callers, and blast radius. `swarph codegraph <query>`.
 - **Shared timeline.** What happened, when, and by whom. `swarph highlight "<one line>"` appends one highlight. `swarph timeline since <date>`, `swarph timeline around <date>`, and `swarph timeline range <from> <to>` read it back. The timeline is date-indexed, not a free-text search.
-- **Secretary.** The curator proposes. A person accepts. `swarph dreaming run` is the cell-local pass: it clones one cell's corpus, checks claims, and never writes the live store. It is not scheduled by install.
+- **HIPPOCAMPUS (secretary).** The curator proposes. A person accepts. `swarph dreaming run` is the cell-local pass: it clones one cell's corpus, checks claims, and never writes the live store. It is not scheduled by install.
 
 Three measurements, all on our system, reported 2026-10-06, and early:
 
@@ -156,7 +156,7 @@ Measure what is waiting, not only what is running. A deaf agent and an idle one 
 
 | Instrument | Question | swarph |
 |---|---|---|
-| Obligation sweep | Which rows are overdue, or have no one who can close them? | `swarph board obligations list` |
+| LYMPH (obligation sweep) | Which rows are overdue, or have no one who can close them? | `swarph board obligations list` |
 | Pull-request ledger | What is approved but unmerged, and who does it wait on? | read the gate live, at the full head |
 | Lane use | Which lanes are scaled, and where are jobs queued? | `swarph lane list` |
 | Timers | What is scheduled, and did it fire? | `swarph schedule list` |
