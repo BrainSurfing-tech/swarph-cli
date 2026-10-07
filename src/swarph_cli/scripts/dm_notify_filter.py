@@ -41,6 +41,12 @@ from typing import IO, Any, Optional
 
 _IDLE_DEFAULT_SECONDS = 1800
 
+# Card #1050: ANY per-line failure is a logged skip, never a process death
+# (a death in --once mode reads as "no DM arrived"). The notice keeps the
+# [MESH DM prefix and goes to stdout so a downstream waker wakes on it;
+# it is ASCII-only so it cannot itself raise on a hostile-errors stdout.
+_SKIP_NOTICE = "[MESH DM] unrenderable line skipped"
+
 
 def _reader(stream: IO[str], q: "queue.Queue[Optional[str]]") -> None:
     """Daemon thread: blocking readline loop, None sentinel on EOF."""
@@ -119,11 +125,7 @@ def run_filter(
                 except BrokenPipeError:
                     raise  # a closed pipe stays loud (SIGPIPE contract)
                 except Exception:
-                    # Card #1050: ANY per-line failure is a logged skip,
-                    # never a process death. The notice is ASCII-only so it
-                    # cannot itself raise on a hostile-errors stdout.
-                    print("[MESH DM] unrenderable line skipped",
-                          file=stdout, flush=True)
+                    print(_SKIP_NOTICE, file=stdout, flush=True)
             processed += 1
             if max_lines is not None and processed >= max_lines:
                 return 0
@@ -157,11 +159,16 @@ def run_once(path: str, stdout: IO[str], *, timeout: float = 2.0) -> int:
             except Exception:
                 continue
             if isinstance(d, dict):
-                d = d.get("dm") or d
-                rendered = _format_dm(d) if isinstance(d, dict) else None
-                if rendered is not None:
-                    print(rendered, file=stdout, flush=True)
-                    return 0
+                try:
+                    d = d.get("dm") or d
+                    rendered = _format_dm(d) if isinstance(d, dict) else None
+                    if rendered is not None:
+                        print(rendered, file=stdout, flush=True)
+                        return 0
+                except BrokenPipeError:
+                    raise  # a closed pipe stays loud (SIGPIPE contract)
+                except Exception:
+                    print(_SKIP_NOTICE, file=stdout, flush=True)
         time.sleep(0.05)
     return 1
 

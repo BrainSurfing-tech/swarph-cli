@@ -71,3 +71,45 @@ def test_lone_surrogate_never_kills_process():
     assert b"id=12" in p.stdout
     assert b"DEAF" in p.stdout
     assert b"Traceback" not in p.stderr
+
+
+def test_once_skips_non_string_content_and_wakes_on_next(tmp_path):
+    """#1310: run_once shares the never-die contract. A first-arriving DM
+    whose content is not a string (a number here) must become a logged
+    skip, not a death read as 'no DM arrived'; the next good DM still
+    wakes (exit 0). Seam: the --once process boundary, fed live."""
+    import threading
+    import time
+
+    inbox = tmp_path / "inbox.log"
+    inbox.write_text("")
+    proc = subprocess.Popen(
+        MOD + ["--once", "--inbox", str(inbox), "--timeout", "10"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=dict(os.environ),
+    )
+
+    def feed():
+        time.sleep(0.5)
+        with open(inbox, "a") as fh:
+            fh.write('{"id":41,"from_node":"a","kind":"fyi",'
+                     '"content":42}\n')
+        time.sleep(0.5)
+        with open(inbox, "a") as fh:
+            fh.write(GOOD + "\n")
+
+    threading.Thread(target=feed, daemon=True).start()
+    out, err = proc.communicate(timeout=30)
+    assert b"Traceback" not in err, f"run_once died: {err[-300:]!r}"
+    assert b"unrenderable line skipped" in out, (
+        f"numeric content was not a logged skip: rc={proc.returncode} "
+        f"stdout={out!r}"
+    )
+    assert b"id=12" in out, (
+        f"good DM after the skip did not wake: rc={proc.returncode} "
+        f"stdout={out!r}"
+    )
+    assert proc.returncode == 0, (
+        f"wake on the good DM must exit 0, got {proc.returncode}"
+    )
