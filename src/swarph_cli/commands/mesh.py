@@ -3392,6 +3392,35 @@ def _monitor_deliver(state: MonitorState) -> None:
         _write_ledgers_atomic(state.ledgers_path, state.ledgers)
 
 
+def _type_slash_clear(target: str) -> bool:
+    """Type ``/clear`` and submit it. One command, not a wake."""
+    for argv in (
+        ["tmux", "send-keys", "-t", target, "-l", "/clear"],
+        ["tmux", "send-keys", "-t", target, "Enter"],
+    ):
+        try:
+            r = subprocess.run(
+                argv, capture_output=True, timeout=5,
+                text=True, encoding="utf-8", errors="replace",
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if r.returncode != 0:
+            return False
+    return True
+
+
+def _maybe_rowclear(state: MonitorState) -> str:
+    """Card #432. Off and non-opted-in cells return before any pane read."""
+    from swarph_cli.rowclear import maybe_rowclear
+    return maybe_rowclear(
+        state,
+        agent_running=_agent_running,
+        http_get=_http_get_json,
+        type_clear=_type_slash_clear,
+    )
+
+
 def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> None:
     state.iterations += 1
     last_id = int(state.observed.get("last_msg_id", 0))
@@ -3456,6 +3485,9 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
     # A delivery deferred by the idle guard (or failed against a dead sink) must
     # still land even though no NEW mail arrived, so this runs on every poll.
     _monitor_deliver(state)
+    # Card #432: after delivery, so an owed DM (cursor still behind) blocks
+    # the clear. off / not-opted-in return before any pane or board read.
+    _maybe_rowclear(state)
     # The observation cursor is written BEFORE delivery, while last_wake_at is
     # still unknown. A wake that landed this poll has to be written again or
     # cursor.json keeps the 0.0 default after a real keystroke (#405).

@@ -127,6 +127,9 @@ _SWARPH_ENV = (
     "SWARPH_MEMORY_DIR",
     "SWARPH_CODEGRAPH_INDEX",
     "SWARPH_WITNESS",
+    # card #432: a developer's SWARPH_ROWCLEAR=live must not make the suite
+    # type /clear. A test that wants shadow or live sets it itself.
+    "SWARPH_ROWCLEAR",
     # bench registry path — a developer's file must not become the suite's
     "SWARPH_BENCH_PROVIDERS",
     "MESH_DB_PATH",

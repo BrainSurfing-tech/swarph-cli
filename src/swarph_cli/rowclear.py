@@ -1,0 +1,217 @@
+"""Card #432: type ``/clear`` at a row boundary, and follow the new session.
+
+The monitor types ``/clear`` into an opted-in role cell's tmux pane only
+when the cell holds no live row, the pane reads idle, and no DM is owed.
+``SWARPH_ROWCLEAR`` is ``off`` (default), ``shadow`` (log a would-clear,
+type nothing), or ``live``. v1 opt-in is drop-on-meta-edge only: a cell
+that owns a project keeps its context (design_1007 / optin_owners).
+
+A ``/clear`` mints a new Claude session id. The SessionStart hook with
+``source=clear`` writes that id into the role's ``<role>.session-id``
+pin, so the next spawn resumes the cleared session instead of the long
+one the pin still named.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timezone
+from typing import Any, Callable, Optional
+
+from swarph_cli.cell import (
+    CellError,
+    _read_session_sidecar,
+    _write_session_sidecar,
+    session_state_path,
+    validate_uuid_str,
+)
+
+# v1. Further cells join only by their own or the commander's opt-in.
+OPT_IN = frozenset({"drop-on-meta-edge"})
+
+# A row the cell is still holding. ``open`` is the status a taken row
+# carries; anything else still on the holder and not finished counts too.
+_DONE = frozenset({"closed", "cancelled", "canceled", "declined"})
+
+_MODES = frozenset({"off", "shadow", "live"})
+
+
+def mode_from_env() -> str:
+    raw = os.environ.get("SWARPH_ROWCLEAR", "off").strip().lower()
+    return raw if raw in _MODES else "off"
+
+
+def _latch_path(state) -> "os.PathLike[str]":
+    return state.state_dir / "rowclear.json"
+
+
+def _log_path(state) -> "os.PathLike[str]":
+    return state.state_dir / "rowclear.log"
+
+
+def _read_latch(state) -> Optional[str]:
+    path = _latch_path(state)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    mode = data.get("latched_mode") if isinstance(data, dict) else None
+    return mode if isinstance(mode, str) else None
+
+
+def _write_latch(state, mode: Optional[str]) -> None:
+    path = _latch_path(state)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"latched_mode": mode}) + "\n", encoding="utf-8")
+
+
+def _tmux_target(state) -> Optional[str]:
+    for sink in state.sinks:
+        if type(sink).__name__ == "TmuxSink":
+            target = getattr(sink, "target", None)
+            if target:
+                return target
+    return None
+
+
+def _dm_owed(state) -> bool:
+    observed = int(state.observed.get("last_msg_id", 0))
+    for sink in state.sinks:
+        if not getattr(sink, "keeps_ledger", False):
+            continue
+        led = state.ledger(sink.name)
+        if int(led.get("last_delivered_id", 0)) < observed:
+            return True
+        if led.get("wake_outstanding"):
+            return True
+    return False
+
+
+def _live_row_count(state, http_get: Callable) -> Optional[int]:
+    """How many unfinished rows this cell holds, or None if unread.
+
+    None fails closed: an unreadable board must not look like an empty
+    one, or a live row we failed to see gets a ``/clear``.
+    """
+    url = f"{state.gateway}/board/obligations?holder={state.self_name}"
+    try:
+        status, body = http_get(url, state.token)
+    except Exception:
+        return None
+    if status != 200 or not isinstance(body, dict):
+        return None
+    rows = body.get("obligations")
+    if not isinstance(rows, list):
+        return None
+    live = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "") not in _DONE:
+            live += 1
+    return live
+
+
+def _append_would_clear(state, *, open_rows: int, pane_state: str) -> None:
+    path = _log_path(state)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "cell": state.self_name,
+        "time": datetime.now(timezone.utc).isoformat(),
+        "open_rows": open_rows,
+        "pane_state": pane_state,
+        "action": "would-clear",
+    }
+    with path.open("a", encoding="utf-8") as fp:
+        fp.write(json.dumps(record) + "\n")
+
+
+def maybe_rowclear(
+    state,
+    *,
+    agent_running: Callable[[str], Optional[bool]],
+    http_get: Callable,
+    type_clear: Callable[[str], bool],
+) -> str:
+    """One poll. Returns the decision, so a test can name why no key went.
+
+    ``off`` and a cell not on the opt-in list return before any read or
+    write: they are unchanged. A live row, a busy pane, or an owed DM
+    unlatches the idle boundary and types nothing. Unknown rows or an
+    unknown pane type nothing and leave the latch alone.
+    """
+    mode = mode_from_env()
+    if mode == "off":
+        return "off"
+    if state.self_name not in OPT_IN:
+        return "not-opted-in"
+
+    live = _live_row_count(state, http_get)
+    if live is None:
+        return "blocked-rows-unknown"
+    if live > 0:
+        _write_latch(state, None)
+        return "blocked-live-row"
+
+    target = _tmux_target(state)
+    if target is None:
+        return "blocked-no-pane"
+    pane = agent_running(target)
+    if pane is True:
+        _write_latch(state, None)
+        return "blocked-busy"
+    if pane is None:
+        return "blocked-unknown-pane"
+    if _dm_owed(state):
+        _write_latch(state, None)
+        return "blocked-owed-dm"
+
+    if _read_latch(state) == mode:
+        return "latched"
+
+    if mode == "shadow":
+        _append_would_clear(state, open_rows=live, pane_state="idle")
+        _write_latch(state, mode)
+        print(
+            f"[rowclear] {state.self_name}: would-clear "
+            f"(open_rows={live}, pane=idle) — shadow, zero keys",
+            flush=True,
+        )
+        return "shadow"
+
+    if not type_clear(target):
+        print(
+            f"[rowclear] {state.self_name}: /clear send failed — "
+            "not latched, retried next poll",
+            flush=True,
+        )
+        return "type-failed"
+    _write_latch(state, mode)
+    print(
+        f"[rowclear] {state.self_name}: typed /clear "
+        f"(open_rows={live}, pane=idle, no DM owed)",
+        flush=True,
+    )
+    return "live"
+
+
+def apply_sessionstart_clear(payload: dict[str, Any], role: str) -> bool:
+    """Write ``session_id`` into the role pin when SessionStart source is clear.
+
+    Any other source leaves the pin alone: a resume must not clobber the
+    id the spawn will attach to. Returns True only when the pin was rewritten.
+    """
+    if not isinstance(payload, dict) or payload.get("source") != "clear":
+        return False
+    raw = payload.get("session_id") or payload.get("sessionId") or ""
+    try:
+        session_id = validate_uuid_str(str(raw))
+    except (CellError, TypeError, ValueError):
+        return False
+    path = session_state_path(role)
+    _uuid, recorded_cwd = _read_session_sidecar(path)
+    cwd = payload.get("cwd") or recorded_cwd or ""
+    _write_session_sidecar(path, session_id, cwd)
+    return True
