@@ -18,6 +18,8 @@ import json
 import os
 import urllib.request
 
+import pytest
+
 from swarph_cli.commands import watchdog as wd
 from swarph_cli.commands.watchdog import run_watchdog
 
@@ -158,6 +160,25 @@ def test_replay_token_env_yields_a1(monkeypatch, tmp_path, capsys):
     assert '"decision": "a1_send_keys"' in out.out + out.err, out
     assert '"unread_count": 3' in out.out + out.err, out
     assert rc == 1
+
+
+@pytest.mark.parametrize("status", [403, 500])
+def test_count_refused_never_falls_back_to_list(monkeypatch, status):
+    """#1344: a refused/errored count (403/500) must NOT retry via the
+    list query — the gateway deliberately refused bodies (or failed),
+    and doubling the call is wrong. Only 404 (route absent) falls back.
+    The check reports the error (None -> F2 fail-closed downstream)."""
+    calls = []
+
+    def fake_urlopen(req, timeout=5):
+        calls.append(req.full_url)
+        raise urllib.error.HTTPError(req.full_url, status, "nope", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert wd._gateway_unread_count(
+        "http://gw:1", "opencode", TOKEN) is None
+    assert calls == ["http://gw:1/messages/unread-count?to_node=opencode"], \
+        calls
 
 
 def test_replay_count_404_falls_back_to_list(monkeypatch, tmp_path, capsys):

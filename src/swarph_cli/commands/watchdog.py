@@ -511,10 +511,16 @@ def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Opti
               f"unread-count check may 401 if the gateway requires auth; "
               f"A1 stays inert until one is set",
               file=sys.stderr)
-    count = _gateway_unread_via_count(gateway, peer, token)
-    if count is not None:
-        return count
-    return _gateway_unread_via_list(gateway, peer, token)
+    n, status = _gateway_unread_via_count(gateway, peer, token)
+    if n is not None:
+        return n
+    if status == 404:
+        # Gateway predates the endpoint: degrade to the list query. ONLY
+        # 404 triggers this — a 403/401/500 must NOT fall back (#1332:
+        # retrying bodies the gateway deliberately refused, or doubling
+        # a failing call, is wrong; fail closed instead).
+        return _gateway_unread_via_list(gateway, peer, token)
+    return None
 
 
 def _gateway_request(gateway: str, path: str, query: dict,
@@ -536,14 +542,16 @@ def _gateway_request(gateway: str, path: str, query: dict,
 
 
 def _gateway_unread_via_count(gateway: str, peer: str,
-                             token: Optional[str]) -> Optional[int]:
+                             token: Optional[str]) -> tuple:
     """Count-only read: {"to_node", "n"}. No bodies cross the wire, so a
-    least-privilege watchdog identity suffices (card #1059)."""
-    data, _status = _gateway_request(
+    least-privilege watchdog identity suffices (card #1059). Returns
+    (n_or_None, http_status_or_None) — the status is the fallback
+    discriminator, so it must survive even when the body is absent."""
+    data, status = _gateway_request(
         gateway, "/messages/unread-count", {"to_node": peer}, token)
     if isinstance(data, dict) and isinstance(data.get("n"), int):
-        return data["n"]
-    return None
+        return data["n"], status
+    return None, status
 
 
 def _gateway_unread_via_list(gateway: str, peer: str,
