@@ -1950,6 +1950,39 @@ def run_install_service(args: argparse.Namespace) -> int:
         1,
     )
 
+    # Card #1059: template units run without the installer's env, so the
+    # unread check reads None and A1 stays inert (exit 7, opencode +
+    # cursor-lin measured live). Seed the per-cell EnvironmentFile
+    # default with the installer's token — NEVER the unit (units are
+    # world-readable; the default file is written 0600). An existing
+    # default file keeps its non-token lines (local edits survive); a
+    # stale token line is replaced, never duplicated.
+    install_token = os.environ.get("MESH_GATEWAY_TOKEN")
+    if install_token is not None and "\n" in install_token:
+        print("ERROR: MESH_GATEWAY_TOKEN contains a newline — refusing "
+              "to write the EnvironmentFile default.", file=sys.stderr)
+        return 4
+    default_path = _SYSTEMD_DEFAULT_DIR / default_name
+    try:
+        base = default_path.read_text(encoding="utf-8")
+    except OSError:
+        base = default_content
+    kept = [ln for ln in base.splitlines()
+            if not ln.startswith("MESH_GATEWAY_TOKEN=")]
+    default_content = "\n".join(kept).rstrip() + "\n"
+    if install_token:
+        default_content += (
+            "# MESH_GATEWAY_TOKEN: written by --install-service from the "
+            "installer's environment so template runs can read the "
+            "gateway unread count. Re-run --install-service to rotate.\n"
+            f"MESH_GATEWAY_TOKEN={install_token}\n"
+        )
+    else:
+        print("WARNING: MESH_GATEWAY_TOKEN not in installer env — "
+              "template runs will exit 7 (noop_unread_unknown) until it "
+              "is set; re-run --install-service with it set.",
+              file=sys.stderr)
+
     targets = [
         (_SYSTEMD_UNIT_DIR / service_name, service_content),
         (_SYSTEMD_UNIT_DIR / timer_name, timer_content),
@@ -1991,6 +2024,11 @@ def run_install_service(args: argparse.Namespace) -> int:
     try:
         for path, content in targets:
             path.write_text(content, encoding="utf-8")
+            if path == default_path:
+                # The default file may hold MESH_GATEWAY_TOKEN: restrict
+                # it even when this install carried no token (rotation
+                # may have left one from a previous install).
+                os.chmod(path, 0o600)
             print(f"wrote {path}", file=sys.stderr)
     except (OSError, PermissionError) as exc:
         print(f"ERROR: failed to write unit files: {exc}", file=sys.stderr)
