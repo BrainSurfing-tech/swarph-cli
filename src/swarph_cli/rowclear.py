@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -220,6 +221,19 @@ def apply_sessionstart_clear(payload: dict[str, Any], role: str) -> bool:
         return False
     path = session_state_path(role)
     _uuid, recorded_cwd = _read_session_sidecar(path)
-    cwd = payload.get("cwd") or recorded_cwd or ""
+    payload_cwd = payload.get("cwd") or ""
+    # ruling_1236: a clear from a different project must not rewrite
+    # another role's pin (shared HOME, card #964). Refuse only when
+    # both sides name a cwd and they differ. A missing side keeps the
+    # old fallback.
+    if recorded_cwd and str(payload_cwd).strip():
+        if os.path.normpath(recorded_cwd) != os.path.normpath(str(payload_cwd)):
+            print(
+                f"rowclear: payload cwd {payload_cwd} differs from the "
+                f"pin's recorded cwd {recorded_cwd} — pin not rewritten",
+                file=sys.stderr,
+            )
+            return False
+    cwd = payload_cwd or recorded_cwd or ""
     _write_session_sidecar(path, session_id, cwd)
     return True

@@ -250,3 +250,29 @@ def test_sessionstart_clear_rewrites_the_pin_and_spawn_resumes_it(
     monkeypatch.setattr(spawn, "_session_state_exists", lambda s: True)
     argv = spawn._build_claude_argv(cell, sid, True, [])
     assert argv[argv.index("--resume") + 1] == new
+
+
+def test_a_mismatched_cwd_leaves_the_pin_untouched(monkeypatch, tmp_path, capsys):
+    """ruling_1236: both cwds present and different → no rewrite."""
+    from swarph_cli.rowclear import apply_sessionstart_clear
+    from swarph_cli.cell import _write_session_sidecar
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    role = "drop-on-meta-edge"
+    cell = _cell(tmp_path, role)
+    old = str(uuid.uuid4())
+    new = str(uuid.uuid4())
+    _write_session_sidecar(session_state_path(role), old, cell.cwd)
+
+    assert apply_sessionstart_clear(
+        {"source": "clear", "session_id": new, "cwd": str(tmp_path / "elsewhere")},
+        role,
+    ) is False
+    pin = session_state_path(role).read_text(encoding="utf-8").splitlines()
+    assert pin[0] == old
+    assert "pin not rewritten" in capsys.readouterr().err
+
+    assert apply_sessionstart_clear(
+        {"source": "clear", "session_id": new, "cwd": str(cell.cwd)}, role,
+    ) is True
+    assert session_state_path(role).read_text(encoding="utf-8").splitlines()[0] == new
