@@ -1,0 +1,72 @@
+  ┃   23 I have NOT pushed and will not silently fall back. Row #1096 stays with me until the PR is open.
+  ┃   24                                                                                                                                                                                                                                                                             Ensure single DM wake for opencode
+  ┃                                                                                                                                                                                                                                                                                  cell identity
+
+  ┃                                                                                                                                                                                                                                                                                  Context
+  ┃  $ swarph mesh send lab-ovh --kind answer --content-file /tmp/opencode/lab-1096-pr-blocker.md --as opencode 2>&1 | tail -2                                                                                                                                                       584,948 tokens
+  ┃                                                                                                                                                                                                                                                                                  58% used
+  ┃  sent id=62529 from=opencode to=lab-ovh kind=answer                                                                                                                                                                                                                              $3.79 spent
+  ┃
+                                                                                                                                                                                                                                                                                     MCP
+     + Thought: 1.7s                                                                                                                                                                                                                                                                 • swarph Connected
+
+  ┃                                                                                                                                                                                                                                                                                  LSP
+  ┃  # Todos                                                                                                                                                                                                                                                                         LSPs are disabled
+  ┃
+  ┃  [✓] Take #1096 and locate lab-orchestrator repo + hook file                                                                                                                                                                                                                     ▼ Todo
+  ┃  [✓] Narrow tenant prefixes (acme_, omega_trading; drop omega_)                                                                                                                                                                                                                [✓] Take #1096 and locate lab-
+  ┃  [✓] Add test: omega_notes KEPT, omega_trading_x + acme_campaign_y dropped (red on ebf240b)                                                                                                                                                                                        orchestrator repo + hook file
+  ┃  [✓] Verify test red on ebf240b, green on head; 53 hook tests pass                                                                                                                                                                                                               [✓] Narrow tenant prefixes (acme_,
+  ┃  [•] Open PR — BLOCKED: opencode has no GitHub identity (gh-route REFUSED); flagged lab-ovh (62529)                                                                                                                                                                                  omega_trading; drop omega_)
+  ┃  [ ] Close #1096 with evidence (PR ref) — pending PR open                                                                                                                                                                                                                        [✓] Add test: omega_notes KEPT,
+  ┃                                                                                                                                                                                                                                                                                      omega_trading_x +
+                                                                                                                                                                                                                                                                                         acme_campaign_y dropped (red
+     + Thought: 595ms                                                                                                                                                                                                                                                                    on ebf240b)
+                                                                                                                                                                                                                                                                                     [✓] Verify test red on ebf240b,
+     First small job — built and verified, but PR is blocked on GitHub identity:                                                                                                                                                                                                         green on head; 53 hook tests pass
+                                                                                                                                                                                                                                                                                     [•] Open PR — BLOCKED: opencode has
+     Done (#1096, my first build row):                                                                                                                                                                                                                                                   no GitHub identity (gh-route
+                                                                                                                                                                                                                                                                                         REFUSED); flagged lab-ovh (62529)
+     - scripts/memory-retrieve/swarph-memory-retrieve.py: default tenant prefixes "acme_,omega_" → "acme_,omega_trading" (narrowed the over-broad omega_ root; kept acme_; env override untouched).                                                                            [ ] Close #1096 with evidence (PR
+     - Added test_1096_tenant_prefix_narrowed_omega_root_kept.                                                                                                                                                                                                                           ref) — pending PR open
+     - Verified: test RED on ebf240b (omega_notes dropped as tenant), GREEN on head; full hook suite 53 passed.
+     - Commit 037032b on branch fix/1096-tenant-prefix (worktree /home/ubuntu/worktrees/lab-orchestrator-1096-oc).
+
+     Blocker (flagged to lab in 62529): swarph gh-route show REFUSES — opencode has no GitHub identity in gh-identities.json (only lab-ovh, cursor-lin). And builder.gh_token resolves to lab-ovh's account, so pushing with it would open the PR as lab-ovh — the
+     misattribution the router exists to prevent. I did not silently fall back.
+
+     Row #1096 stays mine until the PR is open; lab's pick: add an opencode identity, authorize me to use the builder token, or push the branch themselves.
+
+     ▣  Build · DeepSeek V4.1 Flash · 4h 59m
+
+  ┃
+  ┃  send Lab a DM about this
+  ┃
+
+     + Thought: 6.1s
+
+  ┃
+  ┃  $ swarph mesh send lab-ovh --kind answer --as opencode --content "opencode re #1096: the fix is DONE and verified — commit 037032b on branch fix/1096-tenant-prefix (worktree /home/ubuntu/worktrees/lab-orchestrator-1096-oc). Test
+  ┃  test_1096_tenant_prefix_narrowed_omega_root_kept is RED on ebf240b and GREEN on head; full hook suite 53 passed. BLOCKER: I can't open the PR — 'swarph gh-route show' REFUSES opencode (no GitHub identity in gh-identities.json; only lab-ovh, cursor-lin), and builder.
+  ┃  gh_token resolves to lab-ovh's account, so pushing with it would open the PR AS lab-ovh. Need your call: (1) add an opencode GitHub identity (+token) so I push and open the PR; (2) authorize me to use builder.gh_token accepting lab-ovh as PR author; or (3) you push
+  ┃  the branch / open the PR. Not falling back silently. Row #1096 stays open with me until the PR is up." 2>&1 | tail -2
+  ┃
+  ┃  sent id=62531 from=opencode to=lab-ovh kind=answer
+  ┃
+
+     + Thought: 381ms
+
+     Sent — DM 62531 to lab-ovh with the blocker (and 62529 earlier had the full detail).
+
+     Content: #1096 fix done + verified (037032b on fix/1096-tenant-prefix, red on ebf240b / green on head, 53 tests pass), but the PR is blocked because gh-route refuses opencode (no GitHub identity) and builder.gh_token is lab-ovh's. Asked lab to pick: add an opencode
+     identity, authorize the builder token, or push the branch themselves. Row #1096 stays open with me until the PR is up.
+
+     ▣  Build · DeepSeek V4.1 Flash · 16.5s
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · DeepSeek V4 Pro (New) OpenCode Go                                                                                                                                                                                                                                       ~/swarph-cli:feat/961-muse-sink
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   /home/ubuntu/swarph-cli                                                                                                                                                                                                                  584.9K (58%) · $3.79  ctrl+p commands    • OpenCode 1.18.33
+

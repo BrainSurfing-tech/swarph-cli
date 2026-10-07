@@ -1515,7 +1515,14 @@ class TmuxSink(Sink):
             # Opencode keeps the finished ▣ header on screen, so a deferral
             # during the turn must not clear the flag: the next idle poll
             # still owes a wake. Cursor's #620 clear stays.
-            if _opencode_in_progress(self.target) or _grok_in_progress(self.target):
+            if _opencode_in_progress(self.target):
+                # Card #1052: name the real deferral cause — without this
+                # the log says "composer holds human text" on a CLEAR
+                # composer while a finished header misreads as live.
+                self.deferred_reason = "opencode turn in progress"
+                return None
+            if _grok_in_progress(self.target):
+                self.deferred_reason = "grok turn in progress"
                 return None
             led["wake_outstanding"] = False
         if led.get("wake_outstanding"):
@@ -2327,10 +2334,15 @@ _MUSE_WAKE_PROMPT = "check mesh: swarph_dm_unread"
 # A finished turn keeps its ▣ header and adds a duration.
 # Short turns read `· 3.3s` (drop-on-meta-edge, 1.18.33, card #961 post
 # 54557). A longer idle turn reads `· 3m 4s` (opencode pane, 2026-09-29
-# 07:10Z). On a wide pane the same row continues into the sidebar, so the
-# duration is not the end of the line. An in-progress header has no duration.
+# 07:10Z). Long turns read h/m-only: `· 4h 59m`, `· 12m`, `· 1h` (opencode,
+# card #1052 — the old regex needed trailing seconds and read these as
+# live for 32h). On a wide pane the same row continues into the sidebar,
+# so the duration is not the end of the line. An in-progress header has
+# no duration.
 _OPENCODE_DONE = re.compile(
-    r"·\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+(?:\.\d+)?s\b"
+    r"·\s*(?:(?:\d+h\s+)?(?:\d+m\s+)?\d+(?:\.\d+)?s"
+    r"|\d+h(?:\s+\d+m)?"
+    r"|\d+m)\b"
 )
 # Submit-verify bounds (#533): the settle pause lets the -l literal LAND in
 # the composer before Enter can submit it (the blind gesture raced this), and
@@ -2504,31 +2516,37 @@ def _is_opencode_pane(lines: list[str]) -> bool:
     return bool(lines) and _bottom_tui(lines) == "opencode"
 
 
+def _last_box_header(lines: list[str]) -> Optional[str]:
+    """The LAST ▣ header on screen. Scrollback keeps old headers (card
+    #1052: a finished `4h 59m` header above the live tail); only the
+    bottom-most one judges the turn."""
+    for ln in reversed(lines):
+        if ln.strip().startswith("▣"):
+            return ln.strip()
+    return None
+
+
 def _opencode_running(lines: list[str]) -> bool:
     """True only while a turn is in progress.
 
-    The footer shows ``esc interrupt``, and the ▣ header has no trailing
-    duration. A finished turn keeps the ▣ header and adds ``· <n>s``,
-    with no interrupt hint. That pane is idle. The permission dialog is
+    The footer shows ``esc interrupt``, and the last ▣ header has no
+    trailing duration. A finished turn keeps the ▣ header and adds a
+    duration (``· <n>s`` or h/m-only like ``· 4h 59m``), with no
+    interrupt hint. That pane is idle. The permission dialog is
     not a turn; it has its own branch.
     """
     if any("esc interrupt" in ln for ln in lines):
         return True
-    for ln in lines:
-        s = ln.strip()
-        if s.startswith("▣") and not _OPENCODE_DONE.search(s):
-            return True
-    return False
+    last = _last_box_header(lines)
+    return last is not None and not _OPENCODE_DONE.search(last)
 
 
 def _opencode_turn_finished(lines: list[str]) -> bool:
-    """The ▣ header carried a duration and the interrupt hint is gone."""
+    """The last ▣ header carried a duration and the interrupt hint is gone."""
     if _opencode_running(lines):
         return False
-    return any(
-        ln.strip().startswith("▣") and _OPENCODE_DONE.search(ln.strip())
-        for ln in lines
-    )
+    last = _last_box_header(lines)
+    return last is not None and bool(_OPENCODE_DONE.search(last))
 
 
 def _opencode_in_progress(target: str) -> bool:
