@@ -53,8 +53,12 @@ class _State:
         return self._led[name]
 
 
-def _arm(monkeypatch, state, *, rows=0, pane=False, mode="live"):
-    """rows is an int count, or None for an unreadable board."""
+def _arm(monkeypatch, state, *, rows=0, pane=False, mode="live", statuses=None):
+    """rows is an int count of open rows, or None for an unreadable board.
+
+    statuses, when given, is the status of each returned row (a
+    fallback_fired row, an unknown status).
+    """
     monkeypatch.setenv("SWARPH_ROWCLEAR", mode)
     typed: list[str] = []
 
@@ -64,13 +68,15 @@ def _arm(monkeypatch, state, *, rows=0, pane=False, mode="live"):
 
     monkeypatch.setattr(mesh, "_type_slash_clear", type_clear, raising=False)
     monkeypatch.setattr(mesh, "_agent_running", lambda t: pane)
+    row_statuses = list(statuses) if statuses is not None else (
+        [] if rows is None else ["open"] * rows)
 
     def http_get(url, token, timeout=10.0):
         if rows is None:
             return 500, {"detail": "down"}
         body = {"obligations": [
-            {"id": i + 1, "holder": state.self_name, "status": "open"}
-            for i in range(rows)
+            {"id": i + 1, "holder": state.self_name, "status": s}
+            for i, s in enumerate(row_statuses)
         ]}
         return 200, body
 
@@ -126,6 +132,30 @@ def test_unreadable_rows_block_the_clear(monkeypatch, tmp_path):
     typed = _arm(monkeypatch, state, rows=None, pane=False, mode="live")
     assert _run(state) == "blocked-rows-unknown"
     assert typed == []
+
+
+def test_a_fallback_fired_row_does_not_block(monkeypatch, tmp_path):
+    """fallback_fired is finished. The opted-in cell holds one, and it
+    must not freeze the clear forever."""
+    state = _State(tmp_path)
+    typed = _arm(
+        monkeypatch, state, pane=False, mode="live",
+        statuses=["fallback_fired", "closed"],
+    )
+    assert _run(state) == "live"
+    assert typed == ["/clear"]
+
+
+def test_an_unknown_status_fails_closed(monkeypatch, tmp_path):
+    """A status outside open / closed / fallback_fired is not an empty cell."""
+    state = _State(tmp_path)
+    typed = _arm(
+        monkeypatch, state, pane=False, mode="live",
+        statuses=["closed", "mystery"],
+    )
+    assert _run(state) == "blocked-rows-unknown"
+    assert typed == []
+    assert not (tmp_path / "rowclear.json").exists()
 
 
 def test_shadow_types_nothing_and_writes_one_would_clear(monkeypatch, tmp_path):

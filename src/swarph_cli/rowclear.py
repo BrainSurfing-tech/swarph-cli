@@ -30,9 +30,14 @@ from swarph_cli.cell import (
 # v1. Further cells join only by their own or the commander's opt-in.
 OPT_IN = frozenset({"drop-on-meta-edge"})
 
-# A row the cell is still holding. ``open`` is the status a taken row
-# carries; anything else still on the holder and not finished counts too.
-_DONE = frozenset({"closed", "cancelled", "canceled", "declined"})
+# Gateway statuses are open, closed, and fallback_fired. ``open`` is a
+# live row (taken or offered). ``closed`` and ``fallback_fired`` are
+# finished and do not block: drop-on-meta-edge holds a fallback_fired
+# row that would otherwise make the only opted-in cell never clear.
+# Any other status fails closed — a status this code does not know must
+# not look like an empty cell.
+_LIVE = "open"
+_FINISHED = frozenset({"closed", "fallback_fired"})
 
 _MODES = frozenset({"off", "shadow", "live"})
 
@@ -108,9 +113,12 @@ def _live_row_count(state, http_get: Callable) -> Optional[int]:
     live = 0
     for row in rows:
         if not isinstance(row, dict):
-            continue
-        if str(row.get("status") or "") not in _DONE:
+            return None
+        status = str(row.get("status") or "")
+        if status == _LIVE:
             live += 1
+        elif status not in _FINISHED:
+            return None
     return live
 
 
