@@ -92,6 +92,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "install-wake-hook": "swarph_cli.commands.install_wake_hook.run_install_wake_hook",
     "wake-hook-output": "swarph_cli.commands.wake_hook_output.run_wake_hook_output",
     "postcompact-hook-output": "swarph_cli.commands.postcompact_hook_output.run_postcompact_hook_output",
+    "rowclear-hook": "swarph_cli.commands.rowclear_hook.run_rowclear_hook",
     "install-postcompact-hook": "swarph_cli.commands.install_postcompact_hook.run_install_postcompact_hook",
     "install-opencode-plugin": "swarph_cli.commands.install_opencode_plugin.run_install_opencode_plugin",
     "memory-emit-hook": "swarph_cli.commands.memory_emit_hook.run_memory_emit_hook",
@@ -147,8 +148,13 @@ def _verbs_block(width: int = 78) -> str:
     import textwrap
     verbs = registered_verbs()
     head = f"Verbs ({len(verbs)}) -- each has --help and a guide entry (swarph guide <verb>):"
-    return head + "\n" + textwrap.fill(", ".join(verbs), width=width,
-                                       initial_indent="  ", subsequent_indent="  ") + "\n"
+    # break_on_hyphens would split a verb at a wrap (wake-hook-output
+    # became "wake-hook-" / "output" once the list grew past the width).
+    return head + "\n" + textwrap.fill(
+        ", ".join(verbs), width=width,
+        initial_indent="  ", subsequent_indent="  ",
+        break_on_hyphens=False, break_long_words=False,
+    ) + "\n"
 
 
 def _build_parser() -> argparse.ArgumentParser:

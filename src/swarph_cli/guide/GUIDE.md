@@ -543,6 +543,7 @@ answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not comman
 - `swarph protocol-handler` -- register `swarph://` as an OS URL-scheme handler.
 - `swarph ratify` -- witness flip that admits an onboarded peer; takes the peer name and `--reason`.
 - `swarph rights` -- RBAC rights over the gateway (companion of `swarph group`).
+- `swarph rowclear-hook` -- SessionStart hook (card #432): when `source` is `clear`, write the new session id into the role's `<role>.session-id` pin so the next spawn resumes the cleared session.
 - `swarph scan` -- statically scan an artifact for dangerous patterns before publish.
 - `swarph schedule` -- the gateway's scheduled events: create, list, get, enable, disable, delete, fire-now.
 - `swarph service` -- stand up a $0 subscription-LLM HTTP lane.
