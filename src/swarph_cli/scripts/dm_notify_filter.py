@@ -110,11 +110,20 @@ def run_filter(
             except Exception:
                 d = None
             if isinstance(d, dict):
-                d = d.get("dm") or d
-                rendered = _format_dm(d)
-                if rendered is not None:
-                    print(rendered, file=stdout, flush=True)
-                    quiet = False
+                try:
+                    d = d.get("dm") or d
+                    rendered = _format_dm(d)
+                    if rendered is not None:
+                        print(rendered, file=stdout, flush=True)
+                        quiet = False
+                except BrokenPipeError:
+                    raise  # a closed pipe stays loud (SIGPIPE contract)
+                except Exception:
+                    # Card #1050: ANY per-line failure is a logged skip,
+                    # never a process death. The notice is ASCII-only so it
+                    # cannot itself raise on a hostile-errors stdout.
+                    print("[MESH DM] unrenderable line skipped",
+                          file=stdout, flush=True)
             processed += 1
             if max_lines is not None and processed >= max_lines:
                 return 0
@@ -171,6 +180,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--timeout", type=float, default=2.0,
                    help="seconds --once waits for a new DM (default: %(default)s)")
     args = p.parse_args(argv)
+    try:
+        # Card #1050: lone surrogates in DM content must render (as ?) and
+        # continue, never kill the watch on a strict-errors stdout. Set
+        # before EITHER print path: --once and filter mode both emit DMs.
+        sys.stdout.reconfigure(errors="replace")
+    except Exception:
+        pass
     if args.once:
         if not args.inbox:
             print("dm_notify_filter --once needs --inbox", file=sys.stderr)
