@@ -468,6 +468,14 @@ def _gateway_configured(gateway: str) -> bool:
     """
     return bool((gateway or "").strip())
 
+def _resolve_unread_token(token: Optional[str]) -> Optional[str]:
+    """Token precedence for the unread check: explicit arg (cron setups
+    pass env straight through), else the watchdog identity's token file
+    (card #1059 — template units have no env). The VALUE is never logged.
+    """
+    return token or _read_service_token()
+
+
 def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Optional[int]:
     """Query gateway for unread DM count addressed to peer.
 
@@ -483,15 +491,15 @@ def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Opti
     the code it was documenting — found 2026-08-12 when the contradiction
     caused a real reader to conclude a gateway/token outage makes A1 MORE
     eager, when it makes A1 permanently inert for that cell instead.
+
+    Prefers the count-only endpoint (card #1059: no bodies cross the wire);
+    a 404 (gateway predates the endpoint) falls back to the list query so a
+    mixed fleet never goes blind from the client side alone.
     """
     if not _gateway_configured(gateway):
         return None
-    query = urllib.parse.urlencode({"to_node": peer, "unread_only": "true", "limit": 1})
-    url = f"{gateway.rstrip('/')}/messages?{query}"
-    req = urllib.request.Request(url)
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    else:
+    token = _resolve_unread_token(token)
+    if not token:
         # A missing token and a network outage both surface as None to the
         # caller (correctly — the decision matrix treats them the same way),
         # but they are different FACTS an operator would want to know apart.
@@ -503,10 +511,50 @@ def _gateway_unread_count(gateway: str, peer: str, token: Optional[str]) -> Opti
               f"unread-count check may 401 if the gateway requires auth; "
               f"A1 stays inert until one is set",
               file=sys.stderr)
+    count = _gateway_unread_via_count(gateway, peer, token)
+    if count is not None:
+        return count
+    return _gateway_unread_via_list(gateway, peer, token)
+
+
+def _gateway_request(gateway: str, path: str, query: dict,
+                     token: Optional[str]):
+    """GET path+query with an optional Bearer token. Returns the decoded
+    JSON body, or (None, status) on transport failure — the status lets
+    callers tell a missing route (404: fall back) from a dead end."""
+    url = f"{gateway.rstrip('/')}{path}?{urllib.parse.urlencode(query)}"
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError):
+            return json.loads(resp.read().decode("utf-8")), resp.status
+    except urllib.error.HTTPError as exc:
+        return None, exc.code
+    except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        return None, None
+
+
+def _gateway_unread_via_count(gateway: str, peer: str,
+                             token: Optional[str]) -> Optional[int]:
+    """Count-only read: {"to_node", "n"}. No bodies cross the wire, so a
+    least-privilege watchdog identity suffices (card #1059)."""
+    data, _status = _gateway_request(
+        gateway, "/messages/unread-count", {"to_node": peer}, token)
+    if isinstance(data, dict) and isinstance(data.get("n"), int):
+        return data["n"]
+    return None
+
+
+def _gateway_unread_via_list(gateway: str, peer: str,
+                            token: Optional[str]) -> Optional[int]:
+    """Pre-count-endpoint fallback: parse the list query. Kept so a mixed
+    fleet (new client, old gateway) degrades to body reads, never to
+    blindness — the 404 is the only trigger, never a 403/401."""
+    data, status = _gateway_request(
+        gateway, "/messages",
+        {"to_node": peer, "unread_only": "true", "limit": 1}, token)
+    if status == 404:
         return None
     # Gateway shape varies — handle both list and {"messages": [...]} forms
     if isinstance(data, list):
@@ -1874,6 +1922,37 @@ def _execstart_flags(args: argparse.Namespace) -> str:
     return (" " + " ".join(parts)) if parts else ""
 
 
+def _watchdog_service_token_path() -> Path:
+    """Where the watchdog identity's token lives. Overridable for tests
+    and unusual homes; never a unit file, never argv (card #1059)."""
+    return Path(os.environ.get(
+        "SWARPH_WATCHDOG_TOKEN_FILE",
+        "~/.config/swarph/watchdog-service.token")).expanduser()
+
+
+def _read_service_token() -> Optional[str]:
+    """The watchdog identity's token from its file, or None (absent /
+    unreadable / blank). The VALUE never hits logs — callers log only
+    whether one was found."""
+    try:
+        tok = _watchdog_service_token_path().read_text(
+            encoding="utf-8").strip()
+    except OSError:
+        return None
+    return tok or None
+
+
+def _write_service_token_file(path: Path, token: str) -> None:
+    """Write the token file 0600 (parents created). Refuses multiline
+    values — an env file line cannot hold them, and silently writing
+    half a credential is worse than failing."""
+    if "\n" in token:
+        raise ValueError("token contains a newline")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(token.strip() + "\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+
+
 def run_install_service(args: argparse.Namespace) -> int:
     """Install systemd timer + service for periodic watchdog --check.
 
@@ -1950,6 +2029,25 @@ def run_install_service(args: argparse.Namespace) -> int:
         1,
     )
 
+    # Card #1059/ruling_1332: template units run without the installer's
+    # env, so the unread check reads None and A1 stays inert (exit 7,
+    # opencode + cursor-lin measured live). The watchdog identity's
+    # token lives in a 0600 token FILE (path via SWARPH_WATCHDOG_TOKEN_FILE,
+    # default ~/.config/swarph/watchdog-service.token) — never in a unit,
+    # never in argv, never in the EnvironmentFile default. The installer
+    # writes it from its own env; rotation is re-running the install.
+    install_token = os.environ.get("MESH_GATEWAY_TOKEN")
+    token_path = _watchdog_service_token_path()
+    if install_token is not None and "\n" in install_token:
+        print("ERROR: MESH_GATEWAY_TOKEN contains a newline — refusing "
+              "to write the token file.", file=sys.stderr)
+        return 4
+    if not install_token:
+        print("WARNING: MESH_GATEWAY_TOKEN not in installer env — "
+              "template runs will exit 7 (noop_unread_unknown) until the "
+              f"token file exists at {token_path}; re-run --install-service "
+              "with it set.", file=sys.stderr)
+
     targets = [
         (_SYSTEMD_UNIT_DIR / service_name, service_content),
         (_SYSTEMD_UNIT_DIR / timer_name, timer_content),
@@ -1970,6 +2068,9 @@ def run_install_service(args: argparse.Namespace) -> int:
         for path, content in targets:
             print(f"\n# would write {path}:", file=sys.stderr)
             print(content, file=sys.stderr)
+        if install_token:
+            print(f"\n# would write {token_path} (0600, value not shown):",
+                  file=sys.stderr)
         if legacy_note:
             print(f"\n{legacy_note}", file=sys.stderr)
         print(
@@ -1992,7 +2093,10 @@ def run_install_service(args: argparse.Namespace) -> int:
         for path, content in targets:
             path.write_text(content, encoding="utf-8")
             print(f"wrote {path}", file=sys.stderr)
-    except (OSError, PermissionError) as exc:
+        if install_token:
+            _write_service_token_file(token_path, install_token)
+            print(f"wrote {token_path} (0600)", file=sys.stderr)
+    except (OSError, PermissionError, ValueError) as exc:
         print(f"ERROR: failed to write unit files: {exc}", file=sys.stderr)
         return 5
 

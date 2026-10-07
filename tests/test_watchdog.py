@@ -1108,6 +1108,7 @@ def test_gateway_unread_count_warns_loudly_when_token_missing(monkeypatch, capsy
     from swarph_cli.commands import watchdog
 
     class _FakeResp:
+        status = 200  # the transport seam reports status (404 = fall back)
         def __enter__(self): return self
         def __exit__(self, *a): return False
         def read(self): return b'{"messages": []}'
@@ -1126,6 +1127,7 @@ def test_gateway_unread_count_silent_when_token_present(monkeypatch, capsys):
     from swarph_cli.commands import watchdog
 
     class _FakeResp:
+        status = 200  # the transport seam reports status (404 = fall back)
         def __enter__(self): return self
         def __exit__(self, *a): return False
         def read(self): return b'{"messages": []}'
