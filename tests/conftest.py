@@ -130,6 +130,11 @@ _SWARPH_ENV = (
     # card #432: a developer's SWARPH_ROWCLEAR=live must not make the suite
     # type /clear. A test that wants shadow or live sets it itself.
     "SWARPH_ROWCLEAR",
+    # card #1064: the sweep's repo list, state file and report path must not
+    # leak in from the developer's box (a test that wants them passes flags).
+    "SWARPH_SWEEP_REPOS",
+    "SWARPH_SWEEP_STATE",
+    "SWARPH_SWEEP_REPORT",
     # bench registry path — a developer's file must not become the suite's
     "SWARPH_BENCH_PROVIDERS",
     "MESH_DB_PATH",

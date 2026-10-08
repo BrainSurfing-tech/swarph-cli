@@ -111,6 +111,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "group": "swarph_cli.commands.group.run_group",
     "rights": "swarph_cli.commands.group.run_rights",
     "roster": "swarph_cli.commands.roster.run_roster",
+    "sweep": "swarph_cli.commands.sweep.run_sweep_cmd",
     "mcp-server": "swarph_cli.commands.mcp_server.run_mcp_server",
     "compress": "swarph_cli.commands.compress.run_compress",
     "cell": "swarph_cli.commands.cell.run_cell",
