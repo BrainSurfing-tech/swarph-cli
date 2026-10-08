@@ -49,7 +49,7 @@ release ${VERSION} would:
 4. open the release PR and stop
 5. resume only when a review is APPROVED at that PR head; otherwise refuse to merge
 6. merge as orchestrators-hue
-7. tag v${VERSION} and push the tag
+7. tag v${VERSION} as an annotated tag on the merge commit and push the tag
 8. wait for PyPI to serve ${VERSION}, retrying
 9. pip install --no-cache-dir swarph-cli==${VERSION}
 10. discover swarph units whose running process imports swarph_cli
@@ -84,6 +84,31 @@ merge_as_orchestrators_hue() {
   local token
   token=$(gh auth token --user orchestrators-hue)
   GH_TOKEN="$token" gh pr merge "$number" --repo "$REPO" --merge
+}
+
+# A squash or merge commit is a new object. Tag that, never the PR head.
+tag_merged_release() {
+  local number="$1"
+  local merge_oid existing
+  merge_oid=$(gh pr view "$number" --repo "$REPO" --json mergeCommit --jq .mergeCommit.oid)
+  if [ -z "$merge_oid" ] || [ "$merge_oid" = "null" ]; then
+    echo "release: PR ${number} has no merge commit to tag" >&2
+    exit 1
+  fi
+  git fetch origin "$merge_oid"
+  git fetch origin "refs/tags/v${VERSION}:refs/tags/v${VERSION}" || true
+  if existing=$(git rev-parse --verify --quiet "refs/tags/v${VERSION}^{commit}"); then
+    if [ "$existing" = "$merge_oid" ]; then
+      echo "tag v${VERSION} already points at merge commit ${merge_oid}; continuing"
+      return 0
+    fi
+    echo "release: tag v${VERSION} points at ${existing}, not merge commit ${merge_oid}" >&2
+    exit 1
+  fi
+  git -c user.email="${RELEASE_GIT_EMAIL:-release.sh@local}" \
+      -c user.name="${RELEASE_GIT_NAME:-release.sh}" \
+      tag -a "v${VERSION}" "$merge_oid" -m "swarph-cli ${VERSION}"
+  git push origin "refs/tags/v${VERSION}"
 }
 
 wait_for_pypi() {
@@ -166,8 +191,7 @@ if [ "$RESUME" -eq 1 ]; then
   read -r number head <<< "$meta"
   echo "approval present at head ${head}; merging as orchestrators-hue"
   merge_as_orchestrators_hue "$number"
-  git tag "v${VERSION}" "$head"
-  git push origin "v${VERSION}"
+  tag_merged_release "$number"
   wait_for_pypi
   install_release
   install_epoch=$(date +%s)
