@@ -190,9 +190,10 @@ def test_once_with_only_quiet_returns_silently(monkeypatch, tmp_path):
 # ── channel poll ─────────────────────────────────────────────────
 
 def _inbox(tmp_path, rows):
+    # newline="": the poll slices text by byte offset (st_size) — see appends.
     p = tmp_path / "inbox.log"
-    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
-                 encoding="utf-8")
+    with p.open("w", encoding="utf-8", newline="") as fp:
+        fp.write("\n".join(json.dumps(r) for r in rows) + "\n")
     return p
 
 
