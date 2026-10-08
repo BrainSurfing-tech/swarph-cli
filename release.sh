@@ -51,10 +51,10 @@ release ${VERSION} would:
 6. merge as orchestrators-hue
 7. tag v${VERSION} as an annotated tag on the merge commit and push the tag
 8. wait for PyPI to serve ${VERSION}, retrying
-9. pip install --no-cache-dir swarph-cli==${VERSION}
+9. pip install --no-cache-dir --user --break-system-packages swarph-cli==${VERSION}, retrying until it succeeds
 10. discover swarph units whose running process imports swarph_cli
 11. restart those units one at a time
-12. verify each process started after the install and its loaded version is ${VERSION}, read from the process image
+12. verify each process started after the install and its loaded version is ${VERSION}, read from the process image, retrying while that read is empty
 EOF
 }
 
@@ -126,7 +126,24 @@ wait_for_pypi() {
 }
 
 install_release() {
-  pip install --no-cache-dir "swarph-cli==${VERSION}"
+  local i pip_args
+  # Lab Python is externally managed (PEP 668). RELEASE_PIP_ARGS replaces this default.
+  if [ -n "${RELEASE_PIP_ARGS+x}" ]; then
+    pip_args=$RELEASE_PIP_ARGS
+  else
+    pip_args="--no-cache-dir --user --break-system-packages"
+  fi
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+    # shellcheck disable=SC2086
+    if pip install $pip_args "swarph-cli==${VERSION}"; then
+      echo "installed swarph-cli==${VERSION}"
+      return 0
+    fi
+    echo "pip install swarph-cli==${VERSION} failed (try ${i}); retrying" >&2
+    sleep "${RELEASE_PIP_SLEEP:-20}"
+  done
+  echo "release: pip install swarph-cli==${VERSION} never succeeded" >&2
+  exit 1
 }
 
 restart_importers() {

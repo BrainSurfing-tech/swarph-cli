@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 DIST_INFO = re.compile(rb"swarph_cli-(\d+\.\d+\.\d+)\.dist-info")
 VERSION_LINE = {
@@ -66,16 +67,51 @@ def bump_text(kind: str, version: str, text: str) -> str:
 
 def verify_process(start: float, install_epoch: float, image: bytes, expected: str, pid: str) -> None:
     """Fail if the process started before the install, or its loaded version is not expected."""
+    verify_until_loaded(
+        start, install_epoch, expected, pid, lambda: image, wait_s=0, sleep_s=0,
+    )
+
+
+def verify_until_loaded(
+    start: float,
+    install_epoch: float,
+    expected: str,
+    pid: str,
+    read_image,
+    wait_s: float = 15.0,
+    sleep_s: float = 2.0,
+    sleep=None,
+    monotonic=None,
+) -> None:
+    """Re-read the process image while it has no version yet.
+
+    A wrong version fails immediately. An empty image is the settle window
+    right after restart, so it is retried until wait_s elapses.
+    """
+    if sleep is None:
+        sleep = time.sleep
+    if monotonic is None:
+        monotonic = time.monotonic
     if start < install_epoch:
         raise SystemExit(
             f"FAIL pid {pid} started at {start:.3f} before the install at {install_epoch:.3f}"
         )
-    found = versions_in_image(image)
-    if found != {expected}:
-        shown = ", ".join(sorted(found)) or "none"
-        raise SystemExit(
-            f"FAIL pid {pid} loaded __version__ {shown} from the process image, wanted {expected}"
-        )
+    deadline = monotonic() + wait_s
+    while True:
+        found = versions_in_image(read_image())
+        if found == {expected}:
+            return
+        if found:
+            shown = ", ".join(sorted(found))
+            raise SystemExit(
+                f"FAIL pid {pid} loaded __version__ {shown} from the process image, wanted {expected}"
+            )
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise SystemExit(
+                f"FAIL pid {pid} loaded __version__ none from the process image, wanted {expected}"
+            )
+        sleep(min(sleep_s, remaining))
 
 
 def script_imports_swarph_cli(argv: list[str], read_text) -> bool:
@@ -181,11 +217,17 @@ def _cmd_verify(args: argparse.Namespace) -> int:
                     break
         clk = float(os.environ.get("RELEASE_CLK_TCK", str(os.sysconf("SC_CLK_TCK"))))
         start = start_epoch_from_stat(stat, btime, clk)
-    if os.environ.get("RELEASE_IMAGE"):
-        image = open(os.environ["RELEASE_IMAGE"], "rb").read()
-    else:
-        image = _read_proc_image(args.pid)
-    verify_process(start, float(args.install_epoch), image, args.expected, str(args.pid))
+    def read_image() -> bytes:
+        if os.environ.get("RELEASE_IMAGE"):
+            return open(os.environ["RELEASE_IMAGE"], "rb").read()
+        return _read_proc_image(args.pid)
+
+    wait_s = float(os.environ.get("RELEASE_VERIFY_WAIT", "15"))
+    sleep_s = float(os.environ.get("RELEASE_VERIFY_SLEEP", "2"))
+    verify_until_loaded(
+        start, float(args.install_epoch), args.expected, str(args.pid),
+        read_image, wait_s=wait_s, sleep_s=sleep_s,
+    )
     print(f"ok pid {args.pid} started after the install and loaded {args.expected}")
     return 0
 
