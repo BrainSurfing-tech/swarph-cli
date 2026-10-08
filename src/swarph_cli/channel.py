@@ -15,7 +15,12 @@ from pathlib import Path
 
 from swarph_cli import identity
 from swarph_cli.dm_frame import FIRST_START_GRACE_S, created_within, frame_text, rows
-from swarph_cli.scripts.dm_notify_filter import is_real_dm
+from swarph_cli.scripts.dm_notify_filter import (
+    _QUIET_CAP_S,
+    is_quiet_dm,
+    is_real_dm,
+    quiet_enabled,
+)
 
 PROTOCOL_VERSION = "2025-06-18"
 METHOD = "notifications/claude/channel"
@@ -127,8 +132,15 @@ class Channel:
         First start keeps a present row when created_at is within 30s before
         this poll or any time after, via dm_frame.created_within. Older rows
         set the cursor and are not pushed.
+
+        Card #1066: with quiet wakes enabled, TAKEN receipts and repo.merged
+        events are HELD, not pushed — carried with the next real push or
+        once each passes the cap. The hold is durable: held ids persist in
+        the cursor file, so a restart neither loses nor double-pushes them.
+        A held id missing from the inbox (rotated away) is dropped.
         """
         now = time.time() if now is None else now
+        quiet_on = quiet_enabled()
         notes: list[dict] = []
         if not self.inbox.is_file():
             self._heartbeat(now, None)
@@ -153,6 +165,8 @@ class Channel:
                 "offset": 0,
                 "anomaly_sent": False,
             }
+            if quiet_on:
+                self.cursor["held_quiet"] = []
             self._save()
             notes.append(_note(self.armed_line()))
         if self.cursor.get("inode") != st.st_ino:
@@ -162,6 +176,7 @@ class Channel:
         fresh = _rows(text[offset:])
         last = self.cursor.get("last_pushed_id")
         last_i = int(last) if last is not None else -1
+        held = self._held_entries()
         pending = []
         for row in fresh:
             if row.get("to_node") != self.cell:
@@ -175,29 +190,74 @@ class Channel:
                 continue
             if rid <= last_i:
                 continue
+            if quiet_on and is_quiet_dm(row):
+                if all(h["id"] != rid for h in held):
+                    held.append({"id": rid, "at": now})
+                continue
             pending.append(row)
         if self.foreign and not self.anomaly_sent:
             notes.append(_note(
                 f"{self.foreign} inbox rows dropped: to_node was not {self.cell}"))
             self.anomaly_sent = True
             self.cursor["anomaly_sent"] = True
+        # Card #1066 carry + cap: held rows flush with the first real push
+        # (held first — they arrived earlier) or once each passes the cap.
+        # Held rows are NEVER backlog-truncated: dropping a waited-on row
+        # would lose it, the exact FAIL this card names.
+        by_id = {}
+        for row in rows:
+            try:
+                by_id[int(row["id"])] = row
+            except (KeyError, TypeError, ValueError):
+                continue
+        carried, kept = [], []
+        for h in held:
+            if h["id"] not in by_id:
+                continue  # rotated out of the inbox: undeliverable, drop
+            if pending or now - h["at"] >= _QUIET_CAP_S:
+                carried.append(by_id[h["id"]])
+            else:
+                kept.append(h)
         if len(pending) > BACKLOG:
             skipped = len(pending) - BACKLOG
             pending = pending[-BACKLOG:]
             notes.append(_note(f"{skipped} older DMs not pushed, read the inbox"))
-        for row in pending:
+        for row in carried + pending:
             notes.append(_frame(row))
             self.cursor["last_pushed_id"] = int(row["id"])
+        # Byte-identical cursors when quiet is off: never introduce the key
+        # into a cursor that never had it.
+        if quiet_on or "held_quiet" in self.cursor:
+            self.cursor["held_quiet"] = kept
         self.cursor["offset"] = st.st_size
         self.cursor["inode"] = st.st_ino
         self._save()
-        if newest is not None and self.cursor.get("last_pushed_id") is not None:
-            if int(newest) > int(self.cursor["last_pushed_id"]):
+        covered = self.cursor.get("last_pushed_id")
+        for h in kept:
+            if covered is None or h["id"] > covered:
+                covered = h["id"]
+        if newest is not None and covered is not None:
+            if int(newest) > int(covered):
                 self.stall_since = self.stall_since or now
             else:
                 self.stall_since = None
         self._heartbeat(now, newest)
         return notes
+
+    def _held_entries(self) -> list:
+        """Durable hold, validated: a corrupt held_quiet resets, never kills
+        the poll (a dead channel from a bad cursor is worse than a re-push —
+        re-read rows re-hold by id)."""
+        raw = (self.cursor or {}).get("held_quiet") or []
+        out = []
+        for h in raw:
+            try:
+                if not isinstance(h, dict):
+                    continue
+                out.append({"id": int(h["id"]), "at": float(h["at"])})
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
 
     def _save(self) -> None:
         self.cursor_path.parent.mkdir(parents=True, exist_ok=True)

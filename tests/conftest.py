@@ -135,6 +135,9 @@ _SWARPH_ENV = (
     "SWARPH_SWEEP_REPOS",
     "SWARPH_SWEEP_STATE",
     "SWARPH_SWEEP_REPORT",
+    # card #1066: quiet-wake opt-in must not leak in (default-off is the
+    # regression surface; opt-in tests set it themselves).
+    "SWARPH_QUIET_WAKES",
     # bench registry path — a developer's file must not become the suite's
     "SWARPH_BENCH_PROVIDERS",
     "MESH_DB_PATH",
