@@ -252,6 +252,171 @@ def test_sessionstart_clear_rewrites_the_pin_and_spawn_resumes_it(
     assert argv[argv.index("--resume") + 1] == new
 
 
+# ── v1.1 (#1362): a taken row whose needs are UNMET is not a live row ──
+# drop sat idle for hours holding validate #1008, which waits on build #1007.
+# The step graph (GET /board/cards/{id}/graph) carries each step's needs with
+# a satisfied flag; the live-row predicate reads it. Anything unreadable
+# about the needs state fails closed (no clear), exactly like an unreadable
+# board.
+
+
+def _graph(steps):
+    """A card-graph payload: steps is {step_name: [satisfied_bool, ...]} or
+    {step_name: None} for a step entry with no needs list (malformed)."""
+    out = []
+    for name, sats in steps.items():
+        entry = {"step": name}
+        if sats is not None:
+            entry["needs"] = [
+                {"step": f"need-{i}", "row_id": i, "satisfied": s,
+                 "state": "closed:pass" if s else "open"}
+                for i, s in enumerate(sats)]
+        out.append(entry)
+    return {"steps": out}
+
+
+def _arm_v11(monkeypatch, state, *, obligations, graphs, pane=False,
+             mode="shadow"):
+    """obligations: the raw row list (or None for a down board).
+    graphs: {card_id: graph payload} (or None for a down graph)."""
+    monkeypatch.setenv("SWARPH_ROWCLEAR", mode)
+    typed: list[str] = []
+
+    def type_clear(target: str) -> bool:
+        typed.append("/clear")
+        return True
+
+    def http_get(url, token, timeout=10.0):
+        if url.endswith("/graph"):
+            if graphs is None:
+                return 500, {"detail": "down"}
+            cid = int(url.split("/board/cards/")[1].split("/graph")[0])
+            g = graphs.get(cid)
+            if g is None:
+                return 404, {"detail": "no such card"}
+            return 200, g
+        if obligations is None:
+            return 500, {"detail": "down"}
+        return 200, {"obligations": obligations}
+
+    monkeypatch.setattr(mesh, "_type_slash_clear", type_clear, raising=False)
+    monkeypatch.setattr(mesh, "_agent_running", lambda t: pane)
+    monkeypatch.setattr(mesh, "_http_get_json", http_get)
+    return typed
+
+
+def _row(i, status="open", step="validate", card_id=7, **extra):
+    r = {"id": i, "holder": "drop-on-meta-edge", "status": status,
+         "card_id": card_id}
+    if step is not None:
+        r["step"] = step
+    r.update(extra)
+    return r
+
+
+def test_a_row_with_unmet_needs_is_between_rows(monkeypatch, tmp_path):
+    """Accept (1): the only open row waits on build (still open) → not live →
+    shadow logs a would-clear with open_rows 0 and types nothing."""
+    state = _State(tmp_path)
+    typed = _arm_v11(
+        monkeypatch, state, mode="shadow",
+        obligations=[_row(1008, step="validate", card_id=7)],
+        graphs={7: _graph({"validate": [False], "build": []})})
+    assert _run(state) == "shadow"
+    assert typed == []
+    lines = (tmp_path / "rowclear.log").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["open_rows"] == 0
+
+
+def test_a_row_with_met_needs_stays_live(monkeypatch, tmp_path):
+    """Accept (2): the needed build closed pass → the row is actionable work →
+    no clear, zero keys."""
+    state = _State(tmp_path)
+    typed = _arm_v11(
+        monkeypatch, state, mode="live",
+        obligations=[_row(1008, step="validate", card_id=7)],
+        graphs={7: _graph({"validate": [True]})})
+    assert _run(state) == "blocked-live-row"
+    assert typed == []
+    assert not (tmp_path / "rowclear.log").exists()
+
+
+def test_one_actionable_row_blocks_despite_a_waiting_row(monkeypatch, tmp_path):
+    """The FAIL guard: a waiting validate row plus an actionable build row →
+    the cell has work → nothing typed."""
+    state = _State(tmp_path)
+    typed = _arm_v11(
+        monkeypatch, state, mode="live",
+        obligations=[_row(1008, step="validate", card_id=7),
+                     _row(1007, step="build", card_id=7)],
+        graphs={7: _graph({"validate": [False], "build": []})})
+    assert _run(state) == "blocked-live-row"
+    assert typed == []
+
+
+def test_an_open_row_with_no_step_is_still_live(monkeypatch, tmp_path):
+    """Accept (3): ruling_1236 unchanged — no step means no needs to unmeet."""
+    state = _State(tmp_path)
+    typed = _arm_v11(
+        monkeypatch, state, mode="live",
+        obligations=[_row(1008, step=None, card_id=7)],
+        graphs={7: _graph({})})
+    assert _run(state) == "blocked-live-row"
+    assert typed == []
+
+
+def test_a_step_with_empty_needs_is_live_without_reading_further(
+        monkeypatch, tmp_path):
+    """A stepped row whose step needs nothing is actionable on its face."""
+    state = _State(tmp_path)
+    typed = _arm_v11(
+        monkeypatch, state, mode="live",
+        obligations=[_row(1007, step="build", card_id=7)],
+        graphs={7: _graph({"build": []})})
+    assert _run(state) == "blocked-live-row"
+    assert typed == []
+
+
+def test_an_unreadable_graph_fails_closed(monkeypatch, tmp_path):
+    """Accept (4): the graph is down → needs state unknown → no clear, and
+    no latch (a retry must re-evaluate, not replay a stale boundary)."""
+    state = _State(tmp_path)
+    typed = _arm_v11(
+        monkeypatch, state, mode="live",
+        obligations=[_row(1008, step="validate", card_id=7)],
+        graphs=None)
+    assert _run(state) == "blocked-rows-unknown"
+    assert typed == []
+    assert not (tmp_path / "rowclear.json").exists()
+
+
+def test_a_graph_missing_the_step_fails_closed(monkeypatch, tmp_path):
+    """The graph answers but names no validate step (menu changed under the
+    row) → unevaluable → no clear."""
+    state = _State(tmp_path)
+    typed = _arm_v11(
+        monkeypatch, state, mode="live",
+        obligations=[_row(1008, step="validate", card_id=7)],
+        graphs={7: _graph({"build": []})})
+    assert _run(state) == "blocked-rows-unknown"
+    assert typed == []
+
+
+def test_a_malformed_needs_entry_fails_closed(monkeypatch, tmp_path):
+    """A needs entry without a boolean satisfied flag is not evaluable."""
+    state = _State(tmp_path)
+    bad = {"steps": [{"step": "validate",
+                      "needs": [{"step": "build", "row_id": 1,
+                                 "state": "open"}]}]}
+    typed = _arm_v11(
+        monkeypatch, state, mode="live",
+        obligations=[_row(1008, step="validate", card_id=7)],
+        graphs={7: bad})
+    assert _run(state) == "blocked-rows-unknown"
+    assert typed == []
+
+
 def test_a_mismatched_cwd_leaves_the_pin_untouched(monkeypatch, tmp_path, capsys):
     """ruling_1236: both cwds present and different → no rewrite."""
     from swarph_cli.rowclear import apply_sessionstart_clear
