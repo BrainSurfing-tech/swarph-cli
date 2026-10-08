@@ -19,6 +19,7 @@ discover_units = _mod.discover_units
 script_imports_swarph_cli = _mod.script_imports_swarph_cli
 start_epoch_from_stat = _mod.start_epoch_from_stat
 verify_process = _mod.verify_process
+verify_until_loaded = _mod.verify_until_loaded
 versions_in_image = _mod.versions_in_image
 
 
@@ -64,7 +65,7 @@ def test_dry_run_lists_every_step_and_touches_nothing(tmp_path):
         "merge as orchestrators-hue",
         "tag v9.9.9",
         "wait for PyPI to serve 9.9.9, retrying",
-        "pip install --no-cache-dir swarph-cli==9.9.9",
+        "pip install --no-cache-dir --user --break-system-packages swarph-cli==9.9.9, retrying until it succeeds",
         "imports swarph_cli",
         "one at a time",
         "process image",
@@ -149,7 +150,7 @@ esac
     assert proc.returncode == 0, proc.stderr + proc.stdout
     text = log.read_text()
     assert "MERGE" in text
-    assert "pip install --no-cache-dir swarph-cli==9.9.9" in text
+    assert "pip install --no-cache-dir --user --break-system-packages swarph-cli==9.9.9" in text
     assert "pip show" not in text
     sudo_lines = [ln for ln in sudo_log.read_text().splitlines() if ln]
     restarts = [ln for ln in sudo_lines if ln.startswith("-n systemctl restart ")]
@@ -163,7 +164,7 @@ esac
     assert f"tag v9.9.9 {head}" not in text
 
 
-def _tag_resume(tmp_path, git_body: str):
+def _tag_resume(tmp_path, git_body: str, pip_text: str | None = None, extra_env: dict | None = None):
     """Resume past an approval, with git answering the tag questions."""
     log = tmp_path / "gh.log"
     bin_dir = tmp_path / "bin"
@@ -190,7 +191,7 @@ esac
     )
     (bin_dir / "sudo").write_text("#!/bin/sh\nexit 0\n")
     (bin_dir / "systemctl").write_text("#!/bin/sh\necho 1\n")
-    (bin_dir / "pip").write_text("#!/bin/sh\nexit 0\n")
+    (bin_dir / "pip").write_text(pip_text or "#!/bin/sh\nexit 0\n")
     for name in ("gh", "git", "curl", "sudo", "systemctl", "pip"):
         (bin_dir / name).chmod(0o755)
     units = tmp_path / "units"
@@ -200,6 +201,8 @@ esac
     env["RELEASE_UNITS_FILE"] = str(units)
     env["RELEASE_VERIFY_CMD"] = "true"
     env["RELEASE_PYPI_SLEEP"] = "0"
+    if extra_env:
+        env.update(extra_env)
     proc = _run(["bash", str(RELEASE), "--resume", "9.9.9"], env)
     return proc, log.read_text(), head, merge
 
@@ -387,6 +390,111 @@ def test_bump_rewrites_only_the_version_field():
     assert bump_text("pyproject", "9.9.9", 'version = "0.0.1"\n') == 'version = "9.9.9"\n'
     assert bump_text("init", "9.9.9", '__version__ = "0.0.1"\n') == '__version__ = "9.9.9"\n'
     assert bump_text("plugin", "9.9.9", '{"version": "0.0.1"}\n') == '{"version": "9.9.9"}\n'
+
+
+_GIT_NO_TAG = """#!/bin/bash
+echo "git $*" >> {log}
+case "$1" in
+  rev-parse) exit 1 ;;
+  *) exit 0 ;;
+esac
+"""
+
+
+@needs_bash
+def test_install_retries_until_pip_succeeds(tmp_path):
+    log = tmp_path / "pip.log"
+    count = tmp_path / "count"
+    count.write_text("")
+    pip_text = f"""#!/bin/bash
+echo "pip $*" >> {log}
+lines=$(wc -l < {count})
+echo x >> {count}
+if [ "$lines" -lt 2 ]; then exit 1; fi
+exit 0
+"""
+    proc, _text, _head, _merge = _tag_resume(
+        tmp_path, _GIT_NO_TAG, pip_text=pip_text, extra_env={"RELEASE_PIP_SLEEP": "0"},
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    lines = [ln for ln in log.read_text().splitlines() if ln]
+    assert len(lines) == 3
+    assert all("install --no-cache-dir --user --break-system-packages swarph-cli==9.9.9" in ln for ln in lines)
+
+
+@needs_bash
+def test_install_gives_up_after_thirty_tries(tmp_path):
+    log = tmp_path / "pip.log"
+    pip_text = f"""#!/bin/bash
+echo "pip $*" >> {log}
+exit 1
+"""
+    proc, _text, _head, _merge = _tag_resume(
+        tmp_path, _GIT_NO_TAG, pip_text=pip_text, extra_env={"RELEASE_PIP_SLEEP": "0"},
+    )
+    assert proc.returncode != 0
+    assert "never succeeded" in proc.stderr
+    assert len([ln for ln in log.read_text().splitlines() if ln]) == 30
+
+
+@needs_bash
+def test_pip_args_come_from_RELEASE_PIP_ARGS(tmp_path):
+    log = tmp_path / "pip.log"
+    pip_text = f"""#!/bin/bash
+echo "pip $*" >> {log}
+exit 0
+"""
+    proc, _text, _head, _merge = _tag_resume(
+        tmp_path, _GIT_NO_TAG, pip_text=pip_text,
+        extra_env={"RELEASE_PIP_ARGS": "--no-cache-dir", "RELEASE_PIP_SLEEP": "0"},
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    text = log.read_text()
+    assert "pip install --no-cache-dir swarph-cli==9.9.9" in text
+    assert "--break-system-packages" not in text
+    assert "--user" not in text
+
+
+def test_verify_retries_while_the_image_has_no_version():
+    images = iter([b"", b"noise", b"swarph_cli-9.9.9.dist-info"])
+    clock = {"t": 0.0}
+    slept = []
+
+    def sleeper(seconds):
+        slept.append(seconds)
+        clock["t"] += seconds
+
+    verify_until_loaded(
+        100, 1, "9.9.9", "42", lambda: next(images),
+        wait_s=15, sleep_s=2, sleep=sleeper, monotonic=lambda: clock["t"],
+    )
+    assert slept == [2, 2]
+
+
+def test_verify_fails_immediately_on_a_wrong_version():
+    slept = []
+    with pytest.raises(SystemExit) as caught:
+        verify_until_loaded(
+            100, 1, "9.9.9", "42", lambda: b"swarph_cli-0.1.0.dist-info",
+            wait_s=15, sleep_s=2, sleep=lambda s: slept.append(s), monotonic=lambda: 0.0,
+        )
+    assert "0.1.0" in str(caught.value.code)
+    assert slept == []
+
+
+def test_verify_fails_with_none_only_after_the_settle_window():
+    clock = {"t": 0.0}
+
+    def sleeper(seconds):
+        clock["t"] += seconds
+
+    with pytest.raises(SystemExit) as caught:
+        verify_until_loaded(
+            100, 1, "9.9.9", "42", lambda: b"",
+            wait_s=15, sleep_s=2, sleep=sleeper, monotonic=lambda: clock["t"],
+        )
+    assert "none" in str(caught.value.code)
+    assert clock["t"] >= 15
 
 
 def test_restart_loop_is_one_unit_per_systemctl_call():
