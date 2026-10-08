@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = ROOT / "release.sh"
 CHECK = ROOT / "scripts" / "release_check.py"
@@ -20,12 +22,26 @@ verify_process = _mod.verify_process
 versions_in_image = _mod.versions_in_image
 
 
+def _gnu_bash() -> bool:
+    """Windows runners ship a `bash` that is the WSL stub, not a shell."""
+    try:
+        proc = subprocess.run(["bash", "--version"], capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    text = proc.stdout.decode("utf-8", "replace") + proc.stderr.decode("utf-8", "replace")
+    return proc.returncode == 0 and "GNU bash" in text
+
+
+needs_bash = pytest.mark.skipif(not _gnu_bash(), reason="release.sh needs GNU bash")
+
+
 def _run(args, env, cwd=None):
     return subprocess.run(
         args, cwd=cwd or ROOT, env=env, text=True, capture_output=True,
     )
 
 
+@needs_bash
 def test_dry_run_lists_every_step_and_touches_nothing(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -57,6 +73,7 @@ def test_dry_run_lists_every_step_and_touches_nothing(tmp_path):
     assert not called.exists()
 
 
+@needs_bash
 def test_refuses_to_merge_without_an_approval_at_head(tmp_path):
     log = tmp_path / "gh.log"
     bin_dir = tmp_path / "bin"
@@ -84,6 +101,7 @@ esac
     assert "MERGE" not in log.read_text()
 
 
+@needs_bash
 def test_resume_merges_only_after_approval_at_head(tmp_path):
     log = tmp_path / "gh.log"
     sudo_log = tmp_path / "sudo.log"
@@ -133,6 +151,7 @@ esac
     ]
 
 
+@needs_bash
 def test_open_pr_bumps_three_files_and_stops(tmp_path):
     src = tmp_path / "origin"
     src.mkdir()
