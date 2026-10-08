@@ -108,10 +108,17 @@ restart_importers() {
   local install_epoch="$1"
   local unit pid
   local units=()
+  # bash 3.2 (macOS) has no mapfile. One name per line, one restart per name.
   if [ -n "${RELEASE_UNITS_FILE:-}" ]; then
-    mapfile -t units < "$RELEASE_UNITS_FILE"
+    while IFS= read -r unit || [ -n "$unit" ]; do
+      [ -n "$unit" ] || continue
+      units+=("$unit")
+    done < "$RELEASE_UNITS_FILE"
   else
-    mapfile -t units < <(python3 "$LIB" discover)
+    while IFS= read -r unit || [ -n "$unit" ]; do
+      [ -n "$unit" ] || continue
+      units+=("$unit")
+    done < <(python3 "$LIB" discover)
   fi
   if [ "${#units[@]}" -eq 0 ]; then
     echo "release: no running swarph unit imports swarph_cli" >&2
