@@ -1,4 +1,5 @@
 """card #1065 — release.sh stops for an approval at head, then restarts importers one at a time."""
+import importlib.util
 import os
 import subprocess
 from pathlib import Path
@@ -7,15 +8,16 @@ ROOT = Path(__file__).resolve().parents[1]
 RELEASE = ROOT / "release.sh"
 CHECK = ROOT / "scripts" / "release_check.py"
 
-from scripts.release_check import (  # noqa: E402
-    approval_at_head,
-    bump_text,
-    discover_units,
-    script_imports_swarph_cli,
-    start_epoch_from_stat,
-    verify_process,
-    versions_in_image,
-)
+_spec = importlib.util.spec_from_file_location("release_check", CHECK)
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+approval_at_head = _mod.approval_at_head
+bump_text = _mod.bump_text
+discover_units = _mod.discover_units
+script_imports_swarph_cli = _mod.script_imports_swarph_cli
+start_epoch_from_stat = _mod.start_epoch_from_stat
+verify_process = _mod.verify_process
+versions_in_image = _mod.versions_in_image
 
 
 def _run(args, env, cwd=None):
