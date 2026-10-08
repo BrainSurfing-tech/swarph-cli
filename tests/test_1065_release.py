@@ -108,11 +108,13 @@ def test_resume_merges_only_after_approval_at_head(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     head = "a" * 40
+    merge = "b" * 40
     (bin_dir / "gh").write_text(f"""#!/bin/bash
 printf '%s\\n' "$*" >> {log}
 case "$*" in
   *"auth token"*) echo test-token ;;
   *"pr list"*) echo 7 ;;
+  *"mergeCommit"*) echo {merge} ;;
   *"pr view"*) echo {head} ;;
   *"/reviews"*)
     printf '%s' '[{{"state":"APPROVED","commit_id":"{head}","user":{{"login":"reviewers-pixel"}},"submitted_at":"t","id":1}}]'
@@ -121,7 +123,13 @@ case "$*" in
   *) echo "unexpected gh: $*" >> {log}; exit 99 ;;
 esac
 """)
-    (bin_dir / "git").write_text(f"#!/bin/sh\necho git $* >> {log}\nexit 0\n")
+    (bin_dir / "git").write_text(f"""#!/bin/bash
+echo "git $*" >> {log}
+case "$1" in
+  rev-parse) exit 1 ;;
+  *) exit 0 ;;
+esac
+""")
     (bin_dir / "curl").write_text(
         "#!/bin/sh\npython3 -c 'import json,sys; json.dump({\"releases\":{\"9.9.9\":[]}}, sys.stdout)'\n"
     )
@@ -149,9 +157,102 @@ esac
         "-n systemctl restart swarph-monitor@cursor-lin.service",
         "-n systemctl restart swarph-monitor@drop-on-meta-edge.service",
     ]
+    assert f"fetch origin {merge}" in text
+    assert f"tag -a v9.9.9 {merge}" in text
+    assert f"tag -a v9.9.9 {head}" not in text
+    assert f"tag v9.9.9 {head}" not in text
 
 
 @needs_bash
+def _tag_resume(tmp_path, git_body: str):
+    """Resume past an approval, with git answering the tag questions."""
+    log = tmp_path / "gh.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    head = "a" * 40
+    merge = "b" * 40
+    (bin_dir / "gh").write_text(f"""#!/bin/bash
+printf '%s\\n' "$*" >> {log}
+case "$*" in
+  *"auth token"*) echo test-token ;;
+  *"pr list"*) echo 7 ;;
+  *"mergeCommit"*) echo {merge} ;;
+  *"pr view"*) echo {head} ;;
+  *"/reviews"*)
+    printf '%s' '[{{"state":"APPROVED","commit_id":"{head}","user":{{"login":"reviewers-pixel"}},"submitted_at":"t","id":1}}]'
+    ;;
+  *"pr merge"*) echo MERGED >> {log}; exit 0 ;;
+  *) echo "unexpected gh: $*" >> {log}; exit 99 ;;
+esac
+""")
+    (bin_dir / "git").write_text(git_body.format(log=log, merge=merge))
+    (bin_dir / "curl").write_text(
+        "#!/bin/sh\npython3 -c 'import json,sys; json.dump({\"releases\":{\"9.9.9\":[]}}, sys.stdout)'\n"
+    )
+    (bin_dir / "sudo").write_text("#!/bin/sh\nexit 0\n")
+    (bin_dir / "systemctl").write_text("#!/bin/sh\necho 1\n")
+    (bin_dir / "pip").write_text("#!/bin/sh\nexit 0\n")
+    for name in ("gh", "git", "curl", "sudo", "systemctl", "pip"):
+        (bin_dir / name).chmod(0o755)
+    units = tmp_path / "units"
+    units.write_text("swarph-monitor@cursor-lin.service\n")
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["RELEASE_UNITS_FILE"] = str(units)
+    env["RELEASE_VERIFY_CMD"] = "true"
+    env["RELEASE_PYPI_SLEEP"] = "0"
+    proc = _run(["bash", str(RELEASE), "--resume", "9.9.9"], env)
+    return proc, log.read_text(), head, merge
+
+
+@needs_bash
+def test_tag_targets_the_merge_commit_not_the_pr_head(tmp_path):
+    git_body = """#!/bin/bash
+echo "git $*" >> {log}
+case "$1" in
+  rev-parse) exit 1 ;;
+  *) exit 0 ;;
+esac
+"""
+    proc, text, head, merge = _tag_resume(tmp_path, git_body)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert f"fetch origin {merge}" in text
+    assert f"tag -a v9.9.9 {merge}" in text
+    assert f"tag -a v9.9.9 {head}" not in text
+    assert text.count("tag -a v9.9.9") == 1
+
+
+@needs_bash
+def test_resume_continues_when_the_tag_already_points_at_the_merge_commit(tmp_path):
+    git_body = """#!/bin/bash
+echo "git $*" >> {log}
+case "$1" in
+  rev-parse) echo {merge}; exit 0 ;;
+  *) exit 0 ;;
+esac
+"""
+    proc, text, _head, merge = _tag_resume(tmp_path, git_body)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    assert f"already points at merge commit {merge}" in proc.stdout
+    assert "tag -a" not in text
+
+
+@needs_bash
+def test_resume_stops_when_the_tag_points_at_a_different_commit(tmp_path):
+    other = "c" * 40
+    git_body = f"""#!/bin/bash
+echo "git $*" >> {{log}}
+case "$1" in
+  rev-parse) echo {other}; exit 0 ;;
+  *) exit 0 ;;
+esac
+"""
+    proc, text, _head, merge = _tag_resume(tmp_path, git_body)
+    assert proc.returncode != 0
+    assert f"points at {other}, not merge commit {merge}" in proc.stderr
+    assert "tag -a" not in text
+
+
 def test_open_pr_bumps_three_files_and_stops(tmp_path):
     src = tmp_path / "origin"
     src.mkdir()
