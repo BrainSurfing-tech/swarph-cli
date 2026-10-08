@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the stuck-work sweep: swarph sweep daily (blocked rows + unreviewed PRs, card #1064)
+Documentation=https://github.com/BrainSurfing-tech/swarph-cli
+Requires=swarph-stuck-sweep.service
+
+[Timer]
+OnBootSec=15min
+OnCalendar=daily
+AccuracySec=30min
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target
