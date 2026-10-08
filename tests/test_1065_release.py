@@ -1,11 +1,7 @@
 """card #1065 — release.sh stops for an approval at head, then restarts importers one at a time."""
-import json
 import os
-import stat
 import subprocess
 from pathlib import Path
-
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = ROOT / "release.sh"
