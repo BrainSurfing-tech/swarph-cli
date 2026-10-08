@@ -165,7 +165,9 @@ def test_once_holds_quiet_for_the_first_real_dm(monkeypatch, tmp_path):
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     time.sleep(0.2)
-    with inbox.open("a", encoding="utf-8") as fp:
+    # newline="": the poll slices text by byte offset (st_size), so a
+# Windows-translated CRLF would skew every later read.
+    with inbox.open("a", encoding="utf-8", newline="") as fp:
         fp.write(_line(TAKEN) + "\n")
         fp.write(_line(CLOSED) + "\n")
     t.join(timeout=10)
@@ -239,7 +241,9 @@ def test_channel_next_real_dm_carries_held(monkeypatch, tmp_path):
     chan = _armed(tmp_path)
     _inbox(box, [_row(TAKEN)])
     assert chan.poll(now=T0) == []
-    with (box / "inbox.log").open("a", encoding="utf-8") as fp:
+    # newline="": see above — byte offsets must match characters.
+    with (box / "inbox.log").open("a", encoding="utf-8",
+                                  newline="") as fp:
         fp.write(json.dumps(_row(CLOSED)) + "\n")
     notes = chan.poll(now=T0 + 1)
     assert len(notes) == 2, notes
@@ -267,7 +271,9 @@ def test_channel_hold_survives_restart_without_dup_or_loss(
     _inbox(box, [_row(TAKEN)])
     assert _chan(tmp_path).poll(now=T0) == []
     assert _chan(tmp_path).poll(now=T0 + 1) == []
-    with (box / "inbox.log").open("a", encoding="utf-8") as fp:
+    # newline="": see above — byte offsets must match characters.
+    with (box / "inbox.log").open("a", encoding="utf-8",
+                                  newline="") as fp:
         fp.write(json.dumps(_row(QUESTION)) + "\n")
     notes = _chan(tmp_path).poll(now=T0 + 2)
     ids = [n["params"]["meta"]["id"] for n in notes
