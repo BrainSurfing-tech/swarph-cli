@@ -163,7 +163,6 @@ esac
     assert f"tag v9.9.9 {head}" not in text
 
 
-@needs_bash
 def _tag_resume(tmp_path, git_body: str):
     """Resume past an approval, with git answering the tag questions."""
     log = tmp_path / "gh.log"
@@ -253,6 +252,7 @@ esac
     assert "tag -a" not in text
 
 
+@needs_bash
 def test_open_pr_bumps_three_files_and_stops(tmp_path):
     src = tmp_path / "origin"
     src.mkdir()
