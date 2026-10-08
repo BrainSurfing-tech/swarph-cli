@@ -6,6 +6,10 @@ when the cell holds no live row, the pane reads idle, and no DM is owed.
 type nothing), or ``live``. v1 opt-in is drop-on-meta-edge only: a cell
 that owns a project keeps its context (design_1007 / optin_owners).
 
+v1.1 (#1362): a taken row whose step needs are UNMET is waiting, not
+working — it does not count as live. Needs state comes from the card's
+step graph; anything unreadable about it fails closed (no clear).
+
 A ``/clear`` mints a new Claude session id. The SessionStart hook with
 ``source=clear`` writes that id into the role's ``<role>.session-id``
 pin, so the next spawn resumes the cleared session instead of the long
@@ -95,11 +99,62 @@ def _dm_owed(state) -> bool:
     return False
 
 
+def _step_needs_met(state, row: dict, http_get: Callable,
+                      graphs: dict) -> Optional[bool]:
+    """Is this open row's work actionable (True), waiting (False), or
+    unevaluable (None)?
+
+    A row with no step has no needs to unmeet (ruling_1236: still live).
+    Otherwise the card's step graph (GET /board/cards/{id}/graph) names the
+    step's needs with a satisfied flag — every need satisfied means the
+    holder can act; one unsatisfied need means the cell is between rows.
+    Anything unreadable — no card id, a failed graph fetch, a missing step
+    entry, a needs entry without a boolean satisfied flag — is None: an
+    unevaluable row must not look like an empty cell (fail closed, #1362).
+    One graph fetch per card per poll; the same http_get the board read uses.
+    """
+    step = row.get("step")
+    if not step:
+        return True
+    card_id = row.get("card_id")
+    if not isinstance(card_id, int) or isinstance(card_id, bool):
+        return None
+    if card_id not in graphs:
+        url = f"{state.gateway}/board/cards/{card_id}/graph"
+        try:
+            status, body = http_get(url, state.token)
+        except Exception:
+            return None
+        if status != 200 or not isinstance(body, dict):
+            return None
+        steps = body.get("steps")
+        if not isinstance(steps, list):
+            return None
+        graphs[card_id] = steps
+    for entry in graphs[card_id]:
+        if isinstance(entry, dict) and entry.get("step") == step:
+            needs = entry.get("needs")
+            if not isinstance(needs, list):
+                return None
+            for need in needs:
+                if not isinstance(need, dict) or not isinstance(
+                        need.get("satisfied"), bool):
+                    return None
+                if not need["satisfied"]:
+                    return False
+            return True
+    return None
+
+
 def _live_row_count(state, http_get: Callable) -> Optional[int]:
-    """How many unfinished rows this cell holds, or None if unread.
+    """How many ACTIONABLE rows this cell holds, or None if unread.
 
     None fails closed: an unreadable board must not look like an empty
     one, or a live row we failed to see gets a ``/clear``.
+
+    v1.1 (#1362): an open row whose step needs are unmet is waiting, not
+    working — it does not count. An open row with no step, or whose step
+    needs nothing, is still live (ruling_1236 unchanged).
     """
     url = f"{state.gateway}/board/obligations?holder={state.self_name}"
     try:
@@ -111,15 +166,21 @@ def _live_row_count(state, http_get: Callable) -> Optional[int]:
     rows = body.get("obligations")
     if not isinstance(rows, list):
         return None
+    graphs: dict = {}
     live = 0
     for row in rows:
         if not isinstance(row, dict):
             return None
         status = str(row.get("status") or "")
-        if status == _LIVE:
-            live += 1
-        elif status not in _FINISHED:
+        if status in _FINISHED:
+            continue
+        if status != _LIVE:
             return None
+        met = _step_needs_met(state, row, http_get, graphs)
+        if met is None:
+            return None
+        if met:
+            live += 1
     return live
 
 

@@ -335,3 +335,43 @@ def test_select_next_poll_seconds_backoff(tmp_path):
     state.consecutive_empty = 0
     state.disconnect_since = time.time() - (mesh._BACKOFF_5XX_THRESHOLD_SECONDS + 1)
     assert mesh._select_next_poll_seconds(state) == mesh._BACKOFF_5XX_SECONDS
+
+
+def test_wake_reinjects_at_the_same_pane_after_session_replacement(
+        monkeypatch, tmp_path):
+    """#1362 accept (5) WAKE SURVIVES THE CLEAR: a /clear replaces the Claude
+    session INSIDE the same pane, so the wake path — keyed by pane target,
+    never by session id — still reaches the fresh session. Here the ledger
+    holds a standing wake injected BEFORE the clear while the pane's session
+    is newborn (#611's shape): deliver must re-inject via _tmux_wake at the
+    UNCHANGED pane target, carrying the needs-met fyi the gateway sent on the
+    awaited row's close (#1001)."""
+    from swarph_cli.commands import watchdog
+    state = mesh.MeshSidecarState(
+        self_name="drop-on-meta-edge",
+        state_dir=tmp_path,
+        gateway="http://gateway:8788",
+        token="tok",
+        tmux_target="drop:0.0",
+        poll_s=30,
+        wake_min_interval_s=60,
+    )
+    sink = mesh.TmuxSink("drop:0.0")
+    led = state.ledger(sink.name)
+    led["wake_outstanding"] = True
+    led["last_wake_injected_at"] = 1000.0  # injected before the /clear
+    monkeypatch.setattr(watchdog, "_gateway_unread_count", lambda *a: 1)
+    # the /clear minted a session AFTER the last injection
+    monkeypatch.setattr(mesh, "_tmux_session_created", lambda t: 2000.0)
+    monkeypatch.setattr(mesh, "_opencode_turn_finished_target", lambda t: False)
+    monkeypatch.setattr(mesh, "_grok_turn_finished_target", lambda t: False)
+    wakes = []
+    monkeypatch.setattr(
+        mesh, "_tmux_wake", lambda target: wakes.append(target) or True)
+    dm = {"id": 9, "from_node": "lab-ovh", "to_node": "drop-on-meta-edge",
+          "kind": "fyi",
+          "content": "OBLIGATION #1007 CLOSED outcome=pass evidence: build done",
+          "created_at": "2026-10-08T16:00:00Z"}
+    assert sink.deliver(state, [dm], 9) is True
+    assert wakes == ["drop:0.0"], (
+        "post-clear wake must key the unchanged pane, not the session id")
