@@ -148,12 +148,17 @@ where = ["src"]
 # v0.45: ship the guide (#523). `swarph guide` reads it via
 # importlib.resources, so an undeclared GUIDE.md passes every test in the
 # tree and fails on every installed wheel -- the 0.39.3 bug above, again.
+# 0.72.13: ship the triage owner map (card #1073, #1432). `swarph triage`
+# reads owners.json off the package path, so the same bug a third time:
+# installed 0.72.13 failed 'owner map unreadable' while the tree passed.
+# test_1073_wheel_install builds the wheel and runs the installed copy.
 swarph_cli = ["systemd/*.service", "systemd/*.timer", "systemd/*.default",
               "systemd/*.path",
               "scripts/*.sh", "scripts/*.ps1", "guide/*.md",
               "payloads/postcompact/*.sh", "payloads/postcompact/*.cmd",
               "payloads/opencode/*.js",
-    "skills/*/SKILL.md", "skills/*/LICENSE"]
+    "skills/*/SKILL.md", "skills/*/LICENSE",
+    "triage/*.json"]
 # v0.15: ship the bundled mesh-gateway schema so `swarph gateway serve`
 # can apply it at startup via MESH_SCHEMA_PATH (defaults next to server.py).
 "swarph_cli.gateway" = ["*.sql"]
