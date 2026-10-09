@@ -2954,7 +2954,7 @@ def _copilot_frame(
                 text = "\n".join(ln[1:].strip() for ln in rows).strip()
                 if "esc interrupt" in footer:
                     running = True
-                elif "Interactive ·" in footer:
+                elif "Interactive ·" in footer or "· autopilot ·" in footer:
                     running = False
     elif _is_muse_rule(block[0]):
         bottom = next(
@@ -2970,7 +2970,7 @@ def _copilot_frame(
                 footer = block[-1]
                 if "esc interrupt" in footer:
                     running = True
-                elif "Interactive ·" in footer:
+                elif "Interactive ·" in footer or "· autopilot ·" in footer:
                     running = False
     else:
         return None

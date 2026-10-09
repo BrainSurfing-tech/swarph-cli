@@ -2,8 +2,10 @@
 
 Fixtures are real 1.0.94 capture-pane input blocks, without transcript or
 credentials. Idle/draft frames came from our throwaway reader-fixture and
-reader-mono windows; busy.txt came from our active copilot pane. Only the
-human-draft and quote tests transform these captures.
+reader-mono windows; busy.txt came from our active copilot pane.
+idle-autopilot.txt is the bottom input block of the supplied lab fixture
+usage-panes-20261009/copilot.txt. Only human-draft and quote tests transform
+these captures.
 """
 
 import json
@@ -26,6 +28,7 @@ def frame(name):
     "name,composer,running",
     [
         ("idle-box.txt", "clear", False),
+        ("idle-autopilot.txt", "clear", False),
         ("idle.txt", "clear", False),
         ("busy.txt", "clear", True),
         ("pending-box.txt", "wake", False),
@@ -95,7 +98,7 @@ def test_landed_wake_is_verified_and_not_reinjected(monkeypatch):
     assert [c for c in calls if "-l" in c] == injected
 
 
-@pytest.mark.parametrize("idle_name", ["idle.txt", "idle-box.txt"])
+@pytest.mark.parametrize("idle_name", ["idle.txt", "idle-box.txt", "idle-autopilot.txt"])
 def test_engine_persists_delivery_and_does_not_retry(monkeypatch, tmp_path, idle_name):
     from swarph_cli.commands import watchdog
 
