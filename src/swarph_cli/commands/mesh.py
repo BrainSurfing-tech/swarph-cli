@@ -2331,6 +2331,7 @@ _GROK_WAKE_PROMPT = "check mesh: swarph_dm_unread"
 # Muse 1.4.1 has no push channel either. The wake names the pull tool,
 # same text the grok and opencode sinks inject.
 _MUSE_WAKE_PROMPT = "check mesh: swarph_dm_unread"
+_COPILOT_WAKE_PROMPT = "check mesh: swarph_dm_unread"
 # A finished turn keeps its ▣ header and adds a duration.
 # Short turns read `· 3.3s` (drop-on-meta-edge, 1.18.33, card #961 post
 # 54557). A longer idle turn reads `· 3m 4s` (opencode pane, 2026-09-29
@@ -2894,6 +2895,8 @@ def _muse_running(lines: list[str]) -> bool:
 
 
 def _wake_prompt_for(lines: Optional[list[str]]) -> str:
+    if lines and _copilot_frame(lines) is not None:
+        return _COPILOT_WAKE_PROMPT
     if lines and _is_grok_pane(lines):
         return _GROK_WAKE_PROMPT
     if lines and _is_opencode_pane(lines):
@@ -2916,6 +2919,67 @@ def _sink_failure_detail(target: str) -> str:
     return "the sink is probably gone (session restart / renamed target)"
 
 
+def _copilot_frame(
+    lines: list[str],
+) -> Optional[tuple[Optional[str], Optional[bool]]]:
+    """Read Copilot's bottom input block, not transcript quotes (#386).
+
+    Both measured 1.0.94 layouts put the AIC summary immediately above
+    the input: ``--no-color`` uses rules and ``❯``; color uses a ``┃``
+    box. An identified but incomplete block stays unknown.
+    """
+    tail = _nonempty_tail(lines, 12)
+    summary = next(
+        (i for i in range(len(tail) - 1, -1, -1)
+         if re.search(r"Plan: .* · Session: .* AIC\b", tail[i])),
+        None,
+    )
+    if summary is None:
+        return None
+    block = [ln.strip() for ln in tail[summary + 1:]]
+    if not block:
+        return (None, None)
+    text = None
+    running = None
+    if block[0].startswith("╻▄"):
+        bottom = next(
+            (i for i, ln in enumerate(block) if ln.startswith("╹▀")), None,
+        )
+        if bottom is not None and bottom + 1 < len(block) - 1:
+            return None  # This block is history above another composer.
+        if bottom is not None and bottom + 1 == len(block) - 1:
+            footer = block[-1]
+            rows = block[1:bottom]
+            if rows and all(ln.startswith("┃") for ln in rows):
+                text = "\n".join(ln[1:].strip() for ln in rows).strip()
+                if "esc interrupt" in footer:
+                    running = True
+                elif "Interactive ·" in footer:
+                    running = False
+    elif _is_muse_rule(block[0]):
+        bottom = next(
+            (i for i in range(1, len(block))
+             if _is_muse_rule(block[i])), None,
+        )
+        if bottom is not None and bottom + 1 < len(block) - 1:
+            return None
+        if bottom is not None and bottom + 1 == len(block) - 1:
+            rows = block[1:bottom]
+            if rows and rows[0].startswith("❯"):
+                text = "\n".join([rows[0][1:].strip(), *rows[1:]]).strip()
+                footer = block[-1]
+                if "esc interrupt" in footer:
+                    running = True
+                elif "Interactive ·" in footer:
+                    running = False
+    else:
+        return None
+    if text is None or running is None:
+        return (None, None)
+    composer = "clear" if not text else "wake" if _only_wake_text(text) else "busy"
+    return (composer, running)
+
+
 def _agent_running(target: str) -> Optional[bool]:
     """True while a keystroke would miss the idle composer.
 
@@ -2932,6 +2996,9 @@ def _agent_running(target: str) -> Optional[bool]:
     lines = _capture_pane_lines(target)
     if lines is None:
         return None
+    copilot = _copilot_frame(lines)
+    if copilot is not None:
+        return copilot[1]
     if _is_opencode_pane(lines):
         return _opencode_running(lines)
     if _is_grok_pane(lines):
@@ -2982,6 +3049,9 @@ def _composer_state(target: str) -> Optional[str]:
     lines = _capture_pane_lines(target)
     if lines is None:
         return None
+    copilot = _copilot_frame(lines)
+    if copilot is not None:
+        return copilot[0]
     if _is_opencode_pane(lines):
         return _opencode_composer_state(lines)
     if _is_grok_pane(lines):

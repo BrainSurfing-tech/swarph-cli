@@ -448,6 +448,14 @@ swarph monitor stop
 | `none` | genuinely nothing: observe, append `inbox.log`, no ledger, **no unread tracking**. |
 | `webhook:<url>` | **held** pending an egress review — exits non-zero rather than silently no-op. |
 
+**Copilot tmux panes.** The reader recognizes Copilot CLI 1.0.94's color input
+box and `--no-color` composer using the bottom AIC summary, input borders, and
+status footer. It defers while `esc interrupt` indicates a running turn or
+the composer holds a human draft. The wake names `swarph_dm_unread`; delivery
+is recorded only after the composer is observed clear. Missing or incomplete
+pane captures send no keystrokes and leave delivery pending with a visible
+failure. Keep `pull` for layouts that hide or customize this chrome.
+
 **Two pieces of state that never share a variable.** The *observation cursor* (`cursor.json`) is what this monitor has READ from the gateway; it advances on observation, always, gated on nothing. A *delivery ledger* (`ledgers.json`, one per sink) advances only when that sink is satisfied and may lag arbitrarily far. So a dead tmux pane can no longer freeze the cursor, one dead sink cannot stall another, and a sink attached tomorrow starts with an empty ledger and replays from `inbox.log` (bounded, and it reports what it skipped).
 
 **Pull beats push.** Every push sink's liveness is a precondition for hearing anything — if the pane dies, "no wake arrived" is indistinguishable from "no mail arrived". A pull check run *by* the cell lives one layer above tmux and cannot die with it. Designed to drop straight into a SessionStart hook:
