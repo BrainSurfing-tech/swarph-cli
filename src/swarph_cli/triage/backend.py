@@ -114,7 +114,8 @@ class BoardBackend:
         # 0.72.14 live run POSTed title+body only, was refused, and the
         # old code carried the refusal forward as a row with id None).
         # The owner is the card assignee, so the row lands in a queue.
-        payload = {"project_id": self.project_id, "title": title,
+        payload = {"actor": self.sender, "project_id": self.project_id,
+                   "title": title,
                    "body": f"Daily triage row for {owner} (card #1073). "
                            "Items are appended by the triage job; "
                            "owners work them off the row.",
