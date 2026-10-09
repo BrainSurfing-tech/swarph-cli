@@ -15,7 +15,8 @@ from swarph_cli.scrub import scrub_text
     "sk-ant-aaaa-bbbb-cccc-dddd",
     "sk-abcdefghijklmnop123456",
     "xai-abcdefghijklmnop123456",
-    "AIzaSyDdI0T9mbB4y7KzQ3wX2vU5tS8rR1pP6oO",
+    # Built at runtime: the literal full shape trips gitleaks gcp-api-key.
+    "AIza" + "SyDdI0T9mbB4y7KzQ3wX2vU5tS8rR1pP6oO",
     "ghp_abcdefghijklmnopqrstuvwx1234567890",
     # Built at runtime: the literal full shape trips push protection.
     "xoxb-" + "123456789012-abcdefghijklmnop",

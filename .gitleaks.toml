@@ -9,6 +9,12 @@
 # THE ALLOWLIST IS PATH-SCOPED, NOT RULE-DISABLED: generic-api-key stays ACTIVE
 # everywhere else in the tree. Disabling the rule globally would trade one false
 # positive for blindness to every real one.
+#
+# SAME SHAPE, SECOND CASE (card #1073, #1432): the gcp-api-key rule flags the
+# deliberately fake Google key in tests/test_scrub.py — a fixture fragment
+# exercising the shared outbound scrub, not a credential. The fake is also
+# built at runtime in the test so the full shape never sits in a blob; the
+# allowlist covers the historical commits that predate that split.
 [extend]
 useDefault = true
 
@@ -17,4 +23,11 @@ id = "generic-api-key"
 [rules.allowlist]
 paths = [
   '''tests/test_token_file_one_parser\.py''',
+]
+
+[[rules]]
+id = "gcp-api-key"
+[rules.allowlist]
+paths = [
+  '''tests/test_scrub\.py''',
 ]
