@@ -201,7 +201,8 @@ def gate(monkeypatch):
                         lambda t: calls.__setitem__("enter", calls["enter"] + 1) or True)
     monkeypatch.setattr(mesh, "_wake_still_pending", lambda t: box["pending"])
     monkeypatch.setattr(mesh, "_composer_state", lambda t: box["composer"])
-    monkeypatch.setattr(mesh, "_opencode_in_progress", lambda t: False)
+    monkeypatch.setattr(mesh, "_opencode_in_progress",
+                        lambda t, *a: False)
     monkeypatch.setattr(mesh, "_opencode_turn_finished_target", lambda t: False)
     # #1010 strand-only hermeticity (#1083): deliver() reads the pane
     # (grok-block probe), the run-state and the session age before it
@@ -672,7 +673,9 @@ def test_drop_six_captures_split_the_footer():
     sidebar = "▣  Build · DeepSeek V4.1 Flash · 5.1s" + (" " * 40) + "LSPs are disabled"
     assert mesh._OPENCODE_DONE.search(sidebar)
     assert mesh._opencode_running([sidebar]) is False
-    assert mesh._opencode_running(["▣  Build · DeepSeek V4 Pro (New)"]) is True
+    # card #989: a bare header with no interrupt hint is an aborted turn,
+    # not a live one — the old True here was the 60-tick stall.
+    assert mesh._opencode_running(["▣  Build · DeepSeek V4 Pro (New)"]) is False
 
 
 def test_wide_empty_box_records_the_wake_outstanding(tmux):

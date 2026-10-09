@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -1511,20 +1512,38 @@ class TmuxSink(Sink):
         # piled up before the commander nudged. Clear on the running
         # observation and let the fresh path take over — it defers while
         # running (#619) and injects at the first idle poll.
-        if led.get("wake_outstanding") and _agent_running(self.target):
+        agent_state = (_agent_running(self.target)
+                       if led.get("wake_outstanding") else None)
+        if agent_state:
             # Opencode keeps the finished ▣ header on screen, so a deferral
             # during the turn must not clear the flag: the next idle poll
             # still owes a wake. Cursor's #620 clear stays.
-            if _opencode_in_progress(self.target):
+            verdict = _opencode_in_progress(self.target, led)
+            if verdict:
                 # Card #1052: name the real deferral cause — without this
                 # the log says "composer holds human text" on a CLEAR
                 # composer while a finished header misreads as live.
-                self.deferred_reason = "opencode turn in progress"
+                self.deferred_reason = (
+                    "opencode turn in progress" if verdict == "running"
+                    else "opencode maybe starting")
                 return None
             if _grok_in_progress(self.target):
                 self.deferred_reason = "grok turn in progress"
                 return None
             led["wake_outstanding"] = False
+        elif agent_state is False:
+            # Card #989 rework: the stateless guard reads a booting
+            # turn's first frame (bare header, footer not yet rendered)
+            # as idle. The ledger-backed verdict defers that frame;
+            # anything else falls through to the inject path below
+            # with the flag intact (no clear here — the pane is idle
+            # and the wake is still owed).
+            verdict = _opencode_in_progress(self.target, led)
+            if verdict:
+                self.deferred_reason = (
+                    "opencode turn in progress" if verdict == "running"
+                    else "opencode maybe starting")
+                return None
         if led.get("wake_outstanding"):
             # Lazy: watchdog imports mesh module-level, so the reverse must
             # not. None (gateway error) reads as NOT-drained — re-arming on an
@@ -2529,16 +2548,17 @@ def _last_box_header(lines: list[str]) -> Optional[str]:
 def _opencode_running(lines: list[str]) -> bool:
     """True only while a turn is in progress.
 
-    The footer shows ``esc interrupt``, and the last ▣ header has no
-    trailing duration. A finished turn keeps the ▣ header and adds a
-    duration (``· <n>s`` or h/m-only like ``· 4h 59m``), with no
-    interrupt hint. That pane is idle. The permission dialog is
-    not a turn; it has its own branch.
+    Only the footer judges: ``esc interrupt`` present = running; absent
+    = NOT running, whatever the last ▣ header says. An ABORTED/ERRORED
+    turn prints its header and never adds a duration or the interrupt
+    hint (card #989, 60 deferred ticks 2026-10-09) — the old
+    header-without-duration fallback read it as running forever.
+    A finished turn keeps the ▣ header and adds a duration
+    (``· <n>s`` or h/m-only like ``· 4h 59m``), with no interrupt hint.
+    That pane is idle. The permission dialog is not a turn; it has its
+    own branch.
     """
-    if any("esc interrupt" in ln for ln in lines):
-        return True
-    last = _last_box_header(lines)
-    return last is not None and not _OPENCODE_DONE.search(last)
+    return any("esc interrupt" in ln for ln in lines)
 
 
 def _opencode_turn_finished(lines: list[str]) -> bool:
@@ -2549,12 +2569,89 @@ def _opencode_turn_finished(lines: list[str]) -> bool:
     return last is not None and bool(_OPENCODE_DONE.search(last))
 
 
-def _opencode_in_progress(target: str) -> bool:
-    """In-progress opencode turn. A deferral here keeps wake_outstanding."""
+# Card #989 rework (gemini #1427 FAIL on the footer-alone rule): a live
+# turn's FIRST frame shows the bare ▣ header before the footer renders,
+# so footer-alone reads a booting turn as idle and a wake lands in it.
+# Time tells boot from abort apart: a bare last header with no interrupt
+# hint is MAYBE-STARTING on first sight (defer); it becomes IDLE only
+# when the same pane is seen unchanged on a later poll at least this
+# many seconds later (the monitor polls each minute, so about 2 polls).
+_MAYBE_START_GRACE_S = 60
+
+
+def _opencode_pane_fingerprint(lines: list[str]) -> str:
+    """Content fingerprint of the last ▣ header + footer region (every
+    line from the last header to the end of the capture, stripped). A
+    progressing turn rewrites this region every poll; an aborted one
+    sits byte-identical."""
+    start = 0
+    for i, ln in enumerate(lines):
+        if ln.strip().startswith("▣"):
+            start = i
+    return hashlib.sha256(
+        "\n".join(ln.strip() for ln in lines[start:]).encode(
+            "utf-8", "replace")).hexdigest()
+
+
+def _opencode_poll_verdict(lines: list[str], now: float,
+                           prior) -> tuple[str, str, Optional[dict]]:
+    """One poll's liveness: (verdict, fingerprint, record).
+
+    verdict is "running" (interrupt hint present), "idle" (finished
+    header, no header at all, or an unchanged bare pane past the
+    grace), or "maybe-starting" (bare last header, no hint, first
+    sight or changed or grace not yet elapsed — DEFER). record is the
+    {"fingerprint", "first_seen"} the caller persists when the verdict
+    is maybe-starting, else None. prior is that same record from the
+    previous poll (or anything else — a corrupt entry reads as first
+    sight, never as idle). Pure: the caller owns persistence.
+    """
+    fingerprint = _opencode_pane_fingerprint(lines)
+    if any("esc interrupt" in ln for ln in lines):
+        return "running", fingerprint, None
+    last = _last_box_header(lines)
+    if last is None or _OPENCODE_DONE.search(last):
+        return "idle", fingerprint, None
+    first_seen = None
+    if isinstance(prior, dict):
+        seen = prior.get("first_seen")
+        if (prior.get("fingerprint") == fingerprint
+                and isinstance(seen, (int, float))
+                and not isinstance(seen, bool)):
+            first_seen = float(seen)
+    if first_seen is None:
+        return ("maybe-starting", fingerprint,
+                {"fingerprint": fingerprint, "first_seen": now})
+    if now - first_seen >= _MAYBE_START_GRACE_S:
+        return "idle", fingerprint, None
+    return ("maybe-starting", fingerprint,
+            {"fingerprint": fingerprint, "first_seen": first_seen})
+
+
+def _opencode_in_progress(target: str, ledger=None, now=None):
+    """Deferral verdict for an opencode pane: "running", "maybe-starting",
+    or None (idle, or not an opencode pane at all). A deferral here keeps
+    wake_outstanding.
+
+    With a ledger (the deliver path) the two-poll grace applies: the
+    {"fingerprint", "first_seen"} record lives under the ledger's
+    "opencode_maybe_start" key, which persists in ledgers.json across
+    polls and restarts. Without one (stateless guards) only the
+    interrupt hint judges — the grace needs persisted state.
+    """
     lines = _capture_pane_lines(target)
     if not lines or not _is_opencode_pane(lines):
-        return False
-    return _opencode_running(lines)
+        return None
+    if ledger is None:
+        return "running" if _opencode_running(lines) else None
+    moment = time.time() if now is None else now
+    verdict, _fingerprint, record = _opencode_poll_verdict(
+        lines, moment, ledger.get("opencode_maybe_start"))
+    if verdict == "maybe-starting":
+        ledger["opencode_maybe_start"] = record
+    else:
+        ledger.pop("opencode_maybe_start", None)
+    return verdict if verdict != "idle" else None
 
 
 def _opencode_turn_finished_target(target: str) -> bool:
@@ -2923,8 +3020,9 @@ def _agent_running(target: str) -> Optional[bool]:
     cursor-lin 2026-08-24). A keystroke into that TUI lands in the
     follow-up queue, and the queue is input-gated (measured live
     2026-08-26, twice: queued wakes fired only when the human next typed).
-    Opencode: ``esc interrupt`` or a ▣ header with no trailing duration.
-    A finished ``· <n>s`` header is idle. None =
+    Opencode: ``esc interrupt`` alone. A finished ``· <n>s`` header is
+    idle, and so is a duration-less header with no interrupt hint
+    (card #989: aborted turns never grow either). None =
     pane or composer unreadable; callers treat unknown as NOT-running
     (the composer state was already established by then — this guard
     only vets the timing).

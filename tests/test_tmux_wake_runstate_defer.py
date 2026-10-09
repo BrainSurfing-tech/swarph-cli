@@ -49,7 +49,8 @@ def _rig(monkeypatch, *, composer="clear", unread=3, session_created=None,
     monkeypatch.setattr(mesh, "_composer_state", lambda t: composer)
     monkeypatch.setattr(mesh, "_tmux_session_created", lambda t: session_created)
     monkeypatch.setattr(mesh, "_agent_running", lambda t: running)
-    monkeypatch.setattr(mesh, "_opencode_in_progress", lambda t: False)
+    monkeypatch.setattr(mesh, "_opencode_in_progress",
+                        lambda t, *a: False)
     monkeypatch.setattr(mesh, "_opencode_turn_finished_target", lambda t: False)
     monkeypatch.setattr(watchdog, "_gateway_unread_count",
                         lambda *a, **k: unread)
