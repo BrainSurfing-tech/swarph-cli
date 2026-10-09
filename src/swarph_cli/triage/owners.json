@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "comment": "Organ triage owner map + calibration thresholds (card #1073, rulings #1413). DATA, not code: the router reads this file and contains no owner or threshold literals. Thresholds are written by a PROVEN calibration; until an organ has one, every model result for it is split. Owners keyed here route to '<owner> triage' rows; an organ with no entry routes to lab-ovh and is counted.",
+  "comment": "Organ triage owner map + calibration thresholds (card #1073, rulings #1413). DATA, not code: the router reads this file and contains no owner or threshold literals. Thresholds are written by a PROVEN calibration; until an organ has one, every model result for it is split. Owners keyed here route to '<owner> triage' rows; an organ with no entry routes to lab-ovh and is counted. project_id is the board project triage-row cards are created under (BoardCardCreate requires it; #1446).",
   "owners": {
     "stuck-work": {
       "owner": null,
@@ -19,6 +19,7 @@
       "note": "pattern: detector calibration -> science-claude"
     }
   },
+  "project_id": 9,
   "thresholds": {},
   "label_sets": {
     "stuck-work": ["real-stall", "deliberate-wait", "needed-row-closed-race"],

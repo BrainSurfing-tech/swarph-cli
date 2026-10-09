@@ -212,6 +212,7 @@ def run_triage(*, gateway, token, sender, owners_map, state_file,
         sent[key] = now_iso
         return True
 
+    from swarph_cli.triage.backend import BackendError
     from swarph_cli.triage.rows import TriageStore
     store = TriageStore(store_backend)
     if dry_run:
@@ -219,8 +220,14 @@ def run_triage(*, gateway, token, sender, owners_map, state_file,
             print(f"DRY {record['source_organ']} {record['type']} "
                   f"sharp={record['sharp']} item={record['item_id']}")
         return 0, {"dry_run_records": len(records)}
-    summary = _job.route_and_store(store, owners_map, records,
-                                   dm_sender=dm_sender)
+    try:
+        summary = _job.route_and_store(store, owners_map, records,
+                                       dm_sender=dm_sender)
+    except BackendError as exc:
+        # A failed create or append names itself here and exits non-zero
+        # — never the bare 'accept line not added' assertion (#1446).
+        print(f"swarph triage: board write failed: {exc}", file=sys.stderr)
+        return 1, {"board_error": str(exc)}
     _save_state(state_file, sent)
     return 0, summary
 
@@ -262,6 +269,9 @@ def _build_parser():
     p.add_argument("--owners-file", default=None,
                    help="local owner-map override (PROVEN calibration "
                         "writes here; deep-merges over shipped owners.json)")
+    p.add_argument("--project-id", type=int, default=None,
+                   help="board project for triage-row cards (default: "
+                        "project_id from the owner map, 9)")
     p.add_argument("--json", action="store_true")
     p.add_argument("--as", dest="self_name", default=None,
                    help="DM sender identity")
@@ -298,9 +308,12 @@ def run_triage_cmd(argv):
             return 2
         state_file = args.state_file or os.environ.get(
             "SWARPH_SWEEP_STATE", _sweep._default_state_file())
+        project_id = (args.project_id if args.project_id is not None
+                      else owners_map.get("project_id", 9))
         backend = _backend.BoardBackend(
             args.gateway, resolution.token, sender,
-            _mesh._http_get_json, _mesh._post_json)
+            _mesh._http_get_json, _mesh._post_json,
+            project_id=project_id)
         rc, summary = run_triage(
             gateway=args.gateway, token=resolution.token, sender=sender,
             owners_map=owners_map, state_file=state_file,
