@@ -255,6 +255,7 @@ def _validate_routing(cell: Cell) -> None:
         "antigravity": "antigravity",
         "cursor": "cursor",
         "opencode": "opencode",
+        "copilot": "copilot",
     }.get(cell.provider)
     if provider_native is None:
         raise CellError(
@@ -3237,6 +3238,106 @@ class OpencodeMembrane(ProviderMembrane):
         return cell.cwd / "AGENTS.md"
 
 
+def _build_copilot_argv(
+    cell: Cell,
+    session_id: str,
+    no_starter: bool,
+    passthrough: list[str],
+) -> list[str]:
+    """Build the ``copilot`` cell argv. Grounded against GitHub Copilot CLI 1.0.89
+    (``copilot --help``, 2026-10-09). The card measured 1.0.78, which had
+    ``--no-banner``; 1.0.89 makes the banner opt-in via ``--banner``, so omitting
+    that flag is the no-banner posture.
+
+    ``--session-id`` both resumes an existing session and sets the UUID of a new
+    one. The cell DECLARES the session. It does not infer one from mtime.
+
+    Containment is by argument, on top of ProviderMembrane's env scrub:
+    ``--add-dir=.`` names the cell cwd, ``--deny-tool=shell(git push)`` is the
+    vendor's own documented deny, and ``--allow-all`` / ``--yolo`` /
+    ``--allow-all-tools`` are never the membrane's default. The directory is
+    spelled ``.`` rather than the absolute cwd (#314): ``launch`` chdirs first,
+    and an absolute Windows path containing spaces gets re-split crossing the
+    exec boundary. The ``=`` form keeps a dash-prefixed session id or starter
+    from being eaten as a flag.
+    """
+    argv = [
+        "copilot",
+        "--no-color",
+        "--no-mouse",
+        "--no-ask-user",
+        "--no-auto-update",
+        "--no-remote",
+        f"--session-id={session_id}",
+        "--add-dir=.",
+        "--deny-tool=shell(git push)",
+    ]
+    if not no_starter:
+        starter = read_starter_prompt(cell)
+        if starter:
+            argv.append(f"--interactive={starter}")
+    argv.extend(passthrough)
+    return argv
+
+
+class CopilotMembrane(ProviderMembrane):
+    """Local ``copilot`` CLI as a durable swarph CELL (card #386).
+
+    >>> NOT A SUBCLASS OF ClaudeMembrane. <<< Both CLIs are flag-based. That
+    shape is not the contract. MuseMembrane inherited Claude's grammar and
+    launched the wrong binary's flags (card #382). Copilot's flags are its own.
+
+    Session model (``uses_pinned_session`` True): ``--session-id`` pins the
+    UUID. Codex infers a resume target and has resumed the wrong session;
+    this membrane does not.
+
+    Auth: the membrane never runs ``copilot login``. That CLI wipes credentials
+    when probed. Identity is whatever the operator already authenticated, and
+    choosing it is a commander action.
+    """
+
+    name = "copilot"
+
+    def uses_pinned_session(self) -> bool:
+        return True
+
+    def build_argv(
+        self,
+        cell: Cell,
+        *,
+        session_id: Optional[str],
+        no_starter: bool,
+        passthrough: list[str],
+        effective_role: Optional[str],
+    ) -> list[str]:
+        assert session_id is not None  # copilot always pins a UUID
+        return _build_copilot_argv(cell, session_id, no_starter, passthrough)
+
+    def resolve_binary(self) -> Optional[str]:
+        return shutil.which("copilot")
+
+    def binary_not_found_message(self) -> str:
+        return (
+            "swarph spawn: 'copilot' binary not found on PATH. "
+            "Install the GitHub Copilot CLI and put it on PATH. "
+            "The membrane does not run `copilot login`."
+        )
+
+    # NO launch/pre_launch OVERRIDE — base carries both (#318, #2).
+    # env_builder stays the base scrub + SWARPH_SELF stamp. Do not relocate
+    # $HOME: copilot's auth lives under the operator's ~/.copilot, and a fake
+    # HOME is how other membranes lost their peer token.
+
+    def memory_sync_files(self, cell) -> list:
+        files = []
+        if (cell.cwd / "AGENTS.md").exists():
+            files.append(("AGENTS.md", cell.cwd / "AGENTS.md"))
+        return files
+
+    def memory_guard_file(self, cell):
+        return cell.cwd / "AGENTS.md"
+
+
 MEMBRANES: dict[str, ProviderMembrane] = {
     "claude": ClaudeMembrane(),
     "codex": CodexMembrane(),
@@ -3260,6 +3361,10 @@ MEMBRANES: dict[str, ProviderMembrane] = {
     # in the same release; `opencode` enters swarph_shared.VALID_PROVIDERS only in a
     # LATER one — same #247 ordering as vibe/cursor.
     "opencode": OpencodeMembrane(),
+    # card #386. Registered here AND enabled via cell.CLI_ENABLED_PROVIDERS in
+    # this release. `copilot` enters swarph_shared.VALID_PROVIDERS only in a
+    # LATER one — the #247 ordering. The reverse raises at import.
+    "copilot": CopilotMembrane(),
 }
 
 # Defensive coupling: every shared-whitelisted provider MUST have a membrane,
