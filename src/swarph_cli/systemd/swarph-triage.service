@@ -1,0 +1,12 @@
+[Unit]
+Description=Organ triage router one-shot: route sensor findings onto owner triage rows (card #1073)
+Documentation=https://github.com/BrainSurfing-tech/swarph-cli
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/swarph-triage
+ExecStart=/usr/local/bin/swarph triage --as lab-ovh
+StandardOutput=append:/var/log/swarph-triage.log
+StandardError=append:/var/log/swarph-triage.log
