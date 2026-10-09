@@ -1,3 +1,8 @@
+# SYSTEM-INSTALL DEFAULTS. These fit a root install (swarph at
+# /usr/local/bin, logs to /var/log). A user install MUST override them
+# — see deploy/jobs/README.md (card #1073, #1432): a drop-in sets
+# User=, the real ExecStart path, and a user-writable log. The unit
+# never carries a token: the job reads the runner's own credential.
 [Unit]
 Description=Stuck-work sweep one-shot: DM blockers of >=48h-stuck rows and unreviewed PRs (card #1064)
 Documentation=https://github.com/BrainSurfing-tech/swarph-cli
