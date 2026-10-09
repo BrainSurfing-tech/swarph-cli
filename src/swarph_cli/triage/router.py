@@ -94,38 +94,12 @@ def organ_owner(owners_map: dict, organ: str):
 
 
 # ---- payload scrub (ruling 7) --------------------------------------------------
-# The content analogue of the fleet's env scrub (swarph_shared billing
-# scrub, FORBIDDEN_KEYS_EXPLICIT): secret-shaped TEXT is redacted before
-# any model classifier input. Rules never see the payload at all — they
-# read status/due_at metadata. A non-str payload cannot be scrubbed, so
-# the model is not called for it (caller splits the item).
-
-_SECRET_PATTERNS = [
-    # API keys and tokens: sk-ant-*, sk-*, gh*_*, xox*-*, Bearer credentials.
-    (re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{8,}\b"), "[REDACTED-API-KEY]"),
-    (re.compile(r"\bgh[opusr]_[A-Za-z0-9_]{20,}\b"), "[REDACTED-TOKEN]"),
-    (re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{8,}\b"), "[REDACTED-TOKEN]"),
-    (re.compile(r"\bsk-[A-Za-z0-9]{16,}\b"), "[REDACTED-API-KEY]"),
-    (re.compile(r"\bBearer\s+[A-Za-z0-9\-._~+/]+=*", re.IGNORECASE),
-     "Bearer [REDACTED]"),
-    # PEM blocks (private keys and certificates alike — content, not shape).
-    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
-                re.DOTALL), "[REDACTED-PRIVATE-KEY]"),
-    # password/token/secret assignments.
-    (re.compile(r"(?i)\b(password|passwd|pwd|api[_-]?key|auth[_-]?token|secret)\b\s*[:=]\s*\S+"),
-     r"\1=[REDACTED]"),
-]
-
-
-def scrub_payload(payload) -> str | None:
-    """Scrubbed text, or None when the payload is not scrubbable text
-    (ruling 7: then the model is not called and the item is split)."""
-    if not isinstance(payload, str):
-        return None
-    out = payload
-    for pattern, replacement in _SECRET_PATTERNS:
-        out = pattern.sub(replacement, out)
-    return out
+# Shared module since msg 65982: swarph_cli.scrub is the one source, the
+# router imports it (no copy). Secret-shaped TEXT is redacted before any
+# model classifier input. Rules never see the payload at all — they read
+# status/due_at metadata. A None scrub means unscrubbable, so the model
+# is not called for it (caller splits the item).
+from swarph_cli.scrub import scrub_text as scrub_payload
 
 
 # ---- stuck-work rules (ruling 2-3: sharp without a threshold) --------------------
