@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the organ triage router: swarph triage daily (card #1073)
+Documentation=https://github.com/BrainSurfing-tech/swarph-cli
+Requires=swarph-triage.service
+
+[Timer]
+OnBootSec=20min
+OnCalendar=01:47
+AccuracySec=10min
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

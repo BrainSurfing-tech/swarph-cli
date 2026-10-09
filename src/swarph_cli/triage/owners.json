@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "comment": "Organ triage owner map + calibration thresholds (card #1073, rulings #1413). DATA, not code: the router reads this file and contains no owner or threshold literals. Thresholds are written by a PROVEN calibration; until an organ has one, every model result for it is split. Owners keyed here route to '<owner> triage' rows; an organ with no entry routes to lab-ovh and is counted.",
+  "owners": {
+    "stuck-work": {
+      "owner": null,
+      "note": "per-item blocking holder; unresolvable or non-peer blocker routes to lab-ovh and is counted"
+    },
+    "security": {
+      "owner": "drop-on-meta-edge",
+      "note": "pattern: security -> drop (adaptive immunity)"
+    },
+    "memory": {
+      "owner": "lab-ovh",
+      "note": "pattern: memory -> lab"
+    },
+    "calibration": {
+      "owner": "science-claude",
+      "note": "pattern: detector calibration -> science-claude"
+    }
+  },
+  "thresholds": {},
+  "label_sets": {
+    "stuck-work": ["real-stall", "deliberate-wait", "needed-row-closed-race"],
+    "security": ["threat", "confident-benign"]
+  }
+}
