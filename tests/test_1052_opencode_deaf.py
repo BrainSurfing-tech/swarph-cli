@@ -6,8 +6,12 @@ text' on a CLEAR composer.
 Seams: the pure helpers on the two real captures (lab-ovh's 01:31Z and
 17:18Z fixtures), plus the TmuxSink deferral rigged at the deliver()
 boundary exactly like test_1010_strand_only's. Items: (1) the done-regex
-accepts h/m-only durations; (2) only the LAST ▣ header judges; (3) the
-opencode-in-progress deferral names its real reason.
+accepts h/m-only durations; (2) only the LAST ▣ header judges FINISHED;
+(3) the opencode-in-progress deferral names its real reason.
+
+Card #989 (2026-10-09) redefines liveness itself: only the 'esc
+interrupt' footer judges a RUNNING turn. A duration-less header with no
+interrupt hint is an aborted turn, not a live one.
 
 The committed fixtures are the real captures with one customer
 identifier redacted (a 6-letter tenant prefix -> acme, 7 spots each);
@@ -42,20 +46,25 @@ def test_finished_captures_are_not_running(name: str):
     assert mesh._opencode_turn_finished(lines) is True
 
 
-def test_bare_header_without_duration_still_running():
-    """A header with NO duration is a live turn (or a mid-render one) —
-    the last-header rule must not call it finished."""
-    assert mesh._opencode_running(["▣  Build · DeepSeek V4 Pro (New)"]) is True
-    assert mesh._opencode_turn_finished(
-        ["▣  Build · DeepSeek V4 Pro (New)"]) is False
+def test_aborted_turn_pane_without_interrupt_is_not_running():
+    """Card #989, live case 2026-10-09 17:05Z: an ABORTED/ERRORED turn
+    prints its ▣ header and never adds a duration or the 'esc interrupt'
+    footer. The old last-header rule read it as running forever (60
+    deferred ticks); only the interrupt hint judges a live turn."""
+    lines = ["▣  Build · DeepSeek V4 Pro (New)",
+             "┃",
+             "┃  Build · DeepSeek V4 Pro (New) OpenCode Go"]
+    assert mesh._opencode_running(lines) is False
+    assert mesh._opencode_turn_finished(lines) is False
 
 
-def test_scrollback_done_does_not_mask_live_tail():
-    """Only the LAST ▣ header judges: a finished scrollback header plus a
-    live (duration-less) tail header is still a running turn."""
+def test_scrollback_done_does_not_mask_tail_without_interrupt():
+    """Card #989 redefines the rule these lines once pinned: with no
+    interrupt hint anywhere, a duration-less tail header is an aborted
+    turn, NOT a live one — scrollback must not flip that verdict."""
     lines = ["▣  Build · x · 4h 59m", "some output",
              "▣  Build · x (no duration yet)"]
-    assert mesh._opencode_running(lines) is True
+    assert mesh._opencode_running(lines) is False
     assert mesh._opencode_turn_finished(lines) is False
 
 

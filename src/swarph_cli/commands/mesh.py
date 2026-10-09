@@ -2529,16 +2529,17 @@ def _last_box_header(lines: list[str]) -> Optional[str]:
 def _opencode_running(lines: list[str]) -> bool:
     """True only while a turn is in progress.
 
-    The footer shows ``esc interrupt``, and the last ▣ header has no
-    trailing duration. A finished turn keeps the ▣ header and adds a
-    duration (``· <n>s`` or h/m-only like ``· 4h 59m``), with no
-    interrupt hint. That pane is idle. The permission dialog is
-    not a turn; it has its own branch.
+    Only the footer judges: ``esc interrupt`` present = running; absent
+    = NOT running, whatever the last ▣ header says. An ABORTED/ERRORED
+    turn prints its header and never adds a duration or the interrupt
+    hint (card #989, 60 deferred ticks 2026-10-09) — the old
+    header-without-duration fallback read it as running forever.
+    A finished turn keeps the ▣ header and adds a duration
+    (``· <n>s`` or h/m-only like ``· 4h 59m``), with no interrupt hint.
+    That pane is idle. The permission dialog is not a turn; it has its
+    own branch.
     """
-    if any("esc interrupt" in ln for ln in lines):
-        return True
-    last = _last_box_header(lines)
-    return last is not None and not _OPENCODE_DONE.search(last)
+    return any("esc interrupt" in ln for ln in lines)
 
 
 def _opencode_turn_finished(lines: list[str]) -> bool:
@@ -2923,8 +2924,9 @@ def _agent_running(target: str) -> Optional[bool]:
     cursor-lin 2026-08-24). A keystroke into that TUI lands in the
     follow-up queue, and the queue is input-gated (measured live
     2026-08-26, twice: queued wakes fired only when the human next typed).
-    Opencode: ``esc interrupt`` or a ▣ header with no trailing duration.
-    A finished ``· <n>s`` header is idle. None =
+    Opencode: ``esc interrupt`` alone. A finished ``· <n>s`` header is
+    idle, and so is a duration-less header with no interrupt hint
+    (card #989: aborted turns never grow either). None =
     pane or composer unreadable; callers treat unknown as NOT-running
     (the composer state was already established by then — this guard
     only vets the timing).
