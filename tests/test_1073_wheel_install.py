@@ -40,6 +40,15 @@ def _venv_python(venv: Path) -> Path:
     return exe if exe.exists() else venv / "Scripts" / "python.exe"
 
 
+def _entrypoint(vpy: Path) -> Path:
+    """Console-script path beside the venv interpreter (swarph.exe on
+    Windows, plain swarph elsewhere)."""
+    base = Path(vpy).parent / "swarph"
+    if base.is_file():
+        return base
+    return base.with_suffix(".exe")
+
+
 @pytest.fixture(scope="module")
 def installed_swarph(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("wheel-install")
@@ -61,7 +70,7 @@ def installed_swarph(tmp_path_factory):
     assert installed.returncode == 0, installed.stderr[-2000:]
     assert "swarph-cli" in installed.stdout.replace("_", "-"), \
         installed.stdout[-2000:]
-    swarph = str(Path(vpy).parent / "swarph")
+    swarph = str(_entrypoint(Path(vpy)))
     assert os.path.isfile(swarph), f"no swarph entrypoint beside {vpy}"
     return swarph
 
