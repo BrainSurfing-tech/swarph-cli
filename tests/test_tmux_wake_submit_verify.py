@@ -201,7 +201,8 @@ def gate(monkeypatch):
                         lambda t: calls.__setitem__("enter", calls["enter"] + 1) or True)
     monkeypatch.setattr(mesh, "_wake_still_pending", lambda t: box["pending"])
     monkeypatch.setattr(mesh, "_composer_state", lambda t: box["composer"])
-    monkeypatch.setattr(mesh, "_opencode_in_progress", lambda t: False)
+    monkeypatch.setattr(mesh, "_opencode_in_progress",
+                        lambda t, *a: False)
     monkeypatch.setattr(mesh, "_opencode_turn_finished_target", lambda t: False)
     # #1010 strand-only hermeticity (#1083): deliver() reads the pane
     # (grok-block probe), the run-state and the session age before it
