@@ -38,6 +38,7 @@ _LLM_BLURBS = {
     "muse": "Muse — muse membrane",
     "vibe": "Vibe — vibe membrane",
     "opencode": "OpenCode — opencode membrane (XDG config+data isolation)",
+    "copilot": "GitHub Copilot — copilot membrane (pinned --session-id, no allow-all)",
 }
 
 
