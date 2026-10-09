@@ -631,7 +631,8 @@ def _step_list(values) -> list[str]:
 
 
 def _ask_payload(self_name, what, *, holder=None, step=None, needs=None, hours=None,
-                 done=None, accept=None, kind="action", timeout_hours=None) -> dict:
+                 done=None, accept=None, kind="action", timeout_hours=None,
+                 task=None, task_needs=None) -> dict:
     """POST /board/cards/{id}/ask body. None = not mentioned = key ABSENT (#191's
     rule; test_532 pins that a null `accept` on the wire would overwrite the
     gateway's own normalization). No holder → `requested`; `me` → the caller's
@@ -653,6 +654,10 @@ def _ask_payload(self_name, what, *, holder=None, step=None, needs=None, hours=N
         p["accept"] = accept
     if timeout_hours is not None:
         p["timeout_hours"] = timeout_hours
+    if task is not None:
+        p["task"] = task
+    if task_needs is not None and _step_list(task_needs):
+        p["task_needs"] = _step_list(task_needs)
     return p
 
 
@@ -680,6 +685,8 @@ def _ask_line(d) -> str:
         return _format_ask(d)
     n = d.get("id"); card = d.get("card_id")
     step = _s(d.get("step")) or "unstepped"
+    if d.get("task"):
+        step = f"{step} {_s(d.get('task'))}"
     holder = _s(d.get("holder")); take = _s(d.get("take_with"))
     missing = ", ".join(_s(m) for m in d.get("still_missing") or [])  # the gateway's field (mesh-gateway #157)
     if state == "requested":
@@ -980,6 +987,17 @@ def _build_parser() -> argparse.ArgumentParser:
     ck.add_argument("--done", default=None, metavar="EVIDENCE",
                     help="mint + take + close in ONE act (needs --holder me); the "
                          "container the step names — a ref, >=40 words, or a verdict")
+    ck.add_argument("--task", default=None, metavar="task:<slug>",
+                    help="task id, one token task:<slug> (letters, digits, dots, "
+                         "underscores, hyphens). A pull-request task is "
+                         "task:pr-<repo>-<digits>. pr:<repo>#<n> is refused. "
+                         "Set at mint; amend cannot add it. Two live rows of one "
+                         "step need different task ids. Omit it for the one live "
+                         "unsplit row")
+    ck.add_argument("--task-needs", action="append", dest="task_needs", default=None,
+                    metavar="task:<slug>",
+                    help="sibling task id on this same step (repeatable). The "
+                         "gateway stores the edge and refuses a cycle")
     ck.add_argument("--json", action="store_true"); _add_common(ck)
 
     cf = cards.add_parser(
@@ -1055,7 +1073,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "list", help="list obligations — the READ half (#590): an obligation "
                      "that can be minted and closed but never read makes the "
                      "holder the only auditor")
-    ol.add_argument("--status", choices=["open", "closed", "fallback_fired"])
+    ol.add_argument("--status", choices=["open", "closed", "fallback_fired", "withdrawn"])
     ol.add_argument("--holder", help="only obligations this peer owes")
     ol.add_argument("--card", type=int, dest="card_id", help="only this card")
     ol.add_argument("--overdue", action="store_true",
@@ -1092,6 +1110,15 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="the contract's signed spelling: `+step` adds, `-step` removes "
                          "(write the latter `--needs=-step`; a bare `-step` reads as a flag)")
     oa.add_argument("--json", action="store_true"); _add_common(oa)
+    ow = obl.add_parser(
+        "withdraw",
+        help="WITHDRAW an untaken row (asker, card assignee, or orchestrator). "
+             "A taken row is closed or declined, not withdrawn. Status becomes "
+             "withdrawn, which is neither pass nor fail")
+    ow.add_argument("id", type=int, help="the obligation id")
+    ow.add_argument("--reason", required=True,
+                    help="why the row is withdrawn; whitespace is refused")
+    ow.add_argument("--json", action="store_true"); _add_common(ow)
     return p
 
 
@@ -1194,6 +1221,20 @@ def run_board(argv: list[str]) -> int:
                 return 2
             st, d = _patch_json(f"{gw}/board/obligations/{args.id}/amend", patch, token)
             return _out(st, d, _obligation_act_line, aj)
+        if args.command == "withdraw":
+            reason = args.reason
+            if not reason.strip():
+                print("swarph board obligations withdraw: --reason is "
+                      "whitespace-only", file=sys.stderr)
+                return 2
+            st, d = _post_json(
+                f"{gw}/board/obligations/{args.id}/withdraw",
+                {"reason": reason}, token)
+            return _out(st, d, lambda x: (
+                f"obligation #{_s(x.get('id', args.id))} WITHDRAWN by "
+                f"{_s(x.get('closed_by', self_name))}"
+                + (f" task {_s(x.get('task'))}" if x.get("task") else "")
+            ), aj)
 
     if args.group == "cards":
         if args.command == "list":
@@ -1350,7 +1391,8 @@ def run_board(argv: list[str]) -> int:
             body = _ask_payload(self_name, args.what, holder=holder,
                                 step=args.step, needs=args.needs, hours=args.hours,
                                 done=args.done, accept=args.accept, kind=args.kind,
-                                timeout_hours=args.timeout_hours)
+                                timeout_hours=args.timeout_hours,
+                                task=args.task, task_needs=args.task_needs)
             st, d = _post_json(f"{gw}/board/cards/{args.id}/ask", body, token)
             return _out(st, d, _ask_line, args.json)
         if args.command == "confirm-flow":
