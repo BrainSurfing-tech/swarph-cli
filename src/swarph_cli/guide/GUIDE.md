@@ -550,6 +550,7 @@ answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not comman
 - `swarph service` -- stand up a $0 subscription-LLM HTTP lane.
 - `swarph spawn` -- run a cell from its role name or yaml path.
 - `swarph sweep` -- the card-#1064 stuck-work sweep: blocked rows and unreviewed PRs, DMs the blocker, `swarph sweep --dry-run` reads only.
+- `swarph triage` -- the card-#1073 organ triage router: sensor findings onto owner triage rows (cap 10, carried), `swarph triage --dry-run` reads only.
 - `swarph timeline` -- deterministic temporal lookup over the timeline: around, since, range (see [Code and history](#code-and-history)).
 - `swarph version` -- per-module versions and install origin (PEP 610).
 - `swarph wake-hook-output` -- hook plumbing: the silent-wake SessionStart callback.
