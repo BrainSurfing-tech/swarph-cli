@@ -248,7 +248,9 @@ def test_example_registry_selects_the_decisions_arm(monkeypatch):
     assert entry["auth"]["env"] == "OPENAI_API_KEY"
     assert entry["price"]["in_per_mtok"] == 0.10
     assert entry["price"]["out_per_mtok"] == 0
-    assert entry["price"]["source"] == "https://developers.openai.com/api/docs/guides/decisions"
+    assert entry["price"]["source"] == (
+        "https://developers.openai.com/api/docs/guides/decisions; "
+        "base rate; regional and long-context premiums not modelled")
     arm = _provider_arm("openai", entry, None)
     assert isinstance(arm, DecisionsBackend)
     assert arm.KIND == "typed"
@@ -260,3 +262,96 @@ def test_example_registry_selects_the_decisions_arm(monkeypatch):
         [spec], {}, pack={"request_kind": "typed", "tasks": []})
     assert runnable == [spec]
     assert warnings == []
+
+
+def test_double_rejects_a_predicate_that_carries_choices_or_levels():
+    predicate = {
+        "type": "predicate", "name": "answer", "instructions": "is it?",
+    }
+    for extra in ({"choices": [{"value": "a", "description": "b"}]},
+                  {"levels": [{"label": "low", "description": "small"}]}):
+        status, payload = _post({
+            "model": "gpt-6-luna",
+            "input": "{}",
+            "questions": [dict(predicate, **extra)],
+        })
+        assert status == 400
+        assert payload["error"] == "questions[0] is a predicate carrying choices or levels"
+
+
+def test_double_rejects_a_score_without_levels_and_a_choice_lacking_value():
+    status, payload = _post({
+        "model": "gpt-6-luna",
+        "input": "{}",
+        "questions": [{
+            "type": "score", "name": "answer", "instructions": "how severe?",
+        }],
+    })
+    assert status == 400
+    assert payload["error"] == "questions[0] is a score without levels"
+    status, payload = _post({
+        "model": "gpt-6-luna",
+        "input": "{}",
+        "questions": [{
+            "type": "choice", "name": "answer", "instructions": "which?",
+            "choices": [{"description": "Payments, invoices, and refunds."}],
+        }],
+    })
+    assert status == 400
+    assert "value, description" in payload["error"]
+
+
+def test_score_answer_is_a_parse_fail_and_not_a_label(monkeypatch):
+    arm, double = _arm({
+        "answers": [{
+            "type": "score",
+            "name": "answer",
+            "score": 1.1,
+            "confidence": 0.55,
+        }],
+    }, monkeypatch)
+    prompt = json.dumps({
+        "state": {"text": "export fails in Safari"},
+        "questions": {
+            "answer": {
+                "type": "score",
+                "instructions": "How severe is this issue?",
+                "levels": [
+                    {"label": "Cosmetic", "description": "Appearance only."},
+                    {"label": "Fully blocked", "description": "No workaround."},
+                ],
+            }
+        },
+    })
+    result = arm.generate("openai", prompt, "")
+    assert result.error is None, result.error
+    assert decisions_shape_error(double.bodies[0]) is None
+    assert parse_answer(result.text) is None
+    assert result.text == json.dumps({"refusal": "unsupported answer type: score"})
+    assert "Cosmetic" not in result.text
+    scored = score({"type": "categorical", "expected": "Cosmetic"}, result.text)
+    assert scored["parse_ok"] is False
+
+
+def test_an_image_part_is_refused_and_not_sent(monkeypatch):
+    arm, double = _arm({"answers": []}, monkeypatch)
+    prompt = json.dumps({
+        "state": {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Inspect this."},
+                {"type": "input_image", "image_url": "data:image/png;base64,aaaa"},
+            ],
+        },
+        "questions": {
+            "answer": {
+                "type": "predicate",
+                "instructions": "is it damaged?",
+            }
+        },
+    })
+    result = arm.generate("openai", prompt, "")
+    assert result.error is not None
+    assert "image" in result.error
+    assert double.bodies == []
+    assert arm.calls == 0

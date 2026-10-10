@@ -22,4 +22,4 @@ base_url = "https://api.openai.com"
 path = "/v1/decisions"
 egress = "external"
 auth = { env = "OPENAI_API_KEY", header = "Authorization", scheme = "Bearer" }
-price = { in_per_mtok = 0.10, out_per_mtok = 0, source = "https://developers.openai.com/api/docs/guides/decisions" }
+price = { in_per_mtok = 0.10, out_per_mtok = 0, source = "https://developers.openai.com/api/docs/guides/decisions; base rate; regional and long-context premiums not modelled" }

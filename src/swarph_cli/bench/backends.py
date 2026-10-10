@@ -704,7 +704,23 @@ def decisions_shape_error(body: Any) -> Optional[str]:
             value = question.get(field)
             if not isinstance(value, str) or not value.strip():
                 return f"questions[{i}] lacks {field}"
-        if question.get("type") != "choice":
+        qtype = question.get("type")
+        if qtype == "predicate" and ("choices" in question or "levels" in question):
+            return f"questions[{i}] is a predicate carrying choices or levels"
+        if qtype == "score":
+            levels = question.get("levels")
+            if not isinstance(levels, list) or not levels:
+                return f"questions[{i}] is a score without levels"
+            for j, level in enumerate(levels):
+                if (not isinstance(level, dict)
+                        or not isinstance(level.get("label"), str)
+                        or not level["label"]
+                        or not isinstance(level.get("description"), str)):
+                    return (
+                        f"questions[{i}].levels[{j}] is not "
+                        "{label, description}")
+            continue
+        if qtype != "choice":
             continue
         choices = question.get("choices")
         if not isinstance(choices, list) or not choices:
@@ -784,12 +800,31 @@ def _translate_question(name: str, block: dict) -> dict:
             }
             for key, val in block["criteria"].items()
         ]
+    if out_type == "score" and isinstance(block.get("levels"), list):
+        question["levels"] = block["levels"]
     return question
+
+
+def _carries_image(node: Any) -> bool:
+    """True when a pack value is an image part. Packs are text only."""
+    if isinstance(node, dict):
+        kind = node.get("type")
+        if kind in {"input_image", "image", "image_url"}:
+            return True
+        if "image_url" in node or "input_image" in node:
+            return True
+        return any(_carries_image(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_carries_image(value) for value in node)
+    return False
 
 
 def decisions_request(prompt: str) -> tuple[dict, dict]:
     """Pack prompt -> (original pack object, POST /v1/decisions body)."""
     parsed = _pack_prompt(prompt)
+    if _carries_image(parsed.get("state")) or _carries_image(parsed.get("questions")):
+        raise ValueError(
+            "decisions input carries an image part; packs are text only")
     name, block = _answer_block(parsed)
     return parsed, {
         "model": _DECISIONS_MODEL,
@@ -957,6 +992,8 @@ def _render_decision(block: dict, question: dict,
     failure. The reason stays in the text. Choice keeps the probabilities
     beside a flat answer object the scorer can read.
     """
+    if block.get("type") == "score":
+        return json.dumps({"refusal": "unsupported answer type: score"}), None
     if block.get("type") == "refusal":
         return json.dumps({"refusal": _refusal_reason(block)}), None
     if block.get("type") == "predicate" or (
