@@ -239,6 +239,11 @@ def test_missing_usage_is_estimated_from_the_input(monkeypatch):
     assert json.loads(result.text)["answer"] == "CHAT"
 
 
+def test_price_source_says_base_rate():
+    source = load_registry(EXAMPLE)["openai"]["price"]["source"]
+    assert "base rate; regional and long-context premiums not modelled" in source
+
+
 def test_example_registry_selects_the_decisions_arm(monkeypatch):
     registry = load_registry(EXAMPLE)
     entry = registry["openai"]
@@ -264,22 +269,33 @@ def test_example_registry_selects_the_decisions_arm(monkeypatch):
     assert warnings == []
 
 
-def test_double_rejects_a_predicate_that_carries_choices_or_levels():
-    predicate = {
-        "type": "predicate", "name": "answer", "instructions": "is it?",
-    }
-    for extra in ({"choices": [{"value": "a", "description": "b"}]},
-                  {"levels": [{"label": "low", "description": "small"}]}):
-        status, payload = _post({
-            "model": "gpt-6-luna",
-            "input": "{}",
-            "questions": [dict(predicate, **extra)],
-        })
-        assert status == 400
-        assert payload["error"] == "questions[0] is a predicate carrying choices or levels"
+def test_double_rejects_a_predicate_with_choices():
+    status, payload = _post({
+        "model": "gpt-6-luna",
+        "input": "{}",
+        "questions": [{
+            "type": "predicate", "name": "answer", "instructions": "is it?",
+            "choices": [{"value": "a", "description": "b"}],
+        }],
+    })
+    assert status == 400
+    assert payload["error"] == "questions[0] is a predicate carrying choices or levels"
 
 
-def test_double_rejects_a_score_without_levels_and_a_choice_lacking_value():
+def test_double_rejects_a_predicate_with_levels():
+    status, payload = _post({
+        "model": "gpt-6-luna",
+        "input": "{}",
+        "questions": [{
+            "type": "predicate", "name": "answer", "instructions": "is it?",
+            "levels": [{"label": "low", "description": "small"}],
+        }],
+    })
+    assert status == 400
+    assert payload["error"] == "questions[0] is a predicate carrying choices or levels"
+
+
+def test_double_rejects_a_score_without_levels():
     status, payload = _post({
         "model": "gpt-6-luna",
         "input": "{}",
@@ -289,6 +305,9 @@ def test_double_rejects_a_score_without_levels_and_a_choice_lacking_value():
     })
     assert status == 400
     assert payload["error"] == "questions[0] is a score without levels"
+
+
+def test_double_rejects_a_choice_entry_lacking_value():
     status, payload = _post({
         "model": "gpt-6-luna",
         "input": "{}",
