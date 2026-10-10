@@ -14,14 +14,26 @@ A quota VALUE without its as_of coordinate is a rumour: --quota-used /
 --resets without --quota-as-of are refused client-side (exit 2) before the
 gateway's own 400. The pool NAME needs no coordinate (identifier, not a
 measurement). --clear-until is the grok-returns flow (explicit null clears).
+
+  swarph roster sync [--peer PEER]... [--service-log PEER=PATH]...
+      [--state PATH] [--json]
+
+card #1071: one quota pass over local tmux panes — parse each membrane's
+usage display, PUT the roster on change, DM the commander on a crossing.
+Runs as the quota-writer #417 service (its token via MESH_GATEWAY_TOKEN /
+--token-file); at most one pane read per peer per 5 minutes.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
 
 # card #1061 role vocabulary — mirrors the gateway's _ROSTER_ROLES. A role
 # the gateway does not know is refused here (exit 2) before its 400; when the
@@ -219,7 +231,189 @@ def _build_parser():
     group.add_argument("--clear-until", action="store_true",
                        help="clear unavailable_until (peer is back)")
     s.add_argument("--note", default=None)
+    sy = sub.add_parser("sync", help="one quota pass over local tmux panes "
+                                    "(card #1071): parse, PUT on change, "
+                                    "alert on crossing")
+    _add_global(sy)
+    sy.add_argument("--json", action="store_true",
+                    help="print the raw sync summary")
+    sy.add_argument("--peer", action="append", default=None,
+                    help="peer to read (repeatable; default: all local "
+                         "tmux sessions)")
+    sy.add_argument("--service-log", action="append", default=None,
+                    metavar="PEER=PATH",
+                    help="provider log tail for the headless error path "
+                         "(repeatable)")
+    sy.add_argument("--state", default=None, metavar="PATH",
+                    help="state file override (default: "
+                         "$XDG_STATE_HOME/swarph/quota_sync_state.json)")
     return p
+
+
+def _sync_state_path(explicit=None) -> Path:
+    """$XDG_STATE_HOME/swarph/quota_sync_state.json, else ~/.local/state —
+    the watchdog dm-wake convention, one file over."""
+    if explicit:
+        return Path(explicit).expanduser()
+    root = os.environ.get("XDG_STATE_HOME", "").strip()
+    if root:
+        return Path(root) / "swarph" / "quota_sync_state.json"
+    return Path.home() / ".local" / "state" / "swarph" / "quota_sync_state.json"
+
+
+def _load_sync_state(path: Path) -> dict:
+    try:
+        with Path(path).open(encoding="utf-8") as fp:
+            data = json.load(fp)
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_sync_state(path: Path, state: dict) -> None:
+    """Atomic best-effort persist (temp sibling + os.replace, never raises)."""
+    path = Path(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _local_tmux_peers() -> list:
+    """Session names on this box. [] when tmux is missing — sync then covers
+    only --peer/--service-log peers instead of failing the whole pass."""
+    try:
+        out = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+                             capture_output=True, timeout=10, text=True,
+                             encoding="utf-8", errors="replace")
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return []
+    if out.returncode != 0:
+        return []
+    return [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()]
+
+
+def _capture_peer_pane(peer: str):
+    """One read-only full-height capture of the peer's active pane. Never
+    sends keys (ruling 6); None on any failure — the peer reads unknown."""
+    try:
+        out = subprocess.run(["tmux", "capture-pane", "-p", "-t", peer],
+                             capture_output=True, timeout=10, text=True,
+                             encoding="utf-8", errors="replace")
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout or ""
+
+
+def _parse_service_logs(values) -> dict:
+    """['PEER=PATH', ...] -> {peer: tail text}. A missing/unreadable log is
+    skipped (its peer still gets the pane path), never fatal."""
+    logs = {}
+    for item in values or []:
+        if "=" not in item:
+            raise ValueError(f"--service-log takes PEER=PATH, got {item!r}")
+        peer, _, path = item.partition("=")
+        peer, path = peer.strip(), path.strip()
+        if not peer or not path:
+            raise ValueError(f"--service-log takes PEER=PATH, got {item!r}")
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fp:
+                fp.seek(0, os.SEEK_END)
+                size = fp.tell()
+                fp.seek(max(0, size - 65536))
+                logs[peer] = fp.read()
+        except OSError:
+            continue
+    return logs
+
+
+def _post_message(gateway: str, token: str, to_node: str, content: str) -> bool:
+    """DM the commander as the quota-writer service. True on HTTP 2xx."""
+    from swarph_cli.commands.mesh import _require_absolute_gateway_url
+    _require_absolute_gateway_url(gateway)
+    data = json.dumps({"from_node": "quota-writer", "to_node": to_node,
+                       "kind": "fyi", "content": content}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{gateway}/messages", data=data, method="POST",
+        headers={"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            return 200 <= resp.status < 300
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def _run_sync(args):
+    from swarph_cli import quota_sync as qs
+    token = _resolve(args)
+    if token is None:
+        return 2
+    gateway = args.gateway.rstrip("/")
+    try:
+        service_logs = _parse_service_logs(args.service_log)
+    except ValueError as exc:
+        print(f"swarph roster sync: {exc}", file=sys.stderr)
+        return 2
+    peers = list(args.peer or []) or _local_tmux_peers()
+    for peer in service_logs:
+        if peer not in peers:
+            peers.append(peer)
+    if not peers:
+        print("swarph roster sync: no peers (no --peer, no tmux sessions, "
+              "no --service-log)", file=sys.stderr)
+        return 1
+
+    def _get_roster():
+        status, payload = _http_get_json(f"{gateway}/roster", token)
+        if status < 200 or status >= 300 or not isinstance(payload, dict):
+            return []
+        rows = payload.get("roster")
+        return rows if isinstance(rows, list) else []
+
+    failures = []
+
+    def _put_roster(peer, body):
+        status, payload = _http_put_json(
+            f"{gateway}/roster/{peer}", body, token)
+        if status < 200 or status >= 300:
+            failures.append(peer)
+
+    def _send_alert(peer, text):
+        _post_message(gateway, token, "commander",
+                      f"quota [{peer}]: {text}")
+
+    state_path = _sync_state_path(args.state)
+    summary = qs.sync_once(
+        peers=peers, capture=_capture_peer_pane, get_roster=_get_roster,
+        put_roster=_put_roster, send_alert=_send_alert,
+        service_logs=service_logs,
+        state=_load_sync_state(state_path),
+        now=datetime.now(timezone.utc))
+    _save_sync_state(state_path, summary.get("state", {}))
+    if args.json:
+        print(json.dumps(summary, indent=2))
+    else:
+        for peer, entry in summary.get("peers", {}).items():
+            if entry.get("skipped"):
+                print(f"  {peer}: skipped ({entry['skipped']})")
+                continue
+            bits = [entry.get("record", "?")]
+            if entry.get("put"):
+                bits.append("PUT")
+            for threshold in entry.get("alerts", []):
+                bits.append(f"ALERT {threshold}")
+            print(f"  {peer}: {' '.join(bits)}")
+    if failures:
+        print(f"swarph roster sync: PUT failed for: {', '.join(failures)}",
+              file=sys.stderr)
+        return 1
+    return 0
 
 
 def run_roster(argv):
@@ -228,6 +422,8 @@ def run_roster(argv):
     try:
         if args.command == "set":
             return _run_set(args)
+        if args.command == "sync":
+            return _run_sync(args)
         if args.command is None:
             return _run_list(args)
         parser.error(f"unknown command: {args.command}")
