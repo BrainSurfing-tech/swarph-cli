@@ -32,6 +32,7 @@ from swarph_cli.bench.backends import (
     SubscriptionBackend,
     TypedHttpBackend,
     HttpBackend,
+    DecisionsBackend,
 )
 from swarph_cli.bench.pack import PackError, load_pack, slugify_theme, validate_schema
 from swarph_cli.bench.providers import RegistryError, load_registry, registry_path
@@ -221,6 +222,24 @@ def _default_packs_dir() -> Path:
     return cwd_packs
 
 
+def _provider_arm(name: str, entry: dict, noul_threshold):
+    """The registry arm for ``provider:<name>``.
+
+    ``kind = "decisions"`` is the OpenAI Decisions translator. ``typed`` and
+    ``semantic`` stay on :class:`HttpBackend`, which posts a typed pack body
+    unchanged.
+    """
+    common = dict(
+        name=name, base_url=entry["base_url"], path=entry["path"],
+        auth=entry.get("auth"), usage=entry.get("usage"),
+        price=entry.get("price"), egress=entry["egress"],
+        noul_threshold=noul_threshold,
+    )
+    if entry["kind"] == "decisions":
+        return DecisionsBackend(**common)
+    return HttpBackend(kind=entry["kind"], **common)
+
+
 # ── dispatch ───────────────────────────────────────────────────────────────
 
 def _cmd_run(args) -> int:
@@ -249,11 +268,8 @@ def _cmd_run(args) -> int:
         entry = registry.get(spec.provider)
         if entry is None:
             continue
-        spec.arm = HttpBackend(
-            name=spec.provider, kind=entry["kind"], base_url=entry["base_url"],
-            path=entry["path"], auth=entry.get("auth"), usage=entry.get("usage"),
-            price=entry.get("price"), egress=entry["egress"],
-            noul_threshold=pack.get("noul_threshold"))
+        spec.arm = _provider_arm(
+            spec.provider, entry, pack.get("noul_threshold"))
     allow_egress = set(args.allow_egress or [])
     runnable, warnings = preflight(
         specs, backends, pack=pack, allow_egress=allow_egress,

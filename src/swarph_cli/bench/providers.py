@@ -52,14 +52,18 @@ def _check(name: str, entry: dict) -> dict:
     if unknown:
         raise RegistryError(f"{name}: unknown keys {sorted(unknown)}")
     kind = entry.get("kind")
-    if kind not in {"typed", "semantic"}:
-        raise RegistryError(f"{name}: kind must be typed or semantic")
+    if kind not in {"typed", "semantic", "decisions"}:
+        raise RegistryError(f"{name}: kind must be typed, semantic, or decisions")
     base = entry.get("base_url")
     if not isinstance(base, str) or not base.strip():
         raise RegistryError(f"{name}: base_url is required")
     path = entry.get("path")
     if path is None:
-        path = "/v1/systemone" if kind == "typed" else "/v1/chat/completions"
+        path = {
+            "typed": "/v1/systemone",
+            "semantic": "/v1/chat/completions",
+            "decisions": "/v1/decisions",
+        }[kind]
     if not isinstance(path, str) or not path.startswith("/"):
         raise RegistryError(f"{name}: path must start with /")
     egress = entry.get("egress", "external")
