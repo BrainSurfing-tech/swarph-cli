@@ -217,7 +217,7 @@ def test_the_pricing_PATH_works_for_a_mistral_key_without_the_cache(monkeypatch)
 def test_every_backend_class_is_actually_SELECTABLE():
     import inspect
     from swarph_cli.bench import backends as backends_mod
-    from swarph_cli.commands.bench import _default_backends
+    from swarph_cli.commands.bench import _default_backends, _provider_arm
 
     # CONCRETE lanes only. `Backend` itself is the PROTOCOL every lane
     # implements — it is defined here and is correctly not selectable, so a
@@ -240,6 +240,17 @@ def test_every_backend_class_is_actually_SELECTABLE():
     assert "MeteredMistralBackend" in defined, "enumeration is undercounting"
 
     selectable = {type(b).__name__ for b in _default_backends().values()}
+    # provider:<name> builds the arm from the registry, not from the default
+    # map. decisions is that path (card #1083). A class neither map constructs
+    # is still the unwired producer this test exists to catch.
+    for kind, path in (
+            ("typed", "/v1/systemone"),
+            ("semantic", "/v1/chat/completions"),
+            ("decisions", "/v1/decisions")):
+        selectable.add(type(_provider_arm("probe", {
+            "kind": kind, "base_url": "http://127.0.0.1", "path": path,
+            "egress": "local",
+        }, None)).__name__)
     missing = defined - selectable
     assert not missing, (
         f"backend class(es) defined but NOT selectable from `_default_backends()`: "
