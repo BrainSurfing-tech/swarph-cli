@@ -54,6 +54,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="minimum seconds between firings",
     )
+    create.add_argument(
+        "--deliver",
+        choices=["wake", "dm"],
+        default="wake",
+        help="delivery mode: wake (default) types into a host-local tmux pane; "
+             "dm schedules a deferred DM to the target peer — use dm for any "
+             "cell not on lab's box (card #1081)",
+    )
     add_common_args(create)
 
     ls = sub.add_parser("list", help="list scheduled events")
@@ -188,6 +196,8 @@ def _run_create(args: argparse.Namespace) -> int:
         body["out_channel"] = args.out_channel
     if args.min_interval is not None:
         body["min_interval_sec"] = args.min_interval
+    if args.deliver == "dm":
+        body["deliver"] = "dm"
     status, payload = post_json(f"{base}/scheduled-events", body, token)
     if not _ok(status):
         return _fail("create", status, payload)

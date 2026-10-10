@@ -121,6 +121,37 @@ def test_schedule_create_minimal_omits_optionals(monkeypatch):
     assert "min_interval_sec" not in body
 
 
+def test_schedule_create_deliver_dm_sends_deliver_dm(monkeypatch):
+    """Card #1081: --deliver dm puts deliver=dm in the create body, so the
+    gateway stores a dm:<peer> target instead of the send-keys wake."""
+    seen = _capture_post(monkeypatch)
+    rc = sc.run_schedule([
+        "create", "ev",
+        "--trigger", "event",
+        "--target", "c2",
+        "--task", "do thing",
+        "--context", "memory=proj_x",
+        "--deliver", "dm",
+    ])
+    assert rc == 0
+    assert seen["body"]["deliver"] == "dm"
+
+
+def test_schedule_create_default_omits_deliver(monkeypatch):
+    """Card #1081: the default (wake) body is UNCHANGED — no `deliver` field,
+    so the gateway keeps its own default (send-keys wake)."""
+    seen = _capture_post(monkeypatch)
+    rc = sc.run_schedule([
+        "create", "ev",
+        "--trigger", "event",
+        "--target", "c2",
+        "--task", "do thing",
+        "--context", "memory=proj_x",
+    ])
+    assert rc == 0
+    assert "deliver" not in seen["body"]
+
+
 def test_schedule_create_without_context_fails_LOCALLY_and_never_posts(monkeypatch):
     """The replacement for what the old minimal test asserted. An event with no
     durable anchor is refused BEFORE the network, so the user gets the reason and
