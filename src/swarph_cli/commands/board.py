@@ -132,6 +132,12 @@ def _format_obligations(data: dict) -> str:
             marks.append(f"UNCLOSABLE:{_s(o['unclosable_reason'])}")
         state = _s(o.get("accept_state"))
         marks.append(f"accept:{state}" if state else "accept:missing")
+        if o.get("accept_format") == "json":
+            # #1068: a structured row reads evidenced/total — the reviewer
+            # checks condition by condition (--json carries each pair).
+            conds = o.get("conditions") or []
+            ev = sum(1 for x in conds if x.get("evidence"))
+            marks.append(f"conds:{ev}/{len(conds)}")
         if o.get("status") != "open":
             # a NULL outcome on a closed row is a pre-#562 legacy close — name
             # the absence rather than print a blank that reads as recorded
@@ -547,6 +553,28 @@ def _card_say_payload(from_node: str, to_node: str, kind: str, content: str,
 _NO_TIMEOUT = "NO TIMEOUT — this never goes red on its own; pass --timeout-hours if it should"
 
 
+def _parse_accept_conditions(accept):
+    """#1068: read a stored accept the way the gateway does — a JSON row
+    yields {"pass", "fail"}, prose or missing yields None. Never raises:
+    a render helper must not 500 a listing over one odd row."""
+    if not accept or not str(accept).strip():
+        return None
+    try:
+        obj = json.loads(str(accept))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(obj, dict) or not isinstance(obj.get("pass"), list):
+        return None
+    passes = [p for p in obj["pass"]
+              if isinstance(p, dict) and isinstance(p.get("id"), str)
+              and isinstance(p.get("text"), str)]
+    if len(passes) != len(obj["pass"]) or not passes:
+        return None
+    fails = obj.get("fail", [])
+    return {"pass": [{"id": p["id"], "text": p["text"]} for p in passes],
+            "fail": [f for f in fails if isinstance(f, str)]}
+
+
 def _accept_line(accept) -> str:
     """#532's mint-time falsifier readout — shared by the pre-#591 and the §2
     success lines, because the rule is about the MOMENT, not the response
@@ -556,6 +584,13 @@ def _accept_line(accept) -> str:
         return ("NO ACCEPT CHECK — reads RED in the sweep; pass --accept "
                 "\"PASS = ... | FAIL = ...\" naming an observable and a way "
                 "it comes out negative")
+    parsed = _parse_accept_conditions(accept)
+    if parsed is not None:
+        # #1068: a structured check reads condition by condition, not as a blob.
+        line = "; ".join(f"{p['id']}: {p['text']}" for p in parsed["pass"])
+        if parsed["fail"]:
+            line += " | FAIL: " + "; ".join(parsed["fail"])
+        return f"accept: {line}"
     if not _FAIL_MARKER_RE.search(str(accept)):
         return ("accept check has NO FAIL BRANCH — marked NO-FAIL-BRANCH in "
                 "the sweep; a check that cannot come out negative is not one")
@@ -630,15 +665,28 @@ def _step_list(values) -> list[str]:
     return [n for n in names if n]
 
 
+def _json_flag(flag: str, value: str):
+    """Parse a --*-json flag locally (#1068): invalid JSON is refused here
+    (exit 2 via the caller's ValueError catch), never sent as a string the
+    gateway would have to guess at."""
+    try:
+        return json.loads(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"{flag} is not valid JSON: {exc}")
+
+
 def _ask_payload(self_name, what, *, holder=None, step=None, needs=None, hours=None,
-                 done=None, accept=None, kind="action", timeout_hours=None,
-                 task=None, task_needs=None) -> dict:
+                 done=None, accept=None, accept_json=None, kind="action",
+                 timeout_hours=None, task=None, task_needs=None) -> dict:
     """POST /board/cards/{id}/ask body. None = not mentioned = key ABSENT (#191's
     rule; test_532 pins that a null `accept` on the wire would overwrite the
     gateway's own normalization). No holder → `requested`; `me` → the caller's
     own `--as` identity (the contract binds `me` to the token, never to an env
     var). `needs` is whatever `--needs` collected — see `_step_list`.
     """
+    if accept is not None and accept_json is not None:
+        raise ValueError("pass --accept or --accept-json, not both — "
+                         "one check per row")
     p = {"what": what, "created_by": self_name, "kind": kind}
     if holder is not None:
         p["holder"] = self_name if holder == "me" else holder
@@ -652,6 +700,8 @@ def _ask_payload(self_name, what, *, holder=None, step=None, needs=None, hours=N
         p["done"] = done
     if accept is not None:
         p["accept"] = accept
+    if accept_json is not None:
+        p["accept_json"] = accept_json
     if timeout_hours is not None:
         p["timeout_hours"] = timeout_hours
     if task is not None:
@@ -818,8 +868,25 @@ def _move_line(x) -> str:
     return line
 
 
+def _close_payload(outcome, evidence=None, evidence_json=None) -> dict:
+    """POST /board/obligations/{id}/close body (#1068): --evidence and/or
+    --evidence-json, at least one. The CLI cannot know the row's stored
+    accept, so it sends what it was given — the gateway requires the map
+    for a JSON pass, the string everywhere else."""
+    if evidence is None and evidence_json is None:
+        raise ValueError("nothing observed — pass --evidence and/or "
+                         "--evidence-json")
+    p = {"outcome": outcome}
+    if evidence is not None:
+        p["evidence"] = evidence
+    if evidence_json is not None:
+        p["evidence_json"] = evidence_json
+    return p
+
+
 def _amend_payload(step=None, holder=None, accept=None, hours=None,
-                   needs_add=None, needs_remove=None, needs=None) -> dict:
+                   needs_add=None, needs_remove=None, needs=None,
+                   accept_json=None) -> dict:
     """PATCH /board/obligations/{id}/amend body. None = not mentioned; an empty
     `holder` is a REAL value (clears → `requested`), so the test is
     `is not None`, never truthiness (#191). `needs` is the contract's signed
@@ -827,15 +894,19 @@ def _amend_payload(step=None, holder=None, accept=None, hours=None,
     needs_remove; every edge list flattens through `_step_list`. Refuses the
     empty patch locally — the gateway 400s it too, but a round trip to learn
     you said nothing is the #256 shape one hop later."""
+    if accept is not None and accept_json is not None:
+        raise ValueError("pass --accept or --accept-json, not both — "
+                         "one check per row")
     signed = _step_list(needs)
     add = _step_list(needs_add) + [x for x in signed if not x.startswith("-")]
     rem = _step_list(needs_remove) + [x[1:] for x in signed if x.startswith("-")]
     patch = {k: v for k, v in (("step", step), ("holder", holder), ("accept", accept),
+                               ("accept_json", accept_json),
                                ("hours", hours), ("needs_add", add or None),
                                ("needs_remove", rem or None)) if v is not None}
     if not patch:
-        raise ValueError("nothing to amend — pass --step, --holder, --accept, --hours, "
-                         "--needs-add and/or --needs-remove")
+        raise ValueError("nothing to amend — pass --step, --holder, --accept, --accept-json, "
+                         "--hours, --needs-add and/or --needs-remove")
     return patch
 
 
@@ -968,6 +1039,11 @@ def _build_parser() -> argparse.ArgumentParser:
                          "(#532). Omitting it mints an obligation that reads RED "
                          "in the sweep; a check with no FAIL branch is marked "
                          "NO-FAIL-BRANCH — 'verify it works' is not a check")
+    ck.add_argument("--accept-json", default=None, metavar="'{...}'",
+                    help="the structured check (#1068): '{\"pass\": [{\"id\", "
+                         "\"text\"}], \"fail\": [...]}'. Mutually exclusive "
+                         "with --accept; a PASS close of such a row needs "
+                         "--evidence-json keyed by condition id")
     ck.add_argument("--kind", default="action", help="obligation kind (default: action)")
     # #591: the step graph. `--holder` is an OPTION with its own dest — sharing
     # the positional's dest makes `--holder me --step build "<what>"` parse
@@ -1063,10 +1139,15 @@ def _build_parser() -> argparse.ArgumentParser:
                     choices=("pass", "fail", "cannot_evaluate", "skipped"),
                     help="the accept check's OUTCOME (`skipped` only on an "
                          "optional step — #591)")
-    oc.add_argument("--evidence", required=True,
+    oc.add_argument("--evidence", required=False, default=None,
                     help="what you OBSERVED running the check — whitespace is "
                          "refused: whitespace evidence is the vibe-close this "
                          "endpoint exists to kill")
+    oc.add_argument("--evidence-json", default=None, metavar="'{...}'",
+                    help="the per-condition evidence map (#1068): '{\"c1\": "
+                         "\"...\", ...}' keyed by the row's condition ids. "
+                         "Pass --evidence and/or --evidence-json; the gateway "
+                         "requires what the row's stored accept demands")
     oc.add_argument("--json", action="store_true"); _add_common(oc)
 
     ol = obl.add_parser(
@@ -1101,6 +1182,9 @@ def _build_parser() -> argparse.ArgumentParser:
     oa.add_argument("--holder", default=None, metavar="PEER",
                     help="reassign; pass an empty string to clear (back to requested)")
     oa.add_argument("--accept", default=None, metavar='"PASS = ... | FAIL = ..."')
+    oa.add_argument("--accept-json", default=None, metavar="'{...}'",
+                    help="replace the check with a structured one (#1068); "
+                         "mutually exclusive with --accept")
     oa.add_argument("--hours", type=int, default=None, help="clock override, up to 4x the menu value")
     oa.add_argument("--needs-add", action="append", dest="needs_add", default=None,
                     metavar="STEP", help="add an edge (repeatable)")
@@ -1172,17 +1256,23 @@ def run_board(argv: list[str]) -> int:
             # #562's CLI half: the explicit close act. The gateway guards the
             # identity (holder, creator, or board orchestrator) and refuses a
             # second close; the CLI's job is to refuse what it can see —
-            # whitespace evidence — and to propagate the gateway's refusals
-            # with their detail intact.
+            # whitespace evidence, invalid JSON, neither evidence — and to
+            # propagate the gateway's refusals with their detail intact.
             evidence = args.evidence
-            if not evidence.strip():
+            if evidence is not None and not evidence.strip():
                 print("swarph board obligations close: --evidence is "
                       "whitespace-only — the close act records what you "
                       "OBSERVED, and nothing was observed", file=sys.stderr)
                 return 2
+            try:
+                evidence_json = (_json_flag("--evidence-json", args.evidence_json)
+                                 if args.evidence_json is not None else None)
+                payload = _close_payload(args.outcome, evidence, evidence_json)
+            except ValueError as exc:
+                print(f"swarph board obligations close: {exc}", file=sys.stderr)
+                return 2
             st, d = _post_json(
-                f"{gw}/board/obligations/{args.id}/close",
-                {"outcome": args.outcome, "evidence": evidence}, token)
+                f"{gw}/board/obligations/{args.id}/close", payload, token)
             if st < 200 or st >= 300:
                 detail = d.get("detail", d) if isinstance(d, dict) else d
                 print(f"swarph board obligations close: gateway {st}: {_s(detail)}",
@@ -1212,10 +1302,13 @@ def run_board(argv: list[str]) -> int:
             return _out(st, d, _obligation_act_line, aj)
         if args.command == "amend":
             try:
+                accept_json = (_json_flag("--accept-json", args.accept_json)
+                               if args.accept_json is not None else None)
                 patch = _amend_payload(step=args.step, holder=args.holder,
                                        accept=args.accept, hours=args.hours,
                                        needs_add=args.needs_add,
-                                       needs_remove=args.needs_remove, needs=args.needs)
+                                       needs_remove=args.needs_remove, needs=args.needs,
+                                       accept_json=accept_json)
             except ValueError as exc:
                 print(f"swarph board obligations amend: {exc}", file=sys.stderr)
                 return 2
@@ -1388,11 +1481,18 @@ def run_board(argv: list[str]) -> int:
                       f"or positional). If {args.what!r} was meant as the holder, the "
                       f"\"<what>\" text is missing", file=sys.stderr)
                 return 2
-            body = _ask_payload(self_name, args.what, holder=holder,
-                                step=args.step, needs=args.needs, hours=args.hours,
-                                done=args.done, accept=args.accept, kind=args.kind,
-                                timeout_hours=args.timeout_hours,
-                                task=args.task, task_needs=args.task_needs)
+            try:
+                accept_json = (_json_flag("--accept-json", args.accept_json)
+                               if args.accept_json is not None else None)
+                body = _ask_payload(self_name, args.what, holder=holder,
+                                    step=args.step, needs=args.needs, hours=args.hours,
+                                    done=args.done, accept=args.accept,
+                                    accept_json=accept_json, kind=args.kind,
+                                    timeout_hours=args.timeout_hours,
+                                    task=args.task, task_needs=args.task_needs)
+            except ValueError as exc:
+                print(f"swarph board cards ask: {exc}", file=sys.stderr)
+                return 2
             st, d = _post_json(f"{gw}/board/cards/{args.id}/ask", body, token)
             return _out(st, d, _ask_line, args.json)
         if args.command == "confirm-flow":
