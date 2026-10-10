@@ -10,3 +10,16 @@ egress = "external"
 auth = { env = "JEV_API_KEY", header = "Authorization", scheme = "Bearer" }
 usage = { in = "usage.input_tokens", out = "usage.output_tokens" }
 price = { in_per_mtok = 0.42, out_per_mtok = 0, source = "jevtypesafeai.com/docs#decide, card #927 post 47838" }
+
+# OpenAI Decisions. The key is the env-var name. Model is gpt-6-luna
+# (the only model the endpoint documents). Input is $0.10 per 1M tokens,
+# output free. The page documents no usage fields.
+# source: https://developers.openai.com/api/docs/guides/decisions
+
+[openai]
+kind = "decisions"
+base_url = "https://api.openai.com"
+path = "/v1/decisions"
+egress = "external"
+auth = { env = "OPENAI_API_KEY", header = "Authorization", scheme = "Bearer" }
+price = { in_per_mtok = 0.10, out_per_mtok = 0, source = "https://developers.openai.com/api/docs/guides/decisions; base rate; regional and long-context premiums not modelled" }

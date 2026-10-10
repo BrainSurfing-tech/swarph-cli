@@ -22,6 +22,9 @@ Ships these backends:
 - :class:`RuleBackend` — in-process ``rule:<module:callable>``. No credentials.
 - :class:`TypedHttpBackend` — POST to a Jev-compatible ``/v1/systemone``
   (laya-serve). No credentials; per-item latency is the HTTP round trip.
+- :class:`DecisionsBackend` — POST ``/v1/decisions``. Translates a pack's
+  ``{state, questions}`` body into the Decisions shape. It does not send
+  the pack body unchanged.
 """
 from __future__ import annotations
 
@@ -675,3 +678,341 @@ class HttpBackend:
             latency_s=round(time.perf_counter() - t0, 6),
             estimated=tin is None or tout is None,
         )
+
+
+# The Decisions endpoint documents one model. ``provider:openai`` puts the
+# registry name in model_id, so the model is not taken from that string.
+_DECISIONS_MODEL = "gpt-6-luna"
+_PREDICATE_TYPES = {"noul", "yes", "yes-no", "predicate"}
+
+
+def decisions_shape_error(body: Any) -> Optional[str]:
+    """Why a POST /v1/decisions body is not the documented shape, or None.
+
+    A double more permissive than the real API hid live failures before
+    (#1077 / #1078). This is the check that double applies.
+    """
+    if not isinstance(body, dict):
+        return "body is not an object"
+    questions = body.get("questions")
+    if not isinstance(questions, list):
+        return "questions is not a list"
+    for i, question in enumerate(questions):
+        if not isinstance(question, dict):
+            return f"questions[{i}] is not an object"
+        for field in ("name", "type", "instructions"):
+            value = question.get(field)
+            if not isinstance(value, str) or not value.strip():
+                return f"questions[{i}] lacks {field}"
+        qtype = question.get("type")
+        if qtype == "predicate" and ("choices" in question or "levels" in question):
+            return f"questions[{i}] is a predicate carrying choices or levels"
+        if qtype == "score":
+            levels = question.get("levels")
+            if not isinstance(levels, list) or not levels:
+                return f"questions[{i}] is a score without levels"
+            for j, level in enumerate(levels):
+                if (not isinstance(level, dict)
+                        or not isinstance(level.get("label"), str)
+                        or not level["label"]
+                        or not isinstance(level.get("description"), str)):
+                    return (
+                        f"questions[{i}].levels[{j}] is not "
+                        "{label, description}")
+            continue
+        if qtype != "choice":
+            continue
+        choices = question.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return f"questions[{i}] is a choice without choices"
+        for j, choice in enumerate(choices):
+            if (not isinstance(choice, dict)
+                    or not isinstance(choice.get("value"), str)
+                    or not choice["value"]
+                    or not isinstance(choice.get("description"), str)):
+                return (
+                    f"questions[{i}].choices[{j}] is not "
+                    "{value, description}")
+    return None
+
+
+class StrictDecisionsDouble:
+    """Fake POST /v1/decisions. A body that fails the documented shape is 400.
+
+    ``response`` is the JSON object returned when the body is accepted.
+    """
+
+    def __init__(self, response: Optional[dict] = None):
+        self.response = response if response is not None else {"answers": []}
+        self.bodies: list = []
+
+    def __call__(self, endpoint, headers, raw_body):
+        try:
+            body = json.loads(raw_body.decode() or "null")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return 400, "Bad Request", b'{"error": "body is not JSON"}'
+        self.bodies.append(body)
+        reason = decisions_shape_error(body)
+        if reason:
+            return 400, "Bad Request", json.dumps({"error": reason}).encode()
+        return 200, "OK", json.dumps(self.response).encode()
+
+
+def _pack_prompt(prompt: str) -> dict:
+    try:
+        parsed = json.loads(prompt) if isinstance(prompt, str) else None
+    except json.JSONDecodeError:
+        parsed = None
+    if (not isinstance(parsed, dict) or "state" not in parsed
+            or not isinstance(parsed.get("questions"), dict)
+            or not parsed["questions"]):
+        raise ValueError(
+            "decisions prompt must be JSON with state and questions")
+    return parsed
+
+
+def _answer_block(parsed: dict) -> tuple[str, dict]:
+    questions = parsed["questions"]
+    block = questions.get("answer")
+    if isinstance(block, dict):
+        return "answer", block
+    name, block = next(iter(questions.items()))
+    if not isinstance(block, dict):
+        raise ValueError("decisions question is not an object")
+    return str(name), block
+
+
+def _translate_question(name: str, block: dict) -> dict:
+    raw_type = block.get("type")
+    if raw_type in _PREDICATE_TYPES:
+        out_type = "predicate"
+    else:
+        out_type = raw_type
+    question: dict = {"name": name, "type": out_type}
+    instructions = block.get("instructions")
+    if isinstance(instructions, str):
+        question["instructions"] = instructions
+    if out_type == "choice" and isinstance(block.get("criteria"), dict):
+        question["choices"] = [
+            {
+                "value": key if isinstance(key, str) else str(key),
+                "description": val if isinstance(val, str) else str(val),
+            }
+            for key, val in block["criteria"].items()
+        ]
+    if out_type == "score" and isinstance(block.get("levels"), list):
+        question["levels"] = block["levels"]
+    return question
+
+
+def _carries_image(node: Any) -> bool:
+    """True when a pack value is an image part. Packs are text only."""
+    if isinstance(node, dict):
+        kind = node.get("type")
+        if kind in {"input_image", "image", "image_url"}:
+            return True
+        if "image_url" in node or "input_image" in node:
+            return True
+        return any(_carries_image(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_carries_image(value) for value in node)
+    return False
+
+
+def decisions_request(prompt: str) -> tuple[dict, dict]:
+    """Pack prompt -> (original pack object, POST /v1/decisions body)."""
+    parsed = _pack_prompt(prompt)
+    if _carries_image(parsed.get("state")) or _carries_image(parsed.get("questions")):
+        raise ValueError(
+            "decisions input carries an image part; packs are text only")
+    name, block = _answer_block(parsed)
+    return parsed, {
+        "model": _DECISIONS_MODEL,
+        "input": json.dumps(parsed["state"]),
+        "questions": [_translate_question(name, block)],
+    }
+
+
+def _decision_block(payload: dict) -> dict:
+    answers = payload.get("answers")
+    if not isinstance(answers, list) or not answers:
+        raise ValueError("decisions response has no answers")
+    named = next(
+        (a for a in answers if isinstance(a, dict) and a.get("name") == "answer"),
+        None)
+    block = named if named is not None else next(
+        (a for a in answers if isinstance(a, dict)), None)
+    if not isinstance(block, dict):
+        raise ValueError("decisions answer is not an object")
+    return block
+
+
+def _predicate_label(probability: float, question: Optional[dict],
+                     threshold: Optional[float]) -> str:
+    pos, neg = _noul_labels(question)
+    cut = _NOUL_THRESHOLD if threshold is None else threshold
+    return pos if probability >= cut else neg
+
+
+class DecisionsBackend:
+    """POST a typed pack item to OpenAI ``/v1/decisions``.
+
+    The pack body is ``{state, questions: {answer: {type, instructions,
+    criteria}}}``. This translates it. ``noul`` and yes-no become a
+    predicate. Choice ``criteria`` become ``choices`` of ``{value,
+    description}``. The model is ``gpt-6-luna``.
+
+    ``KIND`` stays ``typed`` so a typed pack is not a kind mismatch. The
+    registry kind that selects this class is ``decisions``.
+
+    A predicate probability is P(true), mapped with the same 0.50 cut and
+    the same template labels as the laya noul path. A refusal is not a
+    label. When the response has no usage object, tokens are an estimate
+    of the input and ``estimated`` is true.
+    """
+
+    KIND = "typed"
+
+    def __init__(self, *, name: str, base_url: str, path: str,
+                 auth: Optional[dict] = None, usage: Optional[dict] = None,
+                 price: Optional[dict] = None, egress: str = "external",
+                 noul_threshold: Optional[float] = None, transport=None):
+        self.name = name
+        self.base_url = base_url.rstrip("/")
+        self.path = path
+        self.auth = auth
+        self.usage = usage or {}
+        self.price = price
+        self.egress = egress
+        self.noul_threshold = noul_threshold
+        self.transport = transport
+        self.calls = 0
+
+    def missing_creds(self) -> list[str]:
+        if not self.auth:
+            return []
+        env = self.auth.get("env") or ""
+        if not os.environ.get(env):
+            return [f"{env} (provider {self.name})"]
+        return []
+
+    def secrets(self) -> list[tuple[str, str, str]]:
+        if not self.auth:
+            return []
+        env = self.auth.get("env") or ""
+        value = os.environ.get(env) or ""
+        if not value:
+            return []
+        return [(value, env, self.auth.get("scheme") or "")]
+
+    def generate(self, model_id: str, prompt: str, system: str = "") -> BackendResult:
+        t0 = time.perf_counter()
+        secrets = self.secrets()
+        try:
+            parsed, body = decisions_request(prompt)
+            input_text = body["input"]
+            endpoint = self.base_url + self.path
+            headers = {"Content-Type": "application/json"}
+            if self.auth:
+                env = self.auth["env"]
+                value = os.environ.get(env) or ""
+                scheme = self.auth.get("scheme") or ""
+                token = f"{scheme} {value}".strip() if scheme else value
+                headers[self.auth["header"]] = token
+            raw_body = json.dumps(body).encode()
+            self.calls += 1
+            if self.transport is not None:
+                status, reason, raw = self.transport(endpoint, headers, raw_body)
+            else:
+                req = urllib.request.Request(
+                    endpoint, data=raw_body, headers=headers, method="POST")
+                try:
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        status, reason, raw = resp.status, resp.reason, resp.read()
+                except urllib.error.HTTPError as exc:
+                    status, reason, raw = exc.code, exc.reason, exc.read()
+            if status < 200 or status >= 300:
+                return BackendResult(
+                    text="", tokens_in=0, tokens_thought=0, tokens_out=0,
+                    latency_s=round(time.perf_counter() - t0, 6),
+                    estimated=False,
+                    error=_redact(f"HTTP {status} {reason}", secrets))
+            payload = json.loads(raw.decode() or "{}")
+            if not isinstance(payload, dict):
+                raise ValueError("decisions response is not an object")
+            block = _decision_block(payload)
+            question = _answer_block(parsed)[1]
+            text, p_true = _render_decision(
+                block, question, self.noul_threshold)
+            usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else None
+            in_path = self.usage.get("in") or "usage.input_tokens"
+            out_path = self.usage.get("out") or "usage.output_tokens"
+            tin = _dig(payload, in_path) if usage is not None else None
+            tout = _dig(payload, out_path) if usage is not None else None
+            if usage is not None and tin is not None:
+                estimated = False
+                tokens_in = int(tin)
+                tokens_out = int(tout or 0)
+            else:
+                estimated = True
+                tokens_in = estimate_tokens(input_text)
+                tokens_out = 0
+            text = _redact(text, secrets)
+        except Exception as exc:
+            return BackendResult(
+                text="", tokens_in=0, tokens_thought=0, tokens_out=0,
+                latency_s=round(time.perf_counter() - t0, 6),
+                estimated=False, error=_redact(str(exc), secrets))
+        return BackendResult(
+            text=text,
+            tokens_in=tokens_in,
+            tokens_thought=0,
+            tokens_out=tokens_out,
+            latency_s=round(time.perf_counter() - t0, 6),
+            estimated=estimated,
+        )
+
+
+def _refusal_reason(block: dict) -> str:
+    for key in ("reason", "message", "explanation"):
+        value = block.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    name = block.get("name")
+    if isinstance(name, str) and name.strip():
+        return name
+    return "refusal"
+
+
+def _render_decision(block: dict, question: dict,
+                     threshold: Optional[float]) -> tuple[str, Optional[float]]:
+    """Result text, and p_true when the answer was a predicate.
+
+    A refusal has no ``answer`` key, so the runner scores it as a parse
+    failure. The reason stays in the text. Choice keeps the probabilities
+    beside a flat answer object the scorer can read.
+    """
+    if block.get("type") == "score":
+        return json.dumps({"refusal": "unsupported answer type: score"}), None
+    if block.get("type") == "refusal":
+        return json.dumps({"refusal": _refusal_reason(block)}), None
+    if block.get("type") == "predicate" or (
+            block.get("type") is None and "probability" in block):
+        p_true = float(block["probability"])
+        label = _predicate_label(p_true, question, threshold)
+        return json.dumps({"answer": label, "p_true": p_true}), p_true
+    if block.get("type") == "choice" or (
+            block.get("type") is None and "choice" in block):
+        label = block.get("choice")
+        if not isinstance(label, str) or not label:
+            raise ValueError("decisions choice has no label")
+        flat = json.dumps({"answer": label})
+        extra = {}
+        if "probabilities" in block:
+            extra["probabilities"] = block["probabilities"]
+        if "confidence" in block:
+            extra["confidence"] = block["confidence"]
+        if extra:
+            return flat + "\n" + json.dumps(extra), None
+        return flat, None
+    raise ValueError("decisions answer is not a choice, predicate, or refusal")
