@@ -99,3 +99,23 @@ def load_registry(path: str | Path | None) -> dict[str, dict]:
     raw = Path(path).read_text(encoding="utf-8")
     data = tomllib.loads(raw)
     return {name: _check(name, entry) for name, entry in data.items()}
+
+
+def provider_arm(name: str, entry: dict, noul_threshold):
+    """The registry arm for ``provider:<name>``.
+
+    ``kind = "decisions"`` is the OpenAI Decisions translator. ``typed`` and
+    ``semantic`` stay on :class:`~swarph_cli.bench.backends.HttpBackend`,
+    which posts a typed pack body unchanged.
+    """
+    from .backends import DecisionsBackend, HttpBackend
+
+    common = dict(
+        name=name, base_url=entry["base_url"], path=entry["path"],
+        auth=entry.get("auth"), usage=entry.get("usage"),
+        price=entry.get("price"), egress=entry["egress"],
+        noul_threshold=noul_threshold,
+    )
+    if entry["kind"] == "decisions":
+        return DecisionsBackend(**common)
+    return HttpBackend(kind=entry["kind"], **common)

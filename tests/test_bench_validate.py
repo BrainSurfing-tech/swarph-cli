@@ -297,6 +297,92 @@ def test_calibration_missing_creds_flagged_gracefully():
     assert any("lacks credentials" in w for w in warnings)
 
 
+class _Recording:
+    def __init__(self, inner):
+        self.inner = inner
+        self.calls = []
+
+    def generate(self, model_id, prompt, system=""):
+        self.calls.append(model_id)
+        return self.inner.generate(model_id, prompt, system)
+
+    def missing_creds(self):
+        return []
+
+
+def test_calibration_subscription_backend_is_called():
+    p = _pack(meta={"calibration": {
+        "model": "m:subscription",
+        "task_ids": ["arith_mult"],
+        "expected_mean_distance_max": 0.1,
+    }})
+    subscription = _Recording(ScriptedBackend(PERFECT_ANSWERS))
+    metered = _Recording(ScriptedBackend({}))
+    warnings = gate_calibration(p, backends={"subscription": subscription, "metered": metered})
+    assert subscription.calls == ["m"]
+    assert metered.calls == []
+    assert any("meta.calibration OK" in w or "MISMATCH" in w for w in warnings)
+    assert not any("could not run" in w for w in warnings)
+
+
+def test_calibration_bare_id_binds_metered_backend():
+    p = _pack(meta={"calibration": {
+        "model": "bare-id",
+        "task_ids": ["arith_mult"],
+        "expected_mean_distance_max": 0.1,
+    }})
+    subscription = _Recording(ScriptedBackend(PERFECT_ANSWERS))
+    metered = _Recording(ScriptedBackend(PERFECT_ANSWERS))
+    warnings = gate_calibration(p, backends={"subscription": subscription, "metered": metered})
+    assert metered.calls == ["bare-id"]
+    assert subscription.calls == []
+    assert any("meta.calibration OK" in w for w in warnings)
+
+
+def test_calibration_provider_resolves_registry_arm(monkeypatch):
+    from swarph_cli.bench import providers as providers_mod
+    from swarph_cli.bench.backends import HttpBackend
+
+    built = []
+    seen = []
+    real = providers_mod.provider_arm
+
+    def wrapped(name, entry, noul):
+        arm = real(name, entry, noul)
+        built.append((name, entry, arm))
+        inner = ScriptedBackend(PERFECT_ANSWERS)
+
+        def generate(model_id, prompt, system=""):
+            seen.append(model_id)
+            return inner.generate(model_id, prompt, system)
+
+        arm.generate = generate
+        return arm
+
+    monkeypatch.setattr(providers_mod, "provider_arm", wrapped)
+    entry = {
+        "kind": "typed",
+        "base_url": "http://127.0.0.1:9",
+        "path": "/v1/systemone",
+        "egress": "local",
+    }
+    p = _pack(meta={"calibration": {
+        "model": "provider:openai",
+        "task_ids": ["arith_mult"],
+        "expected_mean_distance_max": 0.1,
+    }})
+    metered = _Recording(ScriptedBackend(PERFECT_ANSWERS))
+    warnings = gate_calibration(
+        p, backends={"metered": metered}, registry={"openai": entry},
+    )
+    assert built and built[0][0] == "openai" and built[0][1] is entry
+    assert isinstance(built[0][2], HttpBackend)
+    assert seen == ["openai"]
+    assert metered.calls == []
+    assert any("meta.calibration OK" in w or "MISMATCH" in w for w in warnings)
+    assert not any("could not run" in w for w in warnings)
+
+
 # ── orchestration: validate_pack ───────────────────────────────────────────
 
 def test_validate_pack_ok_true_when_only_warnings():

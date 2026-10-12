@@ -22,7 +22,7 @@ import json
 from .backends import Backend
 from .pack import validate_schema
 from .quality import d_text
-from .runner import ModelSpec, preflight, run_pack
+from .runner import ModelSpec, parse_models, preflight, run_pack
 
 DISCRIMINATION_MIN_SPREAD = 0.05  # min stdev of mean_distance across reference models
 # Conservative: text prompts and their expected answers naturally share topical
@@ -199,13 +199,48 @@ CALIBRATION_NOTICE = (
 )
 
 
-def gate_calibration(pack: dict, backends: Optional[dict[str, Backend]] = None) -> list[str]:
+def _calibration_spec(model: str, pack: dict, registry: Optional[dict]):
+    """One spec from the same grammar ``--models`` uses.
+
+    ``provider:<name>`` is not runnable until its registry arm is attached.
+    A bare id stays on the metered default, which is what ``parse_models``
+    already does — this does not reimplement that split.
+    """
+    from .providers import RegistryError, load_registry, provider_arm, registry_path
+
+    specs = parse_models(model)
+    if len(specs) != 1:
+        return None
+    spec = specs[0]
+    if spec.backend != "provider":
+        return spec
+    try:
+        if registry is None:
+            registry = load_registry(registry_path())
+    except (OSError, RegistryError) as exc:
+        raise RegistryError(str(exc)) from exc
+    entry = (registry or {}).get(spec.provider)
+    if entry is not None:
+        spec.arm = provider_arm(spec.provider, entry, pack.get("noul_threshold"))
+    return spec
+
+
+def gate_calibration(
+    pack: dict,
+    backends: Optional[dict[str, Backend]] = None,
+    *,
+    registry: Optional[dict] = None,
+) -> list[str]:
     """ALWAYS emits the context-calibration requirement as a warning (§5d is
     guidance, not automatable in full). If the pack declares
     ``meta.calibration`` ({model, task_ids, expected_mean_distance_max}),
     additionally checks that the declared model+system reproduces it — full
     standardization of this format is DEFERRED (decision #4); this is the
-    minimal v1 check."""
+    minimal v1 check.
+
+    ``meta.calibration.model`` is one ``parse_models`` token: ``id[:backend[:label]]``
+    or ``provider:<name>``. A bare id keeps the metered backend.
+    """
     warnings = [CALIBRATION_NOTICE]
     calib = (pack.get("meta") or {}).get("calibration")
     if not calib:
@@ -214,7 +249,7 @@ def gate_calibration(pack: dict, backends: Optional[dict[str, Backend]] = None) 
     model = calib.get("model")
     task_ids = calib.get("task_ids")
     expected_max = calib.get("expected_mean_distance_max")
-    if not (model and task_ids and expected_max is not None):
+    if not (isinstance(model, str) and model.strip() and task_ids and expected_max is not None):
         warnings.append(
             "meta.calibration is present but malformed (need model, task_ids, "
             "expected_mean_distance_max) — skipping the reproduction check"
@@ -229,7 +264,21 @@ def gate_calibration(pack: dict, backends: Optional[dict[str, Backend]] = None) 
         )
         return warnings
 
-    runnable, preflight_warnings = preflight([ModelSpec(id=model)], backends)
+    from .providers import RegistryError
+
+    try:
+        spec = _calibration_spec(model, pack, registry)
+    except RegistryError as exc:
+        warnings.append(f"meta.calibration provider registry unreadable: {exc}")
+        return warnings
+    if spec is None:
+        warnings.append(
+            f"meta.calibration model={model!r} must be one model spec "
+            f"(id[:backend[:label]] or provider:<name>) — skipping the reproduction check"
+        )
+        return warnings
+
+    runnable, preflight_warnings = preflight([spec], backends)
     warnings.extend(preflight_warnings)
     if not runnable:
         warnings.append(f"meta.calibration check could not run: {model!r} lacks credentials")
