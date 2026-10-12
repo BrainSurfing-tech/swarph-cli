@@ -240,3 +240,54 @@ def test_a_channel_cell_with_a_fresh_heartbeat_is_watched(tmp_path):
     hb.write_text(json.dumps({"pid": 1, "ts": _t.time() - 600}))  # server died 10 min ago
     assert scan(cells, channel_ps, state, now=130) == []
     assert scan(cells, channel_ps, state, now=200) == ["drop"]
+
+
+def test_a_one_shot_mesh_wait_for_the_cell_is_a_watcher(tmp_path):
+    """Live 2026-10-12 23:34Z: copilot wakes on `swarph mesh wait --once` exiting (card #387,
+    probe 69717), and that command line names the cell, not the inbox path, so the watchdog
+    paged copilot 'DM wake is dead' (msgs 69720/69721). Fails on main.
+    tmp_path, not the live path: a live wait_cursor.json would count as watched."""
+    inbox = str(tmp_path / "copilot" / "mesh-sidecar" / "inbox.log")
+    cells = {"copilot": inbox}
+    waiter = ["/usr/bin/python3 /home/ubuntu/.local/bin/swarph mesh wait --once --as copilot --max-wait-s 1500"]
+    state = {}
+    assert scan(cells, waiter, state, now=0) == []
+    assert scan(cells, waiter, state, now=120) == []
+    assert scan(cells, ["swarph mesh wait --once --as=copilot"], {}, now=120) == []
+    other = ["/usr/bin/python3 /home/ubuntu/.local/bin/swarph mesh wait --once --as lab-ovh"]
+    quoted = ["claude -p run swarph mesh wait --once --as copilot then reply"]
+    no_once = ["/home/ubuntu/.local/bin/swarph mesh wait --as copilot"]
+    # drop-on-meta-edge #1682: argv[1] counted without checking argv[0] is an interpreter.
+    echo = ["echo swarph mesh wait --once --as copilot"]
+    grep = ["grep swarph mesh wait --once --as copilot notes.txt"]
+    claude = ["claude swarph mesh wait --once --as copilot and report"]
+    for listing in (other, quoted, no_once, echo, grep, claude):
+        st = {}
+        assert scan(cells, listing, st, now=0) == []
+        assert scan(cells, listing, st, now=120) == ["copilot"], listing
+
+
+def test_the_re_arm_gap_after_a_one_shot_delivery_is_not_an_outage(tmp_path):
+    """The waiter exits on delivery and copilot re-arms only after acting on the DM;
+    a turn longer than GAP_SECONDS paged copilot under the waiter-only fix. A cursor
+    written 30 s ago covers the gap; one written 700 s ago does not."""
+    import os, time
+    inbox = tmp_path / "copilot" / "mesh-sidecar" / "inbox.log"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text("")
+    cursor = inbox.parent / "wait_cursor.json"
+    cursor.write_text('{"last_delivered_id": 69717}')
+    cells = {"copilot": str(inbox)}
+    t = time.time()
+    os.utime(cursor, (t - 30, t - 30))
+    st = {}
+    assert scan(cells, [], st, now=0) == []
+    assert scan(cells, [], st, now=120) == []
+    os.utime(cursor, (t - 700, t - 700))
+    st = {}
+    assert scan(cells, [], st, now=0) == []
+    assert scan(cells, [], st, now=120) == ["copilot"]
+    os.utime(cursor, (t + 3600, t + 3600))  # #1682: a future mtime hid the outage unboundedly
+    st = {}
+    assert scan(cells, [], st, now=0) == []
+    assert scan(cells, [], st, now=120) == ["copilot"]
