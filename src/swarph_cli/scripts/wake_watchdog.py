@@ -134,20 +134,43 @@ def _channel_alive(inbox: str, now: float | None = None) -> bool:
 
 def _watching(inbox: str, cmdlines: Iterable[str]) -> bool:
     """A reader is tail or dm_notify_filter with the inbox path as its own argument,
-    or a channel server whose heartbeat is fresh.
+    a channel server whose heartbeat is fresh, or a one-shot `swarph mesh wait`
+    for this cell.
 
     A process that merely mentions the path (a prompt, a log line) is not a reader.
     """
     if _channel_alive(inbox):
         return True
+    cell = Path(inbox).parent.parent.name
     for cmd in cmdlines:
         parts = cmd.split()
+        if _waits_on(parts, cell):
+            return True
         if inbox not in parts:
             continue
         if any(os.path.basename(p) == "tail" for p in parts):
             return True
         if any(p.endswith("dm_notify_filter") or p.endswith("dm_notify_filter.py") for p in parts):
             return True
+    return False
+
+
+def _waits_on(parts: list[str], cell: str) -> bool:
+    """`swarph mesh wait --once --as <cell>` names the cell, not the inbox path.
+
+    copilot wakes on this waiter's exit (card #387). The process must BE swarph
+    (argv[0], or argv[1] after an interpreter), so a prompt that quotes the
+    command is not a reader.
+    """
+    for i in (0, 1):
+        if len(parts) < i + 3 or os.path.basename(parts[i]) != "swarph":
+            continue
+        if parts[i + 1:i + 3] != ["mesh", "wait"]:
+            continue
+        rest = parts[i + 3:]
+        named = f"--as={cell}" in rest or any(
+            a == "--as" and b == cell for a, b in zip(rest, rest[1:]))
+        return "--once" in rest and named
     return False
 
 

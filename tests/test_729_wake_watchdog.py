@@ -240,3 +240,23 @@ def test_a_channel_cell_with_a_fresh_heartbeat_is_watched(tmp_path):
     hb.write_text(json.dumps({"pid": 1, "ts": _t.time() - 600}))  # server died 10 min ago
     assert scan(cells, channel_ps, state, now=130) == []
     assert scan(cells, channel_ps, state, now=200) == ["drop"]
+
+
+def test_a_one_shot_mesh_wait_for_the_cell_is_a_watcher():
+    """Live 2026-10-12 23:34Z: copilot wakes on `swarph mesh wait --once` exiting (card #387,
+    probe 69717), and that command line names the cell, not the inbox path, so the watchdog
+    paged copilot 'DM wake is dead' (msgs 69720/69721). Fails on main."""
+    inbox = "/home/ubuntu/swarph_state/copilot/mesh-sidecar/inbox.log"
+    cells = {"copilot": inbox}
+    waiter = ["/usr/bin/python3 /home/ubuntu/.local/bin/swarph mesh wait --once --as copilot --max-wait-s 1500"]
+    state = {}
+    assert scan(cells, waiter, state, now=0) == []
+    assert scan(cells, waiter, state, now=120) == []
+    assert scan(cells, ["swarph mesh wait --once --as=copilot"], {}, now=120) == []
+    other = ["/usr/bin/python3 /home/ubuntu/.local/bin/swarph mesh wait --once --as lab-ovh"]
+    quoted = ["claude -p run swarph mesh wait --once --as copilot then reply"]
+    no_once = ["/home/ubuntu/.local/bin/swarph mesh wait --as copilot"]
+    for listing in (other, quoted, no_once):
+        st = {}
+        assert scan(cells, listing, st, now=0) == []
+        assert scan(cells, listing, st, now=120) == ["copilot"], listing
