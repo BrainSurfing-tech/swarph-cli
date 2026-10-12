@@ -142,7 +142,8 @@ def _waiter_just_delivered(inbox: str, now: float | None = None) -> bool:
         mtime = (Path(inbox).parent / "wait_cursor.json").stat().st_mtime
     except OSError:
         return False
-    return (time.time() if now is None else now) - mtime < WAIT_REARM_GRACE
+    age = (time.time() if now is None else now) - mtime
+    return 0 <= age < WAIT_REARM_GRACE  # a future mtime is not a delivery
 
 
 def _watching(inbox: str, cmdlines: Iterable[str]) -> bool:
@@ -177,6 +178,8 @@ def _waits_on(parts: list[str], cell: str) -> bool:
     """
     for i in (0, 1):
         if len(parts) < i + 3 or os.path.basename(parts[i]) != "swarph":
+            continue
+        if i == 1 and not os.path.basename(parts[0]).startswith("python"):
             continue
         if parts[i + 1:i + 3] != ["mesh", "wait"]:
             continue

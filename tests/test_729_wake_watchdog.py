@@ -257,7 +257,11 @@ def test_a_one_shot_mesh_wait_for_the_cell_is_a_watcher(tmp_path):
     other = ["/usr/bin/python3 /home/ubuntu/.local/bin/swarph mesh wait --once --as lab-ovh"]
     quoted = ["claude -p run swarph mesh wait --once --as copilot then reply"]
     no_once = ["/home/ubuntu/.local/bin/swarph mesh wait --as copilot"]
-    for listing in (other, quoted, no_once):
+    # drop-on-meta-edge #1682: argv[1] counted without checking argv[0] is an interpreter.
+    echo = ["echo swarph mesh wait --once --as copilot"]
+    grep = ["grep swarph mesh wait --once --as copilot notes.txt"]
+    claude = ["claude swarph mesh wait --once --as copilot and report"]
+    for listing in (other, quoted, no_once, echo, grep, claude):
         st = {}
         assert scan(cells, listing, st, now=0) == []
         assert scan(cells, listing, st, now=120) == ["copilot"], listing
@@ -280,6 +284,10 @@ def test_the_re_arm_gap_after_a_one_shot_delivery_is_not_an_outage(tmp_path):
     assert scan(cells, [], st, now=0) == []
     assert scan(cells, [], st, now=120) == []
     os.utime(cursor, (t - 700, t - 700))
+    st = {}
+    assert scan(cells, [], st, now=0) == []
+    assert scan(cells, [], st, now=120) == ["copilot"]
+    os.utime(cursor, (t + 3600, t + 3600))  # #1682: a future mtime hid the outage unboundedly
     st = {}
     assert scan(cells, [], st, now=0) == []
     assert scan(cells, [], st, now=120) == ["copilot"]
