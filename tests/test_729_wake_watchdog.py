@@ -242,11 +242,12 @@ def test_a_channel_cell_with_a_fresh_heartbeat_is_watched(tmp_path):
     assert scan(cells, channel_ps, state, now=200) == ["drop"]
 
 
-def test_a_one_shot_mesh_wait_for_the_cell_is_a_watcher():
+def test_a_one_shot_mesh_wait_for_the_cell_is_a_watcher(tmp_path):
     """Live 2026-10-12 23:34Z: copilot wakes on `swarph mesh wait --once` exiting (card #387,
     probe 69717), and that command line names the cell, not the inbox path, so the watchdog
-    paged copilot 'DM wake is dead' (msgs 69720/69721). Fails on main."""
-    inbox = "/home/ubuntu/swarph_state/copilot/mesh-sidecar/inbox.log"
+    paged copilot 'DM wake is dead' (msgs 69720/69721). Fails on main.
+    tmp_path, not the live path: a live wait_cursor.json would count as watched."""
+    inbox = str(tmp_path / "copilot" / "mesh-sidecar" / "inbox.log")
     cells = {"copilot": inbox}
     waiter = ["/usr/bin/python3 /home/ubuntu/.local/bin/swarph mesh wait --once --as copilot --max-wait-s 1500"]
     state = {}
@@ -260,3 +261,25 @@ def test_a_one_shot_mesh_wait_for_the_cell_is_a_watcher():
         st = {}
         assert scan(cells, listing, st, now=0) == []
         assert scan(cells, listing, st, now=120) == ["copilot"], listing
+
+
+def test_the_re_arm_gap_after_a_one_shot_delivery_is_not_an_outage(tmp_path):
+    """The waiter exits on delivery and copilot re-arms only after acting on the DM;
+    a turn longer than GAP_SECONDS paged copilot under the waiter-only fix. A cursor
+    written 30 s ago covers the gap; one written 700 s ago does not."""
+    import os, time
+    inbox = tmp_path / "copilot" / "mesh-sidecar" / "inbox.log"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text("")
+    cursor = inbox.parent / "wait_cursor.json"
+    cursor.write_text('{"last_delivered_id": 69717}')
+    cells = {"copilot": str(inbox)}
+    t = time.time()
+    os.utime(cursor, (t - 30, t - 30))
+    st = {}
+    assert scan(cells, [], st, now=0) == []
+    assert scan(cells, [], st, now=120) == []
+    os.utime(cursor, (t - 700, t - 700))
+    st = {}
+    assert scan(cells, [], st, now=0) == []
+    assert scan(cells, [], st, now=120) == ["copilot"]

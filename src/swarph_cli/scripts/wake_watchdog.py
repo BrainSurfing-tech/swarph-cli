@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterable
 
 GAP_SECONDS = 60
+WAIT_REARM_GRACE = 600
 
 
 def writer_verdict(*, reader_alive: bool, monitor_rc: int) -> str:
@@ -132,14 +133,26 @@ def _channel_alive(inbox: str, now: float | None = None) -> bool:
     return (time.time() if now is None else now) - ts < 180
 
 
+def _waiter_just_delivered(inbox: str, now: float | None = None) -> bool:
+    """`swarph mesh wait --once` writes wait_cursor.json beside the inbox when it
+    delivers, then exits. The cell re-arms only after acting on the DM, which can
+    take minutes; inside that window no waiter is running but the wake is not dead.
+    """
+    try:
+        mtime = (Path(inbox).parent / "wait_cursor.json").stat().st_mtime
+    except OSError:
+        return False
+    return (time.time() if now is None else now) - mtime < WAIT_REARM_GRACE
+
+
 def _watching(inbox: str, cmdlines: Iterable[str]) -> bool:
     """A reader is tail or dm_notify_filter with the inbox path as its own argument,
     a channel server whose heartbeat is fresh, or a one-shot `swarph mesh wait`
-    for this cell.
+    for this cell (running, or delivered within WAIT_REARM_GRACE).
 
     A process that merely mentions the path (a prompt, a log line) is not a reader.
     """
-    if _channel_alive(inbox):
+    if _channel_alive(inbox) or _waiter_just_delivered(inbox):
         return True
     cell = Path(inbox).parent.parent.name
     for cmd in cmdlines:
