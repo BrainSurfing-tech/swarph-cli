@@ -32,7 +32,6 @@ from swarph_cli.bench.backends import (
     SubscriptionBackend,
     TypedHttpBackend,
     HttpBackend,
-    DecisionsBackend,
 )
 from swarph_cli.bench.pack import PackError, load_pack, slugify_theme, validate_schema
 from swarph_cli.bench.providers import RegistryError, load_registry, registry_path
@@ -223,21 +222,9 @@ def _default_packs_dir() -> Path:
 
 
 def _provider_arm(name: str, entry: dict, noul_threshold):
-    """The registry arm for ``provider:<name>``.
-
-    ``kind = "decisions"`` is the OpenAI Decisions translator. ``typed`` and
-    ``semantic`` stay on :class:`HttpBackend`, which posts a typed pack body
-    unchanged.
-    """
-    common = dict(
-        name=name, base_url=entry["base_url"], path=entry["path"],
-        auth=entry.get("auth"), usage=entry.get("usage"),
-        price=entry.get("price"), egress=entry["egress"],
-        noul_threshold=noul_threshold,
-    )
-    if entry["kind"] == "decisions":
-        return DecisionsBackend(**common)
-    return HttpBackend(kind=entry["kind"], **common)
+    """The registry arm for ``provider:<name>``. Same constructor validate uses."""
+    from swarph_cli.bench.providers import provider_arm
+    return provider_arm(name, entry, noul_threshold)
 
 
 # ── dispatch ───────────────────────────────────────────────────────────────
