@@ -294,7 +294,8 @@ def test_calibration_missing_creds_flagged_gracefully():
             return ["SOME_KEY"]
 
     warnings = gate_calibration(p, backends={"metered": NoCreds()})
-    assert any("lacks credentials" in w for w in warnings)
+    assert any("requires SOME_KEY" in w and "skipped" in w for w in warnings)
+    assert not any("lacks credentials" in w for w in warnings)
 
 
 class _Recording:
@@ -381,6 +382,59 @@ def test_calibration_provider_resolves_registry_arm(monkeypatch):
     assert metered.calls == []
     assert any("meta.calibration OK" in w or "MISMATCH" in w for w in warnings)
     assert not any("could not run" in w for w in warnings)
+
+
+def test_calibration_on_box_only_refuses_external_provider(monkeypatch):
+    from swarph_cli.bench import providers as providers_mod
+
+    calls = []
+    real = providers_mod.provider_arm
+
+    def wrapped(name, entry, noul):
+        arm = real(name, entry, noul)
+
+        def generate(model_id, prompt, system=""):
+            calls.append(model_id)
+            raise AssertionError("external arm must not be dispatched")
+
+        arm.generate = generate
+        return arm
+
+    monkeypatch.setattr(providers_mod, "provider_arm", wrapped)
+    entry = {
+        "kind": "typed",
+        "base_url": "https://api.example.com",
+        "path": "/v1/systemone",
+        "egress": "external",
+    }
+    p = _pack(
+        egress="on_box_only",
+        meta={"calibration": {
+            "model": "provider:openai",
+            "task_ids": ["arith_mult"],
+            "expected_mean_distance_max": 0.1,
+        }},
+    )
+    warnings = gate_calibration(p, backends={}, registry={"openai": entry})
+    assert calls == []
+    assert any("on_box_only" in w and "external" in w for w in warnings)
+    assert not any("lacks credentials" in w for w in warnings)
+
+
+def test_calibration_kind_mismatch_refuses_the_arm():
+    p = _pack(
+        request_kind="typed",
+        meta={"calibration": {
+            "model": "m:subscription",
+            "task_ids": ["arith_mult"],
+            "expected_mean_distance_max": 0.1,
+        }},
+    )
+    subscription = _Recording(ScriptedBackend(PERFECT_ANSWERS))
+    warnings = gate_calibration(p, backends={"subscription": subscription})
+    assert subscription.calls == []
+    assert any("kind mismatch: pack=typed arm=semantic" in w for w in warnings)
+    assert not any("lacks credentials" in w for w in warnings)
 
 
 # ── orchestration: validate_pack ───────────────────────────────────────────

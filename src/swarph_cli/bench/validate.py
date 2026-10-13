@@ -278,10 +278,12 @@ def gate_calibration(
         )
         return warnings
 
-    runnable, preflight_warnings = preflight([spec], backends)
+    runnable, preflight_warnings = preflight([spec], backends, pack=pack)
     warnings.extend(preflight_warnings)
     if not runnable:
-        warnings.append(f"meta.calibration check could not run: {model!r} lacks credentials")
+        # The preflight warning already names the refusal (credentials, kind
+        # mismatch, on_box_only egress). A second "lacks credentials" line
+        # mislabels every other refusal as a missing key.
         return warnings
 
     result = run_pack(runnable, pack, backends, task_ids=task_ids)
