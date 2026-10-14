@@ -1,4 +1,20 @@
+import pytest
+
 import swarph_cli.stall_alert as st
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cells_dir(tmp_path, monkeypatch):
+    """The stall alert reads THIS cell's own yaml (`responsible:`). Never let a test
+    read the real ~/.config/swarph/cells of the machine it runs on."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    d = tmp_path / "config" / "swarph" / "cells"
+    d.mkdir(parents=True)
+    return d
+
+
+def _cell_yaml(cells_dir, name, text):
+    (cells_dir / f"{name}.yaml").write_text(text, encoding="utf-8")
 
 
 def test_is_alert_tick_backoff_sequence():
@@ -276,3 +292,91 @@ def test_both_stall_call_sites_use_pending_count():
     for rel in ("commands/daemon.py", "commands/mesh.py"):
         src = (root / rel).read_text(encoding="utf-8")
         assert "stall_alert.pending_count(" in src, rel
+
+
+# ---- card #1135 / row #1813, commander ruling 16:19Z: the cell's own `responsible:` key ----
+
+def test_responsible_key_in_own_yaml_is_the_holder_at_the_first_alert(monkeypatch, _isolated_cells_dir):
+    _cell_yaml(_isolated_cells_dir, "cursor-win", "name: cursor-win\nresponsible: workstation-lc\n")
+    board = _Board()
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.is_alert_tick(60) is True
+    assert st.send_stall_alert("http://gw", "tok", "cursor-win", 60, 2) is True
+    body = _ask_body(board)
+    assert body["holder"] == "workstation-lc"            # told at tick 60, not at a timeout
+    assert body["created_by"] == "cursor-win"
+    assert "cell=cursor-win " in body["what"]
+    assert body["fallback_target"] == "lab-ovh"          # the later timeout is a second escalation
+    assert body["timeout_hours"] == 2
+
+
+def test_responsible_key_unset_falls_back_to_the_constant(monkeypatch, _isolated_cells_dir):
+    _cell_yaml(_isolated_cells_dir, "cell-x", "name: cell-x\ngithub: someone\n")   # a yaml, no key
+    board = _Board()
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
+    assert _ask_body(board)["holder"] == st.RESPONSIBLE_FOR_OWNERLESS == "lab-ovh"
+
+
+def test_unreadable_yaml_falls_back_to_the_constant(monkeypatch, _isolated_cells_dir):
+    (_isolated_cells_dir / "cell-x.yaml").write_bytes(b"name: [unterminated\n  responsible: {\n")
+    board = _Board()
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
+    assert _ask_body(board)["holder"] == "lab-ovh"
+
+
+def test_no_yaml_for_the_cell_falls_back_to_the_constant(monkeypatch, _isolated_cells_dir):
+    _cell_yaml(_isolated_cells_dir, "someone-else", "name: someone-else\nresponsible: science-claude\n")
+    board = _Board()
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
+    assert _ask_body(board)["holder"] == "lab-ovh"       # another cell's key is not this cell's
+
+
+def test_responsible_naming_the_cell_itself_falls_back_to_the_constant(monkeypatch, _isolated_cells_dir):
+    _cell_yaml(_isolated_cells_dir, "cell-x", "name: cell-x\nresponsible: cell-x\n")
+    board = _Board()
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
+    body = _ask_body(board)
+    assert body["holder"] == "lab-ovh"                   # a stalled cell cannot hold its own alert
+    assert body["holder"] != body["created_by"]
+
+
+def test_lab_ovh_own_stall_ignores_a_responsible_key(monkeypatch, _isolated_cells_dir):
+    _cell_yaml(_isolated_cells_dir, "lab-ovh", "name: lab-ovh\nresponsible: science-claude\n")
+    board = _Board()
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "lab-ovh", 60, 1) is True
+    assert _ask_body(board)["holder"] == "drop-on-meta-edge"
+
+
+@pytest.mark.parametrize("value", ["two words", "a/b", "", "x" * 80, "bad\nname"])
+def test_a_value_that_is_not_a_peer_name_falls_back(monkeypatch, _isolated_cells_dir, value):
+    import json as _json
+    (_isolated_cells_dir / "cell-x.yaml").write_text(
+        "name: cell-x\nresponsible: " + _json.dumps(value) + "\n", encoding="utf-8")
+    board = _Board()
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
+    assert _ask_body(board)["holder"] == "lab-ovh"
+
+
+def test_yaml_claims_takes_a_key_and_the_default_is_unchanged(_isolated_cells_dir):
+    from swarph_cli import gh_identity
+    _cell_yaml(_isolated_cells_dir, "cell-x", "name: cell-x\ngithub: gh-login\nresponsible: peer-y\n")
+    d = _isolated_cells_dir
+    assert [v for v, _ in gh_identity.yaml_claims("cell-x", d)[0]] == ["gh-login"]
+    assert [v for v, _ in gh_identity.yaml_claims("cell-x", d, key="responsible")[0]] == ["peer-y"]
+
+
+def test_a_cell_yaml_with_a_responsible_key_still_loads(_isolated_cells_dir):
+    """`swarph spawn` reads the same file. An unknown top-level key must land in
+    Cell.extra, not raise, or setting `responsible:` would break the cell."""
+    from swarph_cli.cell import load_cell
+    f = _isolated_cells_dir / "probe-cell.yaml"
+    f.write_text("name: probe-cell\nrole: builder\ncwd: .\nresponsible: lab-ovh\n", encoding="utf-8")
+    cell = load_cell(f)
+    assert cell.name == "probe-cell"
+    assert (cell.extra or {}).get("responsible") == "lab-ovh"

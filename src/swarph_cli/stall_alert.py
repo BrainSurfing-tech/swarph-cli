@@ -15,6 +15,7 @@ raises and never blocks delivery."""
 from __future__ import annotations
 
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -28,9 +29,12 @@ _HOLDER = "lab-ovh"
 _OTHER = "drop-on-meta-edge"
 # Card #1135. TWO CHOICES ARE UNRULED; each is ONE constant so a ruling flips it
 # here and nowhere else (one test each in tests/test_stall_alert.py).
-# (1) Who is responsible for a stalled cell. No cell -> responsible-peer source
-#     exists (claude_peers.owner is a Meta-Edge USER id, never a cell), so this
-#     one peer is responsible for every cell until a ruling names a source.
+# (1) Who is responsible for a stalled cell: the `responsible:` key in the cell's
+#     OWN yaml (commander, card #1135). This daemon runs inside the stalled cell,
+#     so that yaml is local. claude_peers.owner is a Meta-Edge USER id, a person,
+#     and is deliberately never read. ONE fallback constant, used when the key is
+#     unset, the yaml is unreadable or absent, or the value names the cell itself.
+RESPONSIBLE_YAML_KEY = "responsible"
 RESPONSIBLE_FOR_OWNERLESS = "lab-ovh"
 # (2) Whether the commander also gets a copy at the first alert. Card #989: a DM
 #     to the commander is not a reminder, so the default is no.
@@ -89,18 +93,45 @@ def _request(method: str, url: str, token: str, payload: dict | None = None) -> 
     return json.loads(raw) if raw else {}
 
 
-def _holder_for(self_name: str) -> str:
-    """Who is told at the FIRST alert: the responsible peer.
+_PEER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
-    There is no cell -> responsible-peer source today. claude_peers.owner is the
-    Meta-Edge USER id (a person), not a cell, and must NOT be used: routing a
-    stall row to it would page a human. So every cell takes the one constant
-    RESPONSIBLE_FOR_OWNERLESS; when a real source exists it plugs in here.
-    lab-ovh's own stall goes to the other orchestrator. The stalled cell is
-    never its own holder: it cannot act on a notice it cannot receive."""
+
+def _responsible_from_yaml(self_name: str) -> str | None:
+    """The `responsible:` value in THIS cell's own yaml, or None.
+
+    None in every case that must fall back: no yaml for the cell, the key unset,
+    a yaml that cannot be parsed (it may be this cell's, so the cells dir is not
+    trusted), two yamls naming the cell with different values, a value that is
+    not a mesh peer name, or a value that names the cell itself. Fail-safe: any
+    error is None, never an exception into the delivery loop. Reads through
+    gh_identity.yaml_claims (one yaml reader)."""
+    try:
+        from swarph_cli import gh_identity
+        claims, unreadable = gh_identity.yaml_claims(
+            self_name, key=RESPONSIBLE_YAML_KEY)
+    except Exception:  # noqa: BLE001 - PyYAML missing, odd cells dir, anything
+        return None
+    if unreadable:
+        return None
+    values = {v.strip() for v, _ in claims if isinstance(v, str) and v.strip()}
+    if len(values) != 1:
+        return None
+    value = values.pop()
+    if not _PEER_NAME_RE.fullmatch(value) or value == self_name:
+        return None
+    return value
+
+
+def _holder_for(self_name: str) -> str:
+    """Who is told at the FIRST alert: the cell's responsible peer.
+
+    lab-ovh's own stall goes to the other orchestrator, whatever its yaml says.
+    Otherwise the cell's own `responsible:` key, else RESPONSIBLE_FOR_OWNERLESS.
+    The stalled cell is never its own holder: it cannot act on a notice it
+    cannot receive."""
     if self_name == _HOLDER:
         return _OTHER
-    holder = RESPONSIBLE_FOR_OWNERLESS
+    holder = _responsible_from_yaml(self_name) or RESPONSIBLE_FOR_OWNERLESS
     return _OTHER if holder == self_name else holder
 
 
