@@ -525,3 +525,44 @@ def test_every_other_case_still_escalates_with_a_2h_timeout(monkeypatch, _isolat
         assert st.send_stall_alert("http://gw", "tok", cell, 60, 1) is True
         body = json.loads(_asks(board)[0][2].decode())
         assert (body["holder"], body["fallback_target"], body["timeout_hours"]) == (holder, target, 2)
+
+
+# ---- follow-up row #1825 (drop's non-blocking items 1 and 2 on PR 585) ----
+
+@pytest.mark.parametrize("code", [400, 401, 408, 422, 429, 500, 503])
+def test_only_the_refused_holder_codes_retry_with_the_default(monkeypatch, _isolated_cells_dir, code):
+    """A transient 429 or 408 must NOT route the alert to lab-ovh: the open row would
+    then suppress a re-mint and the responsible peer would never be told. Exactly one
+    POST, False, no row, so the next alert tick tries the responsible peer again."""
+    _responsible(_isolated_cells_dir, "cell-x", "workstation-lc")
+    board = _Board(ask_error=code)
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is False
+    assert board.ask_attempts == 1
+    assert board.rows == []
+
+
+def test_the_retry_codes_are_exactly_404_403_409():
+    assert st._REFUSED_HOLDER_CODES == frozenset({403, 404, 409})
+
+
+@pytest.mark.parametrize("code", [404, 403, 409])
+def test_the_three_refusal_codes_still_retry_once_with_lab_ovh(monkeypatch, _isolated_cells_dir, code):
+    _responsible(_isolated_cells_dir, "cell-x", "no-such-peer")
+    board = _Board(known_holders={"lab-ovh"}, refuse_code=code)
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
+    assert board.ask_attempts == 2
+    assert [r["holder"] for r in board.rows] == ["lab-ovh"]
+
+
+def test_lab_ovh_stall_with_drop_refused_is_one_post_false_and_no_row(monkeypatch, _isolated_cells_dir):
+    """drop's named test. Self = lab-ovh, the only holder is drop-on-meta-edge and the
+    sink refuses it: exactly 1 POST and False. Never a retry that would hold the row
+    by the stalled cell (lab-ovh)."""
+    board = _Board(known_holders=set())           # drop-on-meta-edge is refused
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "lab-ovh", 60, 1) is False
+    assert board.ask_attempts == 1
+    assert board.rows == []
+    assert all(r["holder"] != "lab-ovh" for r in board.rows)

@@ -41,6 +41,11 @@ RESPONSIBLE_FOR_OWNERLESS = "lab-ovh"
 COMMANDER_COPY = False
 # The second escalation (timeout) lands within a working session, not a day.
 _TIMEOUT_HOURS = 2
+# The gateway refuses a holder it does not hold with one of these (#510). ONLY
+# these retry with the default: a transient 408/429 (or 400/401/422/5xx) is not
+# "the responsible peer is unknown", and routing it to lab-ovh would let the open
+# row suppress the re-mint, so the responsible peer would never be told.
+_REFUSED_HOLDER_CODES = frozenset({403, 404, 409})
 _PREFIX = f"STALL card #{_CARD}"
 
 
@@ -238,12 +243,13 @@ def send_stall_alert(gateway: str, token: str, self_name: str,
             _ask(gateway, token, self_name, count, pending_n, holder, note)
         except urllib.error.HTTPError as exc:
             # The gateway refuses a holder it does not hold (#510: a typo, a
-            # deregistered peer, wrong case) with a 4xx. Main would have told
-            # lab-ovh in that case, so minting nothing here would be a silent
-            # path. ONE more try with the default; a second refusal is a real
-            # failure and returns False as before.
+            # deregistered peer, wrong case) with 404, 403 or 409. Main would
+            # have told lab-ovh in that case, so minting nothing here would be a
+            # silent path. ONE more try with the default; a second refusal, or
+            # any other status (408/429/5xx), is a real failure and returns
+            # False as before so the next tick re-tries the responsible peer.
             fallback = _default_holder(self_name)
-            if not (400 <= exc.code < 500) or holder == fallback:
+            if exc.code not in _REFUSED_HOLDER_CODES or holder == fallback:
                 raise
             note = f"responsible_refused={holder} (gateway HTTP {exc.code}); held by {fallback}"
             holder = fallback
