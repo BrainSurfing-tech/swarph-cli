@@ -23,6 +23,7 @@ import yaml
 from swarph_shared.cell import PEER_NAME_RE, parse_cell_dict
 from swarph_cli.cell import CLI_ENABLED_PROVIDERS, CellError, cells_dir
 from swarph_cli.gateway_default import env_gateway
+from swarph_cli.gh_identity import LOGIN_RE
 
 _CODEX_SANDBOX_DEFAULT = "workspace-write"
 _CODEX_SANDBOX_VALUES = ("workspace-write", "read-only")
@@ -67,6 +68,7 @@ def _llm_choices() -> list:
 # ---------------------------------------------------------------------------
 # Prompt helpers (interactive). All no-op when a flag already supplied the value.
 # ---------------------------------------------------------------------------
+
 
 def _ask(prompt: str, default: Optional[str] = None) -> str:
     suffix = f" [{default}]" if default else ""
@@ -134,6 +136,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--assisted-memory", dest="assisted_memory", default=None, metavar="REPO",
                    help="enable git-backed memory at REPO (SSH→HTTPS normalized)")
     p.add_argument("--starter", default=None)
+    p.add_argument("--github", default=None, metavar="LOGIN",
+                   help="GitHub login gh-route injects for this cell (#1144). No default: "
+                        "without it the cell is refused by gh-route where the hook is installed")
     p.add_argument("--symlink-cwd", dest="symlink_cwd", action="store_true")
     p.add_argument("--force", action="store_true")
     p.add_argument("--non-interactive", "-y", dest="non_interactive", action="store_true",
@@ -209,6 +214,21 @@ def run_init(argv: list[str]) -> int:
     if args.starter:
         cell["starter_prompt_path"] = args.starter
 
+    # ── GitHub login (#1144) ──
+    # >>> NO DEFAULT, AND NEVER THE ACTIVE `gh` ACCOUNT. <<< A login filled from
+    # `gh auth status` makes the cell act as whoever happens to be logged in, which is
+    # the #360 substitution gh-route refuses. Blank stays blank; gh-route then refuses
+    # the cell, and the line below says so at creation instead of at its first push.
+    github = (args.github or "").strip()
+    if not github and interactive:
+        github = _ask("GitHub login this cell acts as (blank = none yet)").strip()
+    if github:
+        if not LOGIN_RE.fullmatch(github):
+            print(f"swarph init: --github {github!r} is not a valid GitHub login",
+                  file=sys.stderr)
+            return 2
+        cell["github"] = github
+
     # ── assisted memory (y/n) ──
     am_repo = args.assisted_memory
     if am_repo is None and interactive and _ask_yn("Use assisted memory (git-backed durable memory)?", False):
@@ -254,6 +274,12 @@ def run_init(argv: list[str]) -> int:
     print(f"    tmux_session={cell['tmux_session']}  cursor_path={cell['cursor_path']}")
     if "assisted_memory" in cell:
         print(f"    assisted_memory.repo={cell['assisted_memory']['repo']} (enabled)")
+    if "github" in cell:
+        print(f"    github={cell['github']}")
+    else:
+        print(f"    github=(none) — >>> gh-route will REFUSE every `gh` call from {name} "
+              f"once its hook is installed on this box. <<< Set it by adding "
+              f"`github: <login>` to {dest}.")
 
     # Registration is NOT done here (R1 token mint-once is a once-only secret —
     # init scaffolding from the operator's context shouldn't capture another
