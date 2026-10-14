@@ -163,10 +163,12 @@ def _cells_dir() -> Path:
     return cells_dir()
 
 
-def yaml_claims(peer: str, directory: Optional[Path] = None):
+def yaml_claims(peer: str, directory: Optional[Path] = None, key: str = YAML_KEY):
     """Every cell yaml that declares mesh name ``peer`` -> ``([(value, path)], unreadable)``.
 
-    ``value`` is the raw ``github:`` value (None when the file has no such key), so the
+    ``key`` names the yaml key to read (default ``github``; stall_alert reads
+    ``responsible``, card #1135) so there is ONE yaml reader, not two.
+    ``value`` is the raw value (None when the file has no such key), so the
     caller can tell "no yaml for this cell" from "a yaml that maps nothing". A file with
     no ``name:`` is the cell named by its stem — the same rule as _cells_on_this_box.
     ``unreadable`` lists files that could not be parsed: they may be this cell, so a
@@ -195,7 +197,7 @@ def yaml_claims(peer: str, directory: Optional[Path] = None):
             continue
         name = doc.get("name")
         if (name if isinstance(name, str) and name else f.stem) == peer:
-            claims.append((doc.get(YAML_KEY), f))
+            claims.append((doc.get(key), f))
     return claims, unreadable
 
 
