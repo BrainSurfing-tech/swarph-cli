@@ -75,6 +75,12 @@ def run_hook(stdin_text: Optional[str] = None) -> int:
         res = ghid.resolve(peer or None)
     except ghid.RouterRefusal as exc:
         return _deny(str(exc))
+    except Exception as exc:
+        # >>> A CRASHED RESOLVER MUST DENY, NOT EXIT NON-ZERO. <<< Claude Code blocks a
+        # PreToolUse call only on exit 2 or a deny; any other failure lets `gh` run as
+        # the active account (#360). drop-on-meta-edge measured it on #1818.
+        return _deny(f"the identity resolver crashed, so no identity was resolved: "
+                     f"{type(exc).__name__}: {exc}")
 
     rewritten = ghid.inject(command, res.login)
     updated = dict(payload.get("tool_input") or {})
@@ -97,7 +103,7 @@ def run_show() -> int:
     peer = identity.declared(env=identity.SELF_ONLY)[0] or ""
     try:
         res = ghid.resolve(peer or None)
-    except ghid.RouterRefusal as exc:
+    except Exception as exc:  # RouterRefusal, or a resolver crash: both are "no identity"
         print_safe(f"swarph gh-route: REFUSED\n  {exc}", file=sys.stderr)
         return 1
     print_safe(f"cell        {res.peer}")
@@ -145,7 +151,7 @@ def _cells_on_this_box() -> list:
         try:
             doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
             name = doc.get("name") if isinstance(doc, dict) else None
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError, RecursionError) as exc:
             # >>> AN UNREADABLE CONFIG IS NOT A CELL NAMED AFTER ITS FILE. <<< The first
             # version's docstring promised this distinction and the CODE DID NOT MAKE IT:
             # OSError and no-name-found both set name=None and both fell through to
@@ -181,7 +187,7 @@ def _any_yaml_login() -> bool:
     for f in files:
         try:
             doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
+        except Exception:
             continue
         if isinstance(doc, dict) and doc.get(ghid.YAML_KEY):
             return True

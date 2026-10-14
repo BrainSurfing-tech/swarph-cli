@@ -136,7 +136,8 @@ def load_mapping(path: Optional[Path] = None) -> dict:
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except Exception as exc:
-        raise RouterRefusal(f"GitHub identity mapping at {p} is unreadable: {exc}")
+        raise RouterRefusal(f"GitHub identity mapping at {p} is unreadable: {exc}. "
+                            f"Fix it, or delete it if every cell's yaml carries '{YAML_KEY}:'.")
     if not isinstance(data, dict):
         raise RouterRefusal(f"GitHub identity mapping at {p} must be a JSON object")
     return data
@@ -182,7 +183,11 @@ def yaml_claims(peer: str, directory: Optional[Path] = None):
     for f in files:
         try:
             doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
+        except Exception:
+            # Not just OSError/YAMLError: a UTF-16 file (a PowerShell 5.1 redirect) raises
+            # UnicodeDecodeError and deep nesting raises RecursionError. Either escaping
+            # here crashed the hook, and a crashed hook lets `gh` run as the active
+            # account (#360) for every cell on the box (drop-on-meta-edge, #1818).
             unreadable.append(f)
             continue
         if not isinstance(doc, dict):

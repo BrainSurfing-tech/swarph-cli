@@ -220,8 +220,10 @@ def test_init_rejects_an_invalid_github_login(box, tmp_path, bad):
 
 # ── 5. the login is spliced into a shell command ────────────────────────────
 
+# The whitespace-free ones matter: with only spaces and $( ) here, a LOGIN_RE loosened
+# to admit ';' passed every test (drop-on-meta-edge's surviving mutant, #1818).
 _HOSTILE = ["x); touch PWNED; #", "x$(touch PWNED)", "x`touch PWNED`", "a b",
-            "x;touch PWNED", "lab-ovh\n"]
+            "x;touch PWNED", "a;b", "a|b", "a&b", "a>b", "lab-ovh\n"]
 
 
 @pytest.mark.parametrize("bad", _HOSTILE[:-1])   # yaml strips, so "lab-ovh\n" is lab-ovh
@@ -248,3 +250,82 @@ def test_inject_QUOTES_the_login_so_a_bad_one_cannot_run(tmp_path):
     subprocess.run(["bash", "-c", cmd], cwd=tmp_path, capture_output=True,
                    env={"PATH": "/usr/bin:/bin"})
     assert not (tmp_path / "PWNED").exists()
+
+
+# ── 6. a stray file must not crash the hook (#1818) ─────────────────────────
+#
+# drop-on-meta-edge, reviewing b962a72: a crashed hook is not a refusal. Claude Code
+# blocks a PreToolUse call only on exit 2 or a deny, so a resolver exception let `gh`
+# run as the active account for every cell sharing the box.
+
+def _hook(monkeypatch, cell):
+    monkeypatch.setenv("SWARPH_SELF", cell)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = gh_route.run_hook(json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": "gh pr view 1"}}))
+    return rc, json.loads(buf.getvalue())["hookSpecificOutput"]
+
+
+_STRAY = {
+    "utf16.yaml": "name: other\ngithub: reviewers-pixel\n".encode("utf-16"),  # PS 5.1 redirect
+    "badbytes.yaml": b"name: other\ngithub: \xff\xfe\x80\n",
+    "deep.yaml": b"[" * 100000,
+}
+
+
+@pytest.mark.parametrize("fname", sorted(_STRAY))
+def test_a_stray_unreadable_yaml_beside_a_YAML_mapped_cell_still_rewrites(
+        box, monkeypatch, fname):
+    box("lab.yaml", name="lab-ovh", github="lab-ovh")
+    (cells_dir() / fname).write_bytes(_STRAY[fname])
+    rc, out = _hook(monkeypatch, "lab-ovh")
+    assert rc == 0
+    assert out["updatedInput"]["command"].startswith(
+        "export GH_TOKEN=$(gh auth token --user lab-ovh); ")
+
+
+@pytest.mark.parametrize("fname", sorted(_STRAY))
+def test_a_stray_unreadable_yaml_beside_a_JSON_mapped_cell_still_rewrites(
+        box, tmp_path, monkeypatch, fname):
+    """main 17b4b52 rewrote here; b962a72 exited 1 with empty stdout."""
+    _json(tmp_path, {"cursor-lin": "orchestrators-hue"})
+    (cells_dir() / fname).write_bytes(_STRAY[fname])
+    rc, out = _hook(monkeypatch, "cursor-lin")
+    assert rc == 0
+    assert "--user orchestrators-hue" in out["updatedInput"]["command"]
+
+
+@pytest.mark.parametrize("fname", sorted(_STRAY))
+def test_an_unmapped_cell_with_an_unreadable_yaml_is_DENIED_naming_it(
+        box, monkeypatch, fname):
+    (cells_dir() / fname).write_bytes(_STRAY[fname])
+    rc, out = _hook(monkeypatch, "meta-muse")
+    assert rc == 0 and out["permissionDecision"] == "deny"
+    assert fname in out["permissionDecisionReason"]
+
+
+def test_a_resolver_CRASH_is_a_deny_not_an_exit(box, monkeypatch):
+    """Belt and braces for a future resolver bug."""
+    def boom(*a, **k):
+        raise ValueError("boom")
+    monkeypatch.setattr(ghid, "resolve", boom)
+    rc, out = _hook(monkeypatch, "lab-ovh")
+    assert rc == 0 and out["permissionDecision"] == "deny"
+    assert "crashed" in out["permissionDecisionReason"]
+
+
+def test_show_REFUSES_on_a_resolver_crash(box, monkeypatch, capsys):
+    monkeypatch.setattr(ghid, "resolve", lambda *a, **k: (_ for _ in ()).throw(ValueError("x")))
+    monkeypatch.setenv("SWARPH_SELF", "lab-ovh")
+    assert gh_route.run_show() == 1
+    assert "REFUSED" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("fname", sorted(_STRAY))
+def test_doctor_names_an_unreadable_yaml_instead_of_crashing(box, capsys, fname):
+    box("lab.yaml", name="lab-ovh", github="lab-ovh")
+    (cells_dir() / fname).write_bytes(_STRAY[fname])
+    rc, out, err = _doctor(capsys)
+    assert fname in err and "NOT counted as covered" in err
+    assert "ok       lab-ovh -> lab-ovh" in out
