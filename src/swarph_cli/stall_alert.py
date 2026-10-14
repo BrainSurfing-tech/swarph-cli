@@ -5,10 +5,13 @@ Measured 2026-09-30/10-01: 7 of 7 stall rows fired on busy builder cells that
 drained on their own within 7-25 min. The first alert waits 60 ticks (30 min
 at the 30s poll) so a long build is not paged at 3 min.
 
-Card #989: the surface is one obligation held by lab-ovh, never a DM to
-commander. A second stall tick while that row is open opens nothing new. A
-drain closes it. Fail-safe: a failed POST never raises and never blocks
-delivery."""
+Card #989: the surface is one obligation, never a DM to commander by default.
+Card #1135 (commander, 2026-10-14: "route those to culprits or responsible"):
+the row NAMES the stalled cell and is held by that cell's RESPONSIBLE peer from
+the first alert, so someone who can act is told at tick 60, not at a timeout.
+A later timeout is only a second escalation. A second stall tick while the row
+is open opens nothing new. A drain closes it. Fail-safe: a failed POST never
+raises and never blocks delivery."""
 from __future__ import annotations
 
 import json
@@ -23,7 +26,17 @@ _CARD = 989
 _HOLDER = "lab-ovh"
 # lab-ovh's own stall cannot escalate to lab-ovh. Another orchestrator holds it.
 _OTHER = "drop-on-meta-edge"
-_TIMEOUT_HOURS = 24
+# Card #1135. TWO CHOICES ARE UNRULED; each is ONE constant so a ruling flips it
+# here and nowhere else (one test each in tests/test_stall_alert.py).
+# (1) Who is responsible for a stalled cell. No cell -> responsible-peer source
+#     exists (claude_peers.owner is a Meta-Edge USER id, never a cell), so this
+#     one peer is responsible for every cell until a ruling names a source.
+RESPONSIBLE_FOR_OWNERLESS = "lab-ovh"
+# (2) Whether the commander also gets a copy at the first alert. Card #989: a DM
+#     to the commander is not a reminder, so the default is no.
+COMMANDER_COPY = False
+# The second escalation (timeout) lands within a working session, not a day.
+_TIMEOUT_HOURS = 2
 _PREFIX = f"STALL card #{_CARD}"
 
 
@@ -77,7 +90,43 @@ def _request(method: str, url: str, token: str, payload: dict | None = None) -> 
 
 
 def _holder_for(self_name: str) -> str:
-    return _OTHER if self_name == _HOLDER else _HOLDER
+    """Who is told at the FIRST alert: the responsible peer.
+
+    There is no cell -> responsible-peer source today. claude_peers.owner is the
+    Meta-Edge USER id (a person), not a cell, and must NOT be used: routing a
+    stall row to it would page a human. So every cell takes the one constant
+    RESPONSIBLE_FOR_OWNERLESS; when a real source exists it plugs in here.
+    lab-ovh's own stall goes to the other orchestrator. The stalled cell is
+    never its own holder: it cannot act on a notice it cannot receive."""
+    if self_name == _HOLDER:
+        return _OTHER
+    holder = RESPONSIBLE_FOR_OWNERLESS
+    return _OTHER if holder == self_name else holder
+
+
+def _escalation_for(holder: str, self_name: str) -> str:
+    """Who the timeout escalates to: a different peer than the holder."""
+    if holder == _OTHER:
+        return holder  # lab-ovh's own stall: nobody above the other orchestrator
+    return _OTHER if holder == _HOLDER else _HOLDER
+
+
+def pending_count(entries, self_name: str) -> int:
+    """How many owed DMs a stall alert should report, WITHOUT the row's own
+    notice. Minting the row DMs its holder (gateway /ask inserts one message
+    per holder, and a self-ask posts one to the asker's inbox), so when the
+    holder is, or later becomes, the stalled cell itself that notice sits in
+    the same stuck queue and would inflate the next alert's pending count.
+    An entry is the row's own notice when its text carries this alert's prefix
+    and names this cell."""
+    needle = f"cell={self_name} "
+    n = 0
+    for e in entries or ():
+        text = " ".join(str(v) for v in e.values()) if isinstance(e, dict) else str(e)
+        if _PREFIX in text and needle in text:
+            continue
+        n += 1
+    return n
 
 
 def _cell_row(row: dict, self_name: str) -> bool:
@@ -106,9 +155,11 @@ def _live(gateway: str, token: str, self_name: str) -> list[dict]:
 
 def send_stall_alert(gateway: str, token: str, self_name: str,
                      count: int, pending_n: int) -> bool:
-    """Open one obligation on card #989 held by lab-ovh. True when that row
-    is open (newly or already). False on any error. Never raises, never
-    DMs commander, and a second call while the row is open opens nothing."""
+    """Open one obligation on card #989 held by the responsible peer
+    (RESPONSIBLE_FOR_OWNERLESS, lab-ovh today). True when that row is open (newly or
+    already). False on any error. Never raises, DMs the commander only when
+    COMMANDER_COPY is on, and a second call while the row is open opens
+    nothing."""
     try:
         gateway = gateway.rstrip("/")
         if _live(gateway, token, self_name):
@@ -121,9 +172,16 @@ def send_stall_alert(gateway: str, token: str, self_name: str,
              "created_by": self_name,
              "kind": "action",
              "fallback_mode": "escalate",
-             "fallback_target": holder,
+             "fallback_target": _escalation_for(holder, self_name),
              "timeout_hours": _TIMEOUT_HOURS,
              "accept": _accept(self_name, count, pending_n)})
+        if COMMANDER_COPY:
+            _request(
+                "POST", f"{gateway}/messages", token,
+                {"from_node": self_name, "to_node": "commander", "kind": "fyi",
+                 "content": _what(self_name, count, pending_n)
+                            + f"\nheld by {holder}; escalates to "
+                              f"{_escalation_for(holder, self_name)}"})
         return True
     except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as exc:
         print_safe(f"[swarph-daemon] stall-alert POST failed: {exc}",

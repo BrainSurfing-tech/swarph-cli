@@ -3535,7 +3535,8 @@ def _monitor_deliver(state: MonitorState) -> None:
                 from swarph_cli import stall_alert
                 if stall_alert.is_alert_tick(ticks):
                     stall_alert.send_stall_alert(
-                        state.gateway, state.token, state.self_name, ticks, len(dms)
+                        state.gateway, state.token, state.self_name, ticks,
+                        stall_alert.pending_count(dms, state.self_name)
                     )
                 changed = True
                 # #1010: name the deferral's real cause — a hardcoded
