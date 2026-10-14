@@ -175,8 +175,9 @@ def test_lab_ovh_stall_is_held_by_someone_else(monkeypatch):
     import json
     body = json.loads(board.calls[-1][2].decode())
     assert body["holder"] != "lab-ovh"
-    assert body["fallback_target"] != body["holder"]     # never escalates to itself
-    assert board.rows[0]["timeout_at"] is not None
+    assert body.get("fallback_target") != body["holder"]   # never escalates to itself
+    assert "timeout_hours" not in body                    # no escalation at all (row #1823)
+    assert board.rows[0]["timeout_at"] is None
 
 
 def test_send_stall_alert_failsafe_on_error(monkeypatch):
@@ -454,10 +455,11 @@ def test_a_server_error_is_not_retried_with_the_default(monkeypatch, _isolated_c
 
 
 @pytest.mark.parametrize("holder", ["lab-ovh", "drop-on-meta-edge", "workstation-lc", "x"])
-def test_the_escalation_target_never_equals_the_holder(holder):
-    """(b) for EVERY holder, including both orchestrators."""
-    assert st._escalation_for(holder, "some-cell") != holder
-    assert st._escalation_for(holder, "lab-ovh") != holder
+@pytest.mark.parametrize("cell", ["some-cell", "lab-ovh", "drop-on-meta-edge"])
+def test_the_escalation_target_is_neither_the_holder_nor_the_stalled_cell(holder, cell):
+    """(b) for EVERY holder and every stalled cell: a different peer, or None."""
+    target = st._escalation_for(holder, cell)
+    assert target is None or (target != holder and target != cell)
 
 
 @pytest.mark.parametrize("cell,responsible", [
@@ -474,5 +476,52 @@ def test_no_minted_row_escalates_to_its_own_holder(monkeypatch, _isolated_cells_
     monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.send_stall_alert("http://gw", "tok", cell, 60, 1) is True
     row = board.rows[0]
-    assert row["fallback_target"] != row["holder"], row
+    assert row["fallback_target"] not in (row["holder"], cell), row   # None is fine
     assert row["holder"] != cell                                  # never held by the stalled cell
+
+
+# ---- row #1823: no escalation when the only other orchestrator is the stalled cell ----
+
+def test_lab_ovh_own_stall_mints_one_row_held_by_drop_with_no_timeout(monkeypatch, _isolated_cells_dir):
+    """Over the full send path: ONE row, held by drop-on-meta-edge, and the POST carries
+    no timeout_hours (so timeout_at stays null and nothing is ever swept), and no
+    fallback fields that would name the holder or the stalled cell."""
+    import json
+    board = _Board()
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "lab-ovh", 60, 2) is True
+    assert st.send_stall_alert("http://gw", "tok", "lab-ovh", 120, 2) is True   # open row: nothing new
+    asks = _asks(board)
+    assert len(asks) == 1 and len(board.rows) == 1
+    body = json.loads(asks[0][2].decode())
+    assert body["holder"] == "drop-on-meta-edge"
+    assert body["created_by"] == "lab-ovh"
+    assert "timeout_hours" not in body
+    assert "fallback_target" not in body and "fallback_mode" not in body
+    assert board.rows[0]["timeout_at"] is None
+    assert board.rows[0]["fallback_target"] is None
+
+
+def test_drop_own_stall_has_no_escalation_either(monkeypatch, _isolated_cells_dir):
+    """drop-on-meta-edge stalled: lab-ovh holds, and the only peer above lab-ovh is
+    the stalled cell itself, so there is no escalation (it would target the cell)."""
+    import json
+    board = _Board()
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "drop-on-meta-edge", 60, 1) is True
+    body = json.loads(_asks(board)[0][2].decode())
+    assert body["holder"] == "lab-ovh"
+    assert "timeout_hours" not in body and "fallback_target" not in body
+
+
+def test_every_other_case_still_escalates_with_a_2h_timeout(monkeypatch, _isolated_cells_dir):
+    """Row #1823 changes only the case where the stalled cell would be the target."""
+    import json
+    _responsible(_isolated_cells_dir, "cell-x", "drop-on-meta-edge")
+    for cell, holder, target in (("cell-y", "lab-ovh", "drop-on-meta-edge"),
+                                 ("cell-x", "drop-on-meta-edge", "lab-ovh")):
+        board = _Board()
+        monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+        assert st.send_stall_alert("http://gw", "tok", cell, 60, 1) is True
+        body = json.loads(_asks(board)[0][2].decode())
+        assert (body["holder"], body["fallback_target"], body["timeout_hours"]) == (holder, target, 2)

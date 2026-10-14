@@ -146,17 +146,20 @@ def _holder_for(self_name: str) -> str:
     return _OTHER if holder == self_name else holder
 
 
-def _escalation_for(holder: str, self_name: str) -> str:
-    """The timeout's second escalation: ALWAYS a peer other than the holder.
+def _escalation_for(holder: str, self_name: str) -> str | None:
+    """The timeout's second escalation target, or None for NO escalation.
 
-    lab-ovh <-> drop-on-meta-edge for the two orchestrators; any other holder
-    escalates to lab-ovh. Known limit: for lab-ovh's own stall the holder is
-    drop-on-meta-edge, so the escalation lands on lab-ovh, the stalled cell
-    itself. There is no third orchestrator constant to name; a ruling can add
-    one here."""
-    if holder == _HOLDER:
-        return _OTHER
-    return _HOLDER
+    ALWAYS a peer other than the holder AND other than the stalled cell:
+    lab-ovh <-> drop-on-meta-edge for the two orchestrators, lab-ovh for any
+    other holder. When the only candidate is the stalled cell itself (lab-ovh's
+    own stall is held by drop-on-meta-edge; drop-on-meta-edge's own stall is held
+    by lab-ovh) there is nobody above the holder, so the answer is None and the
+    ask carries NO timeout_hours: the gateway never sweeps a null timeout_at
+    (mesh-gateway scripts/obligation_sweep.py), so nothing fires."""
+    candidate = _OTHER if holder == _HOLDER else _HOLDER
+    if candidate in (holder, self_name):
+        return None
+    return candidate
 
 
 def pending_count(entries, self_name: str) -> int:
@@ -203,16 +206,19 @@ def _live(gateway: str, token: str, self_name: str) -> list[dict]:
 
 def _ask(gateway: str, token: str, self_name: str, count: int, pending_n: int,
          holder: str, note: str) -> None:
-    _request(
-        "POST", f"{gateway}/board/cards/{_CARD}/ask", token,
-        {"holder": holder,
-         "what": _what(self_name, count, pending_n, note),
-         "created_by": self_name,
-         "kind": "action",
-         "fallback_mode": "escalate",
-         "fallback_target": _escalation_for(holder, self_name),
-         "timeout_hours": _TIMEOUT_HOURS,
-         "accept": _accept(self_name, count, pending_n)})
+    body = {"holder": holder,
+            "what": _what(self_name, count, pending_n, note),
+            "created_by": self_name,
+            "kind": "action",
+            "accept": _accept(self_name, count, pending_n)}
+    target = _escalation_for(holder, self_name)
+    if target is not None:
+        body.update({"fallback_mode": "escalate", "fallback_target": target,
+                     "timeout_hours": _TIMEOUT_HOURS})
+    # else: no second escalation exists. timeout_hours is OMITTED (null timeout_at
+    # is never swept), and so are the fallback fields: the gateway would otherwise
+    # store the asker, the stalled cell, as the target.
+    _request("POST", f"{gateway}/board/cards/{_CARD}/ask", token, body)
 
 
 def send_stall_alert(gateway: str, token: str, self_name: str,
@@ -248,7 +254,7 @@ def send_stall_alert(gateway: str, token: str, self_name: str,
                 {"from_node": self_name, "to_node": "commander", "kind": "fyi",
                  "content": _what(self_name, count, pending_n, note)
                             + f"\nheld by {holder}; escalates to "
-                              f"{_escalation_for(holder, self_name)}"})
+                              f"{_escalation_for(holder, self_name) or 'nobody (no peer above the holder)'}"})
         return True
     except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as exc:
         print_safe(f"[swarph-daemon] stall-alert POST failed: {exc}",
