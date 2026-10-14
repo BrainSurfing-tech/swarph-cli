@@ -216,3 +216,35 @@ def test_init_rejects_an_invalid_github_login(box, tmp_path, bad):
                    f"--github={bad}", "-y"])    # = form: argparse reads "-lead" as a flag
     assert rc == 2
     assert not (cells_dir() / "x-cell.yaml").exists()
+
+
+# ── 5. the login is spliced into a shell command ────────────────────────────
+
+_HOSTILE = ["x); touch PWNED; #", "x$(touch PWNED)", "x`touch PWNED`", "a b",
+            "x;touch PWNED", "lab-ovh\n"]
+
+
+@pytest.mark.parametrize("bad", _HOSTILE[:-1])   # yaml strips, so "lab-ovh\n" is lab-ovh
+def test_a_shell_shaped_YAML_login_is_REFUSED(box, bad):
+    """A cell yaml can sit behind `<cwd>/cell.yaml` (--symlink-cwd); the hook rewrites
+    an approved `gh` command with this value, so it must be a GitHub login or nothing."""
+    box("c.yaml", name="c", github=bad)
+    with pytest.raises(ghid.RouterRefusal):
+        ghid.resolve("c")
+
+
+@pytest.mark.parametrize("bad", _HOSTILE)
+def test_a_shell_shaped_JSON_login_is_REFUSED(box, tmp_path, bad):
+    box("c.yaml", name="c")
+    _json(tmp_path, {"c": bad})
+    with pytest.raises(ghid.RouterRefusal):
+        ghid.resolve("c")
+
+
+def test_inject_QUOTES_the_login_so_a_bad_one_cannot_run(tmp_path):
+    """Defence in depth behind the refusal: executed, not string-matched."""
+    import subprocess
+    cmd = ghid.inject("true", "x); touch PWNED; #")
+    subprocess.run(["bash", "-c", cmd], cwd=tmp_path, capture_output=True,
+                   env={"PATH": "/usr/bin:/bin"})
+    assert not (tmp_path / "PWNED").exists()

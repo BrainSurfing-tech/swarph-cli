@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import copy
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -24,6 +23,7 @@ import yaml
 from swarph_shared.cell import PEER_NAME_RE, parse_cell_dict
 from swarph_cli.cell import CLI_ENABLED_PROVIDERS, CellError, cells_dir
 from swarph_cli.gateway_default import env_gateway
+from swarph_cli.gh_identity import LOGIN_RE
 
 _CODEX_SANDBOX_DEFAULT = "workspace-write"
 _CODEX_SANDBOX_VALUES = ("workspace-write", "read-only")
@@ -68,10 +68,6 @@ def _llm_choices() -> list:
 # ---------------------------------------------------------------------------
 # Prompt helpers (interactive). All no-op when a flag already supplied the value.
 # ---------------------------------------------------------------------------
-
-#: GitHub's login rule: alphanumerics and single hyphens, no leading/trailing hyphen,
-#: at most 39 characters.
-_GITHUB_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
 
 
 def _ask(prompt: str, default: Optional[str] = None) -> str:
@@ -227,7 +223,7 @@ def run_init(argv: list[str]) -> int:
     if not github and interactive:
         github = _ask("GitHub login this cell acts as (blank = none yet)").strip()
     if github:
-        if not _GITHUB_LOGIN_RE.match(github):
+        if not LOGIN_RE.fullmatch(github):
             print(f"swarph init: --github {github!r} is not a valid GitHub login",
                   file=sys.stderr)
             return 2

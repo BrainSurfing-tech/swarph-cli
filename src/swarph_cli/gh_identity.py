@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -144,6 +145,17 @@ def load_mapping(path: Optional[Path] = None) -> dict:
 #: The cell-yaml key that names the cell's GitHub login (#1144).
 YAML_KEY = "github"
 
+#: GitHub's login grammar. The login is spliced into the hook's shell command, so a
+#: value outside it is refused, never quoted-and-hoped (#1144 security review).
+LOGIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
+
+
+def _checked(peer: str, login: str, source) -> "Resolution":
+    if not LOGIN_RE.fullmatch(login):
+        raise RouterRefusal(
+            f"{source}: GitHub login for {peer!r} is not a valid GitHub login: {login!r}")
+    return Resolution(peer=peer, login=login, source=str(source))
+
 
 def _cells_dir() -> Path:
     from swarph_cli.cell import cells_dir  # local: cell.py is the one owner of the path
@@ -235,7 +247,7 @@ def resolve(peer: Optional[str], path: Optional[Path] = None,
                 f"  >>> REFUSING RATHER THAN LETTING EITHER WIN. <<< The yaml is the\n"
                 f"  source of truth from #1144 on: fix whichever is wrong, then delete\n"
                 f"  {peer!r} from {p.name}.")
-        return Resolution(peer=peer, login=yaml_logins[0], source=str(mapped[0][1]))
+        return _checked(peer, yaml_logins[0], mapped[0][1])
 
     table = _optional_mapping(path)
     if table is None:
@@ -261,7 +273,7 @@ def resolve(peer: Optional[str], path: Optional[Path] = None,
             + _unreadable_note(unreadable))
     if not isinstance(login, str):
         raise RouterRefusal(f"mapping for {peer!r} must be a string, got {type(login).__name__}")
-    return Resolution(peer=peer, login=login, source=str(p))
+    return _checked(peer, login, p)
 
 
 def _unreadable_note(unreadable) -> str:
@@ -314,4 +326,4 @@ def inject(command: str, login: str) -> str:
     per-invocation property wanted — it is not `gh auth switch`, and it touches no
     global state and no other session.
     """
-    return f'export GH_TOKEN=$(gh auth token --user {login}); {command}'
+    return f'export GH_TOKEN=$(gh auth token --user {shlex.quote(login)}); {command}'
