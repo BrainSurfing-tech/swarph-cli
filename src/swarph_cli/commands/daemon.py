@@ -375,8 +375,7 @@ def _legacy_attempt_delivery_removed(state: DaemonState) -> None:
             if stall_alert.is_alert_tick(n):
                 stall_alert.send_stall_alert(
                     state.gateway, state.token, state.self_name,
-                    n, stall_alert.pending_count(
-                        state.queue.pending(), state.self_name),
+                    n, len(state.queue.pending()),
                 )
             return
         entries = state.queue.pending()

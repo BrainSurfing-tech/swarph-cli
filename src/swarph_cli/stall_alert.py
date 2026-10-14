@@ -65,10 +65,11 @@ def _accept(self_name: str, count: int, pending_n: int) -> str:
     )
 
 
-def _what(self_name: str, count: int, pending_n: int) -> str:
+def _what(self_name: str, count: int, pending_n: int, note: str = "") -> str:
     return (
         f"{_PREFIX}\n"
         f"cell={self_name} ticks={count} pending_dms={pending_n}"
+        + (f"\n{note}" if note else "")
     )
 
 
@@ -122,24 +123,40 @@ def _responsible_from_yaml(self_name: str) -> str | None:
     return value
 
 
+def _default_holder(self_name: str) -> str:
+    """The ONE fallback: RESPONSIBLE_FOR_OWNERLESS, never the cell itself, and
+    lab-ovh's own stall goes to the other orchestrator."""
+    if self_name == _HOLDER:
+        return _OTHER
+    holder = RESPONSIBLE_FOR_OWNERLESS
+    return _OTHER if holder == self_name else holder
+
+
 def _holder_for(self_name: str) -> str:
     """Who is told at the FIRST alert: the cell's responsible peer.
 
     lab-ovh's own stall goes to the other orchestrator, whatever its yaml says.
-    Otherwise the cell's own `responsible:` key, else RESPONSIBLE_FOR_OWNERLESS.
-    The stalled cell is never its own holder: it cannot act on a notice it
-    cannot receive."""
+    Otherwise the cell's own `responsible:` key, else the default. The stalled
+    cell is never its own holder: it cannot act on a notice it cannot receive.
+    A well-formed value the gateway does not hold is handled at mint time in
+    send_stall_alert (the gateway refuses an unknown holder)."""
     if self_name == _HOLDER:
         return _OTHER
-    holder = _responsible_from_yaml(self_name) or RESPONSIBLE_FOR_OWNERLESS
+    holder = _responsible_from_yaml(self_name) or _default_holder(self_name)
     return _OTHER if holder == self_name else holder
 
 
 def _escalation_for(holder: str, self_name: str) -> str:
-    """Who the timeout escalates to: a different peer than the holder."""
-    if holder == _OTHER:
-        return holder  # lab-ovh's own stall: nobody above the other orchestrator
-    return _OTHER if holder == _HOLDER else _HOLDER
+    """The timeout's second escalation: ALWAYS a peer other than the holder.
+
+    lab-ovh <-> drop-on-meta-edge for the two orchestrators; any other holder
+    escalates to lab-ovh. Known limit: for lab-ovh's own stall the holder is
+    drop-on-meta-edge, so the escalation lands on lab-ovh, the stalled cell
+    itself. There is no third orchestrator constant to name; a ruling can add
+    one here."""
+    if holder == _HOLDER:
+        return _OTHER
+    return _HOLDER
 
 
 def pending_count(entries, self_name: str) -> int:
@@ -184,6 +201,20 @@ def _live(gateway: str, token: str, self_name: str) -> list[dict]:
     return live
 
 
+def _ask(gateway: str, token: str, self_name: str, count: int, pending_n: int,
+         holder: str, note: str) -> None:
+    _request(
+        "POST", f"{gateway}/board/cards/{_CARD}/ask", token,
+        {"holder": holder,
+         "what": _what(self_name, count, pending_n, note),
+         "created_by": self_name,
+         "kind": "action",
+         "fallback_mode": "escalate",
+         "fallback_target": _escalation_for(holder, self_name),
+         "timeout_hours": _TIMEOUT_HOURS,
+         "accept": _accept(self_name, count, pending_n)})
+
+
 def send_stall_alert(gateway: str, token: str, self_name: str,
                      count: int, pending_n: int) -> bool:
     """Open one obligation on card #989 held by the responsible peer
@@ -196,21 +227,26 @@ def send_stall_alert(gateway: str, token: str, self_name: str,
         if _live(gateway, token, self_name):
             return True
         holder = _holder_for(self_name)
-        _request(
-            "POST", f"{gateway}/board/cards/{_CARD}/ask", token,
-            {"holder": holder,
-             "what": _what(self_name, count, pending_n),
-             "created_by": self_name,
-             "kind": "action",
-             "fallback_mode": "escalate",
-             "fallback_target": _escalation_for(holder, self_name),
-             "timeout_hours": _TIMEOUT_HOURS,
-             "accept": _accept(self_name, count, pending_n)})
+        note = ""
+        try:
+            _ask(gateway, token, self_name, count, pending_n, holder, note)
+        except urllib.error.HTTPError as exc:
+            # The gateway refuses a holder it does not hold (#510: a typo, a
+            # deregistered peer, wrong case) with a 4xx. Main would have told
+            # lab-ovh in that case, so minting nothing here would be a silent
+            # path. ONE more try with the default; a second refusal is a real
+            # failure and returns False as before.
+            fallback = _default_holder(self_name)
+            if not (400 <= exc.code < 500) or holder == fallback:
+                raise
+            note = f"responsible_refused={holder} (gateway HTTP {exc.code}); held by {fallback}"
+            holder = fallback
+            _ask(gateway, token, self_name, count, pending_n, holder, note)
         if COMMANDER_COPY:
             _request(
                 "POST", f"{gateway}/messages", token,
                 {"from_node": self_name, "to_node": "commander", "kind": "fyi",
-                 "content": _what(self_name, count, pending_n)
+                 "content": _what(self_name, count, pending_n, note)
                             + f"\nheld by {holder}; escalates to "
                               f"{_escalation_for(holder, self_name)}"})
         return True

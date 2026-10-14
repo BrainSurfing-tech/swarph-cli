@@ -40,7 +40,8 @@ def test_first_alert_is_60_after_the_measured_drains():
 class _Board:
     """One card's obligations. A second ask while one is open is the defect."""
 
-    def __init__(self, owners=None, allow_messages=False, peers_status=200):
+    def __init__(self, owners=None, allow_messages=False, peers_status=200,
+                 known_holders=None, refuse_code=404, ask_error=None):
         self.rows = []
         self.calls = []
         self.next_id = 1
@@ -48,6 +49,10 @@ class _Board:
         self.allow_messages = allow_messages
         self.peers_status = peers_status
         self.messages = []
+        self.known_holders = known_holders      # None = every holder is held
+        self.refuse_code = refuse_code
+        self.ask_error = ask_error              # an OSError-free HTTP code for EVERY ask
+        self.ask_attempts = 0
 
     def handle(self, req, timeout=None):
         import json
@@ -86,6 +91,12 @@ class _Board:
             return _Resp(json.dumps({"obligations": live}).encode())
         if req.get_method() == "POST" and url.endswith("/ask"):
             body = json.loads(req.data.decode())
+            self.ask_attempts += 1
+            import urllib.error as _ue
+            if self.ask_error is not None:
+                raise _ue.HTTPError(url, self.ask_error, "gateway error", {}, None)
+            if self.known_holders is not None and body["holder"] not in self.known_holders:
+                raise _ue.HTTPError(url, self.refuse_code, "unknown holder", {}, None)
             hours = body.get("timeout_hours")
             row = {"id": self.next_id, "status": "open",
                    "holder": body["holder"], "what": body["what"],
@@ -164,8 +175,7 @@ def test_lab_ovh_stall_is_held_by_someone_else(monkeypatch):
     import json
     body = json.loads(board.calls[-1][2].decode())
     assert body["holder"] != "lab-ovh"
-    assert body["fallback_target"] != "lab-ovh"
-    assert body["fallback_target"] == body["holder"]
+    assert body["fallback_target"] != body["holder"]     # never escalates to itself
     assert board.rows[0]["timeout_at"] is not None
 
 
@@ -285,13 +295,12 @@ def test_owner_is_never_read_from_the_gateway(monkeypatch):
     assert all("/peers" not in c[1] for c in board.calls)
 
 
-def test_both_stall_call_sites_use_pending_count():
-    """Guards the wiring: both loops pass the filtered count, not len(queue)."""
+def test_the_live_call_site_uses_pending_count():
+    """commands/mesh.py is the LIVE stall call site. The copy in commands/daemon.py
+    sits inside _legacy_attempt_delivery_removed (a dead string) and is untouched."""
     import pathlib
     root = pathlib.Path(st.__file__).parent
-    for rel in ("commands/daemon.py", "commands/mesh.py"):
-        src = (root / rel).read_text(encoding="utf-8")
-        assert "stall_alert.pending_count(" in src, rel
+    assert "stall_alert.pending_count(" in (root / "commands/mesh.py").read_text(encoding="utf-8")
 
 
 # ---- card #1135 / row #1813, commander ruling 16:19Z: the cell's own `responsible:` key ----
@@ -380,3 +389,90 @@ def test_a_cell_yaml_with_a_responsible_key_still_loads(_isolated_cells_dir):
     cell = load_cell(f)
     assert cell.name == "probe-cell"
     assert (cell.extra or {}).get("responsible") == "lab-ovh"
+
+
+# ---- review of PR 585 (drop, REQUEST_CHANGES at 12daeab), row #1822 ----
+
+def _responsible(cells_dir, cell, value):
+    _cell_yaml(cells_dir, cell, f"name: {cell}\nresponsible: {value}\n")
+
+
+@pytest.mark.parametrize("code", [404, 403, 409])
+def test_a_responsible_value_the_gateway_does_not_hold_still_mints_one_row(
+        monkeypatch, _isolated_cells_dir, code):
+    """(a) A typo, a deregistered peer or a wrong-case name is well-formed but unknown:
+    the gateway refuses it at mint. The alert must retry once with the default and
+    mint ONE row, not return False with nothing minted (the silent path)."""
+    _responsible(_isolated_cells_dir, "cell-x", "Workstation-LC")      # wrong case
+    board = _Board(known_holders={"lab-ovh", "drop-on-meta-edge"}, refuse_code=code)
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 2) is True
+    assert board.ask_attempts == 2                      # the refused one, then the retry
+    assert len(board.rows) == 1
+    row = board.rows[0]
+    assert row["holder"] == "lab-ovh"
+    assert row["fallback_target"] != row["holder"]
+    assert "cell=cell-x " in row["what"]
+    assert "responsible_refused=Workstation-LC" in row["what"]
+    # a second tick while that row is open opens nothing
+    assert st.send_stall_alert("http://gw", "tok", "cell-x", 120, 2) is True
+    assert len(board.rows) == 1
+
+
+def test_a_known_responsible_value_is_not_retried(monkeypatch, _isolated_cells_dir):
+    _responsible(_isolated_cells_dir, "cell-x", "workstation-lc")
+    board = _Board(known_holders={"lab-ovh", "workstation-lc"})
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
+    assert board.ask_attempts == 1
+    assert board.rows[0]["holder"] == "workstation-lc"
+    assert "responsible_refused" not in board.rows[0]["what"]
+
+
+def test_a_second_refusal_is_a_real_failure_not_a_loop(monkeypatch, _isolated_cells_dir):
+    _responsible(_isolated_cells_dir, "cell-x", "no-such-peer")
+    board = _Board(known_holders=set())                 # even lab-ovh is refused
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is False
+    assert board.ask_attempts == 2                      # one retry, never more
+    assert board.rows == []
+
+
+def test_the_default_holder_refused_is_not_retried_with_itself(monkeypatch, _isolated_cells_dir):
+    board = _Board(known_holders=set())                 # no yaml: holder is the default
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is False
+    assert board.ask_attempts == 1
+
+
+def test_a_server_error_is_not_retried_with_the_default(monkeypatch, _isolated_cells_dir):
+    _responsible(_isolated_cells_dir, "cell-x", "workstation-lc")
+    board = _Board(ask_error=500)
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is False
+    assert board.ask_attempts == 1
+
+
+@pytest.mark.parametrize("holder", ["lab-ovh", "drop-on-meta-edge", "workstation-lc", "x"])
+def test_the_escalation_target_never_equals_the_holder(holder):
+    """(b) for EVERY holder, including both orchestrators."""
+    assert st._escalation_for(holder, "some-cell") != holder
+    assert st._escalation_for(holder, "lab-ovh") != holder
+
+
+@pytest.mark.parametrize("cell,responsible", [
+    ("cell-x", None),                       # default: lab-ovh holds, escalates to drop
+    ("cell-x", "drop-on-meta-edge"),        # drop holds its own: must not escalate to itself
+    ("cell-x", "workstation-lc"),
+    ("lab-ovh", None),                      # lab's own stall: drop holds
+    ("drop-on-meta-edge", None),            # drop's own stall: lab-ovh holds, escalates to drop
+])
+def test_no_minted_row_escalates_to_its_own_holder(monkeypatch, _isolated_cells_dir, cell, responsible):
+    if responsible:
+        _responsible(_isolated_cells_dir, cell, responsible)
+    board = _Board()
+    monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+    assert st.send_stall_alert("http://gw", "tok", cell, 60, 1) is True
+    row = board.rows[0]
+    assert row["fallback_target"] != row["holder"], row
+    assert row["holder"] != cell                                  # never held by the stalled cell
