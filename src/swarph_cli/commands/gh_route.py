@@ -169,6 +169,25 @@ def _cells_on_this_box() -> list:
     return sorted(out)
 
 
+def _any_yaml_login() -> bool:
+    """True when at least one cell yaml on this box carries a ``github:`` value. With no
+    json AND no yaml login the router is unconfigured, not merely incomplete."""
+    import yaml  # local import — keeps `swarph --version` PyYAML-free (cell.py:254)
+
+    try:
+        files = sorted(cells_dir().glob("*.yaml"))
+    except OSError:
+        return False
+    for f in files:
+        try:
+            doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(doc, dict) and doc.get(ghid.YAML_KEY):
+            return True
+    return False
+
+
 def run_doctor() -> int:
     """Would installing the router REFUSE anyone on this box? Answer BEFORE installing.
 
@@ -185,9 +204,20 @@ def run_doctor() -> int:
     every command that mentions one inside a string.
 
     Exit 0 only when every cell on this box resolves. Non-zero is "do not install yet".
+
+    #1144: each cell is checked through ``ghid.resolve`` — THE SAME CALL THE HOOK MAKES —
+    so a yaml-mapped cell reads ok and a yaml/json disagreement reads REFUSED here
+    exactly as it would at the first `gh` call. A preflight that loads the json itself
+    asks a different question than the hook, the defect _cells_on_this_box records.
     """
+    mp = ghid.mapping_path()
     try:
-        table = ghid.load_mapping()
+        if mp.exists():
+            ghid.load_mapping(mp)        # an UNREADABLE json refuses every cell: say so once
+        elif not _any_yaml_login():
+            raise ghid.RouterRefusal(
+                f"no GitHub identity mapping at {mp}, and no cell yaml under "
+                f"{cells_dir()} carries '{ghid.YAML_KEY}:'.")
     except ghid.RouterRefusal as exc:
         print_safe(
             f"swarph gh-route doctor: REFUSED\n  {exc}\n"
@@ -209,12 +239,19 @@ def run_doctor() -> int:
             file=sys.stderr)
         return 1
 
-    unmapped = [c for c in cells if not isinstance(table.get(c), str) or not table.get(c)]
+    unmapped = []
     for c in cells:
-        login = table.get(c)
-        ok = isinstance(login, str) and login
-        print(f"  {'ok     ' if ok else 'REFUSED'}  {c} -> {login if ok else '(unmapped)'}")
-    print(f"\nmapping: {ghid.mapping_path()}")
+        try:
+            res = ghid.resolve(c, cells=cells_dir())
+        except ghid.RouterRefusal as exc:
+            unmapped.append(c)
+            why = str(exc).splitlines()[0]
+            print_safe(f"  REFUSED  {c} -> (unmapped)  [{why}]")
+            continue
+        where = "yaml" if res.source.endswith(".yaml") else "json"
+        print_safe(f"  ok       {c} -> {res.login}  [{where}: {res.source}]")
+    print(f"\ncell yamls: {cells_dir()}  (read first, key '{ghid.YAML_KEY}:')")
+    print(f"mapping:    {mp}  (fallback, retiring)")
     if unmapped:
         print(f">>> {len(unmapped)} of {len(cells)} cells on this box would be REFUSED: "
               f"{', '.join(unmapped)}")

@@ -24,6 +24,22 @@ consistent, so no server-side control can fire.
 THE MAPPING IS OPERATOR DATA, NOT SHIPPED DATA. A wrong mapping is a silent identity
 substitution, so this module ships NO defaults and NO built-in table: an absent or
 incomplete mapping is a REFUSAL, never a guess.
+
+#1144 — THE CELL CARRIES ITS OWN LOGIN. A cell's yaml (``github: <login>``) is read
+FIRST; ``gh-identities.json`` is the fallback for one release and is then retired. The
+commander, 2026-10-14: "you are all suppose to have that identity in your cell yaml".
+The json held 2 cells for two months while the rest were refused at their first push
+(#1096), days after they were created. A field set at ``swarph init`` puts the gap at
+creation instead.
+
+>>> A CELL IS FOUND BY ITS ``name:``, NEVER BY ITS FILENAME. <<< ``lab.yaml`` carries
+``name: lab-ovh``, and SWARPH_SELF is the mesh name — the same split ``gh-route doctor``
+was fixed for (_cells_on_this_box).
+
+>>> YAML AND JSON DISAGREEING IS A REFUSAL, NOT "YAML WINS". <<< During the fallback
+release both can name a login for one cell. Picking either silently is the identity
+substitution this module exists to end, one layer up; the operator decides which is
+right and deletes the other.
 """
 from __future__ import annotations
 
@@ -125,8 +141,63 @@ def load_mapping(path: Optional[Path] = None) -> dict:
     return data
 
 
-def resolve(peer: Optional[str], path: Optional[Path] = None) -> Resolution:
-    """peer -> Resolution, or RouterRefusal. Never returns a fallback."""
+#: The cell-yaml key that names the cell's GitHub login (#1144).
+YAML_KEY = "github"
+
+
+def _cells_dir() -> Path:
+    from swarph_cli.cell import cells_dir  # local: cell.py is the one owner of the path
+    return cells_dir()
+
+
+def yaml_claims(peer: str, directory: Optional[Path] = None):
+    """Every cell yaml that declares mesh name ``peer`` -> ``([(value, path)], unreadable)``.
+
+    ``value`` is the raw ``github:`` value (None when the file has no such key), so the
+    caller can tell "no yaml for this cell" from "a yaml that maps nothing". A file with
+    no ``name:`` is the cell named by its stem — the same rule as _cells_on_this_box.
+    ``unreadable`` lists files that could not be parsed: they may be this cell, so a
+    refusal names them rather than reading as "not mapped".
+    """
+    import yaml  # local import — keeps `swarph --version` PyYAML-free (cell.py:254)
+
+    d = directory or _cells_dir()
+    claims, unreadable = [], []
+    try:
+        files = sorted(d.glob("*.yaml"))
+    except OSError:
+        return claims, unreadable
+    for f in files:
+        try:
+            doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            unreadable.append(f)
+            continue
+        if not isinstance(doc, dict):
+            unreadable.append(f)
+            continue
+        name = doc.get("name")
+        if (name if isinstance(name, str) and name else f.stem) == peer:
+            claims.append((doc.get(YAML_KEY), f))
+    return claims, unreadable
+
+
+def _optional_mapping(path: Optional[Path]) -> Optional[dict]:
+    """The json table, or None when the file is ABSENT. Absent is now a normal state
+    (the yaml carries the login); an UNREADABLE file still refuses via load_mapping."""
+    p = path or mapping_path()
+    if not p.exists():
+        return None
+    return load_mapping(p)
+
+
+def resolve(peer: Optional[str], path: Optional[Path] = None,
+            cells: Optional[Path] = None) -> Resolution:
+    """peer -> Resolution, or RouterRefusal. Never returns a fallback.
+
+    Order (#1144): the cell's yaml ``github:``, then gh-identities.json. Both present
+    and different is a refusal.
+    """
     if not peer:
         raise RouterRefusal(
             "SWARPH_SELF is unset, so this cell has no mesh identity to route from.\n"
@@ -135,21 +206,69 @@ def resolve(peer: Optional[str], path: Optional[Path] = None) -> Resolution:
             "  6 of 6 cells (#243) and the direct cause of #360.\n"
             "  Set SWARPH_SELF, or pass GH_TOKEN=... explicitly for a one-off."
         )
-    table = load_mapping(path)
+    claims, unreadable = yaml_claims(peer, cells)
+    mapped = [(v, f) for v, f in claims if v is not None]
+    for v, f in mapped:
+        if not isinstance(v, str) or not v.strip():
+            raise RouterRefusal(
+                f"{f}: '{YAML_KEY}:' for {peer!r} must be a non-empty string, "
+                f"got {v!r}")
+    yaml_logins = sorted({v.strip() for v, _ in mapped})
+    if len(yaml_logins) > 1:
+        # Two configs claiming one mesh name with different logins: either could be
+        # the live one, and picking is a guess.
+        raise RouterRefusal(
+            f"cell {peer!r} is claimed by {len(mapped)} cell yamls with different "
+            f"GitHub logins:\n"
+            + "".join(f"    {f}: {YAML_KEY}: {v}\n" for v, f in mapped)
+            + "  >>> REFUSING RATHER THAN PICKING ONE. <<< Keep one config per cell.")
+
+    p = path or mapping_path()
+    if yaml_logins:
+        table = _optional_mapping(path) or {}
+        jl = table.get(peer)
+        if jl is not None and jl != yaml_logins[0]:
+            raise RouterRefusal(
+                f"cell {peer!r} has two GitHub identities that disagree:\n"
+                f"    {mapped[0][1]}: {YAML_KEY}: {yaml_logins[0]}\n"
+                f"    {p}: {jl!r}\n"
+                f"  >>> REFUSING RATHER THAN LETTING EITHER WIN. <<< The yaml is the\n"
+                f"  source of truth from #1144 on: fix whichever is wrong, then delete\n"
+                f"  {peer!r} from {p.name}.")
+        return Resolution(peer=peer, login=yaml_logins[0], source=str(mapped[0][1]))
+
+    table = _optional_mapping(path)
+    if table is None:
+        raise RouterRefusal(
+            f"cell {peer!r} has no '{YAML_KEY}:' in its cell yaml under {cells or _cells_dir()},\n"
+            f"  and there is no GitHub identity mapping at {p} either.\n"
+            f"  The router refuses rather than using whichever `gh` account happens\n"
+            f"  to be active — an ambient identity is how a cell runs for days as\n"
+            f"  another cell (#360) with every request internally consistent.\n"
+            f"  Add `{YAML_KEY}: <github-login>` to the cell's yaml"
+            f" (`swarph init --github` writes it).\n"
+            + _unreadable_note(unreadable))
     login = table.get(peer)
     if not login:
-        p = path or mapping_path()
         raise RouterRefusal(
-            f"cell {peer!r} has no GitHub identity in {p}.\n"
-            f"  Known cells: {', '.join(sorted(table)) or '(none)'}\n"
+            f"cell {peer!r} has no GitHub identity: no '{YAML_KEY}:' in its cell yaml"
+            f" under {cells or _cells_dir()}, and none in {p}.\n"
+            f"  Known cells in {p.name}: {', '.join(sorted(table)) or '(none)'}\n"
             f"  >>> REFUSING RATHER THAN USING THE ACTIVE ACCOUNT. <<< Falling back\n"
             f"  would attribute {peer}'s action to whoever is logged in, and GitHub's\n"
             f"  own gates key on the CREDENTIAL, not on who did the work.\n"
-            f"  Add \"{peer}\": \"<github-login>\" to that file, or pass GH_TOKEN=... explicitly."
-        )
+            f"  Add `{YAML_KEY}: <github-login>` to the cell's yaml, or pass GH_TOKEN=... explicitly.\n"
+            + _unreadable_note(unreadable))
     if not isinstance(login, str):
         raise RouterRefusal(f"mapping for {peer!r} must be a string, got {type(login).__name__}")
-    return Resolution(peer=peer, login=login, source=str(path or mapping_path()))
+    return Resolution(peer=peer, login=login, source=str(p))
+
+
+def _unreadable_note(unreadable) -> str:
+    if not unreadable:
+        return ""
+    return ("  NOT READ (may be this cell's config): "
+            + ", ".join(str(f) for f in unreadable) + "\n")
 
 
 def targets_gh(command: str) -> bool:
