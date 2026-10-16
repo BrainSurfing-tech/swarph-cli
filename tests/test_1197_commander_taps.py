@@ -91,6 +91,43 @@ def test_untagged_commander_held_rows_reach_the_board():
     assert len(long) <= 160
 
 
+# The three open commander-held rows as `swarph board obligations list --as
+# lab-ovh --status open --holder commander --json` returned them on
+# 2026-10-16 (fields used here only; the #1986 accept is its first 110
+# characters as read, which is past the cut).
+LIVE = [
+    {"id": 1181, "holder": "commander", "created_by": "lab-ovh", "card_id": 1038,
+     "step": None, "status": "open",
+     "accept": "PASS=the commander taps YES in the app|FAIL=the commander taps NO"},
+    {"id": 1986, "holder": "commander", "created_by": "lab-ovh", "card_id": 1192,
+     "step": None, "status": "open",
+     "accept": "PASS = commander states the rule (sonnet for read-only sweeps, or keep opus) "
+               "| FAIL = commander declines to se"},
+    {"id": 1989, "holder": "commander", "created_by": "lab-ovh", "card_id": 554,
+     "step": None, "status": "open",
+     "accept": "PASS = commander states yes or no for A and for B "
+               "| FAIL = commander declines both or defers"},
+]
+
+
+def test_the_live_untagged_rows_render_and_answer_lab():
+    pub = _load()
+    rows = pub.commander_rows([dict(r) for r in LIVE])
+    assert [r["obligation_id"] for r in rows] == [1181, 1986, 1989], \
+        "RED: the live commander-held rows never reached the board"
+    assert [r["title"] for r in rows] == [
+        "the commander taps YES in the app",
+        "commander states the rule (sonnet for read-only sweeps, or keep opus)",
+        "commander states yes or no for A and for B",
+    ]
+    qs = pub.build_board._questions(rows)
+    assert [q["to_node"] for q in qs] == ["lab-ovh"] * 3
+    assert [(o["text"], o["outcome"]) for o in qs[0]["options"]] == [("yes", "pass"), ("no", "fail")]
+    # Two answers, or a stated rule: no tap may close these.
+    for q in qs[1:]:
+        assert all(o["outcome"] is None for o in q["options"]), q["title"]
+
+
 def test_commander_held_answer_goes_to_the_creator_never_commander():
     pub = _load()
     rows = pub.commander_rows([

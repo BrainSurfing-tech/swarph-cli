@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -90,13 +91,16 @@ def commander_title(accept: str) -> str | None:
 
 
 _TITLE_MAX = 160
+_LEAD_PASS = re.compile(r"^\s*PASS\s*=\s*", re.IGNORECASE)
+_TITLE_CUT = re.compile(r"\||\b(?:PASS|FAIL)\s*=", re.IGNORECASE)
 
 
 def untagged_title(row: dict) -> str:
     """A title for a commander-held row whose accept carries no [commander] tag.
 
-    The accept text, cut at the first '|' or 'PASS=' and trimmed. A JSON
-    accept reads as its pass conditions. No accept reads as the row's ids.
+    The accept text without a leading 'PASS =', cut at the first '|' or
+    'PASS=' / 'FAIL=' and trimmed. A JSON accept reads as its pass
+    conditions. No accept reads as the row's ids.
     """
     accept = str(row.get("accept") or "").strip()
     text = ""
@@ -107,12 +111,7 @@ def untagged_title(row: dict) -> str:
     if isinstance(parsed, dict) and isinstance(parsed.get("pass"), list):
         text = "; ".join(str(p.get("text") or "") for p in parsed["pass"] if isinstance(p, dict))
     elif accept:
-        cut = len(accept)
-        for marker in ("|", "PASS="):
-            found = accept.find(marker)
-            if found > 0:
-                cut = min(cut, found)
-        text = accept[:cut]
+        text = _TITLE_CUT.split(_LEAD_PASS.sub("", accept), 1)[0]
     text = " ".join(text.split())
     if not text:
         return f"card #{row.get('card_id')} obligation #{row.get('id', row.get('obligation_id'))}"
