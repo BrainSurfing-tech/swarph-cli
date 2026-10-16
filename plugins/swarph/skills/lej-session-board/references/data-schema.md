@@ -33,8 +33,8 @@ The board page renders from the JSON in `<script type="application/json" id="boa
 | `to` | Where the reply gets pasted, such as `"PRJ2"` or `"PRJ2 (type the go there yourself)"`. |
 | `title` | The question. Copy puts the session's `name`, then `Re: <title>`, then the reply. |
 | `note` | Optional context. Keep it under three lines. |
-| `options` | Two or three `{ "label", "text", "rec" }`. `label` is what the user reads, `text` is the full reply the session gets, and `rec: true` marks the recommended option, which is selected by default. |
-| `to_node` | The cell that receives the decision. The app sends the answer DM to this name. |
+| `options` | Two or three `{ "label", "text", "rec", "outcome" }`. `label` is what the user reads, `text` is the full reply the session gets, and `rec: true` marks the recommended option, which is selected by default. `outcome` is `"pass"`, `"fail"` or `null`: a tap on an option with an outcome closes the question's obligation with it, and `null` closes nothing. A choice question on a commander-held row (a title ending in `a, b, or c?`) has one option per choice, each `rec: false` and `outcome: "pass"`, up to five. |
+| `to_node` | The cell that receives the decision. The app sends the answer DM to this name. For a commander-held row it is the row's creator, never `commander`. |
 | `card` | Optional. The swarph card id this question refers to. |
 | `obligation` | Optional. The swarph obligation id this question refers to. |
 | `in_session` | `true` when the choice must be made inside that session (a deploy or a hard gate named in the row's accept). The app shows it as answer-in-session and does not send. |

@@ -348,10 +348,12 @@ def test_in_session_marker_sets_the_flag_and_strips_the_title():
     assert plain["in_session"] is False
 
 
-def _commander_obligation(oid, holder="commander", step="build", accept="PASS=x | FAIL=y", title="Do it"):
+def _commander_obligation(oid, holder="commander", step="build", accept="PASS=x | FAIL=y", title="Do it",
+                          created_by="lab-ovh"):
     return {
         "id": oid,
         "holder": holder,
+        "created_by": created_by,
         "card_id": 291,
         "state": "open",
         "step": step,
@@ -369,12 +371,10 @@ def test_tap_closable_commander_rows_render_yes_no():
         _commander_obligation(2, step=None),
     ])
     assert [r["step"] for r in rows] == ["build", None]
-    by_cell = {}
     for row in rows:
         row["title"] = "Do it"
         row["options"] = [{"label": "Prose", "text": "discuss first", "rec": True}]
-        by_cell.setdefault(row["cell"], []).append(row)
-    questions = pub.build_board._questions(by_cell["commander"])
+    questions = pub.build_board._questions(rows)
     assert len(questions) == 2
     for q in questions:
         assert [(o["label"], o["text"], o["outcome"]) for o in q["options"]] == [
@@ -392,12 +392,10 @@ def test_validate_plan_review_rows_keep_display_only_options():
         _commander_obligation(3, step="validate"),
         _commander_obligation(4, step="plan-review"),
     ])
-    by_cell = {}
     for row in rows:
         row["title"] = "Check it"
         row["options"] = [{"label": "Prose", "text": "discuss first", "rec": True}]
-        by_cell.setdefault(row["cell"], []).append(row)
-    questions = pub.build_board._questions(by_cell["commander"])
+    questions = pub.build_board._questions(rows)
     assert len(questions) == 2
     for q in questions:
         assert all(o.get("outcome") is None for o in q["options"]), \
@@ -413,8 +411,8 @@ def test_default_options_are_display_only():
     row["title"] = "Do it"
     row.pop("options", None)
     other = dict(row, cell="drop-on-meta-edge", holder="drop-on-meta-edge")
-    for q in pub.build_board._questions([row, other]):
-        if q["to_node"] == "commander":
+    for src, q in zip([row, other], pub.build_board._questions([row, other])):
+        if src["holder"] == "commander":
             assert [o["outcome"] for o in q["options"]] == ["pass", "fail"]
         else:
             assert [o["label"] for o in q["options"]] == [

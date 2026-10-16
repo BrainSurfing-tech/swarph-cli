@@ -73,9 +73,10 @@ def _in_session(row: dict) -> bool:
 
 
 # card #291 ruling_1157 (1): tap-closable commander rows (holder commander,
-# step build or step-less) render as yes/no with the FIXED mapping
-# yes=pass, no=fail. Every other option is display-only (outcome None)
-# and closes nothing — no prose option closes PASS by default.
+# step build or step-less) with a binary title render as yes/no with the
+# FIXED mapping yes=pass, no=fail. Every other option is display-only
+# (outcome None) and closes nothing — no prose option closes PASS by
+# default. card #1197: a choice title renders its choices instead (below).
 _TAP_YES = {"label": "Yes", "text": "yes", "rec": True, "outcome": "pass"}
 _TAP_NO = {"label": "No", "text": "no", "rec": False, "outcome": "fail"}
 
@@ -85,12 +86,66 @@ def _tap_closable(row: dict) -> bool:
     return holder == "commander" and row.get("step") in (None, "build")
 
 
+# card #1197: a fixed yes/no lost the commander's choice on "extend, flip,
+# or kill?" rows. A title is NON-BINARY only when it ends with "?" and its
+# final clause (after the last ':' or ' — ') contains " or ". Such a clause
+# renders one tap per choice when it parses, and no tap at all
+# (display-only, closes nothing) when it does not. Every other title keeps
+# yes/no, even with " or " elsewhere in it.
+_OR = re.compile(r"\sor\s", re.IGNORECASE)
+_CHOICE_SPLIT = re.compile(r"\s*,\s*(?:or\s+)?|\s+or\s+", re.IGNORECASE)
+_CHOICE = re.compile(r"^[A-Za-z][A-Za-z0-9'/-]*(?: [A-Za-z0-9'/-]+)?$")
+
+
+def _choice_clause(title: str) -> str | None:
+    """The final clause of a question title when it offers a choice, else None.
+
+    Only a title ending in '?' qualifies, and only the text after its last
+    ':' or ' — ' is read; that clause must contain " or ".
+    """
+    text = (title or "").strip()
+    if not text.endswith("?"):
+        return None
+    tail = re.split(r":| \u2014 ", text[:-1])[-1].strip()
+    return tail if _OR.search(tail) else None
+
+
+def _choices(clause: str) -> list[str] | None:
+    """The 2-5 short choices of a choice clause ("a, b, or c" / "a or b"), else None.
+
+    Each choice is one or two plain words, so a question stem ("Should we
+    ship or hold") or a parenthetical ("(now or never)") does not parse.
+    """
+    parts = [p.strip() for p in _CHOICE_SPLIT.split(clause)]
+    if not 2 <= len(parts) <= 5:
+        return None
+    if any(len(p) > 24 or not _CHOICE.match(p) for p in parts):
+        return None
+    if len({p.lower() for p in parts}) != len(parts):
+        return None
+    return parts
+
+
+def _tap_options(row: dict) -> list[dict] | None:
+    """Options for a tap-closable row, or None when it must not be a tap."""
+    clause = _choice_clause(row.get("title") or "")
+    if clause is not None:
+        choices = _choices(clause)
+        if choices is None:
+            return None
+        if {c.lower() for c in choices} != {"yes", "no"}:
+            return [
+                {"label": c[:1].upper() + c[1:], "text": c, "rec": False, "outcome": "pass"}
+                for c in choices
+            ]
+    return [dict(_TAP_YES), dict(_TAP_NO)]
+
+
 def _questions(rows: list[dict]) -> list[dict]:
     out = []
     for row in rows:
-        if _tap_closable(row):
-            options = [dict(_TAP_YES), dict(_TAP_NO)]
-        else:
+        options = _tap_options(row) if _tap_closable(row) else None
+        if options is None:
             options = []
             for opt in row.get("options") or []:
                 options.append({
