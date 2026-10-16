@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- card #1195. Rendered from systemd/swarph-codex-outbox@.service + systemd/swarph-codex-outbox@.timer by launchd_render.py. Do not edit by hand. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>tech.brainsurfing.swarph.codex-outbox.timer.__PEER__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__SWARPH_BIN__</string>
+    <string>codex-waker</string>
+    <string>--drain-outbox</string>
+    <string>--self</string>
+    <string>__PEER__</string>
+    <string>--state-dir</string>
+    <string>__SWARPH_WAKER_STATE_DIR__</string>
+    <string>--cwd</string>
+    <string>__SWARPH_WAKER_CWD__</string>
+    <string>--outbox-dir</string>
+    <string>__SWARPH_OUTBOX_DIR__</string>
+    <string>--gateway</string>
+    <string>__SWARPH_GATEWAY__</string>
+    <string>--token-file</string>
+    <string>__SWARPH_TOKEN_FILE__</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>15</integer>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/launchd.err.log</string>
+</dict>
+</plist>
