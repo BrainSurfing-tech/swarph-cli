@@ -63,7 +63,7 @@ def test_unparseable_or_title_renders_no_tap():
     pub = _load()
     for accept in ("[commander] Ship it (now or never)? | PASS=x",
                    "[commander] Should we ship or hold the release? | PASS=x",
-                   "[commander] Retire or keep the guard | PASS=x"):
+                   "[commander] ship it or wait, given the X? | PASS=x"):
         opts = _options(pub, accept)
         assert opts, accept
         assert all(o["outcome"] is None for o in opts), \
@@ -93,8 +93,7 @@ def test_untagged_commander_held_rows_reach_the_board():
 
 # The three open commander-held rows as `swarph board obligations list --as
 # lab-ovh --status open --holder commander --json` returned them on
-# 2026-10-16 (fields used here only; the #1986 accept is its first 110
-# characters as read, which is past the cut).
+# 2026-10-16 (fields used here only; accepts verbatim).
 LIVE = [
     {"id": 1181, "holder": "commander", "created_by": "lab-ovh", "card_id": 1038,
      "step": None, "status": "open",
@@ -102,7 +101,7 @@ LIVE = [
     {"id": 1986, "holder": "commander", "created_by": "lab-ovh", "card_id": 1192,
      "step": None, "status": "open",
      "accept": "PASS = commander states the rule (sonnet for read-only sweeps, or keep opus) "
-               "| FAIL = commander declines to se"},
+               "| FAIL = commander declines to set one"},
     {"id": 1989, "holder": "commander", "created_by": "lab-ovh", "card_id": 554,
      "step": None, "status": "open",
      "accept": "PASS = commander states yes or no for A and for B "
@@ -123,9 +122,40 @@ def test_the_live_untagged_rows_render_and_answer_lab():
     qs = pub.build_board._questions(rows)
     assert [q["to_node"] for q in qs] == ["lab-ovh"] * 3
     assert [(o["text"], o["outcome"]) for o in qs[0]["options"]] == [("yes", "pass"), ("no", "fail")]
-    # Two answers, or a stated rule: no tap may close these.
-    for q in qs[1:]:
-        assert all(o["outcome"] is None for o in q["options"]), q["title"]
+
+
+def _live_options(pub, oid):
+    rows = pub.commander_rows([dict(r) for r in LIVE if r["id"] == oid])
+    assert len(rows) == 1
+    return rows[0]["title"], pub.build_board._questions(rows)[0]["options"]
+
+
+def test_live_1986_rule_statement_renders_yes_no():
+    """The " or " sits inside a parenthetical of a statement, not a final
+    question clause, so the row is binary and the commander can tap it."""
+    pub = _load()
+    title, opts = _live_options(pub, 1986)
+    assert title == "commander states the rule (sonnet for read-only sweeps, or keep opus)"
+    assert [(o["label"], o["text"], o["outcome"]) for o in opts] == [
+        ("Yes", "yes", "pass"), ("No", "no", "fail")], \
+        "RED: #1986 has no question clause; it must stay tappable Yes/No"
+
+
+def test_live_1989_statement_with_or_renders_yes_no():
+    pub = _load()
+    title, opts = _live_options(pub, 1989)
+    assert title == "commander states yes or no for A and for B"
+    assert [(o["label"], o["text"], o["outcome"]) for o in opts] == [
+        ("Yes", "yes", "pass"), ("No", "no", "fail")], \
+        "RED: #1989 does not end with '?'; it must stay tappable Yes/No"
+
+
+def test_or_outside_a_final_question_clause_stays_yes_no():
+    pub = _load()
+    for accept in ("[commander] Retire or keep the guard | PASS=x",
+                   "[commander] Decide (now or later): ship it? | PASS=x"):
+        assert [(o["text"], o["outcome"]) for o in _options(pub, accept)] == [
+            ("yes", "pass"), ("no", "fail")], f"RED: binary title: {accept}"
 
 
 def test_commander_held_answer_goes_to_the_creator_never_commander():
