@@ -22,7 +22,7 @@ A test run or a CI run must not call `Artifact` with a live roster or live board
 
 ## 2. Questions come from the swarph board
 
-Each cell section lists that cell's open rows that wait on the commander. A question has two or three options and exactly one `"rec": true`. The recommended option is the reply you would send. Copy puts the session name, then `Re: <question>`, then the reply.
+Each cell section lists that cell's open rows that wait on the commander. A question has two or three options and exactly one `"rec": true`, except a choice question on a commander-held row (one option per choice, none recommended). The recommended option is the reply you would send. Copy puts the session name, then `Re: <question>`, then the reply.
 
 Build the JSON with `scripts/build_board.py`. It reads a `ListAgents` listing and a JSON file of those rows. It does not send anything.
 
@@ -51,7 +51,7 @@ A relayed yes approves building, not deploying.
 
 A user timer runs `scripts/publish_board.py` every 5 minutes. The unit files in `deploy/` are templates. Do not install them from a test or from CI.
 
-The timer does not call `ListAgents` and it does not read the inbox. The roster is `swarph monitor status` for each cell plus `tmux has-session`. The tmux name for `lab-ovh` is `lab`. Questions are open obligation rows whose accept starts with `[commander]`. The holder is the cell that receives the answer. The timer lists those rows with `--as lab-ovh --status open`. A question leaves the board when that row is closed. A `Re:` DM does not remove it. A failed read sends nothing. `publish_if_changed` sends nothing when the board is unchanged. The unit PATH uses `%h` only.
+The timer does not call `ListAgents` and it does not read the inbox. The roster is `swarph monitor status` for each cell plus `tmux has-session`. The tmux name for `lab-ovh` is `lab`. Questions are open obligation rows whose accept starts with `[commander]`, plus every open row the commander holds, tagged or not. The holder is the cell that receives the answer, except on a commander-held row: that answer goes to the row's creator (`created_by`), or to `lab-ovh` when the commander created it. It never goes to `commander`. A commander-held build or step-less row whose title ends in a short choice list (`extend, flip, or kill?`) offers one tap per choice; a binary title offers Yes and No; a title with `or` that does not parse offers no tap. The timer lists those rows with `--as lab-ovh --status open`. A question leaves the board when that row is closed. A `Re:` DM does not remove it. A failed read sends nothing. `publish_if_changed` sends nothing when the board is unchanged. The unit PATH uses `%h` only.
 
 The send uses `--token-file` with a path. The token value is not an argument. The service identity must not be the recipient: a self-send is refused.
 

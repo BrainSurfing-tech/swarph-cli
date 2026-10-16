@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish the SWARPH-BOARD from open [commander] rows.
+"""Publish the SWARPH-BOARD from open [commander] and commander-held rows.
 
 Roster comes from `swarph monitor status` plus `tmux has-session`.
 The send uses `--token-file` (a path).
@@ -89,26 +89,79 @@ def commander_title(accept: str) -> str | None:
     return rest[:cut].strip()
 
 
-def commander_rows(rows: list[dict]) -> list[dict]:
-    """Open GET /board/obligations rows whose accept starts with [commander].
+_TITLE_MAX = 160
 
-    The real row has id, holder, card_id, accept, and state. It has no title,
-    no cell, and no obligation_id. The holder is the cell that gets the answer.
+
+def untagged_title(row: dict) -> str:
+    """A title for a commander-held row whose accept carries no [commander] tag.
+
+    The accept text, cut at the first '|' or 'PASS=' and trimmed. A JSON
+    accept reads as its pass conditions. No accept reads as the row's ids.
+    """
+    accept = str(row.get("accept") or "").strip()
+    text = ""
+    try:
+        parsed = json.loads(accept) if accept.startswith("{") else None
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("pass"), list):
+        text = "; ".join(str(p.get("text") or "") for p in parsed["pass"] if isinstance(p, dict))
+    elif accept:
+        cut = len(accept)
+        for marker in ("|", "PASS="):
+            found = accept.find(marker)
+            if found > 0:
+                cut = min(cut, found)
+        text = accept[:cut]
+    text = " ".join(text.split())
+    if not text:
+        return f"card #{row.get('card_id')} obligation #{row.get('id', row.get('obligation_id'))}"
+    if len(text) > _TITLE_MAX:
+        text = text[:_TITLE_MAX - 1].rstrip() + "…"
+    return text
+
+
+def answer_cell(row: dict, holder: str) -> str:
+    """The cell that receives the commander's answer. Never "commander".
+
+    A commander-held row is answered to the cell that minted it (created_by).
+    A row the commander minted for itself, or one with no creator, goes to
+    lab-ovh, the cell that asks the commander on the board.
+    """
+    if holder != "commander":
+        return holder
+    creator = str(row.get("created_by") or "").strip()
+    if creator and creator != "commander":
+        return creator
+    return READ_AS
+
+
+def commander_rows(rows: list[dict]) -> list[dict]:
+    """Open GET /board/obligations rows the commander must answer.
+
+    Kept: rows whose accept starts with [commander], and every row the
+    commander holds, tagged or not (card #1197). The real row has id, holder,
+    created_by, card_id, accept, and state. It has no title, no cell, and no
+    obligation_id. ``cell`` is the cell that gets the answer: the holder, or
+    for a commander-held row its creator (see ``answer_cell``).
     """
     kept = []
     for row in rows:
         state = str(row.get("state") or row.get("status") or "open")
         if state.startswith("closed"):
             continue
+        holder = row.get("holder") or row.get("cell") or ""
         title = commander_title(row.get("accept") or "")
         if title is None:
-            continue
-        holder = row.get("holder") or row.get("cell") or ""
+            if holder != "commander":
+                continue
+            title = untagged_title(row)
         kept.append({
             "title": title,
             "accept": row.get("accept") or "",
-            "cell": holder,
+            "cell": answer_cell(row, holder),
             "holder": holder,
+            "created_by": row.get("created_by"),
             "card_id": row.get("card_id"),
             "obligation_id": row.get("id", row.get("obligation_id")),
             "state": state,
@@ -174,7 +227,7 @@ def build_roster(roster: list[dict], rows: list[dict], *, project: str = "~/swar
         "updated": now,
         "projectFolder": project,
         "manager": manager,
-        "todoIntro": "Open obligation rows tagged [commander].",
+        "todoIntro": "Open obligation rows tagged [commander] or held by the commander.",
         "sessions": sessions,
         "groups": groups,
     }
