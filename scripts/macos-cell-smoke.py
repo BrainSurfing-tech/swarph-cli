@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, urlparse
 
 # Card #1195 discriminator. None runs the installed swarph. An absolute path
 # that does not exist must make this workflow FAIL.
-BROKEN_BIN: str | None = "/no/such/swarph-bin"
+BROKEN_BIN: str | None = None
 
 PEER = "smoke-cell"
 LABEL = f"tech.brainsurfing.swarph.monitor.{PEER}"
