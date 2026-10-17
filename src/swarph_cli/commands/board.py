@@ -1013,6 +1013,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ct = cards.add_parser("thread", help="show the card's conversation (#181: a card IS a thread)")
     ct.add_argument("id", type=int)
     ct.add_argument("--limit", type=int, default=None, help="max messages (gateway caps at 1000)")
+    ct.add_argument("--json", action="store_true")
     _add_common(ct)
     cy = cards.add_parser("say", help="post a message onto the card's thread")
     cy.add_argument("id", type=int)
