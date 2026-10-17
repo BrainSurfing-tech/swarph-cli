@@ -101,6 +101,58 @@ def test_no_matching_message_keeps_the_accept_derived_title():
     assert not question["title"].endswith("?")
 
 
+# msg 73942 and row #2076, card #1203, as listed 2026-10-17.
+ACCEPT_2076 = (
+    "PASS = the commander picks one of the three options and lab carries it "
+    "out (for 'move aside': mv to ~/swarph_state/lab-ovh/operator.json.bak-<ts>, "
+    "then swarph-me reports 'no operator config') | FAIL = no answer, or lab "
+    "acts before one"
+)
+QUESTION_2076 = (
+    "#1203: ~/.config/swarph/operator.json (identity=commander, likely left "
+    "over from validate #222) lets any cell on lab-ovh run swarph-me as you. "
+    "Move it aside now, keep it until the refusal ships, or keep it for good?"
+)
+MSG_73942 = {
+    "id": 73942,
+    "from_node": "lab-ovh",
+    "to_node": "commander",
+    "kind": "question",
+    "content": QUESTION_2076 + "\n\nACCEPT CHECK: " + ACCEPT_2076,
+}
+
+
+def test_2076_live_offer_renders_three_options_not_fragments():
+    """The colon is in an earlier sentence. The comma inside the parenthesis
+    must not become a tap. The three options are the last sentence."""
+    pub = _load()
+    row, question = _kept(pub, _row(2076, ACCEPT_2076, card_id=1203), [MSG_73942])
+    assert row["source"] == "offer"
+    assert row["title"] == QUESTION_2076
+    assert [o["text"] for o in question["options"]] == [
+        "Move it aside now",
+        "keep it until the refusal ships",
+        "keep it for good",
+    ]
+    assert all(o["outcome"] == "pass" for o in question["options"])
+
+
+def test_tagged_paren_comma_stays_display_only():
+    """#1197: a tagged title whose comma sits inside a parenthesis does not
+    parse, so it closes nothing. It must not gain pass-closing fragment taps."""
+    pub = _load()
+    accept = (
+        "[commander] Move the file (identity=commander, likely left over from "
+        "validate #222) aside now, keep it until the refusal ships, or keep it "
+        "for good? | PASS=the commander picks one"
+    )
+    rows = pub.commander_rows([_row(1, accept)])
+    opts = pub.build_board._questions(rows)[0]["options"]
+    assert opts[0]["label"] == "Answer on the card"
+    assert all(o["outcome"] is None for o in opts)
+    assert [o["text"] for o in opts] != ["yes", "no"]
+
+
 def test_a_decoy_message_whose_accept_differs_does_not_match():
     pub = _load()
     decoy = {

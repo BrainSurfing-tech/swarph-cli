@@ -100,14 +100,17 @@ _CHOICE = re.compile(r"^[A-Za-z][A-Za-z0-9'/-]*(?: [A-Za-z0-9'/-]+)?$")
 def _choice_clause(title: str) -> str | None:
     """The final clause of a question title when it offers a choice, else None.
 
-    Only a title ending in '?' qualifies, and only the text after its last
-    ':' or ' — ' is read; that clause must contain " or ".
+    Only a title ending in '?' qualifies. The clause is the last sentence.
+    A ':' or ' — ' inside that sentence still cuts it. A colon in an earlier
+    sentence does not (card #1206, row #2076). The clause must contain " or ".
     """
     text = (title or "").strip()
     if not text.endswith("?"):
         return None
-    tail = re.split(r":| \u2014 ", text[:-1])[-1].strip()
-    return tail if _OR.search(tail) else None
+    sentence = re.split(r"\.\s+", text[:-1].rstrip())[-1].strip()
+    if re.search(r":| \u2014 ", sentence):
+        sentence = re.split(r":| \u2014 ", sentence)[-1].strip()
+    return sentence if sentence and _OR.search(sentence) else None
 
 
 def _choices(clause: str) -> list[str] | None:
@@ -123,6 +126,9 @@ def _choices(clause: str) -> list[str] | None:
     if not 2 <= len(parts) <= 5:
         return None
     if len({p.lower() for p in parts}) != len(parts):
+        return None
+    # A comma inside a parenthesis must not become its own tap.
+    if any(p.count("(") != p.count(")") for p in parts):
         return None
     if all(len(p) <= 24 and _CHOICE.match(p) for p in parts):
         return parts
