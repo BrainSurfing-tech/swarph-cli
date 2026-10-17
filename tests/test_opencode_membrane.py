@@ -442,6 +442,19 @@ def test_NO_credential_symlink_when_the_operator_has_NO_auth(tmp_path, monkeypat
         assert not [p for p in root.rglob("*") if p.is_symlink()]
 
 
+def test_gh_config_dir_defaults_to_home_unless_already_set(tmp_path, monkeypatch):
+    """Card #1196. An opencode cell must see GH_CONFIG_DIR. Dropping the
+    assignment fails this test. Assert the env dict only: do not open the
+    directory and do not read a token."""
+    monkeypatch.delenv("GH_CONFIG_DIR", raising=False)
+    env = _opencode_env(_cell(tmp_path))
+    assert env["GH_CONFIG_DIR"] == str(Path.home() / ".config" / "gh")
+
+    monkeypatch.setenv("GH_CONFIG_DIR", "/already/set")
+    kept = _opencode_env(_cell(tmp_path))
+    assert kept["GH_CONFIG_DIR"] == "/already/set"
+
+
 def test_autoupdate_is_disabled_in_the_cell(tmp_path):
     """A cell self-updating mid-run is a silent seat change. Pin it off for the
     cell explicitly — the same reason every probe sets OPENCODE_DISABLE_AUTOUPDATE."""

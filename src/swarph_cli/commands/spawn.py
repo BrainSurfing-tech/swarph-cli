@@ -3065,6 +3065,10 @@ def _opencode_env(cell: Cell) -> dict[str, str]:
     # an operator's own disable would otherwise be lost, not preserved).
     env["OPENCODE_DISABLE_CLAUDE_CODE"] = "1"
     env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
+    # $HOME is shared, but gh does not use it unless GH_CONFIG_DIR is set.
+    # Keep a parent value; otherwise point the cell at $HOME/.config/gh.
+    if "GH_CONFIG_DIR" not in env:
+        env["GH_CONFIG_DIR"] = str(Path.home() / ".config" / "gh")
     # NOTE (2026-09-16, probe): the plugin's `experimental.chat.system.transform`
     # fires WITHOUT the OPENCODE_EXPERIMENTAL umbrella (measured on 1.18.30), so
     # we do NOT set it — widening the experimental surface for a flag the hook
