@@ -111,19 +111,25 @@ def _choice_clause(title: str) -> str | None:
 
 
 def _choices(clause: str) -> list[str] | None:
-    """The 2-5 short choices of a choice clause ("a, b, or c" / "a or b"), else None.
+    """The 2-5 choices of a choice clause ("a, b, or c" / "a or b"), else None.
 
-    Each choice is one or two plain words, so a question stem ("Should we
+    The short form is one or two plain words, so a question stem ("Should we
     ship or hold") or a parenthetical ("(now or never)") does not parse.
+    card #1206: a comma-separated list of three or more longer phrases is
+    the same choice list. A two-part stem stays unparsed, so a binary
+    question stays Yes/No.
     """
     parts = [p.strip() for p in _CHOICE_SPLIT.split(clause)]
     if not 2 <= len(parts) <= 5:
         return None
-    if any(len(p) > 24 or not _CHOICE.match(p) for p in parts):
-        return None
     if len({p.lower() for p in parts}) != len(parts):
         return None
-    return parts
+    if all(len(p) <= 24 and _CHOICE.match(p) for p in parts):
+        return parts
+    if (len(parts) >= 3 and any(len(p) > 24 for p in parts)
+            and all(p and len(p) <= 120 and "?" not in p for p in parts)):
+        return parts
+    return None
 
 
 def _tap_options(row: dict) -> list[dict] | None:
@@ -170,6 +176,8 @@ def _questions(rows: list[dict]) -> list[dict]:
             "in_session": _in_session(row),
             "options": options,
         }
+        if row.get("source"):
+            question["source"] = row["source"]
         if row.get("card_id") is not None:
             question["card"] = row["card_id"]
         if row.get("obligation_id") is not None:

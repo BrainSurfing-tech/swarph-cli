@@ -95,6 +95,38 @@ _LEAD_PASS = re.compile(r"^\s*PASS\s*=\s*", re.IGNORECASE)
 _TITLE_CUT = re.compile(r"\||\b(?:PASS|FAIL)\s*=", re.IGNORECASE)
 
 
+_ACCEPT_MARK = "\n\nACCEPT CHECK:"
+
+
+def offer_question(row: dict, messages: list | None) -> str | None:
+    """The offer question for one commander-held row, or None.
+
+    The card-thread message addressed to the commander whose body contains
+    ``ACCEPT CHECK: `` plus this row's accept. The question is the text
+    before ``\\n\\nACCEPT CHECK:``. A message whose accept differs does
+    not match. card #1206.
+    """
+    accept = str(row.get("accept") or "")
+    if not accept or not messages:
+        return None
+    needle = "ACCEPT CHECK: " + accept
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if (msg.get("to_node") or msg.get("to") or "") != "commander":
+            continue
+        body = str(msg.get("content") or msg.get("body") or "")
+        if needle not in body:
+            continue
+        head, sep, _rest = body.partition(_ACCEPT_MARK)
+        if not sep:
+            continue
+        question = head.strip()
+        if question:
+            return question
+    return None
+
+
 def untagged_title(row: dict) -> str:
     """A title for a commander-held row whose accept carries no [commander] tag.
 
@@ -135,7 +167,7 @@ def answer_cell(row: dict, holder: str) -> str:
     return READ_AS
 
 
-def commander_rows(rows: list[dict]) -> list[dict]:
+def commander_rows(rows: list[dict], offers: list | None = None) -> list[dict]:
     """Open GET /board/obligations rows the commander must answer.
 
     Kept: rows whose accept starts with [commander], and every row the
@@ -143,6 +175,10 @@ def commander_rows(rows: list[dict]) -> list[dict]:
     created_by, card_id, accept, and state. It has no title, no cell, and no
     obligation_id. ``cell`` is the cell that gets the answer: the holder, or
     for a commander-held row its creator (see ``answer_cell``).
+
+    card #1206: a commander-held row with no [commander] tag takes its title
+    from the offer message in ``offers``. No match falls back to
+    ``untagged_title`` and says so in ``source``.
     """
     kept = []
     for row in rows:
@@ -151,12 +187,20 @@ def commander_rows(rows: list[dict]) -> list[dict]:
             continue
         holder = row.get("holder") or row.get("cell") or ""
         title = commander_title(row.get("accept") or "")
+        source = "tag"
         if title is None:
             if holder != "commander":
                 continue
-            title = untagged_title(row)
+            offered = offer_question(row, offers)
+            if offered:
+                title = offered
+                source = "offer"
+            else:
+                title = untagged_title(row)
+                source = "untagged_title"
         kept.append({
             "title": title,
+            "source": source,
             "accept": row.get("accept") or "",
             "cell": answer_cell(row, holder),
             "holder": holder,
@@ -269,6 +313,7 @@ def run_once(
     recipient: str,
     token_file: str,
     send,
+    offers: list | None = None,
 ) -> tuple[bool, str]:
     """Build one board and send only when it changed. send sees the path, not the token.
 
@@ -284,7 +329,7 @@ def run_once(
         [parse_monitor_status(text) for text in statuses],
         set(tmux_sessions),
     )
-    open_rows = commander_rows(rows)
+    open_rows = commander_rows(rows, offers)
     remaining = build_board.drop_answered(open_rows, messages, commander=commander)
     board = build_roster(roster, remaining, manager=sender)
 
@@ -325,6 +370,49 @@ def _require_json(proc, label: str):
         raise ReadFailed(f"{label} returned invalid JSON") from exc
 
 
+def _offer_messages(rows: list[dict], *, read_token_file: str, read_as: str, runner) -> list[dict]:
+    """Card-thread posts for commander-held rows that have no [commander] tag.
+
+    One `swarph board cards thread --json` per card. Not an inbox read.
+    A failed read leaves that card unmatched, so the row falls back to
+    untagged_title. The token file is a path. Its contents are not read.
+    """
+    found: list[dict] = []
+    seen: set = set()
+    for row in rows:
+        if (row.get("holder") or row.get("cell") or "") != "commander":
+            continue
+        if commander_title(row.get("accept") or "") is not None:
+            continue
+        card_id = row.get("card_id")
+        if card_id is None or card_id in seen:
+            continue
+        seen.add(card_id)
+        argv = [
+            "swarph", "board", "cards", "thread", str(card_id),
+            "--as", read_as,
+            "--token-file", str(read_token_file),
+            "--json",
+        ]
+        joined = " ".join(argv)
+        if "inbox" in argv or "/messages" in joined:
+            raise ReadFailed("the timer must not read the inbox")
+        proc = runner(argv)
+        if getattr(proc, "returncode", 1):
+            continue
+        text = (getattr(proc, "stdout", None) or "").strip()
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        msgs = payload.get("messages") if isinstance(payload, dict) else payload
+        if isinstance(msgs, list):
+            found.extend(msg for msg in msgs if isinstance(msg, dict))
+    return found
+
+
 def live_once(
     *,
     cells: list[str],
@@ -363,6 +451,9 @@ def live_once(
             saw_list = True
     if not saw_list:
         raise ReadFailed("obligations list was not read")
+    offers = _offer_messages(
+        rows, read_token_file=read_token_file, read_as=READ_AS, runner=runner,
+    )
     changed, _body = run_once(
         rows=rows,
         messages=[],
@@ -374,6 +465,7 @@ def live_once(
         recipient=recipient,
         token_file=token_file,
         send=send,
+        offers=offers,
     )
     return changed
 
