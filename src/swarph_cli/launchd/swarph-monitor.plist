@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- card #1195. Rendered from systemd/swarph-monitor@.service by launchd_render.py. Do not edit by hand. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>tech.brainsurfing.swarph.monitor.__PEER__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__SWARPH_BIN__</string>
+    <string>monitor</string>
+    <string>start</string>
+    <string>--as</string>
+    <string>__PEER__</string>
+    <string>--deliver</string>
+    <string>pull</string>
+    <string>--foreground</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SWARPH_SELF</key>
+    <string>__PEER__</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>MESH_GATEWAY_URL</key>
+    <string>__GATEWAY__</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/launchd.err.log</string>
+</dict>
+</plist>

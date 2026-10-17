@@ -16,11 +16,9 @@
 #     import and path bugs that neither Linux nor Windows reproduces
 #   · Gatekeeper/quarantine on anything downloaded (the gbrain binary launcher)
 #
-# WHAT IT CANNOT AND MUST NOT BE READ AS COVERING: launchd. The package ships FOUR
-# systemd units and ZERO launchd plists, so the background-process story is
-# Linux-only by construction. A green here says the LIBRARY imports and the suite
-# passes; it says nothing about whether a cell can actually run as a daemon on a
-# Mac. Recorded so a green is not over-read.
+# WHAT THIS WORKFLOW DOES NOT COVER: launchd. That leg is
+# macos-cell-smoke.yml (card #1195), which loads the packaged plists. A green
+# here says the library suite passed. It does not say a cell stayed up.
 #
 # >>> NO NODE-ID FLOOR, DELIBERATELY, AND THIS IS THE PART TO NOT CARGO-CULT. <<<
 # windows.yml pins a fixed list of win32-only node ids because those paths exist
