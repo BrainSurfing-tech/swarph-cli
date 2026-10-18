@@ -195,3 +195,68 @@ def test_a_decoy_message_whose_accept_differs_does_not_match():
     assert only_decoy["source"] == "untagged_title"
     assert only_decoy["title"] != "shared token, per-client tokens, or hold?"
     assert "different check" not in only_decoy["title"]
+
+
+# msg 74504 and row #2126. The comma after the final or-part is inside one
+# option ("self-minted id with issued, expiring membership..."), not a fourth tap.
+ACCEPT_2126 = (
+    "PASS = the commander picks one; lab records it on #418 as the Q4 ruling "
+    "with its rationale and re-derives rules 3-5 if 'issued' wins | FAIL = no "
+    "answer, or lab builds an id scheme before the ruling"
+)
+QUESTION_2126 = (
+    "#418 Q4: fractal ids self-minted (key hash only), issued (an issuer "
+    "vouches for the id), or self-minted id with issued, expiring membership "
+    "per fractal (lab's lean)?"
+)
+MSG_74504 = {
+    "id": 74504,
+    "from_node": "lab-ovh",
+    "to_node": "commander",
+    "kind": "question",
+    "content": QUESTION_2126 + "\n\nACCEPT CHECK: " + ACCEPT_2126,
+}
+
+
+def _assert_display_only(opts):
+    assert opts[0]["label"] == "Answer on the card"
+    assert all(o["outcome"] is None for o in opts)
+    assert [o["text"] for o in opts] != ["yes", "no"]
+
+
+def test_2126_untagged_offer_is_display_only():
+    """The comma after the final or-part must not become a fourth tap."""
+    pub = _load()
+    row, question = _kept(
+        pub, _row(2126, ACCEPT_2126, card_id=418), [MSG_74504]
+    )
+    assert row["source"] == "offer"
+    assert row["title"] == QUESTION_2126
+    assert question["title"] == QUESTION_2126
+    _assert_display_only(question["options"])
+
+
+def test_2126_tagged_copy_is_display_only():
+    pub = _load()
+    accept = "[commander] " + QUESTION_2126 + " | PASS=the commander picks one"
+    rows = pub.commander_rows([_row(2126, accept, card_id=418)])
+    assert rows[0]["title"] == QUESTION_2126
+    assert rows[0]["source"] == "tag"
+    _assert_display_only(pub.build_board._questions(rows)[0]["options"])
+
+
+# Row #2094, card #1011. Short form. No comma after the final or-part.
+ACCEPT_2094 = (
+    "[commander] trial #733 extended past its first due (first_due 2026-10-13, "
+    "now 2026-10-24, 48 days total): extend, flip, or kill? | PASS = the trial "
+    "is extended, flipped, or killed | FAIL = it stays extended with no decision"
+)
+
+
+def test_2094_still_renders_extend_flip_kill():
+    pub = _load()
+    rows = pub.commander_rows([_row(2094, ACCEPT_2094, card_id=1011)])
+    opts = pub.build_board._questions(rows)[0]["options"]
+    assert [o["text"] for o in opts] == ["extend", "flip", "kill"]
+    assert [o["label"] for o in opts] == ["Extend", "Flip", "Kill"]
+    assert all(o["outcome"] == "pass" for o in opts)

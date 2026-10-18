@@ -120,8 +120,12 @@ def _choices(clause: str) -> list[str] | None:
     ship or hold") or a parenthetical ("(now or never)") does not parse.
     card #1206: a comma-separated list of three or more longer phrases is
     the same choice list. A two-part stem stays unparsed, so a binary
-    question stays Yes/No.
+    question stays Yes/No. A comma after the final or-part is one phrase,
+    not another choice (card #1206, row #2126), so the clause does not parse.
     """
+    # The part the final " or " introduces must not itself contain a comma.
+    if re.search(r"\sor\s[^,]*,", clause, re.IGNORECASE):
+        return None
     parts = [p.strip() for p in _CHOICE_SPLIT.split(clause)]
     if not 2 <= len(parts) <= 5:
         return None
