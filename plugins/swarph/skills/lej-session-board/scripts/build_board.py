@@ -100,30 +100,46 @@ _CHOICE = re.compile(r"^[A-Za-z][A-Za-z0-9'/-]*(?: [A-Za-z0-9'/-]+)?$")
 def _choice_clause(title: str) -> str | None:
     """The final clause of a question title when it offers a choice, else None.
 
-    Only a title ending in '?' qualifies, and only the text after its last
-    ':' or ' — ' is read; that clause must contain " or ".
+    Only a title ending in '?' qualifies. The clause is the last sentence.
+    A ':' or ' — ' inside that sentence still cuts it. A colon in an earlier
+    sentence does not (card #1206, row #2076). The clause must contain " or ".
     """
     text = (title or "").strip()
     if not text.endswith("?"):
         return None
-    tail = re.split(r":| \u2014 ", text[:-1])[-1].strip()
-    return tail if _OR.search(tail) else None
+    sentence = re.split(r"\.\s+", text[:-1].rstrip())[-1].strip()
+    if re.search(r":| \u2014 ", sentence):
+        sentence = re.split(r":| \u2014 ", sentence)[-1].strip()
+    return sentence if sentence and _OR.search(sentence) else None
 
 
 def _choices(clause: str) -> list[str] | None:
-    """The 2-5 short choices of a choice clause ("a, b, or c" / "a or b"), else None.
+    """The 2-5 choices of a choice clause ("a, b, or c" / "a or b"), else None.
 
-    Each choice is one or two plain words, so a question stem ("Should we
+    The short form is one or two plain words, so a question stem ("Should we
     ship or hold") or a parenthetical ("(now or never)") does not parse.
+    card #1206: a comma-separated list of three or more longer phrases is
+    the same choice list. A two-part stem stays unparsed, so a binary
+    question stays Yes/No. A comma after the final or-part is one phrase,
+    not another choice (card #1206, row #2126), so the clause does not parse.
     """
+    # The part the final " or " introduces must not itself contain a comma.
+    if re.search(r"\sor\s[^,]*,", clause, re.IGNORECASE):
+        return None
     parts = [p.strip() for p in _CHOICE_SPLIT.split(clause)]
     if not 2 <= len(parts) <= 5:
         return None
-    if any(len(p) > 24 or not _CHOICE.match(p) for p in parts):
-        return None
     if len({p.lower() for p in parts}) != len(parts):
         return None
-    return parts
+    # A comma inside a parenthesis must not become its own tap.
+    if any(p.count("(") != p.count(")") for p in parts):
+        return None
+    if all(len(p) <= 24 and _CHOICE.match(p) for p in parts):
+        return parts
+    if (len(parts) >= 3 and any(len(p) > 24 for p in parts)
+            and all(p and len(p) <= 120 and "?" not in p for p in parts)):
+        return parts
+    return None
 
 
 def _tap_options(row: dict) -> list[dict] | None:
@@ -170,6 +186,8 @@ def _questions(rows: list[dict]) -> list[dict]:
             "in_session": _in_session(row),
             "options": options,
         }
+        if row.get("source"):
+            question["source"] = row["source"]
         if row.get("card_id") is not None:
             question["card"] = row["card_id"]
         if row.get("obligation_id") is not None:
