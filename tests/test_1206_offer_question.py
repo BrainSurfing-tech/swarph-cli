@@ -260,3 +260,56 @@ def test_2094_still_renders_extend_flip_kill():
     assert [o["text"] for o in opts] == ["extend", "flip", "kill"]
     assert [o["label"] for o in opts] == ["Extend", "Flip", "Kill"]
     assert all(o["outcome"] == "pass" for o in opts)
+
+
+# Card note 74612, row #2140. Each option is 3-4 words and <= 24 characters.
+TITLE_2140 = (
+    "Plan-review is the missing step in 23 of 26 blocked moves. "
+    "Keep it mandatory, make it optional, or allow a per-card waiver?"
+)
+
+
+def test_2140_medium_phrases_render_three_taps():
+    pub = _load()
+    accept = "[commander] " + TITLE_2140 + " | PASS=the commander picks one"
+    rows = pub.commander_rows([_row(2140, accept)])
+    assert rows[0]["title"] == TITLE_2140
+    opts = pub.build_board._questions(rows)[0]["options"]
+    assert [o["text"] for o in opts] == [
+        "Keep it mandatory",
+        "make it optional",
+        "allow a per-card waiver",
+    ]
+    assert [o["label"] for o in opts] == [
+        "Keep it mandatory",
+        "Make it optional",
+        "Allow a per-card waiver",
+    ]
+    assert all(o["outcome"] == "pass" for o in opts)
+
+
+def test_three_part_stem_stays_display_only():
+    """'hold it' and 'kill it' are two words, so this stem is not a choice list."""
+    pub = _load()
+    accept = "[commander] Should we ship it, hold it, or kill it? | PASS=the commander picks one"
+    rows = pub.commander_rows([_row(3, accept)])
+    _assert_display_only(pub.build_board._questions(rows)[0]["options"])
+
+
+# Review #2144. The long branch turns these stems into taps at 0a7bc65.
+STEMS_2144 = (
+    "Should we ship the release, hold the release, or kill the release?",
+    "Should we keep it mandatory, make it optional, or allow a waiver?",
+)
+
+
+def test_2144_stem_titles_stay_display_only():
+    pub = _load()
+    for title in STEMS_2144:
+        accept = "[commander] " + title + " | PASS=the commander picks one"
+        rows = pub.commander_rows([_row(2144, accept)])
+        assert rows[0]["title"] == title
+        opts = pub.build_board._questions(rows)[0]["options"]
+        assert opts[0]["label"] == "Answer on the card", title
+        assert all(o["outcome"] is None for o in opts), title
+        assert [o["text"] for o in opts] != ["yes", "no"]
