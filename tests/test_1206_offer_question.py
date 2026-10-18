@@ -75,6 +75,28 @@ def test_2103_renders_its_three_options_not_yes_no():
     assert all(o["outcome"] == "pass" for o in question["options"])
 
 
+# Row #1999, card #1197, tagged binary. Listed 2026-10-18.
+ACCEPT_1999 = (
+    "[commander] Merge and restart the gateway with #234 (thread-less self-DMs "
+    "get a 400; card notes unaffected) | PASS = commander taps Yes | FAIL = "
+    "commander taps No"
+)
+
+
+def test_binary_1999_still_renders_yes_no():
+    pub = _load()
+    row, question = _kept(pub, _row(1999, ACCEPT_1999, card_id=1197), [])
+    assert row["title"] == (
+        "Merge and restart the gateway with #234 (thread-less self-DMs get a "
+        "400; card notes unaffected)"
+    )
+    assert not row["title"].endswith("?")
+    assert [(o["label"], o["text"], o["outcome"]) for o in question["options"]] == [
+        ("Yes", "yes", "pass"),
+        ("No", "no", "fail"),
+    ]
+
+
 def test_a_binary_question_still_renders_yes_no():
     pub = _load()
     accept = "PASS = the commander says yes or no | FAIL = no answer"
