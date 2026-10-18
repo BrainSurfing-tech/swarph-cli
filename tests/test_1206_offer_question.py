@@ -260,3 +260,37 @@ def test_2094_still_renders_extend_flip_kill():
     assert [o["text"] for o in opts] == ["extend", "flip", "kill"]
     assert [o["label"] for o in opts] == ["Extend", "Flip", "Kill"]
     assert all(o["outcome"] == "pass" for o in opts)
+
+
+# Card note 74612, row #2140. Each option is 3-4 words and <= 24 characters.
+TITLE_2140 = (
+    "Plan-review is the missing step in 23 of 26 blocked moves. "
+    "Keep it mandatory, make it optional, or allow a per-card waiver?"
+)
+
+
+def test_2140_medium_phrases_render_three_taps():
+    pub = _load()
+    accept = "[commander] " + TITLE_2140 + " | PASS=the commander picks one"
+    rows = pub.commander_rows([_row(2140, accept)])
+    assert rows[0]["title"] == TITLE_2140
+    opts = pub.build_board._questions(rows)[0]["options"]
+    assert [o["text"] for o in opts] == [
+        "Keep it mandatory",
+        "make it optional",
+        "allow a per-card waiver",
+    ]
+    assert [o["label"] for o in opts] == [
+        "Keep it mandatory",
+        "Make it optional",
+        "Allow a per-card waiver",
+    ]
+    assert all(o["outcome"] == "pass" for o in opts)
+
+
+def test_three_part_stem_stays_display_only():
+    """'hold it' and 'kill it' are two words, so this stem is not a choice list."""
+    pub = _load()
+    accept = "[commander] Should we ship it, hold it, or kill it? | PASS=the commander picks one"
+    rows = pub.commander_rows([_row(3, accept)])
+    _assert_display_only(pub.build_board._questions(rows)[0]["options"])
