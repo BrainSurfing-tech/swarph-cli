@@ -99,6 +99,11 @@ _CHOICE = re.compile(r"^[A-Za-z][A-Za-z0-9'/-]*(?: [A-Za-z0-9'/-]+)?$")
 _CHOICE_MEDIUM = re.compile(
     r"^[A-Za-z][A-Za-z0-9'/-]*(?: [A-Za-z0-9'/-]+){2,3}$"
 )
+# "Should we ..." is the question, not the first choice (review #2144).
+_STEM = re.compile(
+    r"^(?:Should|Do|Does|Is|Are|Can|Will)\s+\S",
+    re.IGNORECASE,
+)
 
 
 def _choice_clause(title: str) -> str | None:
@@ -128,7 +133,9 @@ def _choices(clause: str) -> list[str] | None:
     not another choice (card #1206, row #2126), so the clause does not parse.
     Three or more options of three or four words, each within 24 characters,
     are a choice list too (card #1206, row #2140). A shorter part in that
-    list is a stem, so the clause stays unparsed.
+    list is a stem, so the clause stays unparsed. A leading interrogative
+    (Should, Do, Does, Is, Are, Can, or Will, plus a subject) keeps the
+    medium and long forms unparsed (card #1206, review #2144).
     """
     # The part the final " or " introduces must not itself contain a comma.
     if re.search(r"\sor\s[^,]*,", clause, re.IGNORECASE):
@@ -145,10 +152,12 @@ def _choices(clause: str) -> list[str] | None:
         return parts
     # Row #2140: every option is 3-4 words and still <= 24 characters, so it
     # misses both the short form and the long form. A 1-2 word part is a stem.
-    if (len(parts) >= 3
+    # A leading interrogative is the question itself, not a choice.
+    stemmed = bool(parts) and _STEM.match(parts[0])
+    if (len(parts) >= 3 and not stemmed
             and all(len(p) <= 24 and _CHOICE_MEDIUM.match(p) for p in parts)):
         return parts
-    if (len(parts) >= 3 and any(len(p) > 24 for p in parts)
+    if (len(parts) >= 3 and not stemmed and any(len(p) > 24 for p in parts)
             and all(p and len(p) <= 120 and "?" not in p for p in parts)):
         return parts
     return None

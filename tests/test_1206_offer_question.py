@@ -294,3 +294,22 @@ def test_three_part_stem_stays_display_only():
     accept = "[commander] Should we ship it, hold it, or kill it? | PASS=the commander picks one"
     rows = pub.commander_rows([_row(3, accept)])
     _assert_display_only(pub.build_board._questions(rows)[0]["options"])
+
+
+# Review #2144. The long branch turns these stems into taps at 0a7bc65.
+STEMS_2144 = (
+    "Should we ship the release, hold the release, or kill the release?",
+    "Should we keep it mandatory, make it optional, or allow a waiver?",
+)
+
+
+def test_2144_stem_titles_stay_display_only():
+    pub = _load()
+    for title in STEMS_2144:
+        accept = "[commander] " + title + " | PASS=the commander picks one"
+        rows = pub.commander_rows([_row(2144, accept)])
+        assert rows[0]["title"] == title
+        opts = pub.build_board._questions(rows)[0]["options"]
+        assert opts[0]["label"] == "Answer on the card", title
+        assert all(o["outcome"] is None for o in opts), title
+        assert [o["text"] for o in opts] != ["yes", "no"]
