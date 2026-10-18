@@ -262,6 +262,55 @@ def test_identity_change_is_skipped_not_killed(tmp_path):
     assert killed == []
 
 
+def test_recycled_pid_between_scan_and_reap_is_skipped(tmp_path):
+    """A pid recycled after the scan must not be signalled, nor its new children.
+
+    The scan classifies 5000 ORPHANED. Before reap, that pid is replaced by
+    sshd with a new starttime. reap_orphans must skip and send no signal.
+    """
+    scope = "tmux-spawn-dead.scope"
+    orphan_cmd = (
+        "/home/u/.local/bin/claude daemon run --origin transient "
+        f"--spawned-by {json.dumps({'label': 'claude', 'pid': 700337})}"
+    )
+    _write_proc(
+        tmp_path, 5000, cmdline=orphan_cmd, ppid=1,
+        cgroup=f"0::/user.slice/{scope}",
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["tmux", "list-sessions"]:
+            return SimpleNamespace(returncode=0, stdout="lab-ovh\n", stderr="")
+        if cmd[:2] == ["tmux", "list-panes"]:
+            return SimpleNamespace(returncode=0, stdout="42\n", stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    result = scan_orphan_daemons(
+        proc_root=tmp_path, caller_pid=99999, run=fake_run,
+    )
+    assert len(result.orphans) == 1
+    assert result.orphans[0].pid == 5000
+
+    # Recycle the daemon pid. New starttime sits at stat field 22 (after[19]).
+    import shutil
+    shutil.rmtree(tmp_path / "5000")
+    _write_proc(tmp_path, 5000, cmdline="/usr/sbin/sshd -D", ppid=1)
+    (tmp_path / "5000" / "stat").write_text(
+        "5000 (sshd) S 1 " + ("0 " * 17) + "99\n"
+    )
+    _write_proc(tmp_path, 5001, cmdline="sshd: child", ppid=5000)
+
+    killed = []
+    reports = reap_orphans(
+        result, proc_root=tmp_path,
+        kill=lambda pid, sig: killed.append((pid, sig)),
+        wait_s=0.01, poll_s=0.001, sleeper=lambda _s: None,
+    )
+    assert killed == []
+    assert any(r.pid == 5000 and r.action == "skipped" for r in reports)
+    assert all(r.pid != 5001 for r in reports)
+
+
 def test_reap_reports_every_pid_and_never_touches_live(tmp_path):
     """A4: every signalled pid is named. LIVE is not in the reap list."""
     import json

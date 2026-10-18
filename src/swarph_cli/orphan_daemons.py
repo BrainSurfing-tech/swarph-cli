@@ -48,6 +48,9 @@ class DaemonReport:
     rss_kb: int = 0
     reason: str = ""
     self_excluded: bool = False
+    # Scan-time /proc starttime (clock ticks). Reap compares this, not a
+    # snapshot taken at signal time, so a pid recycled after the scan is skipped.
+    starttime: Optional[int] = None
 
 
 @dataclass
@@ -413,6 +416,7 @@ def scan_orphan_daemons(
                 rss_kb=rss,
                 reason=reason,
                 self_excluded=related,
+                starttime=read_starttime(pid, proc_root=proc_root),
             )
         )
     return result
@@ -573,15 +577,45 @@ def reap_orphans(
     poll_s: float = _DEFAULT_REAP_POLL_S,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> list[SignalReport]:
-    """Signal only ORPHANED daemons and their trees. LIVE/UNKNOWN untouched."""
+    """Signal only ORPHANED daemons and their trees. LIVE/UNKNOWN untouched.
+
+    The daemon is re-verified against the identity the scan classified
+    (starttime, cmdline, scope on DaemonReport). A mismatch means the pid
+    was recycled after the scan: skip it and do not walk the reap-time
+    child tree. A child is signalled only when its ppid chain reaches that
+    verified daemon.
+    """
     reports: list[SignalReport] = []
     seen: set[int] = set()
     for daemon in result.orphans:
+        if daemon.pid in seen:
+            continue
+        scan_ident = ProcIdentity(
+            pid=daemon.pid,
+            starttime=daemon.starttime,
+            cmdline=daemon.cmdline,
+            scope=daemon.scope,
+        )
+        if not identities_match(
+            scan_ident, snapshot_identity(daemon.pid, proc_root=proc_root),
+        ):
+            seen.add(daemon.pid)
+            reports.append(SignalReport(
+                daemon.pid, "skipped",
+                "scan identity mismatch (starttime/cmdline/scope) — pid recycle, not killed",
+            ))
+            continue
         for pid in reap_order(daemon.pid, proc_root=proc_root):
             if pid in seen:
                 continue
             seen.add(pid)
-            ident = snapshot_identity(pid, proc_root=proc_root)
+            if pid != daemon.pid and daemon.pid not in ancestry_pids(pid, proc_root=proc_root):
+                reports.append(SignalReport(
+                    pid, "skipped",
+                    "ppid chain does not reach the verified daemon",
+                ))
+                continue
+            ident = scan_ident if pid == daemon.pid else snapshot_identity(pid, proc_root=proc_root)
             if ident is None:
                 reports.append(SignalReport(pid, "already-gone", "gone before snapshot"))
                 continue
