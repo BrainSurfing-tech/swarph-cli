@@ -5,6 +5,10 @@ One row per outbound network path in `src/swarph_cli`. Enforced by
 row below keyed by (file, client), or the build fails naming file:line.
 Add a row when you add a network call — that is the point of the inventory.
 
+Runtime check (card #1219): `make egress-probe` runs a smoke subset inside
+`bwrap --unshare-net`. An unlisted connect fails it. A host where that
+isolation cannot be proven exits 2 with `isolation-unproven:`.
+
 | file | client | destination | what it sends | opt-in or default |
 | --- | --- | --- | --- | --- |
 | src/swarph_cli/commands/_gateway_client.py | urllib.request.urlopen | mesh gateway HTTP API (configured base URL; loopback default) | board/mesh API requests as JSON with the caller's bearer token | default (all board/mesh commands) |
