@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -482,6 +483,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(HELP)
         return 0
 
+    # card #1203: inside a cell (SWARPH_SELF set), refuse BEFORE any token
+    # is read -- a cell must not act as the commander by accident. The
+    # explicit --as-operator hatch overrides, loudly (both names on stderr).
+    as_operator = "--as-operator" in stripped
+    if as_operator:
+        stripped = [a for a in stripped if a != "--as-operator"]
+    cell_self = (os.environ.get("SWARPH_SELF") or "").strip()
+    if cell_self and not as_operator:
+        print(f"SWARPH_SELF={cell_self}: this process is inside a cell; "
+              "run swarph-me from a human shell", file=sys.stderr)
+        return 2
+
     try:
         identity, gateway, token = resolve_session(as_name, config_path=config_path)
     except SystemExit as exc:
@@ -490,6 +503,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         print(f"swarph-me: {exc}", file=sys.stderr)
         return 2
+    if cell_self and as_operator:
+        print(f"SWARPH_SELF={cell_self}: --as-operator override; "
+              f"acting as operator {identity}", file=sys.stderr)
 
     try:
         return run_verb(identity, gateway, token, stripped)
