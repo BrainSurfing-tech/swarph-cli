@@ -31,11 +31,16 @@ _LOG_LIMIT_RE = re.compile(
     r"usage limit[^\n]*?try again at\s+(.+?)\s*$",
     re.IGNORECASE | re.MULTILINE)
 _RATE_EXCEEDED_RE = re.compile(r"rate limits? exceeded", re.IGNORECASE)
-# card #1221: one line per provider window. The name (5h, weekly, ...) is
-# not sent; the gateway ranks on used_pct, resets_at and as_of only.
-_WINDOW_LINE_RE = re.compile(
-    r"quota window\s+\S+:\s*([0-9]+(?:\.[0-9]+)?)%\s*used,\s*resets\s+(\S+)",
-    re.IGNORECASE)
+# card #1221: Claude Code /usage, the 2026-10-19 22:42Z capture. The two
+# runway windows are "Current session" and "Current week (all models)".
+# "Current week (Fable)" is the same weekly reset for one model, so it is
+# not a second window. The gateway ranks on used_pct, resets_at and as_of.
+_CLAUDE_USAGE_RE = re.compile(
+    r"^Current (session|week \(all models\)): "
+    r"([0-9]+(?:\.[0-9]+)?)% used \u00b7 resets "
+    r"([A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2}[ap]m) \(UTC\)\s*$",
+    re.MULTILINE,
+)
 
 
 def _iso(dt: datetime) -> str:
@@ -44,12 +49,37 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+def _claude_reset_iso(when: str, as_of: str) -> Optional[str]:
+    """`Oct 20, 2:49am` plus the year of as_of. The capture names no year."""
+    try:
+        anchor = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if anchor.tzinfo is None:
+        return None
+    anchor = anchor.astimezone(timezone.utc)
+    try:
+        parsed = datetime.strptime(
+            f"{when[:-2]}{when[-2:].upper()} {anchor.year}",
+            "%b %d, %I:%M%p %Y",
+        )
+    except ValueError:
+        return None
+    parsed = parsed.replace(tzinfo=timezone.utc)
+    if parsed < anchor - timedelta(days=1):
+        parsed = parsed.replace(year=anchor.year + 1)
+    return parsed.isoformat()
+
+
 def _window_rows(text: str, as_of: str) -> list:
-    """Every `quota window <name>: N% used, resets <iso>` line, in order."""
+    """Session and weekly-all-models lines from a Claude Code /usage display."""
     rows = []
-    for match in _WINDOW_LINE_RE.finditer(text or ""):
-        rows.append({"used_pct": float(match.group(1)),
-                     "resets_at": match.group(2),
+    for match in _CLAUDE_USAGE_RE.finditer(text or ""):
+        reset = _claude_reset_iso(match.group(3), as_of)
+        if reset is None:
+            continue
+        rows.append({"used_pct": float(match.group(2)),
+                     "resets_at": reset,
                      "as_of": as_of})
     return rows
 
@@ -68,10 +98,10 @@ def parse_pane_capture(text: str, as_of: str):
 
     Self-selecting: the codex hit-limit line beats its own heads-up bound;
     a grok modal and a mistral rate error are blocked without figures;
-    anything else (Claude cells, agy labels, empty captures) is None.
-    A capture that names quota windows still returns those windows when the
-    rest of the pane is unknown, so a 5h window and a weekly window are
-    both kept (card #1221).
+    anything else (a Claude cell transcript, agy labels, empty captures)
+    is None. A Claude Code /usage display keeps two windows: the session
+    and the weekly all-models line (card #1221). The per-model week line
+    is not a second runway window.
     """
     text = text or ""
     windows = _window_rows(text, as_of)

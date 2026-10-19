@@ -1,31 +1,39 @@
-"""card #1221 — quota_sync sends every provider window, not one scalar.
+"""card #1221 — quota_sync reads a real Claude Code /usage display.
 
-A reader that holds a 5h window and a weekly window must PUT both as
-{used_pct, resets_at, as_of}. On main, decide_put drops the windows and
-the assertion on quota_windows fails.
+Source: Claude Code /usage, run by the commander in the lab-ovh Claude
+Code session. local-command-stdout at 2026-10-19 22:42Z. The text below
+is that display, verbatim.
+
+Kept windows, in order: Current session (the 5h window) and Current week
+(all models). Current week (Fable) is the same weekly reset for one model
+and is not sent. On the previous head this display parses as None.
 """
 from datetime import datetime, timezone
 
 from swarph_cli import quota_sync as qs
 
-NOW = datetime(2026, 10, 19, 6, 30, tzinfo=timezone.utc)
-AS_OF = NOW.isoformat()
-FIVE_H = "2026-10-19T11:30:00+00:00"
-WEEKLY = "2026-10-26T06:30:00+00:00"
+CAPTURED_AT = datetime(2026, 10, 19, 22, 42, tzinfo=timezone.utc)
+AS_OF = CAPTURED_AT.isoformat()
+SESSION_RESET = "2026-10-20T02:49:00+00:00"
+WEEKLY_RESET = "2026-10-26T16:59:00+00:00"
 
-PANE = (
-    f"quota window 5h: 10% used, resets {FIVE_H}\n"
-    f"quota window weekly: 80% used, resets {WEEKLY}\n"
-)
+USAGE = """You are currently using your subscription to power your Claude Code usage
+
+Current session: 0% used · resets Oct 20, 2:49am (UTC)
+Current week (all models): 1% used · resets Oct 26, 4:59pm (UTC)
+Current week (Fable): 0% used · resets Oct 26, 4:59pm (UTC)
+"""
 
 
-def test_reader_with_5h_and_weekly_sends_both_windows():
-    record = qs.parse_pane_capture(PANE, AS_OF)
+def test_usage_display_sends_the_session_and_the_weekly_window():
+    record = qs.parse_pane_capture(USAGE, AS_OF)
     assert record is not None
-    body = qs.decide_put(None, record, NOW)
-    assert body is not None
-    assert body["quota_windows"] == [
-        {"used_pct": 10.0, "resets_at": FIVE_H, "as_of": AS_OF},
-        {"used_pct": 80.0, "resets_at": WEEKLY, "as_of": AS_OF},
+    assert record["windows"] == [
+        {"used_pct": 0.0, "resets_at": SESSION_RESET, "as_of": AS_OF},
+        {"used_pct": 1.0, "resets_at": WEEKLY_RESET, "as_of": AS_OF},
     ]
-    assert "quota_as_of" in body
+    assert "Fable" not in str(record["windows"])
+    body = qs.decide_put(None, record, CAPTURED_AT)
+    assert body is not None
+    assert body["quota_windows"] == record["windows"]
+    assert body["quota_as_of"] == AS_OF
