@@ -12,9 +12,12 @@ or null, and never clears a prior quota or block.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
+
+log = logging.getLogger(__name__)
 
 READ_COOLDOWN = timedelta(minutes=5)
 BLOCK_HOLD = timedelta(minutes=5)
@@ -38,7 +41,7 @@ _RATE_EXCEEDED_RE = re.compile(r"rate limits? exceeded", re.IGNORECASE)
 _CLAUDE_USAGE_RE = re.compile(
     r"^Current (session|week \(all models\)): "
     r"([0-9]+(?:\.[0-9]+)?)% used \u00b7 resets "
-    r"([A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2}[ap]m) \(UTC\)\s*$",
+    r"(?:([A-Z][a-z]{2} \d{1,2}), )?(\d{1,2}(?::\d{2})?[ap]m) \(UTC\)\s*$",
     re.MULTILINE,
 )
 
@@ -49,8 +52,17 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
-def _claude_reset_iso(when: str, as_of: str) -> Optional[str]:
-    """`Oct 20, 2:49am` plus the year of as_of. The capture names no year."""
+def _clock(clock: str) -> Optional[datetime]:
+    """`4:59pm` or the on-the-hour form `5pm`."""
+    norm = clock[:-2] + clock[-2:].upper()
+    try:
+        return datetime.strptime(norm, "%I:%M%p" if ":" in norm else "%I%p")
+    except ValueError:
+        return None
+
+
+def _claude_reset_iso(date: Optional[str], clock: str, as_of: str) -> Optional[str]:
+    """A dated reset uses as_of's year. A bare clock is the next time after as_of."""
     try:
         anchor = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
     except ValueError:
@@ -58,10 +70,21 @@ def _claude_reset_iso(when: str, as_of: str) -> Optional[str]:
     if anchor.tzinfo is None:
         return None
     anchor = anchor.astimezone(timezone.utc)
+    clock_dt = _clock(clock)
+    if clock_dt is None:
+        return None
+    if not date:
+        candidate = anchor.replace(
+            hour=clock_dt.hour, minute=clock_dt.minute,
+            second=0, microsecond=0)
+        if candidate <= anchor:
+            candidate += timedelta(days=1)
+        return candidate.isoformat()
+    norm = clock[:-2] + clock[-2:].upper()
     try:
         parsed = datetime.strptime(
-            f"{when[:-2]}{when[-2:].upper()} {anchor.year}",
-            "%b %d, %I:%M%p %Y",
+            f"{date} {norm} {anchor.year}",
+            "%b %d " + ("%I:%M%p" if ":" in norm else "%I%p") + " %Y",
         )
     except ValueError:
         return None
@@ -72,15 +95,28 @@ def _claude_reset_iso(when: str, as_of: str) -> Optional[str]:
 
 
 def _window_rows(text: str, as_of: str) -> list:
-    """Session and weekly-all-models lines from a Claude Code /usage display."""
+    """Session and weekly-all-models lines from a Claude Code /usage display.
+
+    Both lines or neither. One parsed window is the 5h mask card #1217
+    exists to stop, so it is dropped and the scalar path is what remains.
+    """
     rows = []
+    names = []
     for match in _CLAUDE_USAGE_RE.finditer(text or ""):
-        reset = _claude_reset_iso(match.group(3), as_of)
+        reset = _claude_reset_iso(match.group(3), match.group(4), as_of)
         if reset is None:
             continue
+        names.append(match.group(1))
         rows.append({"used_pct": float(match.group(2)),
                      "resets_at": reset,
                      "as_of": as_of})
+    if len(rows) == 1:
+        missing = "weekly" if names[0] == "session" else "session"
+        log.warning(
+            "quota windows dropped: parsed %s only, %s did not parse; "
+            "sending no quota_windows",
+            names[0], missing)
+        return []
     return rows
 
 
