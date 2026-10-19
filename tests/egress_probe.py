@@ -140,7 +140,7 @@ def run_script(source: str, allowed: set[str]) -> tuple[int, list[str]]:
     with open(script, "w", encoding="utf-8") as fh:
         fh.write(source)
     cmd = [
-        bwrap, "--unshare-net", "--die-with-parent",
+        bwrap, "--unshare-user", "--unshare-net", "--die-with-parent",
         "--ro-bind", "/", "/",
         "--bind", work, work,
         "--dev", "/dev", "--proc", "/proc",
@@ -182,7 +182,7 @@ def prove_isolation() -> int:
     with open(script, "w", encoding="utf-8") as fh:
         fh.write(source)
     cmd = [
-        bwrap, "--unshare-net", "--die-with-parent",
+        bwrap, "--unshare-user", "--unshare-net", "--die-with-parent",
         "--ro-bind", "/", "/",
         "--bind", work, work,
         "--dev", "/dev", "--proc", "/proc",

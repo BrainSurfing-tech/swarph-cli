@@ -65,6 +65,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap strace
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       # Primary gate + §5.3 verdict re-derivation: run the suite to a junit record,
       # then RE-DERIVE the verdict from per-test records (not the bare exit code) —
