@@ -95,29 +95,35 @@ def _claude_reset_iso(date: Optional[str], clock: str, as_of: str) -> Optional[s
 
 
 def _window_rows(text: str, as_of: str) -> list:
-    """Session and weekly-all-models lines from a Claude Code /usage display.
+    """Last session line and last weekly-all-models line, or neither.
 
-    Both lines or neither. One parsed window is the 5h mask card #1217
-    exists to stop, so it is dropped and the scalar path is what remains.
+    A pane can repeat a name or hold an older /usage display above a newer
+    one. Counting rows would send two session windows, or stamp the stale
+    display as current, which is the 5h mask card #1217 exists to stop.
+    The set is the last line of each name, and it is sent only when both
+    names parsed.
     """
-    rows = []
-    names = []
+    by_name = {}
     for match in _CLAUDE_USAGE_RE.finditer(text or ""):
         reset = _claude_reset_iso(match.group(3), match.group(4), as_of)
         if reset is None:
             continue
-        names.append(match.group(1))
-        rows.append({"used_pct": float(match.group(2)),
-                     "resets_at": reset,
-                     "as_of": as_of})
-    if len(rows) == 1:
-        missing = "weekly" if names[0] == "session" else "session"
-        log.warning(
-            "quota windows dropped: parsed %s only, %s did not parse; "
-            "sending no quota_windows",
-            names[0], missing)
+        by_name[match.group(1)] = {"used_pct": float(match.group(2)),
+                                   "resets_at": reset,
+                                   "as_of": as_of}
+    session = by_name.get("session")
+    weekly = by_name.get("week (all models)")
+    if session is not None and weekly is not None:
+        return [session, weekly]
+    if session is None and weekly is None:
         return []
-    return rows
+    found = "session" if session is not None else "week (all models)"
+    missing = "weekly" if session is not None else "session"
+    log.warning(
+        "quota windows dropped: parsed %s only, %s did not parse; "
+        "sending no quota_windows",
+        found, missing)
+    return []
 
 
 def _with_windows(record: Optional[dict], windows: list) -> Optional[dict]:

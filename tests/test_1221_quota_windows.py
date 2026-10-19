@@ -42,11 +42,18 @@ def test_usage_display_sends_the_session_and_the_weekly_window():
     assert body["quota_as_of"] == AS_OF
 
 
-def _lines(session_when: str, weekly_when: str) -> str:
+def _session(pct: int, when: str) -> str:
+    return f"Current session: {pct}% used {DOT} resets {when} (UTC)\n"
+
+
+def _weekly(pct: int, when: str) -> str:
     return (
-        f"Current session: 0% used {DOT} resets {session_when} (UTC)\n"
-        f"Current week (all models): 1% used {DOT} resets {weekly_when} (UTC)\n"
+        f"Current week (all models): {pct}% used {DOT} resets {when} (UTC)\n"
     )
+
+
+def _lines(session_when: str, weekly_when: str) -> str:
+    return _session(0, session_when) + _weekly(1, weekly_when)
 
 
 def test_hour_only_and_minute_resets_both_parse():
@@ -83,3 +90,25 @@ def test_one_parsed_window_sends_no_quota_windows(caplog):
     assert scalar is not None
     assert "quota_windows" not in scalar
     assert scalar["quota_used_pct"] == 40.0
+
+
+def test_two_session_lines_and_no_weekly_send_no_quota_windows():
+    text = _session(0, "Oct 20, 2:49am") + _session(5, "Oct 20, 3:49am")
+    record = qs.parse_pane_capture(text, AS_OF)
+    assert record is None or "windows" not in record
+    body = qs.decide_put(None, record, CAPTURED_AT)
+    assert body is None or "quota_windows" not in body
+
+
+def test_newer_display_replaces_the_older_one_on_the_same_capture():
+    older = _session(10, "Oct 20, 1:00am") + _weekly(20, "Oct 26, 3:00pm")
+    newer = _session(0, "Oct 20, 2:49am") + _weekly(1, "Oct 26, 4:59pm")
+    record = qs.parse_pane_capture(older + newer, AS_OF)
+    assert record is not None and len(record["windows"]) == 2
+    assert record["windows"] == [
+        {"used_pct": 0.0, "resets_at": "2026-10-20T02:49:00+00:00", "as_of": AS_OF},
+        {"used_pct": 1.0, "resets_at": WEEKLY_RESET, "as_of": AS_OF},
+    ]
+    body = qs.decide_put(None, record, CAPTURED_AT)
+    assert body is not None
+    assert body["quota_windows"] == record["windows"]
