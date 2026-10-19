@@ -12,9 +12,12 @@ or null, and never clears a prior quota or block.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
+
+log = logging.getLogger(__name__)
 
 READ_COOLDOWN = timedelta(minutes=5)
 BLOCK_HOLD = timedelta(minutes=5)
@@ -31,6 +34,16 @@ _LOG_LIMIT_RE = re.compile(
     r"usage limit[^\n]*?try again at\s+(.+?)\s*$",
     re.IGNORECASE | re.MULTILINE)
 _RATE_EXCEEDED_RE = re.compile(r"rate limits? exceeded", re.IGNORECASE)
+# card #1221: Claude Code /usage, the 2026-10-19 22:42Z capture. The two
+# runway windows are "Current session" and "Current week (all models)".
+# "Current week (Fable)" is the same weekly reset for one model, so it is
+# not a second window. The gateway ranks on used_pct, resets_at and as_of.
+_CLAUDE_USAGE_RE = re.compile(
+    r"^Current (session|week \(all models\)): "
+    r"([0-9]+(?:\.[0-9]+)?)% used \u00b7 resets "
+    r"(?:([A-Z][a-z]{2} \d{1,2}), )?(\d{1,2}(?::\d{2})?[ap]m) \(UTC\)\s*$",
+    re.MULTILINE,
+)
 
 
 def _iso(dt: datetime) -> str:
@@ -39,40 +52,136 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+def _clock(clock: str) -> Optional[datetime]:
+    """`4:59pm` or the on-the-hour form `5pm`."""
+    norm = clock[:-2] + clock[-2:].upper()
+    try:
+        return datetime.strptime(norm, "%I:%M%p" if ":" in norm else "%I%p")
+    except ValueError:
+        return None
+
+
+def _claude_reset_iso(date: Optional[str], clock: str, as_of: str) -> Optional[str]:
+    """A dated reset uses as_of's year. A bare clock is the next time after as_of."""
+    try:
+        anchor = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if anchor.tzinfo is None:
+        return None
+    anchor = anchor.astimezone(timezone.utc)
+    clock_dt = _clock(clock)
+    if clock_dt is None:
+        return None
+    if not date:
+        candidate = anchor.replace(
+            hour=clock_dt.hour, minute=clock_dt.minute,
+            second=0, microsecond=0)
+        if candidate <= anchor:
+            candidate += timedelta(days=1)
+        return candidate.isoformat()
+    norm = clock[:-2] + clock[-2:].upper()
+    try:
+        parsed = datetime.strptime(
+            f"{date} {norm} {anchor.year}",
+            "%b %d " + ("%I:%M%p" if ":" in norm else "%I%p") + " %Y",
+        )
+    except ValueError:
+        return None
+    parsed = parsed.replace(tzinfo=timezone.utc)
+    if parsed < anchor - timedelta(days=1):
+        parsed = parsed.replace(year=anchor.year + 1)
+    return parsed.isoformat()
+
+
+def _window_rows(text: str, as_of: str) -> list:
+    """Last session line and last weekly-all-models line, or neither.
+
+    A pane can repeat a name or hold an older /usage display above a newer
+    one. Counting rows would send two session windows, or stamp the stale
+    display as current, which is the 5h mask card #1217 exists to stop.
+    The set is the last line of each name, and it is sent only when both
+    names parsed.
+    """
+    by_name = {}
+    for match in _CLAUDE_USAGE_RE.finditer(text or ""):
+        reset = _claude_reset_iso(match.group(3), match.group(4), as_of)
+        if reset is None:
+            continue
+        by_name[match.group(1)] = {"used_pct": float(match.group(2)),
+                                   "resets_at": reset,
+                                   "as_of": as_of}
+    session = by_name.get("session")
+    weekly = by_name.get("week (all models)")
+    if session is not None and weekly is not None:
+        return [session, weekly]
+    if session is None and weekly is None:
+        return []
+    found = "session" if session is not None else "week (all models)"
+    missing = "weekly" if session is not None else "session"
+    log.warning(
+        "quota windows dropped: parsed %s only, %s did not parse; "
+        "sending no quota_windows",
+        found, missing)
+    return []
+
+
+def _with_windows(record: Optional[dict], windows: list) -> Optional[dict]:
+    if record is None:
+        return None
+    if windows:
+        record = dict(record)
+        record["windows"] = windows
+    return record
+
+
 def parse_pane_capture(text: str, as_of: str):
     """One read-only pane capture -> a usage record, or None (unknown).
 
     Self-selecting: the codex hit-limit line beats its own heads-up bound;
     a grok modal and a mistral rate error are blocked without figures;
-    anything else (Claude cells, agy labels, empty captures) is None.
+    anything else (a Claude cell transcript, agy labels, empty captures)
+    is None. A Claude Code /usage display keeps two windows: the session
+    and the weekly all-models line (card #1221). The per-model week line
+    is not a second runway window.
     """
     text = text or ""
+    windows = _window_rows(text, as_of)
     low = text.lower()
     # The mistral provider error surfaces in pane output but is classified
     # source 'error' per ruling 2 — it is an API error, not a usage display.
     if _RATE_EXCEEDED_RE.search(text):
-        return {"used_pct": None, "credits": None, "reset_at": None,
-                "blocked": True, "source": "error", "as_of": as_of}
+        return _with_windows(
+            {"used_pct": None, "credits": None, "reset_at": None,
+             "blocked": True, "source": "error", "as_of": as_of}, windows)
     if "buy more credits" in low and "try again" in low:
-        return {"used_pct": None, "credits": None, "reset_at": None,
-                "blocked": True, "source": "pane", "as_of": as_of}
+        return _with_windows(
+            {"used_pct": None, "credits": None, "reset_at": None,
+             "blocked": True, "source": "pane", "as_of": as_of}, windows)
     hit = _CODEX_HIT_RE.search(text)
     if hit:
         # A trailing period is sentence punctuation, not timestamp.
         reset = hit.group(1).strip().rstrip(".").strip() or None
-        return {"used_pct": 100, "credits": None, "reset_at": reset,
-                "blocked": True, "source": "pane", "as_of": as_of}
+        return _with_windows(
+            {"used_pct": 100, "credits": None, "reset_at": reset,
+             "blocked": True, "source": "pane", "as_of": as_of}, windows)
     bound = _CODEX_BOUND_RE.search(text)
     if bound:
         # A bound, not a measurement: used_pct stays null (ruling 2).
-        return {"used_pct": None, "credits": None, "reset_at": None,
-                "blocked": False, "source": "pane", "as_of": as_of,
-                "bound_left_pct": float(bound.group(1))}
+        return _with_windows(
+            {"used_pct": None, "credits": None, "reset_at": None,
+             "blocked": False, "source": "pane", "as_of": as_of,
+             "bound_left_pct": float(bound.group(1))}, windows)
     copilot = _COPILOT_RE.search(text)
     if copilot:
-        return {"used_pct": None, "credits": float(copilot.group(1)),
-                "reset_at": None, "blocked": False, "source": "pane",
-                "as_of": as_of}
+        return _with_windows(
+            {"used_pct": None, "credits": float(copilot.group(1)),
+             "reset_at": None, "blocked": False, "source": "pane",
+             "as_of": as_of}, windows)
+    if windows:
+        return {"used_pct": None, "credits": None, "reset_at": None,
+                "blocked": False, "source": "pane", "as_of": as_of,
+                "windows": windows}
     return None
 
 
@@ -111,6 +220,17 @@ def decide_put(prior: Optional[dict], record: Optional[dict],
     used = record.get("used_pct")
     if used is not None and used != prior.get("quota_used_pct"):
         body["quota_used_pct"] = used
+    windows = []
+    for window in record.get("windows") or []:
+        pct = window.get("used_pct")
+        reset = window.get("resets_at")
+        if pct is None or not reset:
+            continue
+        windows.append({"used_pct": float(pct),
+                        "resets_at": str(reset),
+                        "as_of": window.get("as_of") or as_of})
+    if windows and windows != (prior.get("quota_windows") or []):
+        body["quota_windows"] = windows
     if record.get("blocked"):
         reset = record.get("reset_at")
         until = reset if reset else _iso(now + BLOCK_HOLD)
