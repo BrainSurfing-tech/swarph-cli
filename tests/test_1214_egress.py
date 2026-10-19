@@ -232,6 +232,18 @@ _MUTANTS = {
     "M13_websockets_connect": (
         "src/swarph_cli/mod.py",
         "import websockets\n\ndef go():\n    return websockets.connect('wss://example.invalid')\n"),
+    "M9_socket_create_connection": (
+        "src/swarph_cli/mod.py",
+        "import socket\n\ndef go():\n"
+        "    return socket.create_connection(('example.invalid', 443))\n"),
+    "M10_subprocess_curl": (
+        "src/swarph_cli/mod.py",
+        "import subprocess\n\ndef go():\n"
+        "    return subprocess.run(['curl', 'https://example.invalid/x'])\n"),
+    "M11_subprocess_ssh": (
+        "src/swarph_cli/mod.py",
+        "import subprocess\n\ndef go():\n"
+        "    return subprocess.run(['ssh', 'example.invalid', 'true'])\n"),
 }
 
 
