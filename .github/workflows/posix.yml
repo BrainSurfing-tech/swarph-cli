@@ -58,6 +58,17 @@ jobs:
       - name: Install (editable + dev + server extras)
         run: python -m pip install --upgrade pip && pip install -e ".[dev,gateway,service]"
 
+      # card #1219: the suite's egress-probe tests need a real netns. Installed
+      # before pytest so those tests run, rather than failing closed for a
+      # missing bwrap that CI could have provided.
+      - name: Install bubblewrap and strace (card #1219)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap strace
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       # Primary gate + §5.3 verdict re-derivation: run the suite to a junit record,
       # then RE-DERIVE the verdict from per-test records (not the bare exit code) —
       # assert zero failures/errors AND that a host-known minimum actually RAN
@@ -83,6 +94,12 @@ jobs:
       # sys.platform), so it runs natively on ubuntu/macos — the whole point of
       # this leg. It must NOT skip out (anti-hollow #68 LOW): a floor of 60
       # non-skipped (current ~68) turns red if these are ever win32-gated away.
+      # card #1219: the smoke subset with no route out. Fails closed if
+      # bwrap cannot prove isolation.
+      - name: Runtime egress probe (card #1219)
+        if: matrix.python-version == '3.12'
+        run: make egress-probe
+
       - name: Spawn node-id floor (cross-OS command builder must run)
         run: |
           pytest -v --no-header --junit-xml=spawn.xml tests/test_spawn_command.py
