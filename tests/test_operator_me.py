@@ -37,16 +37,19 @@ def _module_files() -> list[Path]:
     return sorted(OPERATOR_ROOT.rglob("*.py"))
 
 
-def test_operator_package_never_mentions_swarph_self():
+def test_operator_package_mentions_swarph_self_only_to_refuse():
+    """Card #1203 overturns the never-mention rule: cli.py reads SWARPH_SELF
+    ONLY to refuse inside a cell. No other operator module may mention it."""
     offenders = []
     for path in _module_files():
+        if path.name == "cli.py":
+            continue
         text = path.read_text(encoding="utf-8")
         if "SWARPH_SELF" in text:
             offenders.append(str(path.relative_to(OPERATOR_ROOT.parent.parent)))
-    assert not offenders, (
-        "swarph_cli.operator must not mention SWARPH_SELF anywhere — "
-        f"found in: {offenders}"
-    )
+    assert not offenders, f"SWARPH_SELF mentioned outside the refusal: {offenders}"
+    cli_text = (OPERATOR_ROOT / "cli.py").read_text(encoding="utf-8")
+    assert "this process is inside a cell" in cli_text
 
 
 def test_operator_import_graph_forbids_cell_identity_modules():

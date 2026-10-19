@@ -121,7 +121,10 @@ def test_mcp_codegraph_identity_is_SELF_first(clean, monkeypatch):
 # swarph_cli is not importable, so their module scope is stdlib-only (pinned by
 # test_cell_selfcheck / test_139_tool_probe). They cannot import swarph_cli.identity.
 # Both read SWARPH_SELF directly and neither falls back to a peer name.
-_BARE_FILE_MODULES = {"commands/cell_selfcheck.py", "commands/cell_probe.py"}
+_BARE_FILE_MODULES = {"commands/cell_selfcheck.py", "commands/cell_probe.py",
+                      # card #1203: operator/cli.py reads SWARPH_SELF ONLY to
+                      # REFUSE inside a cell, never to resolve an identity.
+                      "operator/cli.py"}
 
 
 def test_no_module_but_identity_reads_an_identity_variable():
