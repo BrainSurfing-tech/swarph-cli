@@ -1,7 +1,13 @@
 .PHONY: egress-probe
 
-# card #1219: real swarph-cli tests inside bwrap --unshare-net.
-# IP-literal TCP only; a hostname that never leaves the stub resolver
-# is not judged. Exit 2 names the reason when isolation cannot be proven.
+# card #1225: the whole tests/ tree except the probe's own suite, which
+# launches the unlisted-connect mutants and would trip the outer trace.
+# IP-literal TCP only. GNU make turns any recipe failure into exit 2, so
+# the status line is the probe's own code (1 leak, 2 isolation-unproven).
 egress-probe:
-	python3 tests/egress_probe.py --pytest tests/test_1214_egress.py tests/test_1071_quota_sync.py
+	@python3 tests/egress_probe.py --pytest tests \
+		--ignore=tests/test_1219_egress_probe.py \
+		--ignore=tests/egress_probe.py; \
+	status=$$?; \
+	echo "egress-probe-status $$status"; \
+	exit $$status
