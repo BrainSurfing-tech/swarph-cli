@@ -23,6 +23,28 @@ _MODULE_KINDS = {
 }
 _HTTP_ATTRS = {"get", "post", "put", "delete", "head", "patch", "request"}
 _SUBPROCESS_TOOLS = {"curl", "wget", "ssh", "scp"}
+_CONSTRUCTOR_MODULE = {
+    "Session": "requests", "Client": "httpx",
+    "AsyncClient": "httpx", "ClientSession": "aiohttp",
+}
+
+
+def _constructor_kind(dotted, bindings, fn_bindings):
+    """Client kind for a session/client construction call, in either
+    from-import form (Session()) or attribute form (requests.Session()),
+    else None."""
+    if not dotted:
+        return None
+    attr = dotted.rsplit(".", 1)[-1]
+    module = _CONSTRUCTOR_MODULE.get(attr)
+    if module is None:
+        return None
+    if "." not in dotted:  # bare Name: Session()
+        return f"{module}.{attr}"
+    root = dotted.split(".")[0]
+    if bindings.get(root) == module:
+        return f"{module}.{attr}"
+    return None
 
 
 def _dotted(node):
@@ -93,6 +115,23 @@ def scan(root: Path):
                     for t in node.targets:
                         if isinstance(t, ast.Name):
                             opener_vars.add(t.id)
+        var_kinds = {}  # session variable name -> client kind
+        for node in ast.walk(tree):
+            value = None
+            targets = []
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                value, targets = node.value, [t for t in node.targets
+                                              if isinstance(t, ast.Name)]
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                for item in node.items:
+                    if isinstance(item.context_expr, ast.Call) \
+                            and isinstance(item.optional_vars, ast.Name):
+                        value, targets = item.context_expr, [item.optional_vars]
+            if value is not None:
+                ck = _constructor_kind(_dotted(value.func), bindings, fn_bindings)
+                if ck:
+                    for t in targets:
+                        var_kinds[t.id] = ck
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -111,6 +150,21 @@ def scan(root: Path):
             elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) \
                     and node.func.value.id in opener_vars and attr == "open":
                 kind = "urllib.request.urlopen"  # opener.open(...)
+            elif _constructor_kind(dotted, bindings, fn_bindings):
+                kind = _constructor_kind(dotted, bindings, fn_bindings)
+            elif isinstance(node.func, ast.Attribute) \
+                    and isinstance(node.func.value, ast.Call) \
+                    and _constructor_kind(_dotted(node.func.value.func),
+                                          bindings, fn_bindings):
+                # requests.Session().post(u): call on a fresh construction
+                kind = _constructor_kind(_dotted(node.func.value.func),
+                                         bindings, fn_bindings)
+            elif isinstance(node.func, ast.Attribute) \
+                    and isinstance(node.func.value, ast.Name) \
+                    and node.func.value.id in var_kinds \
+                    and attr in _HTTP_ATTRS:
+                # s = requests.Session(); s.post(u)
+                kind = var_kinds[node.func.value.id]
             elif dotted.endswith(".urlopen") and bindings.get(root_name) == "urllib.request":
                 kind = "urllib.request.urlopen"
             elif dotted.endswith(".HTTPConnection") or dotted.endswith(".HTTPSConnection"):
@@ -244,6 +298,21 @@ _MUTANTS = {
         "src/swarph_cli/mod.py",
         "import subprocess\n\ndef go():\n"
         "    return subprocess.run(['ssh', 'example.invalid', 'true'])\n"),
+    "M14_requests_Session_attr_post": (
+        "src/swarph_cli/mod.py",
+        "import requests\n\ndef go(u):\n"
+        "    return requests.Session().post(u)\n"),
+    "M15_requests_Session_var_post": (
+        "src/swarph_cli/mod.py",
+        "import requests\n\ndef go(u):\n"
+        "    s = requests.Session()\n    return s.post(u)\n"),
+    "M16_httpx_Client_attr": (
+        "src/swarph_cli/mod.py",
+        "import httpx\n\ndef go(u):\n    return httpx.Client().post(u)\n"),
+    "M17_aiohttp_ClientSession_attr": (
+        "src/swarph_cli/mod.py",
+        "import aiohttp\n\nasync def go():\n"
+        "    async with aiohttp.ClientSession() as s:\n        return s\n"),
 }
 
 
