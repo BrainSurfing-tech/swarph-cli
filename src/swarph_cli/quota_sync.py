@@ -31,6 +31,11 @@ _LOG_LIMIT_RE = re.compile(
     r"usage limit[^\n]*?try again at\s+(.+?)\s*$",
     re.IGNORECASE | re.MULTILINE)
 _RATE_EXCEEDED_RE = re.compile(r"rate limits? exceeded", re.IGNORECASE)
+# card #1221: one line per provider window. The name (5h, weekly, ...) is
+# not sent; the gateway ranks on used_pct, resets_at and as_of only.
+_WINDOW_LINE_RE = re.compile(
+    r"quota window\s+\S+:\s*([0-9]+(?:\.[0-9]+)?)%\s*used,\s*resets\s+(\S+)",
+    re.IGNORECASE)
 
 
 def _iso(dt: datetime) -> str:
@@ -39,40 +44,72 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+def _window_rows(text: str, as_of: str) -> list:
+    """Every `quota window <name>: N% used, resets <iso>` line, in order."""
+    rows = []
+    for match in _WINDOW_LINE_RE.finditer(text or ""):
+        rows.append({"used_pct": float(match.group(1)),
+                     "resets_at": match.group(2),
+                     "as_of": as_of})
+    return rows
+
+
+def _with_windows(record: Optional[dict], windows: list) -> Optional[dict]:
+    if record is None:
+        return None
+    if windows:
+        record = dict(record)
+        record["windows"] = windows
+    return record
+
+
 def parse_pane_capture(text: str, as_of: str):
     """One read-only pane capture -> a usage record, or None (unknown).
 
     Self-selecting: the codex hit-limit line beats its own heads-up bound;
     a grok modal and a mistral rate error are blocked without figures;
     anything else (Claude cells, agy labels, empty captures) is None.
+    A capture that names quota windows still returns those windows when the
+    rest of the pane is unknown, so a 5h window and a weekly window are
+    both kept (card #1221).
     """
     text = text or ""
+    windows = _window_rows(text, as_of)
     low = text.lower()
     # The mistral provider error surfaces in pane output but is classified
     # source 'error' per ruling 2 — it is an API error, not a usage display.
     if _RATE_EXCEEDED_RE.search(text):
-        return {"used_pct": None, "credits": None, "reset_at": None,
-                "blocked": True, "source": "error", "as_of": as_of}
+        return _with_windows(
+            {"used_pct": None, "credits": None, "reset_at": None,
+             "blocked": True, "source": "error", "as_of": as_of}, windows)
     if "buy more credits" in low and "try again" in low:
-        return {"used_pct": None, "credits": None, "reset_at": None,
-                "blocked": True, "source": "pane", "as_of": as_of}
+        return _with_windows(
+            {"used_pct": None, "credits": None, "reset_at": None,
+             "blocked": True, "source": "pane", "as_of": as_of}, windows)
     hit = _CODEX_HIT_RE.search(text)
     if hit:
         # A trailing period is sentence punctuation, not timestamp.
         reset = hit.group(1).strip().rstrip(".").strip() or None
-        return {"used_pct": 100, "credits": None, "reset_at": reset,
-                "blocked": True, "source": "pane", "as_of": as_of}
+        return _with_windows(
+            {"used_pct": 100, "credits": None, "reset_at": reset,
+             "blocked": True, "source": "pane", "as_of": as_of}, windows)
     bound = _CODEX_BOUND_RE.search(text)
     if bound:
         # A bound, not a measurement: used_pct stays null (ruling 2).
-        return {"used_pct": None, "credits": None, "reset_at": None,
-                "blocked": False, "source": "pane", "as_of": as_of,
-                "bound_left_pct": float(bound.group(1))}
+        return _with_windows(
+            {"used_pct": None, "credits": None, "reset_at": None,
+             "blocked": False, "source": "pane", "as_of": as_of,
+             "bound_left_pct": float(bound.group(1))}, windows)
     copilot = _COPILOT_RE.search(text)
     if copilot:
-        return {"used_pct": None, "credits": float(copilot.group(1)),
-                "reset_at": None, "blocked": False, "source": "pane",
-                "as_of": as_of}
+        return _with_windows(
+            {"used_pct": None, "credits": float(copilot.group(1)),
+             "reset_at": None, "blocked": False, "source": "pane",
+             "as_of": as_of}, windows)
+    if windows:
+        return {"used_pct": None, "credits": None, "reset_at": None,
+                "blocked": False, "source": "pane", "as_of": as_of,
+                "windows": windows}
     return None
 
 
@@ -111,6 +148,17 @@ def decide_put(prior: Optional[dict], record: Optional[dict],
     used = record.get("used_pct")
     if used is not None and used != prior.get("quota_used_pct"):
         body["quota_used_pct"] = used
+    windows = []
+    for window in record.get("windows") or []:
+        pct = window.get("used_pct")
+        reset = window.get("resets_at")
+        if pct is None or not reset:
+            continue
+        windows.append({"used_pct": float(pct),
+                        "resets_at": str(reset),
+                        "as_of": window.get("as_of") or as_of})
+    if windows and windows != (prior.get("quota_windows") or []):
+        body["quota_windows"] = windows
     if record.get("blocked"):
         reset = record.get("reset_at")
         until = reset if reset else _iso(now + BLOCK_HOLD)
