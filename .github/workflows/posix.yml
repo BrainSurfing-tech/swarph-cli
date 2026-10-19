@@ -94,8 +94,8 @@ jobs:
       # sys.platform), so it runs natively on ubuntu/macos — the whole point of
       # this leg. It must NOT skip out (anti-hollow #68 LOW): a floor of 60
       # non-skipped (current ~68) turns red if these are ever win32-gated away.
-      # card #1219: the smoke subset with no route out. Fails closed if
-      # bwrap cannot prove isolation.
+      # card #1219 / #1225: the suite except the probe's own tests, with
+      # no route out. Fails closed if bwrap cannot prove isolation.
       - name: Runtime egress probe (card #1219)
         if: matrix.python-version == '3.12'
         run: make egress-probe

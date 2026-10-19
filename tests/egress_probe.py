@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Runtime egress probe (card #1219).
 
-``make egress-probe`` runs a real pytest subset of swarph-cli under
-``bwrap --unshare-net`` and fails if strace sees an unlisted IP-literal
-TCP connect, or an exec of curl/wget/ssh/scp to a destination EGRESS.md
-does not name.
+``make egress-probe`` runs the swarph-cli suite (every file under
+``tests/`` except this probe's own tests) under ``bwrap --unshare-net``
+and fails if strace sees an unlisted IP-literal TCP connect, or an exec
+of curl/wget/ssh/scp to a destination EGRESS.md does not name.
 
 Scope of a connect: IP literals only, IPv4 and IPv6. A hostname lookup
 shows up as a connect to the stub resolver (127.0.0.53); that is not a
@@ -13,7 +13,9 @@ so a listed urlopen and an unlisted hostname cannot be told apart.
 Loopback addresses are ignored. Exec of curl/wget/ssh/scp is judged from
 the destination written in its argv.
 
-Isolation is real only when the control connect fails with ENETUNREACH.
+The operator's live gateway URL is unset inside the suite so a
+developer machine does not dial it. Isolation is real only when the
+control connect fails with ENETUNREACH.
 A connect that merely fails (TEST-NET on a host that still has a route)
 is not proof. When isolation cannot be proven the process exits 2 and
 writes ``isolation-unproven: <reason>`` to stderr.
@@ -235,11 +237,16 @@ def prove_isolation() -> int:
 
 
 def run_pytest(cwd: Path, paths: list[str], allowed: set[str]) -> int:
-    """Run pytest paths inside the netns. Non-zero if an unlisted connect
-    is traced. Pytest's own exit code is not the verdict: a test can pass
-    while the trace shows a connect the test did not assert on."""
+    """Run pytest paths inside the netns.
+
+    A clean trace with pytest exit 1 is not a leak: the trace is the
+    verdict for a real run. Pytest exit 2 through 5 means the run did
+    not happen (interrupted, internal error, usage error, nothing
+    collected), and that is isolation-unproven rather than a pass.
+    """
     code = prove_isolation()
     if code != 0:
+        print("pytest isolation was not proven", file=sys.stderr)
         return code
     bwrap = _bwrap()
     strace = _strace()
@@ -257,19 +264,29 @@ def run_pytest(cwd: Path, paths: list[str], allowed: set[str]) -> int:
         "--bind", str(cwd), str(cwd),
         "--chdir", str(cwd),
         "--dev", "/dev", "--proc", "/proc",
+        "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
+        # The operator's live gateway must not ride into the suite.
+        "--unsetenv", "MESH_GATEWAY_URL",
+        "--unsetenv", "MESH_GATEWAY_TOKEN",
+        "--unsetenv", "SWARPH_BRAIN_GATEWAY",
+        "--unsetenv", "SWARPH_BRAIN_MCP",
         strace, "-f", "-e", "trace=connect,execve", "-s", "400",
         "-o", trace_path,
         sys.executable, "-m", "pytest", "-q", "--tb=line", *paths,
     ]
-    subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     trace = ""
     if os.path.isfile(trace_path):
         with open(trace_path, encoding="utf-8", errors="replace") as fh:
             trace = fh.read()
     if not trace:
         return _die("bwrap --unshare-net failed")
+    # 2 interrupted, 3 internal, 4 usage, 5 nothing collected.
+    if proc.returncode in (2, 3, 4, 5):
+        return _die(f"pytest exited {proc.returncode}")
     found = violations(trace, allowed)
     if found:
+        print("unlisted-connect", file=sys.stderr)
         print("unlisted connect: " + ", ".join(found), file=sys.stderr)
         return 1
     return 0

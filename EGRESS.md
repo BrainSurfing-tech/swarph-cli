@@ -5,12 +5,16 @@ One row per outbound network path in `src/swarph_cli`. Enforced by
 row below keyed by (file, client), or the build fails naming file:line.
 Add a row when you add a network call — that is the point of the inventory.
 
-Runtime check (card #1219): `make egress-probe` runs
-`tests/test_1214_egress.py` and `tests/test_1071_quota_sync.py` inside
-`bwrap --unshare-net`. An unlisted IP-literal TCP connect (IPv4 or IPv6)
-fails it. A hostname lookup that only reaches the stub resolver is not
-judged. A host where isolation cannot be proven — the control connect
-must fail with ENETUNREACH — exits 2 with `isolation-unproven:`.
+Runtime check (card #1219, widened by card #1225): `make egress-probe`
+runs every file under `tests/` except `tests/test_1219_egress_probe.py`
+inside `bwrap --unshare-net`. An unlisted IP-literal TCP connect (IPv4
+or IPv6) fails it. A hostname lookup that only reaches the stub resolver
+is not judged. Pytest exit 2 through 5 (nothing collected, usage error,
+internal error, interrupted) is `isolation-unproven`, not a pass. A host
+where isolation cannot be proven — the control connect must fail with
+ENETUNREACH — exits 2 with `isolation-unproven:`. GNU make folds a recipe
+failure into exit 2, so the recipe prints `egress-probe-status N` with
+the probe's own code. Measured on the lab host at this change: 152s.
 
 | file | client | destination | what it sends | opt-in or default |
 | --- | --- | --- | --- | --- |
