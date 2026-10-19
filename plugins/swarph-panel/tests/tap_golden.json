@@ -1,0 +1,415 @@
+{
+ "tap_options": [
+  {
+   "title": "Deploy the widget service at 08Z?",
+   "options": [
+    [
+     "Yes",
+     "yes",
+     "pass"
+    ],
+    [
+     "No",
+     "no",
+     "fail"
+    ]
+   ]
+  },
+  {
+   "title": "Extend, flip, or kill?",
+   "options": [
+    [
+     "Extend",
+     "Extend",
+     "pass"
+    ],
+    [
+     "Flip",
+     "flip",
+     "pass"
+    ],
+    [
+     "Kill",
+     "kill",
+     "pass"
+    ]
+   ]
+  },
+  {
+   "title": "Ship now or wait?",
+   "options": [
+    [
+     "Ship now",
+     "Ship now",
+     "pass"
+    ],
+    [
+     "Wait",
+     "wait",
+     "pass"
+    ]
+   ]
+  },
+  {
+   "title": "Which lane takes it: Lab or Cursor?",
+   "options": [
+    [
+     "Lab",
+     "Lab",
+     "pass"
+    ],
+    [
+     "Cursor",
+     "Cursor",
+     "pass"
+    ]
+   ]
+  },
+  {
+   "title": "Keep it or drop it?",
+   "options": [
+    [
+     "Keep it",
+     "Keep it",
+     "pass"
+    ],
+    [
+     "Drop it",
+     "drop it",
+     "pass"
+    ]
+   ]
+  },
+  {
+   "title": "yes or no?",
+   "options": [
+    [
+     "Yes",
+     "yes",
+     "pass"
+    ],
+    [
+     "No",
+     "no",
+     "fail"
+    ]
+   ]
+  },
+  {
+   "title": "Should we ship or hold the release?",
+   "options": null
+  },
+  {
+   "title": "Pick one: apples, oranges, or pears",
+   "options": [
+    [
+     "Yes",
+     "yes",
+     "pass"
+    ],
+    [
+     "No",
+     "no",
+     "fail"
+    ]
+   ]
+  },
+  {
+   "title": "Extend or kill",
+   "options": [
+    [
+     "Yes",
+     "yes",
+     "pass"
+    ],
+    [
+     "No",
+     "no",
+     "fail"
+    ]
+   ]
+  },
+  {
+   "title": "Trial 42 ran long. What now: extend, flip, or kill?",
+   "options": [
+    [
+     "Extend",
+     "extend",
+     "pass"
+    ],
+    [
+     "Flip",
+     "flip",
+     "pass"
+    ],
+    [
+     "Kill",
+     "kill",
+     "pass"
+    ]
+   ]
+  },
+  {
+   "title": "A long preamble sentence. Then: red, green, or blue?",
+   "options": [
+    [
+     "Red",
+     "red",
+     "pass"
+    ],
+    [
+     "Green",
+     "green",
+     "pass"
+    ],
+    [
+     "Blue",
+     "blue",
+     "pass"
+    ]
+   ]
+  },
+  {
+   "title": "Earlier: a colon in the first sentence. Extend, flip, or kill?",
+   "options": [
+    [
+     "Extend",
+     "Extend",
+     "pass"
+    ],
+    [
+     "Flip",
+     "flip",
+     "pass"
+    ],
+    [
+     "Kill",
+     "kill",
+     "pass"
+    ]
+   ]
+  },
+  {
+   "title": "Decision needed — ship now or wait?",
+   "options": [
+    [
+     "Ship now",
+     "ship now",
+     "pass"
+    ],
+    [
+     "Wait",
+     "wait",
+     "pass"
+    ]
+   ]
+  },
+  {
+   "title": "Move it aside now, keep it until the refusal ships, or keep it for good?",
+   "options": [
+    [
+     "Move it aside now",
+     "Move it aside now",
+     "pass"
+    ],
+    [
+     "Keep it until the refusal ships",
+     "keep it until the refusal ships",
+     "pass"
+    ],
+    [
+     "Keep it for good",
+     "keep it for good",
+     "pass"
+    ]
+   ]
+  },
+  {
+   "title": "Keep it mandatory, make it optional, or allow a per-card waiver?",
+   "options": [
+    [
+     "Keep it mandatory",
+     "Keep it mandatory",
+     "pass"
+    ],
+    [
+     "Make it optional",
+     "make it optional",
+     "pass"
+    ],
+    [
+     "Allow a per-card waiver",
+     "allow a per-card waiver",
+     "pass"
+    ]
+   ]
+  },
+  {
+   "title": "Give the box the shared token once the fix lands, give it a private token, or wait for the fix?",
+   "options": [
+    [
+     "Give the box the shared token once the fix lands",
+     "Give the box the shared token once the fix lands",
+     "pass"
+    ],
+    [
+     "Give it a private token",
+     "give it a private token",
+     "pass"
+    ],
+    [
+     "Wait for the fix",
+     "wait for the fix",
+     "pass"
+    ]
+   ]
+  },
+  {
+   "title": "Pick (now or never), later?",
+   "options": null
+  },
+  {
+   "title": "Fast, fast, or slow?",
+   "options": null
+  },
+  {
+   "title": "One, two, three, four, five, or six?",
+   "options": null
+  },
+  {
+   "title": "Is it ship or hold?",
+   "options": null
+  },
+  {
+   "title": "Should we merge, close, or park it?",
+   "options": null
+  },
+  {
+   "title": "Rebuild from scratch, patch the old module, or leave it alone, if it works?",
+   "options": null
+  },
+  {
+   "title": "Do you want A or B, with extra notes?",
+   "options": null
+  },
+  {
+   "title": "Run the migration tonight?",
+   "options": [
+    [
+     "Yes",
+     "yes",
+     "pass"
+    ],
+    [
+     "No",
+     "no",
+     "fail"
+    ]
+   ]
+  },
+  {
+   "title": "",
+   "options": [
+    [
+     "Yes",
+     "yes",
+     "pass"
+    ],
+    [
+     "No",
+     "no",
+     "fail"
+    ]
+   ]
+  }
+ ],
+ "tap_closable": [
+  {
+   "holder": "commander",
+   "step": null,
+   "closable": true
+  },
+  {
+   "holder": "commander",
+   "step": "build",
+   "closable": true
+  },
+  {
+   "holder": "commander",
+   "step": "validate",
+   "closable": false
+  },
+  {
+   "holder": "commander",
+   "step": "plan-review",
+   "closable": false
+  },
+  {
+   "holder": "commander",
+   "step": "second-seat",
+   "closable": false
+  },
+  {
+   "holder": "lab-ovh",
+   "step": null,
+   "closable": false
+  },
+  {
+   "holder": "lab-ovh",
+   "step": "build",
+   "closable": false
+  },
+  {
+   "holder": "lab-ovh",
+   "step": "validate",
+   "closable": false
+  },
+  {
+   "holder": "lab-ovh",
+   "step": "plan-review",
+   "closable": false
+  },
+  {
+   "holder": "lab-ovh",
+   "step": "second-seat",
+   "closable": false
+  }
+ ],
+ "titles": [
+  {
+   "accept": "[commander] Merge PR 5? | PASS = commander taps Yes | FAIL = No",
+   "commander_title": "Merge PR 5?",
+   "untagged_title": "[commander] Merge PR 5?"
+  },
+  {
+   "accept": "[commander] [in-session] Redeploy now? PASS = yes",
+   "commander_title": "Redeploy now? PASS = yes",
+   "untagged_title": "[commander] [in-session] Redeploy now?"
+  },
+  {
+   "accept": "[commander]Extend, flip, or kill? PASS=x",
+   "commander_title": "Extend, flip, or kill?",
+   "untagged_title": "[commander]Extend, flip, or kill?"
+  },
+  {
+   "accept": "PASS = commander taps Yes (lab merges PR 9) | FAIL = commander taps No",
+   "commander_title": null,
+   "untagged_title": "commander taps Yes (lab merges PR 9)"
+  },
+  {
+   "accept": "PASS = long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words long words ",
+   "commander_title": null,
+   "untagged_title": "long words long words long words long words long words long words long words long words long words long words long words long words long words long words long…"
+  },
+  {
+   "accept": "",
+   "commander_title": null,
+   "untagged_title": "card #7 obligation #9"
+  },
+  {
+   "accept": "mentions [commander] later in the text",
+   "commander_title": null,
+   "untagged_title": "mentions [commander] later in the text"
+  }
+ ]
+}
