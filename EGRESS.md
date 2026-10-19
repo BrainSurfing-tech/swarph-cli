@@ -5,9 +5,12 @@ One row per outbound network path in `src/swarph_cli`. Enforced by
 row below keyed by (file, client), or the build fails naming file:line.
 Add a row when you add a network call — that is the point of the inventory.
 
-Runtime check (card #1219): `make egress-probe` runs a smoke subset inside
-`bwrap --unshare-net`. An unlisted connect fails it. A host where that
-isolation cannot be proven exits 2 with `isolation-unproven:`.
+Runtime check (card #1219): `make egress-probe` runs
+`tests/test_1214_egress.py` and `tests/test_1071_quota_sync.py` inside
+`bwrap --unshare-net`. An unlisted IP-literal TCP connect (IPv4 or IPv6)
+fails it. A hostname lookup that only reaches the stub resolver is not
+judged. A host where isolation cannot be proven — the control connect
+must fail with ENETUNREACH — exits 2 with `isolation-unproven:`.
 
 | file | client | destination | what it sends | opt-in or default |
 | --- | --- | --- | --- | --- |

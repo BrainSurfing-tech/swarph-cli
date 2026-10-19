@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """Runtime egress probe (card #1219).
 
-Runs a smoke subset inside ``bwrap --unshare-net`` and fails if strace
-sees a direct connect, or an exec of curl/wget/ssh/scp, to a host that
-EGRESS.md does not name. When isolation cannot be proven the process
-exits 2 and writes ``isolation-unproven: <reason>`` to stderr.
+``make egress-probe`` runs a real pytest subset of swarph-cli under
+``bwrap --unshare-net`` and fails if strace sees an unlisted IP-literal
+TCP connect, or an exec of curl/wget/ssh/scp to a destination EGRESS.md
+does not name.
 
-Smoke subset (what ``make egress-probe`` runs): one control connect that
-must fail, one network-free snippet that must stay quiet, and three
-unlisted mutants (os.system curl, an absolute-path curl, and
-asyncio.create_subprocess_exec ssh).
+Scope of a connect: IP literals only, IPv4 and IPv6. A hostname lookup
+shows up as a connect to the stub resolver (127.0.0.53); that is not a
+violation, because the allowlist holds names and the trace holds an IP,
+so a listed urlopen and an unlisted hostname cannot be told apart.
+Loopback addresses are ignored. Exec of curl/wget/ssh/scp is judged from
+the destination written in its argv.
+
+Isolation is real only when the control connect fails with ENETUNREACH.
+A connect that merely fails (TEST-NET on a host that still has a route)
+is not proof. When isolation cannot be proven the process exits 2 and
+writes ``isolation-unproven: <reason>`` to stderr.
 
 Idea after xcb qualification/linux-egress.ts. No code copied.
 """
@@ -54,9 +61,18 @@ MUTANTS = {
         "    await proc.wait()\n"
         "asyncio.run(go())\n",
     ),
+    "ipv6": (
+        "2001:db8::1",
+        "import socket\n"
+        "try:\n"
+        "    socket.create_connection(('2001:db8::1', 80), timeout=1)\n"
+        "except OSError:\n"
+        "    pass\n",
+    ),
 }
 
-_CONNECT_IP = re.compile(r'inet_addr\("([0-9.]+)"\)')
+_CONNECT_IP = re.compile(
+    r'inet_addr\("([0-9.]+)"\)|inet_pton\(AF_INET6,\s*"([^"]+)"')
 _EXEC = re.compile(r'execve\("([^"]+)"')
 _HOST = re.compile(r"https?://([^/:\s'\"]+)|(?:^|[\s\"'])([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)")
 
@@ -78,16 +94,26 @@ def _tool(path: str) -> str | None:
     return base if base in TOOLS else None
 
 
+def _ignored_ip(ip: str, allowed: set[str]) -> bool:
+    if ip == CONTROL_IP or ip.lower() in allowed:
+        return True
+    if ip == "::1" or ip.startswith("127."):
+        return True
+    return False
+
+
 def violations(trace: str, allowed: set[str]) -> list[str]:
-    """Unlisted connects and unlisted curl/ssh/wget/scp execs.
+    """Unlisted IP-literal connects and unlisted curl/ssh/wget/scp execs.
 
     The probe's own control address is ignored here; the isolation check
-    looks at it separately.
+    looks at it separately. Loopback, including the stub resolver, is
+    not a route out.
     """
     found = []
     for line in trace.splitlines():
-        for ip in _CONNECT_IP.findall(line):
-            if ip == CONTROL_IP or ip in allowed:
+        for v4, v6 in _CONNECT_IP.findall(line):
+            ip = v4 or v6
+            if _ignored_ip(ip, allowed):
                 continue
             found.append(f"connect {ip}")
         exec_match = _EXEC.search(line)
@@ -197,12 +223,55 @@ def prove_isolation() -> int:
             trace = fh.read()
     if proc.returncode != 0 or not trace:
         return _die("bwrap --unshare-net failed")
-    if CONTROL_IP not in trace or "connect(" not in trace:
+    lines = [ln for ln in trace.splitlines()
+             if CONTROL_IP in ln and "connect(" in ln]
+    if not lines:
         return _die("control connect not observed")
-    if re.search(rf'inet_addr\("{re.escape(CONTROL_IP)}"\).*= 0\b', trace):
+    if any(re.search(r"= 0\b", ln) for ln in lines):
         return _die("control connect succeeded")
-    if not re.search(rf'inet_addr\("{re.escape(CONTROL_IP)}"\)', trace):
-        return _die("control connect not observed")
+    if not any("ENETUNREACH" in ln for ln in lines):
+        return _die("control connect was not ENETUNREACH")
+    return 0
+
+
+def run_pytest(cwd: Path, paths: list[str], allowed: set[str]) -> int:
+    """Run pytest paths inside the netns. Non-zero if an unlisted connect
+    is traced. Pytest's own exit code is not the verdict: a test can pass
+    while the trace shows a connect the test did not assert on."""
+    code = prove_isolation()
+    if code != 0:
+        return code
+    bwrap = _bwrap()
+    strace = _strace()
+    if not bwrap:
+        return _die("bwrap missing")
+    if not strace:
+        return _die("strace missing")
+    work = tempfile.mkdtemp(prefix="egress-probe-")
+    trace_path = os.path.join(work, "trace")
+    cmd = [
+        bwrap, "--unshare-user", "--unshare-net", "--die-with-parent",
+        "--ro-bind", "/", "/",
+        "--tmpfs", "/tmp",
+        "--bind", work, work,
+        "--bind", str(cwd), str(cwd),
+        "--chdir", str(cwd),
+        "--dev", "/dev", "--proc", "/proc",
+        strace, "-f", "-e", "trace=connect,execve", "-s", "400",
+        "-o", trace_path,
+        sys.executable, "-m", "pytest", "-q", "--tb=line", *paths,
+    ]
+    subprocess.run(cmd, capture_output=True, text=True)
+    trace = ""
+    if os.path.isfile(trace_path):
+        with open(trace_path, encoding="utf-8", errors="replace") as fh:
+            trace = fh.read()
+    if not trace:
+        return _die("bwrap --unshare-net failed")
+    found = violations(trace, allowed)
+    if found:
+        print("unlisted connect: " + ", ".join(found), file=sys.stderr)
+        return 1
     return 0
 
 
@@ -235,6 +304,11 @@ def main(argv: list[str] | None = None) -> int:
         return smoke(allowed)
     if argv == ["--isolation"]:
         return prove_isolation()
+    if argv and argv[0] == "--pytest":
+        if len(argv) < 2:
+            print("usage: egress_probe.py --pytest PATH [PATH...]", file=sys.stderr)
+            return 2
+        return run_pytest(ROOT, argv[1:], allowed)
     if len(argv) == 2 and argv[0] == "--mutant":
         name = argv[1]
         if name not in MUTANTS:
@@ -249,7 +323,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print("unlisted connect: " + ", ".join(found), file=sys.stderr)
         return 1
-    print("usage: egress_probe.py --smoke | --isolation | --mutant NAME",
+    print("usage: egress_probe.py --smoke | --isolation | "
+          "--mutant NAME | --pytest PATH...",
           file=sys.stderr)
     return 2
 
