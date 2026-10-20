@@ -120,23 +120,61 @@ class RowRules(unittest.TestCase):
         out = refresh.commander_rows([obligation(1, "2026-10-19T07:00:00+00:00", "[commander] Go?")], [ask(1, 10), ask(1, 11)])
         self.assertEqual(out[0]["ask_id"], 10)
 
-    def test_proposed_is_the_label_of_the_newest_panel_reply_to_that_ask(self):
+    def test_proposed_is_the_label_of_the_newest_valid_panel_reply_to_that_ask(self):
         rows = [obligation(1, "2026-10-19T07:00:00+00:00", "[commander] Extend, flip, or kill?")]
         thread = [
             ask(1, 10),
-            proposal(10, 20, "Extend", 1, "2026-10-19T09:00:00+00:00"),
-            proposal(10, 21, "Flip", 1, "2026-10-19T11:00:00+00:00"),      # newest
-            proposal(10, 22, "Kill", 1, "2026-10-19T10:00:00+00:00"),
-            proposal(99, 23, "Kill", 1, "2026-10-19T12:00:00+00:00"),      # answers another ask
-            {"id": 24, "reply_to": 10, "content": "not a proposal", "created_at": "2026-10-19T13:00:00+00:00"},
-            {"id": 25, "reply_to": None, "content": "panel: Kill on #1", "created_at": "2026-10-19T14:00:00+00:00"},
+            proposal(10, 20, "Extend", 1),
+            proposal(10, 22, "Flip", 1),                                   # newest valid
+            proposal(10, 21, "Kill", 1),
+            proposal(99, 23, "Kill", 1),                                   # answers another ask
+            {"id": 24, "from_node": "lab-ovh", "to_node": "commander", "reply_to": 10, "content": "not a proposal"},
+            {"id": 25, "from_node": "lab-ovh", "to_node": "commander", "reply_to": None, "content": "panel: Kill on #1"},
         ]
-        self.assertEqual(refresh.commander_rows(rows, thread)[0]["proposed"], "Flip")
+        out = refresh.commander_rows(rows, thread)[0]
+        self.assertEqual((out["ask_id"], out["proposed"]), (10, "Flip"))
         self.assertIsNone(refresh.commander_rows(rows, thread[:1])[0]["proposed"])
 
+    def test_a_proposal_counts_only_from_the_asker_to_the_commander_after_the_ask(self):
+        rows = [obligation(1, "2026-10-19T07:00:00+00:00", "[commander] Extend, flip, or kill?")]
+        valid = proposal(10, 20, "Flip", 1)
+        proposed = lambda *msgs: refresh.commander_rows(rows, [ask(1, 10), *msgs])[0]["proposed"]
+        self.assertEqual(proposed(valid), "Flip")
+        # Another node's message is ignored, even when newer or the only one.
+        self.assertIsNone(proposed(proposal(10, 21, "Flip", 1, from_node="drop-on-meta-edge")))
+        self.assertIsNone(proposed(proposal(10, 21, "Flip", 1, from_node="commander")))
+        self.assertIsNone(proposed(proposal(10, 21, "Flip", 1, from_node=None)))
+        self.assertEqual(proposed(valid, proposal(10, 21, "Kill", 1, from_node="science-claude")), "Flip")
+        # Addressed to the commander, and posted after the ask.
+        self.assertIsNone(proposed(proposal(10, 21, "Flip", 1, to_node="lab-ovh")))
+        self.assertIsNone(proposed(proposal(10, 10, "Flip", 1)))
+        self.assertIsNone(proposed(proposal(10, 9, "Flip", 1)))
+        self.assertIsNone(proposed(proposal(10, "21", "Flip", 1)))
+        self.assertIsNone(proposed(proposal(10, True, "Flip", 1)))
+        # The asker is whoever sent THIS ask.
+        other = {**ask(1, 10), "from_node": "science-claude"}
+        self.assertEqual(refresh.proposed_label(other, [proposal(10, 21, "Flip", 1, from_node="science-claude")], [{"label": "Flip"}]), "Flip")
+        self.assertIsNone(refresh.proposed_label(other, [valid], [{"label": "Flip"}]))
+
+    def test_a_proposal_must_name_one_of_the_rows_option_labels_exactly(self):
+        rows = [obligation(1, "2026-10-19T07:00:00+00:00", "[commander] Extend, flip, or kill?")]
+        proposed = lambda *msgs: refresh.commander_rows(rows, [ask(1, 10), *msgs])[0]["proposed"]
+        for label in ("Defer", "flip", "FLIP", "Flip now", "extend, flip", ""):
+            with self.subTest(label=label):
+                self.assertIsNone(proposed(proposal(10, 20, label, 1)))
+        # A newer invalid label does not mask an older valid one.
+        self.assertEqual(proposed(proposal(10, 20, "Flip", 1), proposal(10, 21, "Defer", 1)), "Flip")
+        # A row with no options (a step that closes nothing on a tap) has nothing to propose.
+        step = [obligation(1, "2026-10-19T07:00:00+00:00", "[commander] Extend, flip, or kill?", step="validate")]
+        out = refresh.commander_rows(step, [ask(1, 10), proposal(10, 20, "Flip", 1)])[0]
+        self.assertEqual((out["options"], out["proposed"]), (None, None))
+        self.assertIsNone(refresh.proposed_label(ask(1, 10), [proposal(10, 20, "Flip", 1)], None))
+
     def test_proposed_label_keeps_a_label_that_contains_on(self):
-        self.assertEqual(refresh.proposed_label(10, [proposal(10, 1, "Turn on #2 later", 5)]), "Turn on #2 later")
-        self.assertEqual(refresh.proposed_label(10, [{"id": 1, "reply_to": 10, "content": "panel:  on #5"}]), None)
+        label = "Turn on #2 later"
+        self.assertEqual(refresh.proposed_label(ask(1, 10), [proposal(10, 20, label, 5)], [{"label": label}]), label)
+        self.assertEqual(refresh.proposed_label(ask(1, 10), [proposal(10, 20, "Flip", 5)], [{"label": "Flip"}]), "Flip")
+        self.assertIsNone(refresh.proposed_label(ask(1, 10), [{**proposal(10, 20, "", 5), "content": "panel:  on #5"}], [{"label": "on #5"}]))
 
 
 class FakeCli:

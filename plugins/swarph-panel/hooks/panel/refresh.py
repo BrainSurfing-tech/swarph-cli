@@ -10,8 +10,8 @@ AbovePrompt module reads on every redraw.
 A row gets buttons only when lab-ovh's ask for it exists (card #1224): a press
 posts one proposal DM that answers that ask, and the commander confirms on the
 board. The cache therefore also carries each row's ``ask_id``, the label of the
-newest ``panel:`` proposal already made for it, and the ``--as`` peer the press
-sends as.
+newest valid ``panel:`` proposal already made for it (from the asker, after the
+ask, naming one of the row's options), and the ``--as`` peer the press sends as.
 
 The title and tap-option rules below are PORTED VERBATIM from
 ~/tools/board-publisher (build_board.py `_tap_options` and friends,
@@ -253,17 +253,29 @@ def ask_message(row: dict, messages: list[dict]) -> dict | None:
     return None
 
 
-def proposed_label(ask_id: int, messages: list[dict]) -> str | None:
-    """The label of the newest ``panel: <label> on #<row>`` message answering this ask, else None."""
-    answers = [
-        m for m in messages
-        if m.get("reply_to") == ask_id and str(m.get("content") or "").startswith(PANEL_PREFIX)
-    ]
-    if not answers:
-        return None
-    newest = max(answers, key=lambda m: (str(m.get("created_at") or ""), m.get("id") or 0))
-    label = _PANEL_ROW.sub("", str(newest["content"])[len(PANEL_PREFIX):].strip()).strip()
-    return label or None
+def proposed_label(ask: dict, messages: list[dict], options: list[dict] | None) -> str | None:
+    """The label of the newest valid ``panel: <label> on #<row>`` proposal answering this ask, else None.
+
+    Same rule as the board page (meta-edge-surfer app.js boardPanelProposal). A message counts only when
+    ALL hold: it is addressed to the commander, sent by the cell that sent the ask, has an integer id above
+    the ask's, replies to the ask, starts with ``panel:``, and its label is exactly one of the row's option
+    labels. Anything else is ignored, so a message from another node cannot name the proposal.
+    """
+    labels = {o["label"] for o in options or [] if isinstance(o, dict) and isinstance(o.get("label"), str)}
+    best_id, best_label = None, None
+    for m in messages:
+        mid = m.get("id")
+        if (m.get("reply_to") != ask.get("id") or m.get("to_node") != "commander"
+                or m.get("from_node") != ask.get("from_node")
+                or not isinstance(mid, int) or isinstance(mid, bool) or mid <= ask["id"]):
+            continue
+        content = str(m.get("content") or "")
+        if not content.startswith(PANEL_PREFIX):
+            continue
+        label = _PANEL_ROW.sub("", content[len(PANEL_PREFIX):].strip()).strip()
+        if label in labels and (best_id is None or mid > best_id):
+            best_id, best_label = mid, label
+    return best_label
 
 
 def commander_rows(rows: list[dict], messages: list[dict]) -> list[dict]:
@@ -301,7 +313,7 @@ def commander_rows(rows: list[dict], messages: list[dict]) -> list[dict]:
             "title": title,
             "options": None if options is None else [{k: o[k] for k in OPTION_KEYS} for o in options],
             "ask_id": ask_id,
-            "proposed": None if ask_id is None else proposed_label(ask_id, messages),
+            "proposed": None if ask_id is None else proposed_label(ask, messages, options),
         })
     kept.sort(key=lambda r: r["created_at"])
     return kept

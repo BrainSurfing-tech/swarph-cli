@@ -24,7 +24,9 @@ ui.render AbovePrompt --> hooks/panel/register.tsx  reads that one file, nothing
   created_at, title, options: [{label, text, outcome}] | null, ask_id, proposed}]}`. `peer` is the `--as` name
   `refresh.py` ran with; a press sends as it. `ask_id` is lab-ovh's ask for the row (its DM to the commander with
   `obligation_id` = the row id, first match, the same rule as the board page), `null` when none was found.
-  `proposed` is the label of the newest `panel: <label> on #<row>` message whose `reply_to` is that ask, else `null`.
+  `proposed` is the label of the newest `panel: <label> on #<row>` message that answers that ask, is addressed to the
+  commander, comes from the cell that sent the ask, has a later id, and names exactly one of the row's option labels,
+  else `null`. The board page applies the same rule before it pre-selects anything.
 - **Render:** sorts rows by `created_at`, draws the first, returns `next(e)` at 0 rows (a missing or
   broken cache counts as 0 rows), and draws the rest of the slot below itself when another module is there.
   No network, no program, no CLI call. Control characters in a title are stripped before they reach the terminal.
