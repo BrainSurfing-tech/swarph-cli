@@ -58,6 +58,46 @@ def test_mesh_send_posts_message_shape(monkeypatch, capsys):
     assert "tok" not in out
 
 
+def test_mesh_send_reply_to_rides_the_post_and_absent_adds_no_key(monkeypatch):
+    """card #1224: --reply-to is sent as reply_to; without it the payload is unchanged."""
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")
+    monkeypatch.setenv("SWARPH_SELF", "gpt-ops")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    monkeypatch.setattr(mesh, "_check_recipient", lambda *a, **k: None)
+    bodies = []
+
+    def fake_post(url, body, token, *, timeout=10.0):
+        bodies.append(body)
+        return 200, {"id": 1, "from_node": body["from_node"], "to_node": body["to_node"], "kind": body["kind"]}
+
+    monkeypatch.setattr(mesh, "_post_json", fake_post)
+    base = ["send", "commander", "--kind", "question", "--content", "panel: Yes on #9"]
+    assert mesh.run_mesh(base + ["--reply-to", "55"]) == 0
+    assert mesh.run_mesh(base) == 0
+    assert bodies[0] == {
+        "from_node": "gpt-ops", "to_node": "commander", "kind": "question",
+        "content": "panel: Yes on #9", "reply_to": 55,
+    }
+    assert "reply_to" not in bodies[1]
+    # thread_id is not inferred from reply_to (mesh reply copies it; send must not).
+    assert "thread_id" not in bodies[0]
+
+
+def test_mesh_send_reply_to_must_be_an_integer(monkeypatch, capsys):
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")
+    monkeypatch.setenv("SWARPH_SELF", "gpt-ops")
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
+    posted = []
+    monkeypatch.setattr(mesh, "_post_json", lambda *a, **k: posted.append(a) or (200, {}))
+    try:
+        mesh.run_mesh(["send", "commander", "--kind", "question", "--content", "x", "--reply-to", "abc"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("argparse accepted a non-integer --reply-to")
+    assert posted == []
+
+
 def test_mesh_send_gateway_error_is_nonsecret(monkeypatch, capsys):
     monkeypatch.setenv("MESH_GATEWAY_URL", "http://gw.test:8788")  # #578: no host default ships
     monkeypatch.setenv("SWARPH_SELF", "gpt-ops")

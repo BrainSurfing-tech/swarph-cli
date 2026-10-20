@@ -59,6 +59,16 @@ def obligation(oid, created_at, accept, holder="commander", step=None, card_id=5
     return {"id": oid, "card_id": card_id, "created_at": created_at, "accept": accept, "holder": holder, "step": step, "status": status, "state": status}
 
 
+def ask(oid, msg_id, **extra):
+    """lab-ovh's ask for a row, as the card-thread read returns it."""
+    return {"id": msg_id, "from_node": "lab-ovh", "to_node": "commander", "obligation_id": oid, "reply_to": None, **extra}
+
+
+def proposal(ask_id, msg_id, label, row, created_at="2026-10-19T10:00:00+00:00", **extra):
+    return {"id": msg_id, "from_node": "lab-ovh", "to_node": "commander", "obligation_id": None, "reply_to": ask_id,
+            "content": f"panel: {label} on #{row}", "created_at": created_at, **extra}
+
+
 class RowRules(unittest.TestCase):
     def test_oldest_first_and_only_the_commanders_open_rows(self):
         rows = [
@@ -68,16 +78,17 @@ class RowRules(unittest.TestCase):
             obligation(4, "2026-10-19T06:00:00+00:00", "[commander] Closed?", status="closed"),
             obligation(5, "2026-10-19T06:30:00+00:00", "PASS = a cell row, not the commander's", holder="lab-ovh"),
         ]
-        out = refresh.commander_rows(rows, [])
+        out = refresh.commander_rows(rows, [ask(1, 901), ask(2, 902), ask(3, 903)])
         self.assertEqual([r["id"] for r in out], [1, 2, 3])
         self.assertEqual([o["label"] for o in out[0]["options"]], ["Extend", "Flip", "Kill"])
-        self.assertEqual(set(out[0]), {"id", "card_id", "created_at", "title", "options"})
+        self.assertEqual(set(out[0]), {"id", "card_id", "created_at", "title", "options", "ask_id", "proposed"})
+        self.assertEqual([r["ask_id"] for r in out], [901, 902, 903])
         self.assertEqual(set(out[0]["options"][0]), {"label", "text", "outcome"})
 
     def test_an_untagged_commander_row_takes_the_offer_question(self):
         accept = "PASS = commander taps Yes (merge) | FAIL = commander taps No"
         offer = {"to_node": "commander", "content": f"Merge it now?\n\nACCEPT CHECK: {accept}"}
-        out = refresh.commander_rows([obligation(9, "2026-10-19T07:00:00+00:00", accept)], [offer])
+        out = refresh.commander_rows([obligation(9, "2026-10-19T07:00:00+00:00", accept)], [offer, ask(9, 77)])
         self.assertEqual(out[0]["title"], "Merge it now?")
         self.assertEqual([o["label"] for o in out[0]["options"]], ["Yes", "No"])
 
@@ -88,9 +99,82 @@ class RowRules(unittest.TestCase):
             obligation(3, "2026-10-19T07:02:00+00:00", "[commander] Merge it?", step="validate"),
             obligation(4, "2026-10-19T07:03:00+00:00", "[commander] | PASS = x", card_id=8),
         ]
-        out = refresh.commander_rows(rows, [])
+        out = refresh.commander_rows(rows, [ask(r["id"], 900 + r["id"]) for r in rows])
         self.assertEqual([r["options"] for r in out], [None, None, None, None])
         self.assertEqual(out[3]["title"], "card #8 row #4")
+
+    def test_a_row_with_no_ask_gets_no_buttons(self):
+        rows = [obligation(1, "2026-10-19T07:00:00+00:00", "[commander] Go?"), obligation(2, "2026-10-19T08:00:00+00:00", "[commander] Go?")]
+        # Not lab-ovh's, not to the commander, and bound to another row: none of them is row 1's ask.
+        stray = [
+            ask(1, 5, from_node="drop-on-meta-edge"),
+            ask(1, 6, to_node="lab-ovh"),
+            ask(99, 7),
+            {"id": 8, "from_node": "lab-ovh", "to_node": "commander", "content": "Go? prose only, no obligation_id"},
+        ]
+        out = refresh.commander_rows(rows, stray + [ask(2, 902)])
+        self.assertEqual([(r["ask_id"], r["options"] is None) for r in out], [(None, True), (902, False)])
+        self.assertIsNone(out[0]["proposed"])
+
+    def test_the_first_ask_for_a_row_wins_like_the_boards_page(self):
+        out = refresh.commander_rows([obligation(1, "2026-10-19T07:00:00+00:00", "[commander] Go?")], [ask(1, 10), ask(1, 11)])
+        self.assertEqual(out[0]["ask_id"], 10)
+
+    def test_proposed_is_the_label_of_the_newest_valid_panel_reply_to_that_ask(self):
+        rows = [obligation(1, "2026-10-19T07:00:00+00:00", "[commander] Extend, flip, or kill?")]
+        thread = [
+            ask(1, 10),
+            proposal(10, 20, "Extend", 1),
+            proposal(10, 22, "Flip", 1),                                   # newest valid
+            proposal(10, 21, "Kill", 1),
+            proposal(99, 23, "Kill", 1),                                   # answers another ask
+            {"id": 24, "from_node": "lab-ovh", "to_node": "commander", "reply_to": 10, "content": "not a proposal"},
+            {"id": 25, "from_node": "lab-ovh", "to_node": "commander", "reply_to": None, "content": "panel: Kill on #1"},
+        ]
+        out = refresh.commander_rows(rows, thread)[0]
+        self.assertEqual((out["ask_id"], out["proposed"]), (10, "Flip"))
+        self.assertIsNone(refresh.commander_rows(rows, thread[:1])[0]["proposed"])
+
+    def test_a_proposal_counts_only_from_the_asker_to_the_commander_after_the_ask(self):
+        rows = [obligation(1, "2026-10-19T07:00:00+00:00", "[commander] Extend, flip, or kill?")]
+        valid = proposal(10, 20, "Flip", 1)
+        proposed = lambda *msgs: refresh.commander_rows(rows, [ask(1, 10), *msgs])[0]["proposed"]
+        self.assertEqual(proposed(valid), "Flip")
+        # Another node's message is ignored, even when newer or the only one.
+        self.assertIsNone(proposed(proposal(10, 21, "Flip", 1, from_node="drop-on-meta-edge")))
+        self.assertIsNone(proposed(proposal(10, 21, "Flip", 1, from_node="commander")))
+        self.assertIsNone(proposed(proposal(10, 21, "Flip", 1, from_node=None)))
+        self.assertEqual(proposed(valid, proposal(10, 21, "Kill", 1, from_node="science-claude")), "Flip")
+        # Addressed to the commander, and posted after the ask.
+        self.assertIsNone(proposed(proposal(10, 21, "Flip", 1, to_node="lab-ovh")))
+        self.assertIsNone(proposed(proposal(10, 10, "Flip", 1)))
+        self.assertIsNone(proposed(proposal(10, 9, "Flip", 1)))
+        self.assertIsNone(proposed(proposal(10, "21", "Flip", 1)))
+        self.assertIsNone(proposed(proposal(10, True, "Flip", 1)))
+        # The asker is whoever sent THIS ask.
+        other = {**ask(1, 10), "from_node": "science-claude"}
+        self.assertEqual(refresh.proposed_label(other, [proposal(10, 21, "Flip", 1, from_node="science-claude")], [{"label": "Flip"}]), "Flip")
+        self.assertIsNone(refresh.proposed_label(other, [valid], [{"label": "Flip"}]))
+
+    def test_a_proposal_must_name_one_of_the_rows_option_labels_exactly(self):
+        rows = [obligation(1, "2026-10-19T07:00:00+00:00", "[commander] Extend, flip, or kill?")]
+        proposed = lambda *msgs: refresh.commander_rows(rows, [ask(1, 10), *msgs])[0]["proposed"]
+        for label in ("Defer", "flip", "FLIP", "Flip now", "extend, flip", ""):
+            with self.subTest(label=label):
+                self.assertIsNone(proposed(proposal(10, 20, label, 1)))
+        # A newer invalid label does not mask an older valid one.
+        self.assertEqual(proposed(proposal(10, 20, "Flip", 1), proposal(10, 21, "Defer", 1)), "Flip")
+        # A row with no options (a step that closes nothing on a tap) has nothing to propose.
+        step = [obligation(1, "2026-10-19T07:00:00+00:00", "[commander] Extend, flip, or kill?", step="validate")]
+        out = refresh.commander_rows(step, [ask(1, 10), proposal(10, 20, "Flip", 1)])[0]
+        self.assertEqual((out["options"], out["proposed"]), (None, None))
+        self.assertIsNone(refresh.proposed_label(ask(1, 10), [proposal(10, 20, "Flip", 1)], None))
+
+    def test_proposed_label_keeps_a_label_that_contains_on(self):
+        label = "Turn on #2 later"
+        self.assertEqual(refresh.proposed_label(ask(1, 10), [proposal(10, 20, label, 5)], [{"label": label}]), label)
+        self.assertEqual(refresh.proposed_label(ask(1, 10), [proposal(10, 20, "Flip", 5)], [{"label": "Flip"}]), "Flip")
+        self.assertIsNone(refresh.proposed_label(ask(1, 10), [{**proposal(10, 20, "", 5), "content": "panel:  on #5"}], [{"label": "on #5"}]))
 
 
 class FakeCli:
@@ -120,19 +204,38 @@ class RefreshWritesTheCache(unittest.TestCase):
         accept = "PASS = commander taps Yes"
         cli = FakeCli(
             [obligation(2, "2026-10-19T08:00:00+00:00", accept, card_id=77), obligation(1, "2026-10-19T07:00:00+00:00", "[commander] Go?")],
-            {"77": [{"to_node": "commander", "content": f"Ship it?\n\nACCEPT CHECK: {accept}"}]},
+            {
+                "50": [ask(1, 301), proposal(301, 302, "No", 1)],
+                "77": [{"to_node": "commander", "content": f"Ship it?\n\nACCEPT CHECK: {accept}"}, ask(2, 303)],
+            },
         )
         cache = refresh.refresh(as_peer="lab-ovh", board_url="https://b.example/", run=cli, out=self.out)
         on_disk = json.loads(self.out.read_text())
         self.assertEqual(on_disk, cache)
         self.assertEqual([r["title"] for r in on_disk["rows"]], ["Go?", "Ship it?"])
         self.assertEqual(on_disk["board_url"], "https://b.example/")
+        self.assertEqual(on_disk["peer"], "lab-ovh")
+        self.assertEqual([(r["ask_id"], r["proposed"]) for r in on_disk["rows"]], [(301, "No"), (303, None)])
         self.assertEqual(cli.calls[0], ["swarph", "board", "obligations", "list", "--status", "open", "--json", "--as", "lab-ovh"])
-        self.assertEqual(cli.calls[1], ["swarph", "board", "cards", "thread", "77", "--json", "--as", "lab-ovh"])
+        # One thread read per card with a commander-held row, tagged or not: the ask lives there.
+        self.assertEqual(cli.calls[1:], [["swarph", "board", "cards", "thread", c, "--json", "--as", "lab-ovh"] for c in ("50", "77")])
         # Read-only: no write verb, no inbox, no credential path on any command line.
         for argv in cli.calls:
             self.assertEqual(argv[:2], ["swarph", "board"])
             self.assertTrue(set(argv).isdisjoint({"say", "close", "send", "take", "decline", "inbox", "--token-file"}), argv)
+
+    def test_the_as_peer_is_recorded_and_a_failed_thread_read_means_no_buttons(self):
+        cli = FakeCli([obligation(1, "2026-10-19T07:00:00+00:00", "[commander] Go?")])
+        real = cli.__call__
+
+        def failing(argv, **kw):
+            if argv[2:4] == ["cards", "thread"]:
+                return subprocess.CompletedProcess(argv, 1, "", "boom")
+            return real(argv, **kw)
+
+        cache = refresh.refresh(as_peer="science-claude", board_url="", run=failing, out=self.out)
+        self.assertEqual(cache["peer"], "science-claude")
+        self.assertEqual((cache["rows"][0]["ask_id"], cache["rows"][0]["options"]), (None, None))
 
     def test_zero_open_rows_is_written_as_zero_rows(self):
         self.out.write_text(json.dumps({"rows": [{"id": 1}]}))

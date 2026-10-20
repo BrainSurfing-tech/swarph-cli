@@ -5,28 +5,34 @@ title, one button per tap option, and an "N of M open" counter. One row at a tim
 the cell the way `AskUserQuestion` does.
 
 Status: **build only.** It is not listed in `.claude-plugin/marketplace.json` and nothing installs it.
-Installing a new plugin module into the CLI is the commander's call. The tap buttons are a **stub** (see
-"Tap path").
+Installing a new plugin module into the CLI is the commander's call. A tap button **proposes** and closes
+nothing; the commander confirms on the board (see "Tap path").
 
 ## How it works
 
 ```
 session.start / turn.complete --> hooks/panel/refresh.py  (python3, stdlib only, not in the render path)
         swarph board obligations list --status open --json --as lab-ovh
-        swarph board cards thread <card> --json --as lab-ovh     (one per untagged commander-held card)
+        swarph board cards thread <card> --json --as lab-ovh     (one per card with a commander-held row)
         --> ~/.claude/.swarph-panel-rows.json   ($CLAUDE_CONFIG_DIR/ when set)
 
 ui.render AbovePrompt --> hooks/panel/register.tsx  reads that one file, nothing else
 ```
 
 - **Cache path:** `~/.claude/.swarph-panel-rows.json` (or `$CLAUDE_CONFIG_DIR/.swarph-panel-rows.json`),
-  the same directory ponytail keeps its flag files in. Shape: `{updated_at, board_url, rows: [{id, card_id,
-  created_at, title, options: [{label, text, outcome}] | null}]}`.
+  the same directory ponytail keeps its flag files in. Shape: `{updated_at, board_url, peer, rows: [{id, card_id,
+  created_at, title, options: [{label, text, outcome}] | null, ask_id, proposed}]}`. `peer` is the `--as` name
+  `refresh.py` ran with; a press sends as it. `ask_id` is lab-ovh's ask for the row (its DM to the commander with
+  `obligation_id` = the row id, first match, the same rule as the board page), `null` when none was found.
+  `proposed` is the label of the newest `panel: <label> on #<row>` message that answers that ask, is addressed to the
+  commander, comes from the cell that sent the ask, has a later id, and names exactly one of the row's option labels,
+  else `null`. The board page applies the same rule before it pre-selects anything.
 - **Render:** sorts rows by `created_at`, draws the first, returns `next(e)` at 0 rows (a missing or
   broken cache counts as 0 rows), and draws the rest of the slot below itself when another module is there.
   No network, no program, no CLI call. Control characters in a title are stripped before they reach the terminal.
 - **Options:** `options` is `null` when the title does not parse, or when a tap would close nothing (step
-  `validate` / `plan-review`, or a `[commander]` row held by another cell), or when the title is empty. The
+  `validate` / `plan-review`, or a `[commander]` row held by another cell), or when the title is empty, or when
+  the row has no ask. The module also draws no buttons without an integer `ask_id` and a `peer`. The
   panel then shows the title and an "open board" button only. No guessed buttons.
 - **"open board"** runs `xdg-open` on `board_url` from the cache, only if it is an `https://` address
   (`SWARPH_PANEL_BOARD_URL` or `--board-url` when running `refresh.py`). With none set it toasts where the
@@ -41,33 +47,38 @@ ui.render AbovePrompt --> hooks/panel/register.tsx  reads that one file, nothing
   row tagged `[commander]`, or held by the commander; title from the tag, else the card-thread offer
   question, else the accept text.
 
-## Tap path (what a board tap does today, and why the press is a stub)
+## Tap path (what a press does, and what the board does with it)
 
-Read from `~/mesh-gateway/server.py` and its tests (line numbers are for the file as read on 2026-10-19; they drift):
+A press **closes nothing and holds no commander credential.** It posts ONE DM through this pane's own peer token:
 
-1. The commander's board app, logged in with the commander's **Meta-Edge SSO session** (`user_identity`,
-   regime `meta_edge`, node `commander`), calls `POST /messages` (`server.py:5424`) with `from_node:
-   commander`, the answer text, `reply_to` = lab-ovh's bound ask. The gateway records how the DM was
-   authenticated (`server.py:5706-5712`). That is the DM id in the evidence (#75403 for row #2272).
-2. The same session closes the row: `POST /board/obligations/{id}/close` (`server.py:16575`) with evidence
-   `Board answer sent (DM #<id>): <text> ask:<ask id> relayed-from=msg:<id>`. The commander branch is
-   `server.py:16691` (`_sso_is_commander`, `server.py:15934`); the direct ask citation is checked at
-   `server.py:13843-13865` and `15988`. Row #2272 reads `closed_by: commander` with the SSO login recorded.
-   The string "Board answer sent" appears in no file of `mesh-gateway/server.py`, `tools/board-publisher` or
-   this repo; the code that produces it was not located (the app is the likely author, unconfirmed).
-3. The alternative is the relay: lab-ovh's own per-peer token closes with `relayed-from=msg:<id>`, and the
-   gateway checks the cited DM was recorded as the commander's SSO session (`server.py:16025-16117`, never
-   `from_node`). That path accepts the bare word yes/no only (`server.py:16102-16117`), so it cannot carry a
-   choice such as "Lab".
+```
+swarph mesh send commander --as <peer> --kind question --reply-to <ask id> --content "panel: <label> on #<row>"
+```
 
-**The panel does not wire the press.** Step 1 and step 2 both need the commander's SSO bearer. A plugin
-module has no such credential, by design, and must not borrow lab-ovh's token to speak as the commander.
-With `COMMANDER_SSO_ENFORCE=1` (`server.py:15922`; off by default in the code, and the live value is set in
-an env file that was not read) the gateway refuses every static credential on a commander row except the
-verified relay (`server.py:16686-16750`).
-`register.tsx` shows a toast that says the tap was **not** recorded. To wire it, the commander's own session
-would have to present its SSO token to the two endpoints above (a decision for the commander, not a
-default), then the panel must read the row back from the gateway and let the next refresh advance it.
+then toasts "proposed, confirm on the board" and runs `refresh.py --min-age 0` without waiting for it. A
+non-zero exit (or a rejected run) toasts that nothing was sent instead. The ask it answers is lab-ovh's own DM to the
+commander carrying `obligation_id = <row>`, found by `refresh.py` in the card thread. `--reply-to` sets `reply_to`
+only; `mesh send` does not copy the parent's `thread_id` (the gateway checks that the parent exists and stores
+`thread_id` exactly as sent), so this DM is not on the card's thread. A card-thread read therefore sees a `panel:`
+message only if someone posted it with `--thread`; the board page reads the commander's inbox, which has it.
+
+The commander then confirms on the board page under their own Meta-Edge SSO session, through the close path that
+is unchanged (read from `~/mesh-gateway/server.py` on 2026-10-19; line numbers drift):
+
+1. The board app calls `POST /messages` (`server.py:5424`) as the commander with the answer text and `reply_to` =
+   lab-ovh's ask. The gateway records how the DM was authenticated (`server.py:5706-5712`).
+2. The same session closes the row: `POST /board/obligations/{id}/close` (`server.py:16575`) with evidence citing the
+   DM and `ask:<ask id>`. The commander branch is `server.py:16691` (`_sso_is_commander`, `server.py:15934`); the
+   direct ask citation is checked at `server.py:13843-13865` and `15988`.
+3. The alternative is the relay: lab-ovh's own per-peer token closes with `relayed-from=msg:<id>`, and the gateway
+   checks the cited DM was recorded as the commander's SSO session (`server.py:16025-16117`, never `from_node`). That
+   path accepts the bare word yes/no only (`server.py:16102-16117`), so it cannot carry a choice such as "Lab".
+
+The proposal DM is a pointer for the commander, not the answer: the relay checks the cited DM against the
+commander's recorded SSO session, and this one is sent under a peer token. The board page pre-selects the proposed
+option and labels its button `confirm: <label> on #<row>`.
+With `COMMANDER_SSO_ENFORCE=1` (`server.py:15922`) the gateway refuses every static credential on a commander row
+except the verified relay (`server.py:16686-16750`); nothing here goes near that.
 
 ## Tests
 
@@ -91,6 +102,8 @@ python tests with the command above.
 - That a fire-and-forget `void $.process.run(...)` survives the handler returning in the live engine
   (ponytail awaits its `process.run` calls and only fires-and-forgets `$.http.fetch`).
 - The event field that carries the toast text: the test mock reads `e.message ?? e.text ?? JSON.stringify(e)`.
+- Whether `$.process.run` rejects or resolves with an `exitCode` when the program exits non-zero. The press handles both.
+- That `swarph mesh send --as <peer>` finds the peer's token on the machine the pane runs on (the CLI resolves it).
 - `import.meta.url` and `$.env.get('CLAUDE_PLUGIN_ROOT')` are not used by ponytail (see above).
 - Where the panel shows (the pane it runs in, not the phone).
 

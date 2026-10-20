@@ -97,6 +97,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help="extra recipient (repeatable). from_node in this list is refused.",
     )
+    send.add_argument(
+        "--reply-to",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="id of the message this one answers, sent as reply_to (card #1224). "
+             "The gateway refuses an id that does not exist. It binds nothing "
+             "by itself and does NOT set thread_id.",
+    )
     add_content_args(send)
     _add_common(send)
 
@@ -680,6 +689,8 @@ def _run_send(args: argparse.Namespace) -> int:
     }
     if cc:
         body["cc"] = cc
+    if getattr(args, "reply_to", None) is not None:
+        body["reply_to"] = args.reply_to
     thread_arg = getattr(args, "thread", None)
     if thread_arg:
         if thread_arg == "new":
