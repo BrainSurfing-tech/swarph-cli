@@ -7,6 +7,12 @@ own credential; this script reads no token or credential file. It writes one
 file, ~/.claude/.swarph-panel-rows.json (or $CLAUDE_CONFIG_DIR/...), that the
 AbovePrompt module reads on every redraw.
 
+A row gets buttons only when lab-ovh's ask for it exists (card #1224): a press
+posts one proposal DM that answers that ask, and the commander confirms on the
+board. The cache therefore also carries each row's ``ask_id``, the label of the
+newest ``panel:`` proposal already made for it, and the ``--as`` peer the press
+sends as.
+
 The title and tap-option rules below are PORTED VERBATIM from
 ~/tools/board-publisher (build_board.py `_tap_options` and friends,
 publish_board.py `commander_title`, `offer_question`, `untagged_title`), so the
@@ -229,11 +235,43 @@ def cache_path() -> Path:
     return Path(base) / CACHE_NAME
 
 
+PANEL_PREFIX = "panel:"
+_PANEL_ROW = re.compile(r"(?:^|\s)on\s+#\d+\s*$")
+
+
+def ask_message(row: dict, messages: list[dict]) -> dict | None:
+    """lab-ovh's ask FOR a row: its DM to the commander carrying the row's obligation_id.
+
+    Structural, never parsed from prose; the same predicate and first-match rule as the
+    commander's board page (meta-edge-surfer app.js boardAskMessage), so a proposal
+    answers the ask the page will cite when it closes the row.
+    """
+    for msg in messages:
+        if (msg.get("from_node") == "lab-ovh" and msg.get("to_node") == "commander"
+                and msg.get("obligation_id") == row.get("id")):
+            return msg
+    return None
+
+
+def proposed_label(ask_id: int, messages: list[dict]) -> str | None:
+    """The label of the newest ``panel: <label> on #<row>`` message answering this ask, else None."""
+    answers = [
+        m for m in messages
+        if m.get("reply_to") == ask_id and str(m.get("content") or "").startswith(PANEL_PREFIX)
+    ]
+    if not answers:
+        return None
+    newest = max(answers, key=lambda m: (str(m.get("created_at") or ""), m.get("id") or 0))
+    label = _PANEL_ROW.sub("", str(newest["content"])[len(PANEL_PREFIX):].strip()).strip()
+    return label or None
+
+
 def commander_rows(rows: list[dict], messages: list[dict]) -> list[dict]:
     """The rows the board shows the commander: tagged [commander], or held by the commander.
 
     Same keep rule and title order as publish_board.commander_rows: the tag's
-    title, else the card-thread offer question, else untagged_title.
+    title, else the card-thread offer question, else untagged_title. A row with no
+    ask from lab-ovh gets no options: a press has no ask to answer.
     """
     kept = []
     for row in rows:
@@ -252,12 +290,18 @@ def commander_rows(rows: list[dict], messages: list[dict]) -> list[dict]:
             options = None
         else:
             options = _tap_options({"title": title}) if _tap_closable(row) else None
+        ask = ask_message(row, messages)
+        ask_id = ask.get("id") if ask else None
+        if ask_id is None:
+            options = None
         kept.append({
             "id": row.get("id"),
             "card_id": row.get("card_id"),
             "created_at": row.get("created_at") or "",
             "title": title,
             "options": None if options is None else [{k: o[k] for k in OPTION_KEYS} for o in options],
+            "ask_id": ask_id,
+            "proposed": None if ask_id is None else proposed_label(ask_id, messages),
         })
     kept.sort(key=lambda r: r["created_at"])
     return kept
@@ -275,22 +319,22 @@ def refresh(*, as_peer: str, board_url: str, run=subprocess.run, out: Path | Non
     base = ["swarph", "board"]
     listing = _cli_json(run, base + ["obligations", "list", "--status", "open", "--json", "--as", as_peer])
     rows = listing if isinstance(listing, list) else listing.get("obligations") or []
-    # One card-thread read per card whose commander-held row has no [commander] tag.
+    # One card-thread read per card with a commander-held row: it holds the offer question and lab-ovh's ask.
     messages: list[dict] = []
     for card_id in sorted({
         r["card_id"] for r in rows
         if r.get("holder") == "commander" and r.get("card_id") is not None
-        and commander_title(r.get("accept") or "") is None
     }):
         try:
             thread = _cli_json(run, base + ["cards", "thread", str(card_id), "--json", "--as", as_peer])
         except (RuntimeError, ValueError):
-            continue  # shortcut: a failed thread read falls back to untagged_title, as the publisher does
+            continue  # shortcut: a failed thread read means no ask, so no buttons and the old title fallback
         found = thread.get("messages") if isinstance(thread, dict) else thread
         messages.extend(m for m in found or [] if isinstance(m, dict))
     cache = {
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "board_url": board_url,
+        "peer": as_peer,
         "rows": commander_rows(rows, messages),
     }
     target = out or cache_path()
