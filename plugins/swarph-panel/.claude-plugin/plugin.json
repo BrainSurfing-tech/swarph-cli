@@ -1,0 +1,7 @@
+{
+  "name": "swarph-panel",
+  "version": "0.1.0",
+  "description": "Commander question panel: shows the oldest open commander row above the prompt, with its tap buttons, from a local cache.",
+  "author": {"name": "BrainSurfing-tech"},
+  "hooks": ["./hooks/claude-panel.json"]
+}
