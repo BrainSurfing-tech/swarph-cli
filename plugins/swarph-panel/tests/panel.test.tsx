@@ -285,6 +285,53 @@ test('debounce: a late failure for A does not release B\'s lock', async ($, on) 
   await ui.unmount()
 })
 
+// Build #2443: A's first send remains pending while the panel goes A → B → A.
+// Its late failure must not release the lock acquired by the second A press.
+test('debounce: a late failure for the first A does not release the second A lock', async ($, on) => {
+  on('env.get', ($: any, e: any) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+  let cache: unknown = cacheOf([row(22, '2026-10-19T07:00:00+00:00', 'Alpha?')])
+  on('fs.read', ($: any, e: any, next: any) => (e.path === CACHE_PATH ? { value: JSON.stringify(cache) } : next(e)))
+  on('ui.render', ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>prompt only</Text>
+  })
+  const runs: string[][] = []
+  const toasts: string[] = []
+  let aSends = 0
+  let releaseFirstA: (() => void) | undefined
+  on('process.run', ($: any, e: any) => {
+    runs.push(e.argv)
+    if (e.argv[0] === 'swarph' && e.argv.includes('922') && ++aSends === 1) {
+      return new Promise(res => {
+        releaseFirstA = () => res({ value: { exitCode: 2, stdout: '', stderr: '' } })
+      }) as never
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('ui.toast', ($: any, e: any) => (toasts.push(e.message ?? e.text ?? JSON.stringify(e)), { value: undefined }))
+  const ui = await mount($)
+  const firstA = ui.press({ key: 'opt-0' })
+  await settle()
+  cache = cacheOf([row(23, '2026-10-19T08:00:00+00:00', 'Beta?')])
+  await ui.redraw()
+  await ui.press({ key: 'opt-0' })
+  await settle()
+  cache = cacheOf([row(22, '2026-10-19T07:00:00+00:00', 'Alpha?')])
+  await ui.redraw()
+  await ui.press({ key: 'opt-0' })
+  await settle()
+  releaseFirstA?.()
+  await firstA
+  await settle()
+  await ui.press({ key: 'opt-1' })
+  await settle()
+  const sendsFor = (id: string) => runs.filter(a => a[0] === 'swarph' && a.at(-1)?.endsWith(`on #${id}`))
+  expect(sendsFor('22').length).toBe(2)
+  expect(sendsFor('23').length).toBe(1)
+  expect(toasts).toContain('already proposed for #22; answer it on the board')
+  await ui.unmount()
+})
+
 // Build #2442 F2: the render-time row-change reset, pinned. A is proposed, B shows
 // (no press), A shows again: A can be proposed a second time. Remove the reset line
 // in register.tsx and the second press toasts instead of sending.

@@ -23,7 +23,7 @@ const clean = (s: string) => s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
 // sends nothing again until the panel shows a different row. Measured need: 4 'panel: Yes on
 // #2436' DMs in 30 s (card thread 77416). A press sets it before awaiting its send; a failed
 // send releases only its own row's lock (#2442), so the row stays pressable.
-let proposedFor: number | null = null
+let proposedFor: { rowId: number } | null = null
 
 // A missing, unreadable or malformed cache is zero rows: the panel draws nothing.
 async function readCache($: EngineInterface): Promise<{ rows: Row[]; boardUrl: string; peer: string }> {
@@ -72,7 +72,7 @@ export const register: Register = on => {
 
     // The debounce lock names the row on screen: once the panel shows a different row the
     // lock is spent, even if this render never gets a press.
-    if (row !== undefined && proposedFor !== null && row.id !== proposedFor) proposedFor = null
+    if (row !== undefined && proposedFor !== null && row.id !== proposedFor.rowId) proposedFor = null
     // A press posts ONE proposal DM and closes nothing (see README "Tap path"): from this pane's own peer, to the
     // commander, reply_to = lab-ovh's ask for the row. No commander credential is held or needed.
     // Only a clean exit counts as proposed; a thrown error or a non-zero exit toasts that nothing was sent.
@@ -81,8 +81,8 @@ export const register: Register = on => {
     // is in flight — the measured case is two sends 0.4 s apart — hit the lock, not the wire.
     // A failed send releases its own row's lock, so the row stays pressable.
     const tap = async (o: Option) => {
-      if (proposedFor === row.id) return $.ui.toast(`already proposed for #${row.id}; answer it on the board`)
-      const mine = row.id
+      if (proposedFor?.rowId === row.id) return $.ui.toast(`already proposed for #${row.id}; answer it on the board`)
+      const mine = { rowId: row.id }
       proposedFor = mine
       // timeoutMs bounds the in-flight lock (plan-review #2439 R3): a hung CLI would
       // otherwise hold the row for the session. A timeout rejects the run, lands in the
