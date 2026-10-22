@@ -77,6 +77,20 @@ is unchanged (read from `~/mesh-gateway/server.py` on 2026-10-19; line numbers d
 The proposal DM is a pointer for the commander, not the answer: the relay checks the cited DM against the
 commander's recorded SSO session, and this one is sent under a peer token. The board page pre-selects the proposed
 option and labels its button `confirm: <label> on #<row>`.
+
+**Debounce and hotkeys (build #2437).** A press that sends locks its row for the rest of the session: further
+presses on that row send nothing and toast `already proposed for #<row>`, until the panel shows a different
+row. A failed send never locks. (Measured need: 4 `panel: Yes on #2436` DMs in 30 s, card #1224 thread 77416.)
+Each option button also carries a digit hotkey (`1`..`9` in option order). The semantics are the mod API's
+(documented in `claude-code.d.ts`, read for plan-review #2439): a bare digit in an **empty** prompt presses
+the band Button whose hotkey it names — no Ctrl+X/Tab focus chord, no mouse (clicks never reach this panel
+in the classic renderer). Once the prompt holds any text, a digit types and never presses, so there is no
+collision mid-typing. The one collision is a prompt whose **first** keystroke is a digit: typing `2 things`
+with a row on screen sends `panel: <option 2> on #<row>` instead of the `2`. Digits were kept regardless —
+chord-free answering from an idle prompt is the point — and the escape is to type any non-digit first or
+answer on the board. The plugin test kit cannot inject a terminal keypress into an AbovePrompt drawing (its
+key act reaches only a Client element's `onKey`), so end-to-end dispatch still needs one live-terminal check
+after install; the panel was not moved on a guess.
 With `COMMANDER_SSO_ENFORCE=1` (`server.py:15922`) the gateway refuses every static credential on a commander row
 except the verified relay (`server.py:16686-16750`); nothing here goes near that.
 
