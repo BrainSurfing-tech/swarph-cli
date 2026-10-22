@@ -220,7 +220,7 @@ test('debounce: two presses on one row run one send, the second toasts already p
   expect(runs.filter(a => a[0] === 'swarph')).toEqual([
     ['swarph', 'mesh', 'send', 'commander', '--as', 'lab-ovh', '--kind', 'question', '--reply-to', '911', '--content', 'panel: Yes on #11'],
   ])
-  expect(toasts).toEqual(['proposed, confirm on the board', 'already proposed for #11'])
+  expect(toasts).toEqual(['proposed, confirm on the board', 'already proposed for #11; answer it on the board'])
   await ui.unmount()
 })
 
@@ -237,7 +237,7 @@ test('debounce: concurrent presses on one row run one send', async ($, on) => {
     ['swarph', 'mesh', 'send', 'commander', '--as', 'lab-ovh', '--kind', 'question', '--reply-to', '917', '--content', 'panel: Yes on #17'],
   ])
   expect(toasts).toContain('proposed, confirm on the board')
-  expect(toasts).toContain('already proposed for #17')
+  expect(toasts).toContain('already proposed for #17; answer it on the board')
   await ui.unmount()
 })
 

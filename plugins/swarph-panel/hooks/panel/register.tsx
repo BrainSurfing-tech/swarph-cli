@@ -80,10 +80,13 @@ export const register: Register = on => {
     // is in flight — the measured case is two sends 0.4 s apart — hit the lock, not the wire.
     // A failed send releases the lock, so the row stays pressable.
     const tap = async (o: Option) => {
-      if (proposedFor === row.id) return $.ui.toast(`already proposed for #${row.id}`)
+      if (proposedFor === row.id) return $.ui.toast(`already proposed for #${row.id}; answer it on the board`)
       proposedFor = row.id
+      // timeoutMs bounds the in-flight lock (plan-review #2439 R3): a hung CLI would
+      // otherwise hold the row for the session. A timeout rejects the run, lands in the
+      // catch below, and releases the lock like any other failed send.
       const sent = await $.process
-        .run(['swarph', 'mesh', 'send', 'commander', '--as', peer, '--kind', 'question', '--reply-to', String(row.ask_id), '--content', `panel: ${clean(o.label)} on #${row.id}`])
+        .run(['swarph', 'mesh', 'send', 'commander', '--as', peer, '--kind', 'question', '--reply-to', String(row.ask_id), '--content', `panel: ${clean(o.label)} on #${row.id}`], { timeoutMs: 30000 })
         .then(r => (r as { exitCode?: number } | undefined)?.exitCode ?? 0)
         .catch(() => 1)
       if (sent !== 0) {
@@ -100,8 +103,12 @@ export const register: Register = on => {
         ? $.process.run(['xdg-open', boardUrl]).catch(() => $.ui.toast('swarph-panel: could not open the board'))
         : $.ui.toast(`swarph-panel: card #${row.card_id} row #${row.id} waits on the commander; answer it on the board`)
 
-    // Digit hotkeys 1..9 (build #2437): key N presses option N with no Ctrl+X/Tab focus chord and
-    // no mouse — clicks never reach this panel in the classic renderer (card thread 77143-77147).
+    // Digit hotkeys 1..9 (build #2437): per the mod API (claude-code.d.ts, cited in
+    // plan-review #2439), a bare digit in an EMPTY prompt presses the band Button whose
+    // hotkey it names — no Ctrl+X/Tab chord, no mouse (clicks never reach this panel in
+    // the classic renderer, card thread 77143-77147). With text in the prompt a digit
+    // types and never presses; the one collision is a prompt whose FIRST keystroke is a
+    // digit ('2 things' sends option 2 instead of typing). See README "Tap path".
     // Buttons need an ask to answer and a peer to send as; a cache without them keeps "open board".
     const canPropose = Number.isInteger(row.ask_id) && Number.isInteger(row.id) && peer !== ''
     const options = canPropose && Array.isArray(row.options) && row.options.length > 0 && row.options.every(o => typeof o?.label === 'string') ? row.options : null
