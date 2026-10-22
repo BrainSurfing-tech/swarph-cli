@@ -173,14 +173,16 @@ def _watching(inbox: str, cmdlines: Iterable[str]) -> bool:
 
 
 def _monitor_sink_pushes(parts: list[str], cell: str) -> bool:
-    """`swarph monitor start --as <cell> ... --deliver tmux:<pane>` is a wake path.
+    """A running `swarph monitor`, started with `--as <cell>` and a tmux sink,
+    is a wake path.
 
     The monitor's tmux sink injects the wake into the cell's pane; card #961
     measured that a cell cannot wake its own session, so this sink is the only
     path that actually STARTS a turn. It names the cell, not the inbox path, so
-    it is checked before the inbox-path gate. A process that merely quotes the
-    command (a prompt, a log line) is not the monitor: it must BE swarph running
-    `monitor start` for this cell with a tmux deliver sink.
+    it is checked before the inbox-path gate. Observation only: the watchdog
+    never starts a monitor. A process that merely quotes the command (a prompt,
+    a log line) is not the monitor -- it must BE swarph running the monitor for
+    this cell with a tmux deliver sink.
     """
     for i in (0, 1):
         if len(parts) < i + 4 or os.path.basename(parts[i]) != "swarph":
