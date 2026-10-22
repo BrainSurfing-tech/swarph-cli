@@ -192,11 +192,12 @@ def _monitor_sink_pushes(parts: list[str], cell: str) -> bool:
         rest = parts[i + 3:]
         named = f"--as={cell}" in rest or any(
             a == "--as" and b == cell for a, b in zip(rest, rest[1:]))
-        has_tmux = (
-            f"--deliver=tmux:{cell}" in rest
-            or any(a == "--deliver" and b.startswith("tmux:")
-                   for a, b in zip(rest, rest[1:]))
-        )
+        # Any tmux: pane counts, in either form (`--deliver tmux:<pane>` or
+        # `--deliver=tmux:<pane>`) -- the sink is the cell's wake, whatever pane
+        # it names, so the two spellings must agree.
+        has_tmux = any(p.startswith("--deliver=tmux:") for p in rest) or any(
+            a == "--deliver" and b.startswith("tmux:")
+            for a, b in zip(rest, rest[1:]))
         return named and has_tmux
     return False
 

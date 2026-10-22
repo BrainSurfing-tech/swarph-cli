@@ -336,10 +336,11 @@ def test_a_pull_only_monitor_is_not_a_watcher():
 
 
 def test_the_equals_form_of_the_tmux_sink_counts():
+    """Both spellings agree: any tmux:<pane> counts, not only the cell's own name."""
     cells = {"opencode": "/tmp/opencode/mesh-sidecar/inbox.log"}
     state = {}
     monitor = ["/usr/bin/python3 /home/ubuntu/.local/bin/swarph monitor start "
-               "--as opencode --deliver=tmux:opencode --foreground"]
+               "--as opencode --deliver=tmux:some-other-pane --foreground"]
     assert scan(cells, monitor, state, now=0) == []
     assert scan(cells, monitor, state, now=120) == []
     assert state["opencode"].get("outage") is not True
