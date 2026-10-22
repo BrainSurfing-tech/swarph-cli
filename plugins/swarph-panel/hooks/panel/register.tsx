@@ -17,7 +17,8 @@ const claudeDir = async ($: EngineInterface) => (await $.env.get('CLAUDE_CONFIG_
 // The cache is a file on disk: no control characters reach the terminal.
 const clean = (s: string) => s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
 
-// Debounce (card #1224, build #2437): the row a successful press proposed for. Module scope, so
+// Debounce (card #1224, build #2437; in-flight lock #2440): the row a press has proposed
+// for, or is sending for right now. Module scope, so
 // it survives re-renders of this panel for the rest of the session; a press on that same row
 // sends nothing again until the panel shows a different row. Measured need: 4 'panel: Yes on
 // #2436' DMs in 30 s (card thread 77416). A failed send never sets it, so the row stays pressable.
@@ -75,14 +76,20 @@ export const register: Register = on => {
     // commander, reply_to = lab-ovh's ask for the row. No commander credential is held or needed.
     // Only a clean exit counts as proposed; a thrown error or a non-zero exit toasts that nothing was sent.
     // A press on the row already proposed for sends nothing (the debounce above) and says so.
+    // The row is locked BEFORE the send is awaited (build #2440): presses made while a send
+    // is in flight — the measured case is two sends 0.4 s apart — hit the lock, not the wire.
+    // A failed send releases the lock, so the row stays pressable.
     const tap = async (o: Option) => {
       if (proposedFor === row.id) return $.ui.toast(`already proposed for #${row.id}`)
+      proposedFor = row.id
       const sent = await $.process
         .run(['swarph', 'mesh', 'send', 'commander', '--as', peer, '--kind', 'question', '--reply-to', String(row.ask_id), '--content', `panel: ${clean(o.label)} on #${row.id}`])
         .then(r => (r as { exitCode?: number } | undefined)?.exitCode ?? 0)
         .catch(() => 1)
-      if (sent !== 0) return $.ui.toast('swarph-panel: the proposal was not sent; answer it on the board')
-      proposedFor = row.id
+      if (sent !== 0) {
+        proposedFor = null
+        return $.ui.toast('swarph-panel: the proposal was not sent; answer it on the board')
+      }
       $.ui.toast('proposed, confirm on the board')
       // --min-age 0: the cache is younger than refresh.py's default 60 s skip.
       void refresh($, ['--min-age', '0'])

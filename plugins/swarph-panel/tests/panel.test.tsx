@@ -224,6 +224,23 @@ test('debounce: two presses on one row run one send, the second toasts already p
   await ui.unmount()
 })
 
+// Build #2440: two presses fired without awaiting the first — the second lands while the
+// first send is still in flight — still run exactly one mesh send.
+test('debounce: concurrent presses on one row run one send', async ($, on) => {
+  const { runs, toasts } = setup(on, cacheOf([row(17, '2026-10-19T07:00:00+00:00', 'Race?')]))
+  const ui = await mount($)
+  const first = ui.press({ key: 'opt-0' })
+  const second = ui.press({ key: 'opt-1' })
+  await Promise.all([first, second])
+  await settle()
+  expect(runs.filter(a => a[0] === 'swarph')).toEqual([
+    ['swarph', 'mesh', 'send', 'commander', '--as', 'lab-ovh', '--kind', 'question', '--reply-to', '917', '--content', 'panel: Yes on #17'],
+  ])
+  expect(toasts).toContain('proposed, confirm on the board')
+  expect(toasts).toContain('already proposed for #17')
+  await ui.unmount()
+})
+
 // Build #2437 (b): a failed send does not lock; the row can be pressed again.
 test('debounce: a failed send leaves the row pressable', async ($, on) => {
   const send = ['swarph', 'mesh', 'send', 'commander', '--as', 'lab-ovh', '--kind', 'question', '--reply-to', '912', '--content', 'panel: Yes on #12']
