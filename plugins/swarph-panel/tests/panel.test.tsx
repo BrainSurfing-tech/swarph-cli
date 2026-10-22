@@ -208,6 +208,82 @@ test('the cache refresh runs on session.start and a main turn, not in render, an
   expect(calls.length).toBe(2)
 })
 
+// Build #2437 (a): after a press sends for a row, more presses on that same row send nothing
+// and toast the lock. (Fresh row ids per test: the debounce lock is module state.)
+test('debounce: two presses on one row run one send, the second toasts already proposed', async ($, on) => {
+  const { runs, toasts } = setup(on, cacheOf([row(11, '2026-10-19T07:00:00+00:00', 'Debounce?')]))
+  const ui = await mount($)
+  await ui.press({ key: 'opt-0' })
+  await settle()
+  await ui.press({ key: 'opt-1' })
+  await settle()
+  expect(runs.filter(a => a[0] === 'swarph')).toEqual([
+    ['swarph', 'mesh', 'send', 'commander', '--as', 'lab-ovh', '--kind', 'question', '--reply-to', '911', '--content', 'panel: Yes on #11'],
+  ])
+  expect(toasts).toEqual(['proposed, confirm on the board', 'already proposed for #11'])
+  await ui.unmount()
+})
+
+// Build #2437 (b): a failed send does not lock; the row can be pressed again.
+test('debounce: a failed send leaves the row pressable', async ($, on) => {
+  const send = ['swarph', 'mesh', 'send', 'commander', '--as', 'lab-ovh', '--kind', 'question', '--reply-to', '912', '--content', 'panel: Yes on #12']
+  const { runs, toasts } = setup(on, cacheOf([row(12, '2026-10-19T07:00:00+00:00', 'Retry?')]), {}, 2)
+  const ui = await mount($)
+  await ui.press({ key: 'opt-0' })
+  await settle()
+  await ui.press({ key: 'opt-0' })
+  await settle()
+  expect(runs).toEqual([send, send])
+  expect(toasts.length).toBe(2)
+  expect(toasts.every(t => t.includes('not sent'))).toBe(true)
+  await ui.unmount()
+})
+
+// Build #2437 (c): when the panel shows a different row, the lock is spent and presses send again.
+test('debounce: a new row resets the lock', async ($, on) => {
+  const cache = cacheOf([row(13, '2026-10-19T07:00:00+00:00', 'First?')])
+  const { runs, toasts } = setup(on, cache)
+  const ui = await mount($)
+  await ui.press({ key: 'opt-0' })
+  await settle()
+  cache.rows = [row(14, '2026-10-19T08:00:00+00:00', 'Second?')]
+  await ui.redraw()
+  await ui.press({ key: 'opt-0' })
+  await settle()
+  expect(runs.filter(a => a[0] === 'swarph')).toEqual([
+    ['swarph', 'mesh', 'send', 'commander', '--as', 'lab-ovh', '--kind', 'question', '--reply-to', '913', '--content', 'panel: Yes on #13'],
+    ['swarph', 'mesh', 'send', 'commander', '--as', 'lab-ovh', '--kind', 'question', '--reply-to', '914', '--content', 'panel: Yes on #14'],
+  ])
+  expect(toasts).toEqual(['proposed, confirm on the board', 'proposed, confirm on the board'])
+  await ui.unmount()
+})
+
+// Build #2437 (d): the drawn option buttons carry digit hotkeys 1..N in order, on the
+// very buttons whose press runs the send — so key N and a press of option N are the same
+// act. The test kit cannot inject a terminal keypress into an AbovePrompt drawing (its
+// key act reaches only a Client element's onKey, and this panel draws none: measured
+// 'key: the drawing holds no Client'), so the mapping is pinned on the drawn tree and
+// the send on the press; end-to-end key dispatch is the host's band hotkey path and
+// needs a live terminal (stated in the PR, per the build row).
+test('hotkeys: options draw hotkeys 1..N in order, and the hotkeyed button press sends', async ($, on) => {
+  const { runs } = setup(on, cacheOf([row(15, '2026-10-19T07:00:00+00:00', 'Keys?', [
+    { label: 'Extend', text: 'extend', outcome: 'pass' },
+    { label: 'Flip', text: 'flip', outcome: 'pass' },
+    { label: 'Kill', text: 'kill', outcome: 'pass' },
+  ])]))
+  const ui = await mount($)
+  for (const [key, hotkey] of [['opt-0', '1'], ['opt-1', '2'], ['opt-2', '3']] as const) {
+    const b = await ui.find({ key })
+    expect(b?.props?.hotkey).toBe(hotkey)
+  }
+  await ui.press({ key: 'opt-1' })
+  await settle()
+  expect(runs.filter(a => a[0] === 'swarph')).toEqual([
+    ['swarph', 'mesh', 'send', 'commander', '--as', 'lab-ovh', '--kind', 'question', '--reply-to', '915', '--content', 'panel: Flip on #15'],
+  ])
+  await ui.unmount()
+})
+
 test('without CLAUDE_PLUGIN_ROOT the script is found next to the module', async ($, on) => {
   const { calls } = setup(on, cacheOf([]))
   on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))

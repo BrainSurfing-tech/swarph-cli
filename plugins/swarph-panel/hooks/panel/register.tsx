@@ -17,6 +17,12 @@ const claudeDir = async ($: EngineInterface) => (await $.env.get('CLAUDE_CONFIG_
 // The cache is a file on disk: no control characters reach the terminal.
 const clean = (s: string) => s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
 
+// Debounce (card #1224, build #2437): the row a successful press proposed for. Module scope, so
+// it survives re-renders of this panel for the rest of the session; a press on that same row
+// sends nothing again until the panel shows a different row. Measured need: 4 'panel: Yes on
+// #2436' DMs in 30 s (card thread 77416). A failed send never sets it, so the row stays pressable.
+let proposedFor: number | null = null
+
 // A missing, unreadable or malformed cache is zero rows: the panel draws nothing.
 async function readCache($: EngineInterface): Promise<{ rows: Row[]; boardUrl: string; peer: string }> {
   try {
@@ -62,15 +68,21 @@ export const register: Register = on => {
     // Other mods share this slot: draw theirs below ours instead of replacing it.
     const below = await next(e).catch(() => undefined)
 
+    // The debounce lock names the row on screen: once the panel shows a different row the
+    // lock is spent, even if this render never gets a press.
+    if (row !== undefined && proposedFor !== null && row.id !== proposedFor) proposedFor = null
     // A press posts ONE proposal DM and closes nothing (see README "Tap path"): from this pane's own peer, to the
     // commander, reply_to = lab-ovh's ask for the row. No commander credential is held or needed.
     // Only a clean exit counts as proposed; a thrown error or a non-zero exit toasts that nothing was sent.
+    // A press on the row already proposed for sends nothing (the debounce above) and says so.
     const tap = async (o: Option) => {
+      if (proposedFor === row.id) return $.ui.toast(`already proposed for #${row.id}`)
       const sent = await $.process
         .run(['swarph', 'mesh', 'send', 'commander', '--as', peer, '--kind', 'question', '--reply-to', String(row.ask_id), '--content', `panel: ${clean(o.label)} on #${row.id}`])
         .then(r => (r as { exitCode?: number } | undefined)?.exitCode ?? 0)
         .catch(() => 1)
       if (sent !== 0) return $.ui.toast('swarph-panel: the proposal was not sent; answer it on the board')
+      proposedFor = row.id
       $.ui.toast('proposed, confirm on the board')
       // --min-age 0: the cache is younger than refresh.py's default 60 s skip.
       void refresh($, ['--min-age', '0'])
@@ -81,6 +93,8 @@ export const register: Register = on => {
         ? $.process.run(['xdg-open', boardUrl]).catch(() => $.ui.toast('swarph-panel: could not open the board'))
         : $.ui.toast(`swarph-panel: card #${row.card_id} row #${row.id} waits on the commander; answer it on the board`)
 
+    // Digit hotkeys 1..9 (build #2437): key N presses option N with no Ctrl+X/Tab focus chord and
+    // no mouse — clicks never reach this panel in the classic renderer (card thread 77143-77147).
     // Buttons need an ask to answer and a peer to send as; a cache without them keeps "open board".
     const canPropose = Number.isInteger(row.ask_id) && Number.isInteger(row.id) && peer !== ''
     const options = canPropose && Array.isArray(row.options) && row.options.length > 0 && row.options.every(o => typeof o?.label === 'string') ? row.options : null
@@ -90,7 +104,7 @@ export const register: Register = on => {
         <Text bold>{clean(row.title)}</Text>
         <Box flexDirection="row" alignItems="center" gap={1}>
           {options ? (
-            options.map((o, i) => <Button key={`opt-${i}`} label={clean(o.label)} onPress={() => tap(o)} />)
+            options.map((o, i) => <Button key={`opt-${i}`} label={clean(o.label)} {...(i < 9 ? { hotkey: String(i + 1) } : {})} onPress={() => tap(o)} />)
           ) : (
             <Button key="board" label="open board" onPress={board} />
           )}
