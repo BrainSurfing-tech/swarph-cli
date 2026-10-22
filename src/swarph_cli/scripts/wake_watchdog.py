@@ -148,8 +148,9 @@ def _waiter_just_delivered(inbox: str, now: float | None = None) -> bool:
 
 def _watching(inbox: str, cmdlines: Iterable[str]) -> bool:
     """A reader is tail or dm_notify_filter with the inbox path as its own argument,
-    a channel server whose heartbeat is fresh, or a one-shot `swarph mesh wait`
-    for this cell (running, or delivered within WAIT_REARM_GRACE).
+    a channel server whose heartbeat is fresh, a one-shot `swarph mesh wait` for
+    this cell (running, or delivered within WAIT_REARM_GRACE), or the cell's own
+    monitor running with a tmux sink.
 
     A process that merely mentions the path (a prompt, a log line) is not a reader.
     """
@@ -160,12 +161,40 @@ def _watching(inbox: str, cmdlines: Iterable[str]) -> bool:
         parts = cmd.split()
         if _waits_on(parts, cell):
             return True
+        if _monitor_sink_pushes(parts, cell):
+            return True
         if inbox not in parts:
             continue
         if any(os.path.basename(p) == "tail" for p in parts):
             return True
         if any(p.endswith("dm_notify_filter") or p.endswith("dm_notify_filter.py") for p in parts):
             return True
+    return False
+
+
+def _monitor_sink_pushes(parts: list[str], cell: str) -> bool:
+    """`swarph monitor start --as <cell> ... --deliver tmux:<pane>` is a wake path.
+
+    The monitor's tmux sink injects the wake into the cell's pane; card #961
+    measured that a cell cannot wake its own session, so this sink is the only
+    path that actually STARTS a turn. It names the cell, not the inbox path, so
+    it is checked before the inbox-path gate. A process that merely quotes the
+    command (a prompt, a log line) is not the monitor: it must BE swarph running
+    `monitor start` for this cell with a tmux deliver sink.
+    """
+    for i in (0, 1):
+        if len(parts) < i + 4 or os.path.basename(parts[i]) != "swarph":
+            continue
+        if i == 1 and not os.path.basename(parts[0]).startswith("python"):
+            continue
+        if parts[i + 1:i + 3] != ["monitor", "start"]:
+            continue
+        rest = parts[i + 3:]
+        named = f"--as={cell}" in rest or any(
+            a == "--as" and b == cell for a, b in zip(rest, rest[1:]))
+        has_tmux = any(a == "--deliver" and b.startswith("tmux:")
+                       for a, b in zip(rest, rest[1:]))
+        return named and has_tmux
     return False
 
 

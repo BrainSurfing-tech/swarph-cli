@@ -291,3 +291,34 @@ def test_the_re_arm_gap_after_a_one_shot_delivery_is_not_an_outage(tmp_path):
     st = {}
     assert scan(cells, [], st, now=0) == []
     assert scan(cells, [], st, now=120) == ["copilot"]
+
+
+def test_a_monitor_with_a_tmux_sink_is_a_watcher():
+    """Card #961: the tmux sink is the only path that starts a turn, so a cell
+    whose own monitor runs with `--deliver tmux:<pane>` is watched even with no
+    tail -- the commander's one-wake-source rule (drop the tail, keep the sink)."""
+    cells = {"opencode": "/tmp/opencode/mesh-sidecar/inbox.log"}
+    state = {}
+    monitor = ["/usr/bin/python3 /home/ubuntu/.local/bin/swarph monitor start "
+               "--as opencode --deliver tmux:opencode --deliver pull --foreground"]
+    assert scan(cells, monitor, state, now=0) == []
+    assert scan(cells, monitor, state, now=120) == []
+    assert state["opencode"].get("outage") is not True
+
+
+def test_a_prompt_quoting_the_monitor_command_is_not_a_watcher():
+    cells = {"opencode": "/tmp/opencode/mesh-sidecar/inbox.log"}
+    state = {}
+    noise = ['claude --append-system-prompt "run swarph monitor start --as opencode '
+             '--deliver tmux:opencode"']
+    assert scan(cells, noise, state, now=0) == []
+    assert scan(cells, noise, state, now=120) == ["opencode"]
+
+
+def test_a_monitor_for_another_cell_is_not_this_cells_watcher():
+    cells = {"opencode": "/tmp/opencode/mesh-sidecar/inbox.log"}
+    state = {}
+    other = ["/usr/bin/python3 /home/ubuntu/.local/bin/swarph monitor start "
+             "--as cursor-lin --deliver tmux:cursor-lin --foreground"]
+    assert scan(cells, other, state, now=0) == []
+    assert scan(cells, other, state, now=120) == ["opencode"]
