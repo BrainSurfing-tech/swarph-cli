@@ -192,8 +192,11 @@ def _monitor_sink_pushes(parts: list[str], cell: str) -> bool:
         rest = parts[i + 3:]
         named = f"--as={cell}" in rest or any(
             a == "--as" and b == cell for a, b in zip(rest, rest[1:]))
-        has_tmux = any(a == "--deliver" and b.startswith("tmux:")
-                       for a, b in zip(rest, rest[1:]))
+        has_tmux = (
+            f"--deliver=tmux:{cell}" in rest
+            or any(a == "--deliver" and b.startswith("tmux:")
+                   for a, b in zip(rest, rest[1:]))
+        )
         return named and has_tmux
     return False
 

@@ -322,3 +322,24 @@ def test_a_monitor_for_another_cell_is_not_this_cells_watcher():
              "--as cursor-lin --deliver tmux:cursor-lin --foreground"]
     assert scan(cells, other, state, now=0) == []
     assert scan(cells, other, state, now=120) == ["opencode"]
+
+
+def test_a_pull_only_monitor_is_not_a_watcher():
+    """A pull-only monitor writes inbox.log but starts no turn, so the cell is
+    still unwatched (card #1234)."""
+    cells = {"opencode": "/tmp/opencode/mesh-sidecar/inbox.log"}
+    state = {}
+    pull_only = ["/usr/bin/python3 /home/ubuntu/.local/bin/swarph monitor start "
+                 "--as opencode --deliver pull --foreground"]
+    assert scan(cells, pull_only, state, now=0) == []
+    assert scan(cells, pull_only, state, now=120) == ["opencode"]
+
+
+def test_the_equals_form_of_the_tmux_sink_counts():
+    cells = {"opencode": "/tmp/opencode/mesh-sidecar/inbox.log"}
+    state = {}
+    monitor = ["/usr/bin/python3 /home/ubuntu/.local/bin/swarph monitor start "
+               "--as opencode --deliver=tmux:opencode --foreground"]
+    assert scan(cells, monitor, state, now=0) == []
+    assert scan(cells, monitor, state, now=120) == []
+    assert state["opencode"].get("outage") is not True
