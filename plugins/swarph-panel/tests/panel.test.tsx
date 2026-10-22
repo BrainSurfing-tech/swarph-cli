@@ -241,6 +241,70 @@ test('debounce: concurrent presses on one row run one send', async ($, on) => {
   await ui.unmount()
 })
 
+// Build #2442 F1: row A's send fails only AFTER the panel moved to row B and B was
+// pressed. The late failure must release nothing: B's lock survives, so a second press
+// on B sends nothing (exactly 1 send for B). A's send hangs on a test-held promise so
+// its failure lands after B's press by construction.
+test('debounce: a late failure for A does not release B\'s lock', async ($, on) => {
+  on('env.get', ($: any, e: any) => ({ value: e.name === 'HOME' ? '/home/u' : undefined }))
+  let cache: unknown = cacheOf([row(18, '2026-10-19T07:00:00+00:00', 'Ay?')])
+  on('fs.read', ($: any, e: any, next: any) => (e.path === CACHE_PATH ? { value: JSON.stringify(cache) } : next(e)))
+  on('ui.render', ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>prompt only</Text>
+  })
+  const runs: string[][] = []
+  const toasts: string[] = []
+  let releaseA: (() => void) | undefined
+  on('process.run', ($: any, e: any) => {
+    runs.push(e.argv)
+    if (e.argv[0] === 'swarph' && e.argv.includes('918')) {
+      return new Promise(res => {
+        releaseA = () => res({ value: { exitCode: 2, stdout: '', stderr: '' } })
+      }) as never
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('ui.toast', ($: any, e: any) => (toasts.push(e.message ?? e.text ?? JSON.stringify(e)), { value: undefined }))
+  const ui = await mount($)
+  const pressA = ui.press({ key: 'opt-0' })
+  await settle()
+  cache = cacheOf([row(19, '2026-10-19T08:00:00+00:00', 'Bee?')])
+  await ui.redraw()
+  await ui.press({ key: 'opt-0' })
+  await settle()
+  releaseA?.()
+  await pressA
+  await settle()
+  await ui.press({ key: 'opt-0' })
+  await settle()
+  const sendsFor = (id: string) => runs.filter(a => a[0] === 'swarph' && a.at(-1)?.endsWith(`on #${id}`))
+  expect(sendsFor('19').length).toBe(1)
+  expect(sendsFor('18').length).toBe(1)
+  expect(toasts).toContain('already proposed for #19; answer it on the board')
+  await ui.unmount()
+})
+
+// Build #2442 F2: the render-time row-change reset, pinned. A is proposed, B shows
+// (no press), A shows again: A can be proposed a second time. Remove the reset line
+// in register.tsx and the second press toasts instead of sending.
+test('debounce: showing another row spends the lock (A, B, A again)', async ($, on) => {
+  const cache = cacheOf([row(20, '2026-10-19T07:00:00+00:00', 'Alpha?')])
+  const { runs } = setup(on, cache)
+  const ui = await mount($)
+  await ui.press({ key: 'opt-0' })
+  await settle()
+  cache.rows = [row(21, '2026-10-19T08:00:00+00:00', 'Beta?')]
+  await ui.redraw()
+  cache.rows = [row(20, '2026-10-19T07:00:00+00:00', 'Alpha?')]
+  await ui.redraw()
+  await ui.press({ key: 'opt-0' })
+  await settle()
+  const send = ['swarph', 'mesh', 'send', 'commander', '--as', 'lab-ovh', '--kind', 'question', '--reply-to', '920', '--content', 'panel: Yes on #20']
+  expect(runs.filter(a => a[0] === 'swarph')).toEqual([send, send])
+  await ui.unmount()
+})
+
 // Build #2437 (b): a failed send does not lock; the row can be pressed again.
 test('debounce: a failed send leaves the row pressable', async ($, on) => {
   const send = ['swarph', 'mesh', 'send', 'commander', '--as', 'lab-ovh', '--kind', 'question', '--reply-to', '912', '--content', 'panel: Yes on #12']

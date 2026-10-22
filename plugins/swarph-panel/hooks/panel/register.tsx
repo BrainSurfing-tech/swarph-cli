@@ -21,7 +21,8 @@ const clean = (s: string) => s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
 // for, or is sending for right now. Module scope, so
 // it survives re-renders of this panel for the rest of the session; a press on that same row
 // sends nothing again until the panel shows a different row. Measured need: 4 'panel: Yes on
-// #2436' DMs in 30 s (card thread 77416). A failed send never sets it, so the row stays pressable.
+// #2436' DMs in 30 s (card thread 77416). A press sets it before awaiting its send; a failed
+// send releases only its own row's lock (#2442), so the row stays pressable.
 let proposedFor: number | null = null
 
 // A missing, unreadable or malformed cache is zero rows: the panel draws nothing.
@@ -78,10 +79,11 @@ export const register: Register = on => {
     // A press on the row already proposed for sends nothing (the debounce above) and says so.
     // The row is locked BEFORE the send is awaited (build #2440): presses made while a send
     // is in flight — the measured case is two sends 0.4 s apart — hit the lock, not the wire.
-    // A failed send releases the lock, so the row stays pressable.
+    // A failed send releases its own row's lock, so the row stays pressable.
     const tap = async (o: Option) => {
       if (proposedFor === row.id) return $.ui.toast(`already proposed for #${row.id}; answer it on the board`)
-      proposedFor = row.id
+      const mine = row.id
+      proposedFor = mine
       // timeoutMs bounds the in-flight lock (plan-review #2439 R3): a hung CLI would
       // otherwise hold the row for the session. A timeout rejects the run, lands in the
       // catch below, and releases the lock like any other failed send.
@@ -90,7 +92,9 @@ export const register: Register = on => {
         .then(r => (r as { exitCode?: number } | undefined)?.exitCode ?? 0)
         .catch(() => 1)
       if (sent !== 0) {
-        proposedFor = null
+        // Release only THIS press's lock (#2442 F1): the panel may have moved to
+        // another row and locked it while this send was in flight.
+        if (proposedFor === mine) proposedFor = null
         return $.ui.toast('swarph-panel: the proposal was not sent; answer it on the board')
       }
       $.ui.toast('proposed, confirm on the board')
