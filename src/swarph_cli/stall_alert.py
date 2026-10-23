@@ -6,12 +6,12 @@ drained on their own within 7-25 min. The first alert waits 60 ticks (30 min
 at the 30s poll) so a long build is not paged at 3 min.
 
 Card #989: the surface is one obligation, never a DM to commander by default.
-Card #1135 (commander, 2026-10-14: "route those to culprits or responsible"):
-the row NAMES the stalled cell and is held by that cell's RESPONSIBLE peer from
-the first alert, so someone who can act is told at tick 60, not at a timeout.
-A later timeout is only a second escalation. A second stall tick while the row
-is open opens nothing new. A drain closes it. Fail-safe: a failed POST never
-raises and never blocks delivery."""
+Card #1135 (commander, 2026-10-14 08:30Z, restated in the 2026-10-23 triage):
+the row is held by the stalled cell, and the timeout escalates to that cell's
+responsible peer. lab-ovh is not the default recipient. lab-ovh's own stall is
+the exception: it is held by the other orchestrator. A second stall tick while
+the row is open opens nothing new. A drain closes it. Fail-safe: a failed POST
+never raises and never blocks delivery."""
 from __future__ import annotations
 
 import json
@@ -27,15 +27,13 @@ _CARD = 989
 _HOLDER = "lab-ovh"
 # lab-ovh's own stall cannot escalate to lab-ovh. Another orchestrator holds it.
 _OTHER = "drop-on-meta-edge"
-# Card #1135. TWO CHOICES ARE UNRULED; each is ONE constant so a ruling flips it
-# here and nowhere else (one test each in tests/test_stall_alert.py).
-# (1) Who is responsible for a stalled cell: the `responsible:` key in the cell's
-#     OWN yaml (commander, card #1135). This daemon runs inside the stalled cell,
-#     so that yaml is local. claude_peers.owner is a Meta-Edge USER id, a person,
-#     and is deliberately never read. ONE fallback constant, used when the key is
-#     unset, the yaml is unreadable or absent, or the value names the cell itself.
+# Card #1135. The `responsible:` key in the cell's OWN yaml names who the
+# timeout escalates to. This daemon runs inside the stalled cell, so that
+# yaml is local. claude_peers.owner is a Meta-Edge USER id, a person, and is
+# deliberately never read. An unset, unreadable, or self-naming key does not
+# escalate to lab-ovh: lab-ovh is not the default recipient.
 RESPONSIBLE_YAML_KEY = "responsible"
-RESPONSIBLE_FOR_OWNERLESS = "lab-ovh"
+RESPONSIBLE_FOR_OWNERLESS = "lab-ovh"  # not a recipient; lab-ovh is not the default
 # (2) Whether the commander also gets a copy at the first alert. Card #989: a DM
 #     to the commander is not a reminder, so the default is no.
 COMMANDER_COPY = False
@@ -128,43 +126,26 @@ def _responsible_from_yaml(self_name: str) -> str | None:
     return value
 
 
-def _default_holder(self_name: str) -> str:
-    """The ONE fallback: RESPONSIBLE_FOR_OWNERLESS, never the cell itself, and
-    lab-ovh's own stall goes to the other orchestrator."""
-    if self_name == _HOLDER:
-        return _OTHER
-    holder = RESPONSIBLE_FOR_OWNERLESS
-    return _OTHER if holder == self_name else holder
-
-
 def _holder_for(self_name: str) -> str:
-    """Who is told at the FIRST alert: the cell's responsible peer.
+    """Who holds the first alert: the stalled cell.
 
-    lab-ovh's own stall goes to the other orchestrator, whatever its yaml says.
-    Otherwise the cell's own `responsible:` key, else the default. The stalled
-    cell is never its own holder: it cannot act on a notice it cannot receive.
-    A well-formed value the gateway does not hold is handled at mint time in
-    send_stall_alert (the gateway refuses an unknown holder)."""
+    Its own drain closes the row. lab-ovh is not that holder, including for
+    lab-ovh's own stall, which the other orchestrator holds."""
     if self_name == _HOLDER:
         return _OTHER
-    holder = _responsible_from_yaml(self_name) or _default_holder(self_name)
-    return _OTHER if holder == self_name else holder
+    return self_name
 
 
 def _escalation_for(holder: str, self_name: str) -> str | None:
-    """The timeout's second escalation target, or None for NO escalation.
+    """The timeout target: the cell's responsible peer, or None.
 
-    ALWAYS a peer other than the holder AND other than the stalled cell:
-    lab-ovh <-> drop-on-meta-edge for the two orchestrators, lab-ovh for any
-    other holder. When the only candidate is the stalled cell itself (lab-ovh's
-    own stall is held by drop-on-meta-edge; drop-on-meta-edge's own stall is held
-    by lab-ovh) there is nobody above the holder, so the answer is None and the
-    ask carries NO timeout_hours: the gateway never sweeps a null timeout_at
-    (mesh-gateway scripts/obligation_sweep.py), so nothing fires."""
-    candidate = _OTHER if holder == _HOLDER else _HOLDER
-    if candidate in (holder, self_name):
+    None when the key is unset, unreadable, names the holder, or names the
+    stalled cell. An absent key does not escalate to lab-ovh. A None here
+    omits timeout_hours, and the gateway never sweeps a null timeout_at."""
+    responsible = _responsible_from_yaml(self_name)
+    if not responsible or responsible in (holder, self_name):
         return None
-    return candidate
+    return responsible
 
 
 def pending_count(entries, self_name: str) -> int:
@@ -228,32 +209,23 @@ def _ask(gateway: str, token: str, self_name: str, count: int, pending_n: int,
 
 def send_stall_alert(gateway: str, token: str, self_name: str,
                      count: int, pending_n: int) -> bool:
-    """Open one obligation on card #989 held by the responsible peer
-    (RESPONSIBLE_FOR_OWNERLESS, lab-ovh today). True when that row is open (newly or
-    already). False on any error. Never raises, DMs the commander only when
-    COMMANDER_COPY is on, and a second call while the row is open opens
-    nothing."""
+    """Open one obligation on card #989 held by the stalled cell.
+
+    The timeout, when the cell has a responsible peer, escalates to that
+    peer. lab-ovh is not the default. True when that row is open (newly or
+    already). False on any error, including a holder the gateway refuses:
+    that refusal is not rerouted to lab-ovh, so the next tick can try again.
+    Never raises. DMs the commander only when COMMANDER_COPY is on. A second
+    call while the row is open opens nothing."""
     try:
         gateway = gateway.rstrip("/")
         if _live(gateway, token, self_name):
             return True
         holder = _holder_for(self_name)
         note = ""
-        try:
-            _ask(gateway, token, self_name, count, pending_n, holder, note)
-        except urllib.error.HTTPError as exc:
-            # The gateway refuses a holder it does not hold (#510: a typo, a
-            # deregistered peer, wrong case) with 404, 403 or 409. Main would
-            # have told lab-ovh in that case, so minting nothing here would be a
-            # silent path. ONE more try with the default; a second refusal, or
-            # any other status (408/429/5xx), is a real failure and returns
-            # False as before so the next tick re-tries the responsible peer.
-            fallback = _default_holder(self_name)
-            if exc.code not in _REFUSED_HOLDER_CODES or holder == fallback:
-                raise
-            note = f"responsible_refused={holder} (gateway HTTP {exc.code}); held by {fallback}"
-            holder = fallback
-            _ask(gateway, token, self_name, count, pending_n, holder, note)
+        # A refused holder, including _REFUSED_HOLDER_CODES, is not rerouted
+        # to lab-ovh. The next alert tick tries this cell again.
+        _ask(gateway, token, self_name, count, pending_n, holder, note)
         if COMMANDER_COPY:
             _request(
                 "POST", f"{gateway}/messages", token,
