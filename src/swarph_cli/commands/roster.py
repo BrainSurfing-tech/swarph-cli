@@ -297,12 +297,18 @@ def _local_tmux_peers() -> list:
 
 
 def _capture_peer_pane(peer: str):
-    """One read-only full-height capture of the peer's active pane. Never
-    sends keys (ruling 6); None on any failure — the peer reads unknown."""
+    """One read-only capture of the peer's pane, including scrollback.
+
+    Card #1228 F2. `capture-pane -p` alone is the visible screen. A Claude
+    Code /usage stdout display scrolls off it, so the multi-window parser
+    never sees the form it knows. `-S -` starts at the top of history.
+    Never sends keys (ruling 6); None on any failure — the peer reads unknown.
+    """
     try:
-        out = subprocess.run(["tmux", "capture-pane", "-p", "-t", peer],
-                             capture_output=True, timeout=10, text=True,
-                             encoding="utf-8", errors="replace")
+        out = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-S", "-", "-t", peer],
+            capture_output=True, timeout=10, text=True,
+            encoding="utf-8", errors="replace")
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None
     if out.returncode != 0:
