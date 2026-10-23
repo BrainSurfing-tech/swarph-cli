@@ -111,7 +111,22 @@ def _run_create(args: argparse.Namespace) -> int:
     status, payload = post_json(f"{base}/lanes", body, token)
     if not _ok(status):
         return _fail("create", status, payload)
-    print(f"created lane {args.name}")
+    # Card #949. The gateway persists the row at n=0 and starts workers only
+    # in scale_lane. Sending n on create is not enough on a server that
+    # ignores it, and a bare "created" line reads as if the workers exist.
+    # When the operator asked for workers, scale and report both results.
+    # n=0 stays a create, and the line says so.
+    if args.n and args.n > 0:
+        name = urllib.parse.quote(args.name, safe="")
+        scale_status, scale_payload = post_json(
+            f"{base}/lanes/{name}/scale", {"n": args.n}, token)
+        print(f"created lane {args.name}")
+        if not _ok(scale_status):
+            return _fail("scale", scale_status, scale_payload)
+        got = scale_payload.get("n", args.n) if isinstance(scale_payload, dict) else args.n
+        print(f"scaled {args.name} -> {got}")
+        return 0
+    print(f"created lane {args.name} n=0; run lane scale")
     return 0
 
 
