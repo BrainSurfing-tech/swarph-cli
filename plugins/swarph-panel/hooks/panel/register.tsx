@@ -58,8 +58,12 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   // A subagent's turn is not the main turn.
+  // --min-age 0 (build #2446): refresh.py's default 60 s skip can hide a row minted
+  // just after the last refresh for a whole extra turn (live test, card posts
+  // 77552/77555). A turn ending after a row is minted always refreshes, so the row
+  // shows on the next render; the render itself still only reads the cache file.
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) void refresh($)
+    if (e.agentId === undefined) void refresh($, ['--min-age', '0'])
     return next(e)
   }).catch(($, e, next) => next(e))
 
