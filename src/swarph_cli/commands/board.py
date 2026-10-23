@@ -604,14 +604,49 @@ def _thread_line(d) -> str:
             f"(#509/#562 — the VERB is the mechanism, the thread is where it lands)")
 
 
+def _hours_token(n) -> str:
+    if isinstance(n, float) and n.is_integer():
+        n = int(n)
+    return str(n)
+
+
+def _clock_line(d) -> str | None:
+    """The due-date clock (#935). It starts when the row is taken, not now.
+
+    `clock_hours` is the menu step's hours, or the `--hours` override.
+    `timeout_at` is a different clock — when the row reads OVERDUE — and
+    is not this line. Absent fields mean an older gateway; the caller
+    keeps its previous sentence rather than inventing a clock.
+    """
+    hours = d.get("clock_hours")
+    if hours is None:
+        return None
+    source = d.get("clock_source") or "menu"
+    menu = d.get("menu_hours")
+    if (source == "override" and isinstance(menu, (int, float))
+            and not isinstance(menu, bool) and menu
+            and isinstance(hours, (int, float)) and not isinstance(hours, bool)):
+        if hours % menu == 0:
+            detail = f"override, {int(hours // menu)}x menu {_hours_token(menu)}h"
+        else:
+            detail = f"override, menu {_hours_token(menu)}h"
+    else:
+        detail = str(source)
+    return f"clock: {_hours_token(hours)}h ({detail}) — STARTS ON TAKE, not now"
+
+
 def _format_ask(d) -> str:
-    """One line naming the obligation, its holder, and when it goes red.
+    """Name the obligation, who owes it, and the deadline clock.
 
     >>> NAMING THE DEADLINE OR ITS ABSENCE IS THE POINT, NOT DECORATION. <<< #145's
     lesson, one layer over: "0 overdue" must not be able to mean "nobody set dates".
-    An obligation with no timeout never goes red on its own, and the operator has to
-    be told that AT THE MOMENT THEY CREATE IT — afterwards it looks identical to one
-    that simply is not late yet.
+    The deadline is the due-date clock (`clock_hours`): the menu step's hours,
+    or the `--hours` override, and it STARTS ON TAKE, not at mint (#935).
+    `timeout_at` is the other clock — when the row READS OVERDUE — and is
+    printed under that name, never as the deadline. A response that carries
+    neither clock says NO TIMEOUT, because an obligation with no timeout never
+    goes red on its own and the operator has to be told that AT THE MOMENT
+    THEY CREATE IT.
 
     #532 applies the same rule to the falsifier: an obligation with no accept
     check reads RED in the sweep, and one whose check has no FAIL branch is
@@ -619,9 +654,17 @@ def _format_ask(d) -> str:
     rows look identical to sound ones.
     """
     when = d.get("timeout_at")
-    deadline = f"overdue after {when}" if when else _NO_TIMEOUT
-    return (f"obligation #{d.get('id')} on card #{d.get('card_id')}: "
-            f"{d.get('holder')} owes it, status={d.get('status')}, {deadline}\n"
+    clock = _clock_line(d)
+    head = (f"obligation #{d.get('id')} on card #{d.get('card_id')}: "
+            f"{d.get('holder')} owes it, status={d.get('status')}")
+    if clock:
+        extra = f"\n  {clock}"
+        extra += f"\n  overdue after {when}" if when else f"\n  {_NO_TIMEOUT}"
+    else:
+        deadline = f"overdue after {when}" if when else _NO_TIMEOUT
+        head = f"{head}, {deadline}"
+        extra = ""
+    return (f"{head}{extra}\n"
             f"  {_accept_line(d.get('accept'))}\n"
             f"  {_thread_line(d)}")
 
@@ -763,6 +806,13 @@ def _ask_line(d) -> str:
         if missing:
             line += f" · still missing: {missing}"
     if not str(state).startswith("closed"):
+        clock = _clock_line(d)
+        if clock:
+            # #935: the due-date clock, then the overdue clock under its own name.
+            # A stepped mint used to say neither, so --timeout-hours was read as the due date.
+            line += "\n  " + clock
+            if d.get("timeout_at"):
+                line += "\n  overdue after " + _s(d["timeout_at"])
         line += "\n  " + _accept_line(d.get("accept"))
         if d.get("step") is None:
             # unstepped: no menu clock, no container — the pre-#591 rules hold
@@ -1034,7 +1084,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ck.add_argument("what", help="what is owed, in one line")
     ck.add_argument("--timeout-hours", type=int, default=None,
                     help="hours until this obligation reads OVERDUE (default: none, "
-                         "which means it never goes red on its own)")
+                         "which means it never goes red on its own). This is not "
+                         "the due-date clock; that is --hours, and it starts on take")
     ck.add_argument("--accept", default=None, metavar='"PASS = ... | FAIL = ..."',
                     help="the falsifiable check that closes this obligation "
                          "(#532). Omitting it mints an obligation that reads RED "
@@ -1057,7 +1108,9 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="explicit edges by step name (added to the menu's); repeatable, "
                          "comma lists and the contract's `+step` spelling all accepted")
     ck.add_argument("--hours", type=int, default=None,
-                    help="clock override, up to 4x the menu value")
+                    help="the due-date clock in hours. Starts on take, not now. "
+                         "Default is the menu step's hours. Up to 4x that value. "
+                         "Not the overdue timeout (--timeout-hours)")
     ck.add_argument("--holder", dest="holder_flag", default=None, metavar="PEER|me",
                     help="who owes it: a peer (offered), `me` (open: a bound self-ask "
                          "is a take), or omit (requested: the eligible set is DM'd)")
@@ -1186,7 +1239,9 @@ def _build_parser() -> argparse.ArgumentParser:
     oa.add_argument("--accept-json", default=None, metavar="'{...}'",
                     help="replace the check with a structured one (#1068); "
                          "mutually exclusive with --accept")
-    oa.add_argument("--hours", type=int, default=None, help="clock override, up to 4x the menu value")
+    oa.add_argument("--hours", type=int, default=None,
+                    help="the due-date clock, starts on take, up to 4x the menu value. "
+                         "Not the overdue timeout")
     oa.add_argument("--needs-add", action="append", dest="needs_add", default=None,
                     metavar="STEP", help="add an edge (repeatable)")
     oa.add_argument("--needs-remove", action="append", dest="needs_remove", default=None,
