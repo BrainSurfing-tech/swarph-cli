@@ -2589,6 +2589,16 @@ def _opencode_turn_finished(lines: list[str]) -> bool:
 # when the same pane is seen unchanged on a later poll at least this
 # many seconds later (the monitor polls each minute, so about 2 polls).
 _MAYBE_START_GRACE_S = 60
+# Card #1222: the grace above is reset every time the footer CHANGES ("a
+# progressing turn rewrites this region every poll"), which is right for a
+# booting turn — but a pane whose footer churns FOREVER (a recreated session
+# showing a bare header — the 2026-10-18 opencode deafness) re-arms first_seen
+# on every poll and NEVER matures to idle. wake_outstanding then stands
+# indefinitely: 8h of deafness, three offers never woke the cell. This ABSOLUTE
+# cap is anchored to the FIRST sighting of maybe-starting and is NOT reset by
+# churn, so a bare header past it reads idle and the wake can re-inject. 600 s
+# matches #616's _WAKE_STALE_S bound.
+_MAYBE_START_MAX_S = 600.0
 
 
 def _opencode_pane_fingerprint(lines: list[str]) -> str:
@@ -2625,19 +2635,39 @@ def _opencode_poll_verdict(lines: list[str], now: float,
     if last is None or _OPENCODE_DONE.search(last):
         return "idle", fingerprint, None
     first_seen = None
+    capped_since = None
     if isinstance(prior, dict):
         seen = prior.get("first_seen")
         if (prior.get("fingerprint") == fingerprint
                 and isinstance(seen, (int, float))
                 and not isinstance(seen, bool)):
             first_seen = float(seen)
+        cap = prior.get("capped_since")
+        if isinstance(cap, (int, float)) and not isinstance(cap, bool):
+            capped_since = float(cap)
+    # Card #1222: the first sighting of maybe-starting is remembered in its own
+    # field so FOOTER CHURN cannot reset the hard cap. A bare header that has
+    # deferred for _MAYBE_START_MAX_S is aborting or idle, never still booting.
+    if capped_since is None:
+        capped_since = first_seen if first_seen is not None else now
+    if now - capped_since >= _MAYBE_START_MAX_S:
+        # Card #1222: past the hard cap the pane is idle, AND the record is KEPT
+        # (non-None) so the caller does not drop the anchor. Dropping it would
+        # make the very next poll a first sight -> maybe-starting again: the
+        # deafness would sawtooth instead of ending.
+        return "idle", fingerprint, {
+            "fingerprint": fingerprint,
+            "first_seen": first_seen if first_seen is not None else now,
+            "capped_since": capped_since}
     if first_seen is None:
         return ("maybe-starting", fingerprint,
-                {"fingerprint": fingerprint, "first_seen": now})
+                {"fingerprint": fingerprint, "first_seen": now,
+                 "capped_since": capped_since})
     if now - first_seen >= _MAYBE_START_GRACE_S:
         return "idle", fingerprint, None
     return ("maybe-starting", fingerprint,
-            {"fingerprint": fingerprint, "first_seen": first_seen})
+            {"fingerprint": fingerprint, "first_seen": first_seen,
+             "capped_since": capped_since})
 
 
 def _opencode_in_progress(target: str, ledger=None, now=None):
@@ -2659,7 +2689,10 @@ def _opencode_in_progress(target: str, ledger=None, now=None):
     moment = time.time() if now is None else now
     verdict, _fingerprint, record = _opencode_poll_verdict(
         lines, moment, ledger.get("opencode_maybe_start"))
-    if verdict == "maybe-starting":
+    # Card #1222: keep the record whenever the verdict returns one. maybe-starting
+    # carries the grace anchor; the cap-‘idle’ carries the anchor too so the cap
+    # stays anchored across polls. running / grace-idle return None and clear it.
+    if record is not None:
         ledger["opencode_maybe_start"] = record
     else:
         ledger.pop("opencode_maybe_start", None)
