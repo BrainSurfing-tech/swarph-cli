@@ -412,6 +412,18 @@ test('hotkeys: options draw hotkeys 1..N in order, and the hotkeyed button press
   await ui.unmount()
 })
 
+// Build #2446: the cache may be under 60 s old when a turn ends (a row was minted just
+// after the last refresh); turn.complete must still run a refresh that picks the row up,
+// i.e. defeat refresh.py's default --min-age 60 skip. Revert the fix (a bare refresh on
+// turn.complete) and the argv loses '--min-age 0' and this test fails.
+test('turn.complete refreshes past the 60 s skip so a just-minted row shows', async ($, on) => {
+  const { calls } = setup(on, cacheOf(THREE), { CLAUDE_PLUGIN_ROOT: '/plug' })
+  on('turn.complete', () => ({ text: '' }))
+  await $.turn.complete({ answer: '', durationMs: 1000 } as never)
+  await settle()
+  expect(calls).toEqual(['process.run python3 -I /plug/hooks/panel/refresh.py --min-age 0'])
+})
+
 test('without CLAUDE_PLUGIN_ROOT the script is found next to the module', async ($, on) => {
   const { calls } = setup(on, cacheOf([]))
   on('session.start', ($: any, e: any) => ({ cwd: e.cwd }))

@@ -38,7 +38,9 @@ ui.render AbovePrompt --> hooks/panel/register.tsx  reads that one file, nothing
   (`SWARPH_PANEL_BOARD_URL` or `--board-url` when running `refresh.py`). With none set it toasts where the
   row waits.
 - **Refresh:** `refresh.py` skips if the cache is under 60 s old (`--min-age`), keeps the last good cache when the
-  CLI fails (a failed read is never written as "0 rows"), and writes through a temp file and a rename.
+  CLI fails (a failed read is never written as "0 rows"), and writes through a temp file and a rename. The
+  turn-end refresh passes `--min-age 0` (build #2446): the 60 s skip could hide a row minted just after the
+  last refresh for a whole extra turn. Session start keeps the default skip.
   It runs one read-only CLI as `--as lab-ovh` (override with `--as`) and reads no token file: the CLI
   resolves its own credential. A subagent's turn does not trigger it.
 - **Port:** `_tap_options`, `_tap_closable`, `commander_title`, `offer_question`, `untagged_title` are copied
