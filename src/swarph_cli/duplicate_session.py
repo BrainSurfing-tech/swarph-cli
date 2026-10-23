@@ -197,14 +197,24 @@ def _live(gateway: str, token: str, cell: str) -> list[dict]:
 
 
 def _holder_for(cell: str) -> str:
-    """The responsible peer, reusing stall_alert's rule (card #1135): never the
-    cell itself (it cannot receive what it cannot deliver), and lab-ovh's own
-    alert goes to the other orchestrator. Any failure falls back, never raises."""
+    """A peer that is NOT the duplicated cell — card #513's invariant.
+
+    Unlike stall_alert, which card #1135 changed to hold its row BY the stalled
+    cell, a duplicate-session row is NEVER held by the duplicated cell: a second
+    live session is the very thing in question, so that cell is the one that
+    cannot be trusted to act on the notice. Reuse stall_alert's responsible peer
+    when it is not the cell; otherwise fall back to lab-ovh, or to the other
+    orchestrator for lab-ovh itself. Any failure falls back, never raises.
+    """
+    candidate = None
     try:
         from swarph_cli import stall_alert
-        return stall_alert._holder_for(cell)
+        candidate = stall_alert._holder_for(cell)
     except Exception:  # noqa: BLE001 - a routing nicety must never break the alarm
-        return _OTHER if cell == "lab-ovh" else "lab-ovh"
+        candidate = None
+    if candidate and candidate != cell:
+        return candidate
+    return _OTHER if cell == "lab-ovh" else "lab-ovh"
 
 
 def _ask(gateway: str, token: str, cell: str, pids: list[int], holder: str) -> None:
