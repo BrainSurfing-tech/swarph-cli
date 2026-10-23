@@ -140,6 +140,9 @@ _SWARPH_ENV = (
     "SWARPH_QUIET_WAKES",
     # bench registry path — a developer's file must not become the suite's
     "SWARPH_BENCH_PROVIDERS",
+    # card #1243: session injection reads this repo. A developer's checkout
+    # must not become the suite's source. Tests that want one set it.
+    "SWARPH_PROVEN_REPO",
     "MESH_DB_PATH",
     "MESH_CALLER_BINDING_ENFORCE",
     "MESH_REVOCATION_ENFORCE",

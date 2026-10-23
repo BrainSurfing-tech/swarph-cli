@@ -92,6 +92,8 @@ def read_commit(repo: Path, rev: str = "origin/main") -> tuple[str, str]:
     sha = subprocess.check_output(
         ["git", "-C", str(repo), "rev-parse", f"{rev}^{{commit}}"],
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=5,
     ).strip()
     if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
@@ -99,6 +101,8 @@ def read_commit(repo: Path, rev: str = "origin/main") -> tuple[str, str]:
     text = subprocess.check_output(
         ["git", "-C", str(repo), "show", f"{sha}:docs/THE_TEN.md"],
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=5,
     )
     return sha, text
