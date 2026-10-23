@@ -1511,6 +1511,15 @@ class TmuxSink(Sink):
                 print(f"[monitor] {self.name}: {reason} — deferring, zero keys",
                       flush=True)
                 return None
+        # #1034: a pane in copy-mode (or view-mode) swallows the wake keys --
+        # tmux runs them as copy-mode commands, the TUI never sees them, and the
+        # capture still reads idle. Ask tmux, not the screen; if in a mode, send
+        # nothing and keep the DM owed (the same owed-state #1010/#1126 use).
+        if _pane_in_mode(self.target):
+            self.deferred_reason = "pane in copy-mode"
+            print(f"[monitor] {self.name}: pane in copy-mode — deferring, zero keys",
+                  flush=True)
+            return None
         # #620: a wake's job is done the moment a TURN is observed running —
         # the cell is awake, whoever woke it (our injected wake fired, or
         # the human typed). Both older clearing paths miss the zombie
@@ -3190,6 +3199,28 @@ def _composer_state(target: str) -> Optional[str]:
     if _only_wake_text(content):
         return "wake"
     return "busy"
+
+
+def _pane_in_mode(target: str) -> bool:
+    """True if the pane is in a tmux MODE (copy-mode / view-mode), card #1034.
+
+    In copy-mode the TUI receives nothing: a keystroke is a copy-mode command,
+    the captured screen still reads idle (it shows the scrolled view), and the
+    monitor would mark the DM delivered while the cell never woke -- "delivered
+    is not submitted" with a new cause. Ask tmux, not the screen:
+    #{pane_in_mode} is 1 in a mode. Unknown (tmux cannot answer) reads as NOT in
+    mode, matching the pre-fix behaviour; the composer gate already fails closed
+    on an unreadable pane.
+    """
+    try:
+        r = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", target, "#{pane_in_mode}"],
+            capture_output=True, timeout=5,
+            text=True, encoding="utf-8", errors="replace",
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and (r.stdout or "").strip() == "1"
 
 
 def _tmux_session_created(target: str) -> Optional[float]:
