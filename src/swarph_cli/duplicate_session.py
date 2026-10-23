@@ -197,14 +197,23 @@ def _live(gateway: str, token: str, cell: str) -> list[dict]:
 
 
 def _holder_for(cell: str) -> str:
-    """The responsible peer, reusing stall_alert's rule (card #1135): never the
-    cell itself (it cannot receive what it cannot deliver), and lab-ovh's own
-    alert goes to the other orchestrator. Any failure falls back, never raises."""
+    """Who can receive this alarm. Never the cell itself: it cannot be told
+    what it cannot receive (card #513).
+
+    The responsible peer, read through stall_alert's yaml rule, when that
+    peer is someone else. Otherwise lab-ovh's own alarm goes to the other
+    orchestrator and every other cell's alarm goes to lab-ovh. This is not
+    stall_alert._holder_for: card #1135 holds a stall row by the stalled
+    cell, and that holder would fail the receive rule here. Any failure
+    falls back, never raises."""
     try:
         from swarph_cli import stall_alert
-        return stall_alert._holder_for(cell)
+        responsible = stall_alert._responsible_from_yaml(cell)
+        if responsible and responsible != cell:
+            return responsible
     except Exception:  # noqa: BLE001 - a routing nicety must never break the alarm
-        return _OTHER if cell == "lab-ovh" else "lab-ovh"
+        pass
+    return _OTHER if cell == "lab-ovh" else "lab-ovh"
 
 
 def _ask(gateway: str, token: str, cell: str, pids: list[int], holder: str) -> None:
