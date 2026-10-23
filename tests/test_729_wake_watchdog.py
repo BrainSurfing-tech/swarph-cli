@@ -153,6 +153,48 @@ def test_escalation_is_one_dm_to_the_peer_and_not_to_itself(tmp_path):
     assert own.count("mesh send watcher-peer") == 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows cannot execute the POSIX swarph stub as argv0; the self-outage assertions run on Linux",
+)
+def test_outage_of_the_sender_itself_marks_once_and_does_not_realert(tmp_path):
+    """Card #1237: the dead cell IS the --as sender. mesh_send refuses the
+    self-send, which used to leave the outage unmarked, so every tick posted
+    the card and DM'd the escalation peer again (112 of each for one outage).
+    The self DM is skipped and counted as sent: the card post and the
+    escalate DM carry the alert, the outage is marked once, and a second
+    pass sends nothing."""
+    root = tmp_path / "state"
+    _cell(root, "lab-ovh")
+    state_path = tmp_path / "wake.json"
+    log = tmp_path / "stub.log"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.path.abspath("src"),
+        "SWARPH_STATE_ROOT": str(root),
+        "WAKE_WATCHDOG_STATE": str(state_path),
+        "SWARPH_BIN": str(_stub(tmp_path)),
+        "STUB_LOG": str(log),
+        "STUB_RC": "0",
+    }
+    env.pop("SWARPH_SELF", None)
+    run = [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
+           "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
+    subprocess.run(run, env=env, check=True)
+    saved = json.loads(state_path.read_text())
+    saved["lab-ovh"]["missing_since"] = 0
+    state_path.write_text(json.dumps(saved))
+    subprocess.run(run, env=env, check=True)
+    text = log.read_text()
+    assert "mesh send lab-ovh" not in text, "no self DM was attempted"
+    assert "cards say 729" in text, "the card post still carries the alert"
+    assert text.count("mesh send drop-on-meta-edge") == 1
+    assert json.loads(state_path.read_text())["lab-ovh"]["outage"] is True
+    log.write_text("")
+    subprocess.run(run, env=env, check=True)
+    assert log.read_text().strip() == "", "a marked outage does not re-alert"
+
+
 def test_sender_equal_to_escalation_peer_saves_nothing(tmp_path):
     root = tmp_path / "state"
     _cell(root, "nobody")
