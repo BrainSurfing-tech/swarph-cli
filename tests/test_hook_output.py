@@ -26,6 +26,9 @@ def isolated_xdg(tmp_path, monkeypatch) -> Iterator[Path]:
     state_root.mkdir()
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
     monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    # Card #1243 reads ~/proven when SWARPH_PROVEN_REPO is unset. Pin the
+    # pre-1243 starter-only contract: an empty value turns that read off.
+    monkeypatch.setenv("SWARPH_PROVEN_REPO", "")
     yield tmp_path
 
 
