@@ -33,6 +33,7 @@ the probe's own code. Measured on the lab host at this change: 152s.
 | src/swarph_cli/commands/watchdog.py | urllib.request.urlopen | mesh gateway HTTP API | watchdog status posts as JSON with bearer token | opt-in (daemon run) |
 | src/swarph_cli/operator/api.py | urllib.request.urlopen | operator API base URL (configured) | operator API requests as JSON with bearer token | opt-in (operator surface) |
 | src/swarph_cli/stall_alert.py | urllib.request.urlopen | mesh gateway HTTP API | stall alert posts as JSON with bearer token | opt-in (alert enabled) |
+| src/swarph_cli/duplicate_session.py | urllib.request.urlopen | mesh gateway HTTP API | duplicate-session alarm rows on card #513 as JSON with bearer token | default (swarph monitor running) |
 | src/swarph_cli/multiplexer.py | urllib.request.urlopen | https://github.com/psmux/psmux/releases (pinned v3.3.6) | nothing (download only, GET) | opt-in (Windows multiplexer install) |
 | src/swarph_cli/gateway/services_control.py | urllib.request.urlopen | http://<health-host>:<port>/health (local services) | nothing (GET health probe) | default (gateway service control) |
 | src/swarph_cli/gateway/server.py | urllib.request.urlopen | fixed tailnet URL (upstream gateway) | proxied gateway requests with bearer token | opt-in (gateway run) |

@@ -3726,6 +3726,22 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
     _write_cursor_atomic(state.heartbeat_path, {
         "ts": time.time(), "iterations": state.iterations, "pid": os.getpid()})
 
+    # Card #513: detect a SECOND live session under this identity and raise ONE
+    # alarm row. Per-cell, IN the monitor (not the send path). It NEVER kills
+    # anything and never raises out of the loop. Throttled inside.
+    _maybe_duplicate_check(state)
+
+
+def _maybe_duplicate_check(state: MonitorState) -> None:
+    """Card #513. Enumerate at most once every duplicate_session.CHECK_EVERY ticks
+    (the check spawns `ps`), and never on the first tick so an ordinary monitor
+    test drives one clean iteration. duplicate_session.check swallows its own
+    errors, so this can never break delivery. It NEVER kills anything."""
+    from swarph_cli import duplicate_session
+    if state.iterations % duplicate_session.CHECK_EVERY != 0:
+        return
+    duplicate_session.check(state)
+
 
 def _monitor_loop(state: MonitorState) -> int:
     print(
