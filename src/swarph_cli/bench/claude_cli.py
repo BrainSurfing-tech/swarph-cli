@@ -23,9 +23,12 @@ class CliResult:
 
 
 def build_argv(model_id: str, system: str) -> list:
+    # Card #1090: one token each. --mcp-config is variadic, so a following
+    # JSON token is consumed only while the token after that is a flag.
     return ["claude", "-p", "--model", model_id, "--system-prompt", system, "--max-turns", "1",
-            "--output-format", "stream-json", "--verbose", "--strict-mcp-config",
-            "--mcp-config", '{"mcpServers":{}}', "--tools", "", "--setting-sources", ""]
+            "--output-format", "stream-json", "--verbose",
+            "--tools=", "--strict-mcp-config",
+            '--mcp-config={"mcpServers":{}}', "--setting-sources="]
 
 
 def clean_env(env: dict) -> dict:

@@ -14,11 +14,22 @@ def lines(key="none", result='{"action": "BUY"}', is_error=False, subtype="succe
 
 
 def test_argv_isolation_flags():
+    """Card #1090. Each isolation flag is one token.
+
+    --mcp-config is variadic. Passing the JSON as the next token is safe only
+    while whatever follows happens to be a flag. --tools and --setting-sources
+    with a separate empty token have the same shape. The one-token form is
+    --tools= --mcp-config={"mcpServers":{}} --setting-sources=.
+    """
     a = C.build_argv("claude-sonnet-5-5", "SYS")
-    for flag in ("--strict-mcp-config", "--setting-sources", "--tools", "--max-turns", "--system-prompt"):
-        assert flag in a
-    assert a[a.index("--mcp-config") + 1] == '{"mcpServers":{}}'
-    assert a[a.index("--tools") + 1] == "" and a[a.index("--setting-sources") + 1] == ""
+    assert "--tools=" in a
+    assert "--strict-mcp-config" in a
+    assert '--mcp-config={"mcpServers":{}}' in a
+    assert "--setting-sources=" in a
+    assert "--mcp-config" not in a
+    assert "--tools" not in a
+    assert "--setting-sources" not in a
+    assert "--max-turns" in a and "--system-prompt" in a
     assert "SYS" in a and not any("prompt text" in x for x in a)  # prompt goes to stdin, never argv
 
 
