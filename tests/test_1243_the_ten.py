@@ -38,11 +38,20 @@ def _git(repo: Path, *args: str) -> str:
             "-c", "user.name=grok-researcher",
             "-c", "user.email=grok-researcher@brainsurfing.tech",
             "-c", "commit.gpgsign=false",
+            "-c", "core.autocrlf=false",
             *args,
         ],
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     return out.strip()
+
+
+def _write(path: Path, text: str) -> None:
+    """UTF-8 and LF. The locale encoding on Windows turns the middle dot into
+    a byte git show then refuses, so the ten parses as empty."""
+    path.write_text(text, encoding="utf-8", newline="\n")
 
 
 def _repo_with_origin_main(tmp_path: Path) -> tuple[Path, str]:
@@ -58,7 +67,7 @@ def _repo_with_origin_main(tmp_path: Path) -> tuple[Path, str]:
         stdout=subprocess.DEVNULL,
     )
     ten = repo / "docs" / "THE_TEN.md"
-    ten.write_text(
+    _write(ten,
         f"1. **L1** · **{_LOCAL}**\n"
         "cycle 1 (2026-09-01): old stamp\n"
     )
@@ -70,13 +79,13 @@ def _repo_with_origin_main(tmp_path: Path) -> tuple[Path, str]:
     lines.append(f"11. **L99** · **{_ELEVENTH}**")
     lines.append("cycle 1 (2026-09-01): old stamp")
     lines.append("cycle 2 (2026-09-29): fresh stamp")
-    ten.write_text("\n".join(lines) + "\n")
+    _write(ten, "\n".join(lines) + "\n")
     _git(repo, "add", "docs/THE_TEN.md")
     _git(repo, "commit", "-m", "current ten")
     sha = _git(repo, "rev-parse", "HEAD")
     _git(repo, "update-ref", "refs/remotes/origin/main", sha)
     _git(repo, "reset", "--hard", "HEAD~1")
-    ten.write_text(ten.read_text() + f"\n{_LEAK}\n")
+    _write(ten, ten.read_text(encoding="utf-8") + f"\n{_LEAK}\n")
     return repo, sha
 
 
