@@ -5,10 +5,10 @@ Receives Claude Code's hook-input JSON on stdin, discovers the
 applicable cell.yaml, and emits a hook-output JSON to stdout
 containing the starter prompt as ``additionalContext``.
 
-Skipped (no-op) when ``SWARPH_SPAWN=1`` env is set — that environment
-marker is set by ``swarph spawn`` to indicate the spawn path already
-injected the prompt via ``--append-system-prompt``. Avoids
-double-injection when the session was launched through swarph.
+``SWARPH_SPAWN=1`` means ``swarph spawn`` already put the starter on
+``--append-system-prompt``. This hook then emits the ten and only the
+ten, so the starter is not doubled. With no ten to read, that path is
+still a no-op.
 
 Cell discovery:
   1. Cwd-local ``./cell.yaml`` (alpha #891 D3 auto-discovery)
@@ -39,13 +39,14 @@ from swarph_cli.cell import (
     load_cell,
     read_starter_prompt,
 )
+from swarph_cli.the_ten import session_block
 
 
 def _emit_no_op() -> int:
     """Emit empty additionalContext + exit 0.
 
-    Used when there's no cell.yaml to load OR when SWARPH_SPAWN=1 OR
-    on any error path. Hook MUST NOT block session startup.
+    Used when there is nothing to add: no starter and no ten, or
+    ``SWARPH_SPAWN=1`` with no ten. Hook MUST NOT block session startup.
     """
     output = {
         "hookSpecificOutput": {
@@ -77,12 +78,34 @@ def _discover_cell_path() -> Path | None:
     return None
 
 
-def run_hook_output(argv: list[str] | None = None) -> int:
-    # Skip when launched-via-swarph-spawn (already injected via
-    # --append-system-prompt; double-injection would duplicate context).
-    if os.environ.get("SWARPH_SPAWN", "").strip() == "1":
-        return _emit_no_op()
+def _emit(additional: str) -> int:
+    output: dict[str, Any] = {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": additional,
+        }
+    }
+    print(json.dumps(output))
+    return 0
 
+
+def _starter_text() -> str:
+    """The cell's starter prompt, or ``""`` when there is nothing to add.
+
+    A missing cell, a malformed cell, or an unreadable starter is an
+    empty starter. The hook still emits the ten when that block exists.
+    """
+    cell_path = _discover_cell_path()
+    if cell_path is None:
+        return ""
+    try:
+        cell = load_cell(cell_path)
+        return read_starter_prompt(cell) or ""
+    except CellError:
+        return ""
+
+
+def run_hook_output(argv: list[str] | None = None) -> int:
     # Drain hook-input from stdin (we don't actually use any field
     # currently, but Claude Code's protocol expects us to consume it
     # without blocking on TTY-detection edge cases).
@@ -92,32 +115,17 @@ def run_hook_output(argv: list[str] | None = None) -> int:
     except Exception:
         pass  # swallow stdin-read errors; hook output is the only thing that matters
 
-    cell_path = _discover_cell_path()
-    if cell_path is None:
-        return _emit_no_op()
+    # Commit-addressed. Empty when the repo or the ref is missing, and
+    # that emptiness must not change the starter-only behaviour.
+    block = session_block()
 
-    try:
-        cell = load_cell(cell_path)
-    except CellError:
-        # cell.yaml exists but is malformed — emit no-op + skip rather
-        # than blocking session startup. Operator can fix cell.yaml
-        # offline; meanwhile sessions still start.
-        return _emit_no_op()
+    # SWARPH_SPAWN=1 means the starter is already on --append-system-prompt.
+    # The ten is not part of that flag, so this path still emits the block
+    # and only the block.
+    if os.environ.get("SWARPH_SPAWN", "").strip() == "1":
+        return _emit(block) if block else _emit_no_op()
 
-    try:
-        starter = read_starter_prompt(cell)
-    except CellError:
-        # starter_prompt_path set but unreadable — emit no-op.
+    parts = [part for part in (_starter_text(), block) if part]
+    if not parts:
         return _emit_no_op()
-
-    if not starter:
-        return _emit_no_op()
-
-    output: dict[str, Any] = {
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": starter,
-        }
-    }
-    print(json.dumps(output))
-    return 0
+    return _emit("\n\n".join(parts))
