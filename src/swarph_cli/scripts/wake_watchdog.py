@@ -398,9 +398,18 @@ def main(argv: list[str] | None = None) -> int:
     rc = 0
     for name in alert:
         print(f"outage {name}", flush=True)
-        dm_rc = mesh_send(
-            swarph, name, sender, "IMMUNE (cell watchdog): your DM wake is dead, re-arm", token_file)
-        dm_ok = dm_rc == 0
+        # Card #1237: the outage cell can be the --as sender itself (the unit
+        # runs --as lab-ovh while watching lab-ovh). mesh_send refuses a
+        # self-send (rc 2), so the outage was never marked and every tick
+        # re-alerted (112 card posts + 112 escalate DMs for one outage).
+        # Skip the self DM and count it as sent, the same shape as the
+        # escalate != name guard below: the card post and the escalate DM
+        # still carry the alert, so the outage is marked once.
+        if name == sender:
+            dm_ok = True
+        else:
+            dm_ok = mesh_send(
+                swarph, name, sender, "IMMUNE (cell watchdog): your DM wake is dead, re-arm", token_file) == 0
         card_argv = [swarph, "board", "cards", "say", "729", "--as", sender,
                      "--to", name, "--content", f"IMMUNE (cell watchdog) — {name}: DM wake is dead, re-arm"]
         if token_file:
