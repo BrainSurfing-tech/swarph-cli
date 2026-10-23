@@ -216,6 +216,12 @@ def _no_unmocked_tmux(request, monkeypatch):
 
     def _guarded_run(argv, *args, **kwargs):
         if isinstance(argv, (list, tuple)) and argv and argv[0] == "tmux":
+            # #1034: a pane-mode query is answerable WITHOUT a real pane -- a
+            # bare runner is not in copy-mode. Answer "0" (not in mode) so the
+            # many deliver-path tests need not each script this new seam; the
+            # live_tmux test drives the real binary.
+            if any("pane_in_mode" in str(a) for a in argv):
+                return subprocess.CompletedProcess(argv, 0, stdout="0", stderr="")
             raise AssertionError(
                 f"unmocked tmux call in {request.node.nodeid}: "
                 f"{list(argv[:4])} — script the seam (subprocess.run / "

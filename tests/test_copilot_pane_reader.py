@@ -68,7 +68,11 @@ def rig(monkeypatch, captures):
                 stdout="\n".join(current or []), stderr="",
             )
         if argv[1] == "display-message":
-            return subprocess.CompletedProcess(argv, 0, stdout="1", stderr="")
+            # #1034: #{pane_in_mode} is "0" (not in copy-mode); the other
+            # display-message queries here answer "1".
+            fmt = argv[-1] if argv else ""
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=("0" if "pane_in_mode" in fmt else "1"), stderr="")
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 

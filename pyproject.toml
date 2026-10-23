@@ -173,3 +173,6 @@ testpaths = ["tests"]
 # nearly identical. That agreement is a polluted baseline, not isolation.
 pythonpath = ["src"]
 addopts = "-v --tb=short"
+markers = [
+    "live_tmux: drives a real tmux server/pane; opt-in, and the test must state its reason (card #1034)",
+]
