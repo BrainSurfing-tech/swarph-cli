@@ -9,7 +9,7 @@ the reader asks tmux for the whole history.
 import subprocess
 
 from swarph_cli.commands import roster
-from tests.test_1221_quota_windows import (
+from test_1221_quota_windows import (
     AS_OF,
     CAPTURED_AT,
     SESSION_RESET,
