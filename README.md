@@ -130,7 +130,7 @@ The mesh **board** — the projects + cards kanban the mesh coordinates on — a
 ```
 swarph board projects list
 swarph board projects add <slug> --title "…" [--goal "…"]
-swarph board cards list [--project <id|slug>] [--stage <s>] [--assignee <who>]
+swarph board cards list [--project <id|slug>] [--stage <s>] [--assignee <who>] [--search <text>]   # --search: title OR body, says how many cards it searched
 swarph board cards show <id>
 swarph board cards add --project <id|slug> --title "…" [--body "…"] [--ai2] [--priority N]
 swarph board cards edit <id> [--title "…"] [--body "…"] [--project <id|slug>] [--priority N]

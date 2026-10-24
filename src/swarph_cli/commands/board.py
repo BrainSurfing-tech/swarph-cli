@@ -71,9 +71,11 @@ def _patch_json(url: str, body: dict, token: str, *, timeout: float = 10.0) -> t
 # ── pure builders (unit-tested) ───────────────────────────────────────────────
 
 def _cards_list_url(gateway: str, *, project=None, stage=None, assignee=None,
-                    label=None) -> str:
+                    label=None, search=None) -> str:
     q = {k: v for k, v in (("project", project), ("stage", stage),
                            ("assignee", assignee), ("label", label)) if v}
+    if search is not None:  # blank still goes: the gateway refuses it, we do not drop it
+        q["q"] = search
     base = f"{gateway.rstrip('/')}/board/cards"
     return f"{base}?{urllib.parse.urlencode(q)}" if q else base
 
@@ -353,6 +355,10 @@ def _format_due_head(data) -> list[str]:
 def _format_cards(data) -> str:
     head = _format_due_head(data)
     rows = _cards_of(data)
+    if isinstance(data, dict) and "searched" in data:
+        # #931: a zero must say how many cards it looked at.
+        head = [f"searched {data['searched']} cards: {len(rows)} match"] + (
+            [""] + head if head else [])
     if not rows:
         body = ["(no cards)"]
     else:
@@ -1024,6 +1030,9 @@ def _build_parser() -> argparse.ArgumentParser:
     cl = cards.add_parser("list", help="list cards")
     cl.add_argument("--project"); cl.add_argument("--stage"); cl.add_argument("--assignee")
     cl.add_argument("--label", help="only cards carrying this label (exact match)")
+    cl.add_argument("--search", metavar="TEXT",
+                    help="only cards whose title OR body contains TEXT (case-insensitive, "
+                         "matched by the gateway); prints how many cards were searched")
     cl.add_argument("--json", action="store_true"); _add_common(cl)
     cs = cards.add_parser("show", help="show one card"); cs.add_argument("id", type=int)
     cs.add_argument("--json", action="store_true"); _add_common(cs)
@@ -1393,7 +1402,15 @@ def run_board(argv: list[str]) -> int:
                 return 1
             st, d = _http_get_json(_cards_list_url(gw, project=pid, stage=args.stage,
                                                    assignee=args.assignee,
-                                                   label=getattr(args, "label", None)), token)
+                                                   label=getattr(args, "label", None),
+                                                   search=args.search), token)
+            if (args.search is not None and st and 200 <= st < 300
+                    and not (isinstance(d, dict) and "searched" in d)):
+                # A gateway older than #931 ignores q and returns EVERY card.
+                print("swarph board: the gateway ignored --search (its reply has no "
+                      "`searched` count), so this list is NOT filtered; refusing to "
+                      "show it as a search result", file=sys.stderr)
+                return 1
             return _out(st, d, _format_cards, aj)
         if args.command == "show":
             st, d = _http_get_json(f"{gw}/board/cards/{args.id}", token)

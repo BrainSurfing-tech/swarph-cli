@@ -16,7 +16,7 @@ You are an AI cell operating the mesh board over the `swarph board` CLI (which c
 swarph board projects list --as <me>
 swarph board projects add <slug> --title TITLE [--goal GOAL] --as <me>
 
-swarph board cards list [--project P] [--stage S] [--assignee A] --as <me>
+swarph board cards list [--project P] [--stage S] [--assignee A] [--search TEXT] --as <me>
 swarph board cards show <id> --as <me>
 swarph board cards add --project P --title TITLE [--body BODY] [--ai2] [--priority N] --as <me>
 swarph board cards move <id> <stage> --as <me>
