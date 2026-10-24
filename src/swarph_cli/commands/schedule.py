@@ -57,10 +57,11 @@ def _build_parser() -> argparse.ArgumentParser:
     create.add_argument(
         "--deliver",
         choices=["wake", "dm"],
-        default="wake",
-        help="delivery mode: wake (default) types into a host-local tmux pane; "
-             "dm schedules a deferred DM to the target peer — use dm for any "
-             "cell not on lab's box (card #1081)",
+        default="dm",
+        help="delivery mode: dm (default) schedules a deferred DM to the target "
+             "peer and works for any cell; wake types into a host-local tmux pane "
+             "and the gateway refuses it for any cell off lab's box, so pass "
+             "--deliver wake only when you mean it (card #1081)",
     )
     add_common_args(create)
 
@@ -196,11 +197,15 @@ def _run_create(args: argparse.Namespace) -> int:
         body["out_channel"] = args.out_channel
     if args.min_interval is not None:
         body["min_interval_sec"] = args.min_interval
-    if args.deliver == "dm":
-        body["deliver"] = "dm"
+    body["deliver"] = args.deliver
     status, payload = post_json(f"{base}/scheduled-events", body, token)
     if not _ok(status):
-        return _fail("create", status, payload)
+        rc = _fail("create", status, payload)
+        if status == 403 and "operator-gated" in str(payload.get("detail", "")):
+            print("hint: a wake-delivery create is refused as operator-gated for any "
+                  "cell off lab's box. Use `--deliver dm` (the default) to schedule a "
+                  "deferred DM to the target peer instead.", file=sys.stderr)
+        return rc
     print(f"scheduled {args.name}")
     return 0
 
