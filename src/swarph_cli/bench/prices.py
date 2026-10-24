@@ -22,6 +22,8 @@ import os
 
 log = logging.getLogger("swarph.bench.prices")
 
+# Shipped in the wheel (card #1248). A missing file is an empty table and
+# every lookup falls through to _FALLBACK. refresh_prices updates this file.
 _CACHE_PATH = os.path.join(os.path.dirname(__file__), "data", "llm_prices.json")
 _MAP: dict | None = None
 
