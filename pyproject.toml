@@ -152,16 +152,13 @@ where = ["src"]
 # reads owners.json off the package path, so the same bug a third time:
 # installed 0.72.13 failed 'owner map unreadable' while the tree passed.
 # test_1073_wheel_install builds the wheel and runs the installed copy.
-# card #1248: the bench price table was gitignored, so an installed wheel
-# loaded {} and priced every model from the three fallbacks. The snapshot
-# is package data; refresh_prices updates the committed file.
 swarph_cli = ["systemd/*.service", "systemd/*.timer", "systemd/*.default",
               "systemd/*.path", "launchd/*.plist",
               "scripts/*.sh", "scripts/*.ps1", "guide/*.md",
               "payloads/postcompact/*.sh", "payloads/postcompact/*.cmd",
               "payloads/opencode/*.js",
     "skills/*/SKILL.md", "skills/*/LICENSE",
-    "triage/*.json", "bench/data/*.json"]
+    "triage/*.json"]
 # v0.15: ship the bundled mesh-gateway schema so `swarph gateway serve`
 # can apply it at startup via MESH_SCHEMA_PATH (defaults next to server.py).
 "swarph_cli.gateway" = ["*.sql"]

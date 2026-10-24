@@ -22,9 +22,23 @@ import os
 
 log = logging.getLogger("swarph.bench.prices")
 
-# Shipped in the wheel (card #1248). A missing file is an empty table and
-# every lookup falls through to _FALLBACK. refresh_prices updates this file.
-_CACHE_PATH = os.path.join(os.path.dirname(__file__), "data", "llm_prices.json")
+
+def _default_cache_path() -> str:
+    """User cache, never the installed package.
+
+    card #1248: a table written next to this file lands in site-packages and
+    goes stale in the wheel. The cache lives under XDG_CACHE_HOME (or
+    ~/.cache). SWARPH_BENCH_PRICE_CACHE overrides it.
+    """
+    override = os.environ.get("SWARPH_BENCH_PRICE_CACHE")
+    if override:
+        return override
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "swarph", "llm_prices.json")
+
+
+_CACHE_PATH = _default_cache_path()
 _MAP: dict | None = None
 
 # Reconciled fallbacks ($/Mtok input, output) — used ONLY when a model isn't in
@@ -36,18 +50,71 @@ _FALLBACK = {
 }
 
 
+def _read_cache() -> dict:
+    try:
+        with open(_CACHE_PATH) as f:
+            return (json.load(f) or {}).get("prices", {}) or {}
+    except Exception:
+        return {}
+
+
+def _fetch_into_cache() -> dict:
+    """Fill the user cache from the LiteLLM price JSON. Never writes inside
+    this package (that path is site-packages once the wheel is installed)."""
+    try:
+        from .refresh_prices import fetch
+        fresh = fetch()
+    except Exception as e:
+        log.warning("llm price fetch failed (%s)", e)
+        return {}
+    if not fresh:
+        return {}
+    import datetime
+    import tempfile
+    dest = os.path.abspath(_CACHE_PATH)
+    pkg = os.path.dirname(os.path.abspath(__file__))
+    if dest == pkg or dest.startswith(pkg + os.sep):
+        log.warning(
+            "refusing to write the price table into the package tree (%s)", dest)
+        return fresh
+    payload = {
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "source": "BerriAI/litellm model_prices_and_context_window.json",
+        "count": len(fresh),
+        "prices": fresh,
+    }
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest), suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, dest)
+    except OSError as e:
+        log.warning("llm price cache not written (%s)", e)
+    return fresh
+
+
 def load(force: bool = False) -> dict:
     """The cached ``{normalized_model: {"in": $/Mtok, "out": $/Mtok}}`` map.
-    Cached in-process; ``force=True`` re-reads the file. Never raises."""
+    Cached in-process; ``force=True`` re-reads. Never raises.
+
+    A missing cache is fetched once into the user cache. If that also fails,
+    the empty table is a WARNING, not a DEBUG line: every later lookup is
+    then a built-in fallback (card #1248)."""
     global _MAP
     if _MAP is not None and not force:
         return _MAP
-    try:
-        with open(_CACHE_PATH) as f:
-            _MAP = (json.load(f) or {}).get("prices", {}) or {}
-    except Exception as e:  # missing/corrupt cache -> fall back to built-ins
-        log.debug("llm price cache unavailable (%s) — using fallbacks", e)
+    table = _read_cache() or _fetch_into_cache()
+    if not table:
+        log.warning(
+            "llm price table unavailable — pricing from the built-in "
+            "fallbacks (pro/lite/flash). No cache at %s and the price "
+            "source could not be fetched.",
+            _CACHE_PATH,
+        )
         _MAP = {}
+        return _MAP
+    _MAP = table
     return _MAP
 
 
