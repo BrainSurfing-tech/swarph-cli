@@ -29,7 +29,11 @@ import tempfile
 import urllib.request
 from datetime import datetime, timezone
 
-from .prices import _CACHE_PATH as CACHE_PATH
+def _cache_path() -> str:
+    """Read at call time so a monkeypatch of prices._CACHE_PATH is honored,
+    and so a refresh never keeps an import-time path inside the package."""
+    from .prices import _CACHE_PATH
+    return _CACHE_PATH
 
 LITELLM_URL = ("https://raw.githubusercontent.com/BerriAI/litellm/main/"
                "model_prices_and_context_window.json")
@@ -59,7 +63,7 @@ def fetch() -> dict:
 
 def load_prior() -> dict:
     try:
-        with open(CACHE_PATH) as f:
+        with open(_cache_path()) as f:
             return (json.load(f) or {}).get("prices", {}) or {}
     except Exception:
         return {}
@@ -98,11 +102,17 @@ def main() -> int:
     payload = {"generated_at": datetime.now(timezone.utc).isoformat(),
                "source": "BerriAI/litellm model_prices_and_context_window.json",
                "count": len(merged), "prices": merged}
-    os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(CACHE_PATH), suffix=".tmp")
+    dest = _cache_path()
+    pkg = os.path.dirname(os.path.abspath(os.path.join(os.path.dirname(__file__), "prices.py")))
+    if os.path.abspath(dest).startswith(pkg + os.sep):
+        print(f"refresh_prices: refusing to write into the package tree ({dest})",
+              file=sys.stderr)
+        return 1
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest), suffix=".tmp")
     with os.fdopen(fd, "w") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
-    os.replace(tmp, CACHE_PATH)
+    os.replace(tmp, dest)
     print(f"refresh_prices: {len(merged)} models cached "
           f"({len(fresh)} fetched, {len(merged) - len(fresh)} prior-only kept). "
           f"{len(flagged)} guarded.")

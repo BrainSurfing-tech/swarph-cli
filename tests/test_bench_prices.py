@@ -53,11 +53,14 @@ def test_never_raises_on_junk(monkeypatch):
         assert isinstance(r, tuple) and len(r) == 2
 
 
-def test_missing_cache_file_returns_empty(monkeypatch):
-    # force a re-read pointed at a nonexistent path -> {} not a crash
+def test_missing_cache_file_returns_empty(monkeypatch, caplog):
+    # no file and no fetch -> {} not a crash, and the fallback is a warning
     monkeypatch.setattr(p, "_MAP", None)
     monkeypatch.setattr(p, "_CACHE_PATH", "/nonexistent/does/not/exist.json")
-    assert p.load(force=True) == {}
+    monkeypatch.setattr(p, "_fetch_into_cache", lambda: {})
+    with caplog.at_level("WARNING"):
+        assert p.load(force=True) == {}
+    assert any(r.levelno >= 30 and "fallback" in r.message for r in caplog.records)
     assert isinstance(p.lookup("gemini-2.5-flash"), tuple)  # still resolves via fallback
 
 
