@@ -137,19 +137,42 @@ def test_schedule_create_deliver_dm_sends_deliver_dm(monkeypatch):
     assert seen["body"]["deliver"] == "dm"
 
 
-def test_schedule_create_default_omits_deliver(monkeypatch):
-    """Card #1081: the default (wake) body is UNCHANGED — no `deliver` field,
-    so the gateway keeps its own default (send-keys wake)."""
+_CREATE = ["create", "ev", "--trigger", "event", "--target", "c2",
+           "--task", "do thing", "--context", "memory=proj_x"]
+
+
+def test_schedule_create_default_sends_deliver_dm(monkeypatch):
+    """Card #1081: with no --deliver the body carries deliver=dm. The gateway
+    refuses a wake for any cell off lab's box, so wake is opt-in, not the default."""
     seen = _capture_post(monkeypatch)
-    rc = sc.run_schedule([
-        "create", "ev",
-        "--trigger", "event",
-        "--target", "c2",
-        "--task", "do thing",
-        "--context", "memory=proj_x",
-    ])
-    assert rc == 0
-    assert "deliver" not in seen["body"]
+    assert sc.run_schedule(_CREATE) == 0
+    assert seen["body"]["deliver"] == "dm"
+
+
+def test_schedule_create_explicit_wake_sends_deliver_wake(monkeypatch):
+    """Card #1081: --deliver wake is still honoured, so the flag is not ignored."""
+    seen = _capture_post(monkeypatch)
+    assert sc.run_schedule(_CREATE + ["--deliver", "wake"]) == 0
+    assert seen["body"]["deliver"] == "wake"
+
+
+@pytest.mark.parametrize("extra", [[], ["--deliver", "wake"]])
+def test_schedule_create_operator_gated_403_hints_deliver_dm(monkeypatch, capsys, extra):
+    """Card #1081: the gateway's operator-gated 403 is surfaced verbatim AND
+    followed by a hint naming --deliver dm."""
+    detail = "scheduled events are operator-gated (active session-injection)"
+    _capture_post(monkeypatch, status=403, payload={"detail": detail})
+    assert sc.run_schedule(_CREATE + extra) == 1
+    err = capsys.readouterr().err
+    assert detail in err
+    assert "hint:" in err and "--deliver dm" in err
+
+
+def test_schedule_create_other_failure_prints_no_hint(monkeypatch, capsys):
+    """The hint is for the operator-gated refusal only, not every failure."""
+    _capture_post(monkeypatch, status=403, payload={"detail": "operator only"})
+    assert sc.run_schedule(_CREATE) == 1
+    assert "hint:" not in capsys.readouterr().err
 
 
 def test_schedule_create_without_context_fails_LOCALLY_and_never_posts(monkeypatch):
