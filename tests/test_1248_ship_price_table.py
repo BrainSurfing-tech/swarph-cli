@@ -41,7 +41,7 @@ def test_card_1248_wheel_contains_the_price_table(tmp_path):
     env.pop("PYTHONPATH", None)
     built = subprocess.run(
         [sys.executable, "-m", "pip", "wheel", ".", "--no-deps",
-         "--no-build-isolation", "-w", str(wheeldir)],
+         "-w", str(wheeldir)],
         cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=600,
     )
     assert built.returncode == 0, built.stderr[-2000:]
