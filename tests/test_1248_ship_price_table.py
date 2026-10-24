@@ -97,6 +97,10 @@ def test_card_1248_installed_wheel_prices_opus_and_warns_when_offline(tmp_path):
     offline_env["XDG_CACHE_HOME"] = str(tmp_path / "empty-cache")
     offline_env["https_proxy"] = "http://127.0.0.1:9"
     offline_env["http_proxy"] = "http://127.0.0.1:9"
+    offline_env["HTTPS_PROXY"] = "http://127.0.0.1:9"
+    offline_env["HTTP_PROXY"] = "http://127.0.0.1:9"
+    offline_env.pop("NO_PROXY", None)
+    offline_env.pop("no_proxy", None)
     offline = subprocess.run(
         [str(vpy), "-c",
          "import logging\n"
