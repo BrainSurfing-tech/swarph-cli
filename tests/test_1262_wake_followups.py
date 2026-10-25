@@ -8,6 +8,8 @@ import json
 import os
 import subprocess
 import sys
+
+import pytest
 import textwrap
 import threading
 import time
@@ -114,6 +116,7 @@ def _stub(tmp_path: Path) -> Path:
     return stub
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
 def test_recovered_sender_closes_its_commander_row_once(tmp_path):
     """The sender's wake is alive again. The open dead-wake row on card 729
     is closed once, and the evidence names the recovery time. A second pass
@@ -161,6 +164,7 @@ def test_recovered_sender_closes_its_commander_row_once(tmp_path):
     assert "obligations close" not in log.read_text(encoding="utf-8")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
 def test_dead_sender_mints_a_wake_dead_accept_marker(tmp_path):
     """A new dead-wake row carries --accept WAKE-DEAD <sender>. The close
     matches that marker, not a what field the gateway does not store."""
