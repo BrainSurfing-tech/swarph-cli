@@ -271,7 +271,7 @@ def _cell_yaml(config: Path, name: str, role: str, session_id: str = "") -> None
         "schema_version: v1\n"
         f"name: {name}\n"
         f"role: {role}\n"
-        "cwd: /tmp\n"
+        f"cwd: \"{Path.cwd().as_posix()}\"\n"
         "provider: claude\n"
         + sid,
         encoding="utf-8",

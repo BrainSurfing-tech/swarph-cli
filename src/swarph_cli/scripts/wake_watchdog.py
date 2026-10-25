@@ -129,9 +129,13 @@ def _channel_alive(inbox: str, now: float | None = None, *,
     """A channel server writes channel_heartbeat.json beside the inbox every 60 s.
 
     `swarph channel-serve` takes no inbox argument, so no command line names the
-    path. A fresh timestamp is not enough (card #1256): the recorded pid must
-    still be alive, and that pid's parent must be this cell's claude session.
-    A reused pid, or a live server whose parent is not the session, is dead.
+    path. A fresh timestamp is not enough where the process parent can be read
+    (Linux /proc, or a fixture standing in for it): the recorded pid must still
+    be alive, and that pid's parent must be this cell's claude session. A
+    reused pid, or a live server whose parent is not the session, is dead.
+
+    Where the parent cannot be read (no proc tree, as on Windows), a fresh
+    heartbeat with a live pid counts as alive. Card #1256, rework #2733.
     """
     hb = Path(inbox).parent / "channel_heartbeat.json"
     try:
@@ -142,15 +146,57 @@ def _channel_alive(inbox: str, now: float | None = None, *,
         return False
     if (time.time() if now is None else now) - ts >= 180:
         return False
-    if proc_root is not None:
-        root = proc_root
-    else:
-        override = os.environ.get("WAKE_WATCHDOG_PROC", "").strip()
-        root = Path(override) if override else Path("/proc")
+    root = _resolve_proc_root(proc_root)
+    if not _parent_readable(root):
+        return _pid_alive_host(pid)
     who = cell or Path(inbox).parent.parent.name
     if not _pid_alive(pid, root):
         return False
     return _parent_is_cell_session(pid, who, root)
+
+
+def _resolve_proc_root(proc_root: Path | None) -> Path:
+    if proc_root is not None:
+        return proc_root
+    override = os.environ.get("WAKE_WATCHDOG_PROC", "").strip()
+    if override:
+        return Path(override)
+    return Path("/proc")
+
+
+def _parent_readable(proc_root: Path) -> bool:
+    """True when a proc tree is there to read the parent from."""
+    try:
+        return proc_root.is_dir()
+    except OSError:
+        return False
+
+
+def _pid_alive_host(pid: int) -> bool:
+    """Whether `pid` is a live process, without a proc tree.
+
+    Windows `os.kill(pid, 0)` terminates the process, so that platform uses
+    OpenProcess. A permission error means the process exists.
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if handle:
+            kernel.CloseHandle(handle)
+            return True
+        return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _pid_alive(pid: int, proc_root: Path) -> bool:

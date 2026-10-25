@@ -133,7 +133,10 @@ def test_clock_moved_six_hours_sends_exactly_one_more_alert(tmp_path):
 
 def test_live_pid_whose_parent_is_not_the_cell_session_reads_as_dead(tmp_path):
     """The heartbeat pid is alive, but its parent is this test, not the
-    cell's claude session. The channel reads as dead."""
+    cell's claude session. Where /proc can be read, the channel is dead.
+    """
+    if not Path("/proc").is_dir():
+        pytest.skip("parent rule needs a proc tree; the no-proc pin covers this host")
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"])
     try:
@@ -150,3 +153,20 @@ def test_live_pid_whose_parent_is_not_the_cell_session_reads_as_dead(tmp_path):
     finally:
         child.kill()
         child.wait(timeout=5)
+
+
+def test_fresh_heartbeat_with_a_live_pid_is_alive_when_proc_cannot_be_read(tmp_path):
+    """Card #2733: the parent rule applies only where the parent can be read.
+    A missing proc tree does not require a claude parent. A fresh heartbeat
+    whose pid is live counts as alive; a dead pid does not."""
+    inbox = tmp_path / "drop" / "mesh-sidecar" / "inbox.log"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text("")
+    hb = inbox.parent / "channel_heartbeat.json"
+    missing = tmp_path / "no-such-proc"
+    hb.write_text(json.dumps({"ts": time.time(), "pid": os.getpid()}), encoding="utf-8")
+    assert _channel_alive(str(inbox), cell="drop", proc_root=missing) is True
+    hb.write_text(json.dumps({"ts": time.time(), "pid": 1 << 30}), encoding="utf-8")
+    assert _channel_alive(str(inbox), cell="drop", proc_root=missing) is False
+    hb.write_text(json.dumps({"ts": time.time() - 600, "pid": os.getpid()}), encoding="utf-8")
+    assert _channel_alive(str(inbox), cell="drop", proc_root=missing) is False

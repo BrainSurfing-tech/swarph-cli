@@ -165,7 +165,11 @@ def test_a_fresh_channel_heartbeat_counts_as_a_watcher(tmp_path, monkeypatch):
     cells = tmp_path / "cfg" / "swarph" / "cells"
     cells.mkdir(parents=True)
     (cells / "drop.yaml").write_text(
-        "schema_version: v1\nname: drop\nrole: drop\ncwd: /tmp\nprovider: claude\n",
+        "schema_version: v1\n"
+        "name: drop\n"
+        "role: drop\n"
+        f"cwd: \"{Path.cwd().as_posix()}\"\n"
+        "provider: claude\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))

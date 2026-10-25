@@ -56,7 +56,7 @@ def _cell_claude_session(tmp_path, monkeypatch):
         "schema_version: v1\n"
         "name: fixture-cell\n"
         "role: fixture-cell\n"
-        "cwd: /tmp\n"
+        f"cwd: \"{Path.cwd().as_posix()}\"\n"
         "provider: claude\n",
         encoding="utf-8",
     )
