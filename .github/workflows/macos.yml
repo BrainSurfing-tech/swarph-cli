@@ -85,7 +85,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install (editable + dev + server extras)
-        run: python -m pip install --upgrade pip && pip install -e ".[dev,gateway,service]"
+        run: python -m pip install --upgrade pip && pip install -e ".[dev,gateway,service,mcp]"
 
       # Same §5.3 discipline as windows.yml: re-derive the verdict from per-test
       # junit records rather than trusting the exit code, and assert a host-known
