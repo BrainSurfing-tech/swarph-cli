@@ -121,6 +121,7 @@ def test_escalation_is_one_dm_to_the_peer_and_not_to_itself(tmp_path):
         "STUB_RC": "0",
     }
     env.pop("SWARPH_SELF", None)
+    env.pop("MESH_GATEWAY_URL", None)
     subprocess.run(
         [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
          "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"],
@@ -176,6 +177,7 @@ def test_outage_of_the_sender_itself_marks_once_and_does_not_realert(tmp_path):
         "STUB_RC": "0",
     }
     env.pop("SWARPH_SELF", None)
+    env.pop("MESH_GATEWAY_URL", None)
     run = [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
            "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
     subprocess.run(run, env=env, check=True)
@@ -205,6 +207,7 @@ def test_sender_equal_to_escalation_peer_saves_nothing(tmp_path):
         "WAKE_WATCHDOG_STATE": str(state_path),
     }
     env.pop("SWARPH_SELF", None)
+    env.pop("MESH_GATEWAY_URL", None)
     proc = subprocess.run(
         [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
          "--as", "lab-ovh", "--escalate", "lab-ovh"],
@@ -240,6 +243,7 @@ def test_failed_send_is_not_saved_as_alerted_and_the_next_run_retries(tmp_path):
         "STUB_RC": "1",
     }
     env.pop("SWARPH_SELF", None)
+    env.pop("MESH_GATEWAY_URL", None)
     # first pass only records missing_since
     subprocess.run(
         [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog", "--as", "lab-ovh"],

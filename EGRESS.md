@@ -31,6 +31,7 @@ the probe's own code. Measured on the lab host at this change: 152s.
 | src/swarph_cli/commands/brain_ask.py | urllib.request.urlopen | fixed tailnet URL (brain service) | question text as JSON | opt-in (command run) |
 | src/swarph_cli/commands/mcp_server.py | urllib.request.urlopen | mesh gateway HTTP API | MCP tool-call requests as JSON with bearer token | opt-in (server run) |
 | src/swarph_cli/commands/watchdog.py | urllib.request.urlopen | mesh gateway HTTP API | watchdog status posts as JSON with bearer token | opt-in (daemon run) |
+| src/swarph_cli/scripts/wake_watchdog.py | urllib.request.urlopen | mesh gateway HTTP API (MESH_GATEWAY_URL) | GET /peers with the sender's bearer token | opt-in (watchdog pass when MESH_GATEWAY_URL is set) |
 | src/swarph_cli/operator/api.py | urllib.request.urlopen | operator API base URL (configured) | operator API requests as JSON with bearer token | opt-in (operator surface) |
 | src/swarph_cli/stall_alert.py | urllib.request.urlopen | mesh gateway HTTP API | stall alert posts as JSON with bearer token | opt-in (alert enabled) |
 | src/swarph_cli/duplicate_session.py | urllib.request.urlopen | mesh gateway HTTP API | duplicate-session alarm rows on card #513 as JSON with bearer token | default (swarph monitor running) |

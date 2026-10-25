@@ -14,6 +14,8 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Iterable
 
@@ -260,8 +262,10 @@ def _parent_is_cell_session(pid: int, cell: str, proc_root: Path) -> bool:
     """True when pid's parent is claude for this cell's session.
 
     A pinned session_id must be the parent's `--resume` or `--session-id`.
-    With no pin, `--name` must be the cell's role. Any other parent, including
-    a live pid reused by an unrelated process, is not the session.
+    With no pin, `--name` may be the cell yaml's name or its role.
+    science-claude's pane is `--name science-claude` while its role is
+    `science` (card #1262). Any other parent, including a live pid reused
+    by an unrelated process, is not the session.
     """
     ppid = _read_ppid(pid, proc_root)
     if not ppid:
@@ -276,9 +280,10 @@ def _parent_is_cell_session(pid: int, cell: str, proc_root: Path) -> bool:
     if session_id:
         return (_flag(argv, "--resume") == session_id
                 or _flag(argv, "--session-id") == session_id)
-    if role:
-        return _flag(argv, "--name") == role
-    return False
+    named = _flag(argv, "--name")
+    if not named:
+        return False
+    return named == cell or bool(role) and named == role
 
 
 def _format_ts(ts: float) -> str:
@@ -478,6 +483,150 @@ def scan(cells: dict[str, str], cmdlines: Iterable[str], state: dict,
     return alert
 
 
+def _bearer(token_file: str, sender: str) -> str:
+    path = (token_file or "").strip()
+    if not path and sender:
+        path = os.path.expanduser(f"~/.config/swarph/{sender}.peer_token")
+    if not path:
+        return ""
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def enabled_peer_names(gateway: str, token: str) -> set[str] | None:
+    """Registered, enabled peer names. None when the list cannot be read.
+
+    A failed read leaves the watched set alone. An empty successful list
+    is treated the same way: a gateway hiccup that returns [] must not
+    drop every cell. A non-empty list is a real answer, and peers absent
+    from it, or present and disabled, are not scanned.
+    """
+    if not gateway:
+        return None
+    req = urllib.request.Request(gateway.rstrip("/") + "/peers")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+            json.JSONDecodeError, TimeoutError):
+        return None
+    rows = data if isinstance(data, list) else (
+        data.get("peers") if isinstance(data, dict) else None)
+    if not isinstance(rows, list) or len(rows) == 0:
+        return None
+    names: set[str] = set()
+    for peer in rows:
+        if not isinstance(peer, dict):
+            continue
+        name = peer.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if "enabled" in peer and peer.get("enabled") in (0, False, "0", "false", "False"):
+            continue
+        names.add(name)
+    return names
+
+
+def retain_registered(cells: dict[str, str], state: dict,
+                      names: set[str] | None) -> dict[str, str]:
+    """Drop peers the gateway does not list, and disabled peers.
+
+    State entries go too, so a defunct cell does not stay in the watchdog
+    file after the pass that noticed it. None means the list was unreadable
+    and the set is unchanged.
+    """
+    if names is None:
+        return cells
+    for name in list(state):
+        if name not in names:
+            state.pop(name, None)
+    return {name: inbox for name, inbox in cells.items() if name in names}
+
+
+def _board_line(proc: subprocess.CompletedProcess) -> str:
+    text = proc.stdout if (proc.stdout or "").strip() else proc.stderr
+    lines = (text or "").splitlines()
+    return lines[0] if lines else ""
+
+
+def _log_board(label: str, proc: subprocess.CompletedProcess) -> None:
+    print(
+        f"wake_watchdog: {label} rc={proc.returncode} {_board_line(proc)}",
+        file=sys.stderr, flush=True)
+
+
+def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
+                                      now: float, state: dict, state_path: Path) -> None:
+    """Withdraw this sender's untaken dead-wake rows on card 729.
+
+    The running gateway refuses a close of a commander-held row from the
+    cell token. The creator may withdraw an untaken row. A row the
+    commander has already taken is left alone and logged once. Every
+    board call's return code and first output line are logged.
+    """
+    argv = [swarph, "board", "obligations", "list", "--card", "729",
+            "--holder", "commander", "--status", "open", "--json",
+            "--as", sender]
+    if token_file:
+        argv.extend(["--token-file", token_file])
+    listed = subprocess.run(
+        argv, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", check=False)
+    _log_board("obligations list", listed)
+    if listed.returncode != 0:
+        return
+    try:
+        data = json.loads(listed.stdout or "{}")
+    except json.JSONDecodeError:
+        return
+    rows = data.get("obligations") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return
+    when = _format_ts(now)
+    marker = f"WAKE-DEAD {sender}"
+    rec = state.setdefault(sender, {})
+    logged = rec.setdefault("logged_taken", [])
+    if not isinstance(logged, list):
+        logged = []
+        rec["logged_taken"] = logged
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("card_id")) != "729":
+            continue
+        if row.get("holder") != "commander":
+            continue
+        if row.get("status") not in (None, "open"):
+            continue
+        if row.get("created_by") != sender:
+            continue
+        if marker not in (row.get("accept") or ""):
+            continue
+        oid = row.get("id")
+        if not oid:
+            continue
+        if row.get("taken_at"):
+            if oid not in logged and str(oid) not in logged:
+                print(
+                    f"wake_watchdog: taken {oid} left for the commander",
+                    file=sys.stderr, flush=True)
+                logged.append(oid)
+                save_state(state_path, state)
+            continue
+        withdraw = [swarph, "board", "obligations", "withdraw", str(oid),
+                    "--reason", f"recovered {when}", "--as", sender]
+        if token_file:
+            withdraw.extend(["--token-file", token_file])
+        done = subprocess.run(
+            withdraw, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=False)
+        _log_board(f"obligations withdraw {oid}", done)
+
+
 def cells_under(root: Path) -> dict[str, str]:
     found = {}
     if not root.is_dir():
@@ -604,6 +753,12 @@ def main(argv: list[str] | None = None) -> int:
     cells = cells_under(root)
     state = load_state(state_path)
     now = _clock()
+    token_file = (args.token_file or "").strip()
+    sender = args.sender.strip()
+    names = enabled_peer_names(
+        os.environ.get("MESH_GATEWAY_URL", "").strip(),
+        _bearer(token_file, sender))
+    cells = retain_registered(cells, state, names)
     alert = scan(cells, cmdlines, state, now, timers=timers, crontab=crontab)
     sender = args.sender.strip()
     escalate = (args.escalate or "").strip()
@@ -647,6 +802,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     swarph = _swarph_bin()
     rc = 0
+    if (sender in cells
+            and _watching(cells[sender], cmdlines, cell=sender)):
+        _release_recovered_commander_rows(
+            swarph, sender, token_file, now, state, state_path)
     for name in alert:
         print(f"outage {name}", flush=True)
         # Card #1256: the dead cell is this unit's own --as identity. A DM
@@ -656,7 +815,9 @@ def main(argv: list[str] | None = None) -> int:
         if name == sender:
             content = commander_alert(name, _dead_since(cells[name], state.get(name) or {}))
             ask_argv = [swarph, "board", "cards", "ask", "729",
-                        "--holder", "commander", "--as", sender, content]
+                        "--holder", "commander",
+                        "--accept", f"WAKE-DEAD {sender}",
+                        "--as", sender, content]
             if token_file:
                 ask_argv.extend(["--token-file", token_file])
             asked = subprocess.run(ask_argv, check=False)
