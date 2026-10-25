@@ -2,7 +2,6 @@
 import io
 import json
 import os
-import select
 import subprocess
 import sys
 
@@ -73,16 +72,13 @@ def test_mcp_add_cannot_install_from_model_arguments():
     assert out["code"] == 2
 
 
-def _read_line(proc, timeout):
-    ready, _, _ = select.select([proc.stdout], [], [], timeout)
-    if not ready:
-        raise AssertionError("mcp server produced no stdout")
-    return proc.stdout.readline()
-
-
 def test_mcp_server_add_writes_nothing_but_protocol_frames(tmp_path):
     """The tool call's stdout is only JSON-RPC lines. Install text and a
-    child's stdout would show up here, because both share fd 1."""
+    child's stdout would show up here, because both share fd 1.
+
+    stdin is closed after the call so the server exits. communicate waits
+    on the pipes; select() cannot, it rejects a pipe on Windows.
+    """
     env = {
         **os.environ,
         "PYTHONPATH": os.path.abspath("src"),
@@ -99,49 +95,35 @@ def test_mcp_server_add_writes_nothing_but_protocol_frames(tmp_path):
         cwd=str(tmp_path),
         text=True,
     )
-    lines = []
-    try:
-        assert proc.stdin is not None
-        proc.stdin.write(json.dumps({
+    messages = "\n".join([
+        json.dumps({
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
                 "clientInfo": {"name": "card-1261", "version": "0"},
             },
-        }) + "\n")
-        proc.stdin.write(json.dumps({
-            "jsonrpc": "2.0", "method": "notifications/initialized",
-        }) + "\n")
-        proc.stdin.write(json.dumps({
+        }),
+        json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        json.dumps({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "swarph_add", "arguments": {"uri": _URI}},
-        }) + "\n")
-        proc.stdin.flush()
-        seen_call = False
-        for _ in range(20):
-            line = _read_line(proc, 15)
-            lines.append(line)
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                msg = None
-            if isinstance(msg, dict) and msg.get("id") == 2:
-                seen_call = True
-                break
-        proc.stdin.close()
-        # Drain whatever the exit flush still holds.
-        leftover = ""
-        if proc.stdout is not None:
-            ready, _, _ = select.select([proc.stdout], [], [], 2)
-            if ready:
-                leftover = proc.stdout.read()
-        proc.wait(timeout=10)
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=5)
-    text = "".join(lines) + (leftover or "")
+        }),
+    ]) + "\n"
+    try:
+        text, _err = proc.communicate(messages, timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        text, _err = proc.communicate()
+        raise AssertionError("mcp server did not exit")
+    seen_call = False
+    for line in text.splitlines():
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            msg = None
+        if isinstance(msg, dict) and msg.get("id") == 2:
+            seen_call = True
     assert seen_call is True
     for line in text.splitlines():
         if not line.strip():
