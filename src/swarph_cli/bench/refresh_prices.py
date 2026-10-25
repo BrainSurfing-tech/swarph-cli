@@ -19,6 +19,10 @@ not wired to any scheduler in this PR, just the ported fetch+guard logic.
 
 Network call — never exercised in the offline test suite (mocked or skipped).
 Read-only wrt the rest of swarph-cli: only ever writes the price cache.
+
+``SWARPH_BENCH_PRICE_URL`` overrides the source URL. Only the ``https``,
+``http`` and ``file`` schemes are accepted (card #1250). ``load()`` passes a
+5s timeout; this CLI keeps 30s.
 """
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ import json
 import os
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -38,14 +43,32 @@ def _cache_path() -> str:
 LITELLM_URL = ("https://raw.githubusercontent.com/BerriAI/litellm/main/"
                "model_prices_and_context_window.json")
 GUARD_RATIO = 3.0  # reject a new price >3x or <1/3x the prior cached value
+# The CLI's own fetch. load() passes prices.LOAD_FETCH_TIMEOUT_S instead.
+CLI_FETCH_TIMEOUT_S = 30
+_ALLOWED_SOURCE_SCHEMES = frozenset({"https", "http", "file"})
+
+
+def price_source_url() -> str:
+    """The JSON URL ``fetch`` reads.
+
+    ``SWARPH_BENCH_PRICE_URL`` overrides ``LITELLM_URL``. Schemes other than
+    https, http and file are refused.
+    """
+    raw = (os.environ.get("SWARPH_BENCH_PRICE_URL") or LITELLM_URL).strip()
+    scheme = urllib.parse.urlparse(raw).scheme.lower()
+    if scheme not in _ALLOWED_SOURCE_SCHEMES:
+        raise ValueError(
+            f"SWARPH_BENCH_PRICE_URL scheme {scheme!r} is not allowed "
+            "(https, http, file)")
+    return raw
 
 
 def _norm(key: str) -> str:
     return key.split("/")[-1].strip().lower()
 
 
-def fetch() -> dict:
-    raw = urllib.request.urlopen(LITELLM_URL, timeout=30).read()
+def fetch(timeout: float = CLI_FETCH_TIMEOUT_S) -> dict:
+    raw = urllib.request.urlopen(price_source_url(), timeout=timeout).read()
     d = json.loads(raw)
     out: dict[str, dict] = {}
     for key, v in d.items():

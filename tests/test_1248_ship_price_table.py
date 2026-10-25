@@ -8,10 +8,13 @@ fetches it into the user cache. No cache and no fetch is a warning.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 import swarph_cli.bench.prices as prices
 
@@ -72,10 +75,27 @@ def test_card_1248_installed_wheel_prices_opus_and_warns_when_offline(tmp_path):
     assert installed.returncode == 0, installed.stderr[-2000:]
 
     cache_home = tmp_path / "cache"
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps({
+        "claude-opus-5-5": {
+            "input_cost_per_token": 0.000004,
+            "output_cost_per_token": 0.00002,
+        }
+    }))
     run_env = _clean_env()
     run_env["HOME"] = str(tmp_path / "home")
     run_env["XDG_CACHE_HOME"] = str(cache_home)
     run_env.pop("SWARPH_BENCH_PRICE_CACHE", None)
+    # card #1250: the installed wheel reads a local file, with the network
+    # proxy pointed at a closed port so a fetch that ignores the override
+    # cannot reach raw.githubusercontent.com.
+    run_env["SWARPH_BENCH_PRICE_URL"] = source.as_uri()
+    run_env["https_proxy"] = "http://127.0.0.1:9"
+    run_env["http_proxy"] = "http://127.0.0.1:9"
+    run_env["HTTPS_PROXY"] = "http://127.0.0.1:9"
+    run_env["HTTP_PROXY"] = "http://127.0.0.1:9"
+    run_env.pop("NO_PROXY", None)
+    run_env.pop("no_proxy", None)
     priced = subprocess.run(
         [str(vpy), "-c",
          "import swarph_cli.bench.prices as p\n"
@@ -95,6 +115,7 @@ def test_card_1248_installed_wheel_prices_opus_and_warns_when_offline(tmp_path):
 
     offline_env = dict(run_env)
     offline_env["XDG_CACHE_HOME"] = str(tmp_path / "empty-cache")
+    offline_env["SWARPH_BENCH_PRICE_URL"] = "http://127.0.0.1:9/prices.json"
     offline_env["https_proxy"] = "http://127.0.0.1:9"
     offline_env["http_proxy"] = "http://127.0.0.1:9"
     offline_env["HTTPS_PROXY"] = "http://127.0.0.1:9"
@@ -115,3 +136,22 @@ def test_card_1248_installed_wheel_prices_opus_and_warns_when_offline(tmp_path):
     assert offline.returncode == 0, offline.stderr[-2000:]
     assert "WARNING" in offline.stderr
     assert "fallback" in offline.stderr
+
+
+@pytest.mark.skip(reason="card #1250: hits the live LiteLLM price source")
+def test_card_1250_live_price_source_lists_opus():
+    """The real source, not the local override. Default-skipped."""
+    env = _clean_env()
+    env.pop("SWARPH_BENCH_PRICE_URL", None)
+    env.pop("https_proxy", None)
+    env.pop("http_proxy", None)
+    env.pop("HTTPS_PROXY", None)
+    env.pop("HTTP_PROXY", None)
+    probe = subprocess.run(
+        [sys.executable, "-c",
+         "import swarph_cli.bench.refresh_prices as r\n"
+         "fresh = r.fetch()\n"
+         "assert 'claude-opus-5-5' in fresh, sorted(fresh)[:8]\n"],
+        cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert probe.returncode == 0, probe.stderr[-2000:]
