@@ -559,14 +559,28 @@ def _log_board(label: str, proc: subprocess.CompletedProcess) -> None:
         file=sys.stderr, flush=True)
 
 
+def _note_argv(swarph: str, sender: str, token_file: str, oid, when: str) -> list[str]:
+    note = [swarph, "board", "cards", "say", "729",
+            "--kind", "status", "--to", "commander",
+            "--content",
+            (f"{sender} DM wake recovered at {when}; "
+             f"dead-wake row #{oid} can be dismissed"),
+            "--as", sender]
+    if token_file:
+        note.extend(["--token-file", token_file])
+    return note
+
+
 def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
                                       now: float, state: dict, state_path: Path) -> None:
-    """Withdraw this sender's untaken dead-wake rows on card 729.
+    """Tell the commander this sender's dead-wake row can be dismissed.
 
-    The running gateway refuses a close of a commander-held row from the
-    cell token. The creator may withdraw an untaken row. A row the
-    commander has already taken is left alone and logged once. Every
-    board call's return code and first output line are logged.
+    Under commander-for-life the row is taken at mint, so the cell token
+    cannot close, withdraw, or amend it. One status note on card 729 names
+    the row. A successful note is not repeated. A failed note is logged
+    and the pass continues, and the next pass tries again. An untaken row
+    is still withdrawn. A taken row is logged once. Every board call's
+    return code and first output line are logged.
     """
     argv = [swarph, "board", "obligations", "list", "--card", "729",
             "--holder", "commander", "--status", "open", "--json",
@@ -593,6 +607,10 @@ def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
     if not isinstance(logged, list):
         logged = []
         rec["logged_taken"] = logged
+    noted = rec.setdefault("noted", [])
+    if not isinstance(noted, list):
+        noted = []
+        rec["noted"] = noted
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -609,6 +627,15 @@ def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
         oid = row.get("id")
         if not oid:
             continue
+        if oid not in noted and str(oid) not in noted:
+            said = subprocess.run(
+                _note_argv(swarph, sender, token_file, oid, when),
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", check=False)
+            _log_board(f"cards say {oid}", said)
+            if said.returncode == 0:
+                noted.append(oid)
+                save_state(state_path, state)
         if row.get("taken_at"):
             if oid not in logged and str(oid) not in logged:
                 print(
