@@ -60,6 +60,7 @@ def _env(tmp_path: Path, root: Path, state_path: Path, log: Path) -> dict:
         "XDG_CONFIG_HOME": str(tmp_path / "config"),
     }
     env.pop("SWARPH_SELF", None)
+    env.pop("MESH_GATEWAY_URL", None)
     env.pop("WAKE_WATCHDOG_NOW", None)
     return env
 

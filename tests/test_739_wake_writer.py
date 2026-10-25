@@ -281,6 +281,7 @@ def test_a_failed_send_is_retried_on_the_next_run(tmp_path):
         "STUB_LOG": str(log),
     }
     env.pop("SWARPH_SELF", None)
+    env.pop("MESH_GATEWAY_URL", None)
     cmd = [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
            "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
     first = subprocess.run(cmd, env=env, capture_output=True, text=True)
@@ -328,6 +329,7 @@ def test_main_does_not_mark_before_send_or_ignore_a_failed_rc(tmp_path):
         "STUB_LOG": str(log),
     }
     env.pop("SWARPH_SELF", None)
+    env.pop("MESH_GATEWAY_URL", None)
     proc = subprocess.run(
         [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
          "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"],
@@ -369,6 +371,7 @@ def test_outage_cards_say_carries_the_token_and_is_marked_once(tmp_path):
         "STUB_LOG": str(log),
     }
     env.pop("SWARPH_SELF", None)
+    env.pop("MESH_GATEWAY_URL", None)
     cmd = [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
            "--as", "wake-watchdog", "--token-file", str(token),
            "--escalate", "drop-on-meta-edge"]
@@ -443,6 +446,7 @@ def test_main_sends_one_writer_down_dm_and_does_not_start(tmp_path):
         "STUB_LOG": str(log),
     }
     env.pop("SWARPH_SELF", None)
+    env.pop("MESH_GATEWAY_URL", None)
     cmd = [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
            "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
     for _ in range(3):
@@ -495,6 +499,7 @@ def test_main_names_the_recorded_supervisor_not_the_ownership_fallback(tmp_path)
         "STUB_LOG": str(log),
     }
     env.pop("SWARPH_SELF", None)
+    env.pop("MESH_GATEWAY_URL", None)
     proc = subprocess.run(
         [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
          "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"],
