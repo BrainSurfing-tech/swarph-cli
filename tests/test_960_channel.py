@@ -152,15 +152,34 @@ def test_heartbeat_is_written(tmp_path):
 
 
 def test_a_fresh_channel_heartbeat_counts_as_a_watcher(tmp_path, monkeypatch):
-    inbox = tmp_path / "inbox.log"
+    """A fresh heartbeat counts when its pid is alive and that pid's parent
+    is the cell's claude session (card #1256). Ten minutes later it does not."""
+    inbox = tmp_path / "drop" / "mesh-sidecar" / "inbox.log"
+    inbox.parent.mkdir(parents=True)
     inbox.write_text("", encoding="utf-8")
-    hb = tmp_path / "channel_heartbeat.json"
-    hb.write_text(json.dumps({"ts": 10_000, "pid": 1}), encoding="utf-8")
+    proc = tmp_path / "proc"
+    (proc / "4242").mkdir(parents=True)
+    (proc / "4242" / "stat").write_text("4242 (child) S 111 0 0\n", encoding="utf-8")
+    (proc / "111").mkdir()
+    (proc / "111" / "cmdline").write_bytes(b"claude\0--name\0drop\0")
+    cells = tmp_path / "cfg" / "swarph" / "cells"
+    cells.mkdir(parents=True)
+    (cells / "drop.yaml").write_text(
+        "schema_version: v1\n"
+        "name: drop\n"
+        "role: drop\n"
+        f"cwd: \"{Path.cwd().as_posix()}\"\n"
+        "provider: claude\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    (inbox.parent / "channel_heartbeat.json").write_text(
+        json.dumps({"ts": 10_000, "pid": 4242}), encoding="utf-8")
     monkeypatch.setattr("swarph_cli.scripts.wake_watchdog.time.time", lambda: 10_100)
     cmd = f"python3 -m swarph_cli.channel {inbox}"
-    assert _watching(str(inbox), [cmd]) is True
+    assert _watching(str(inbox), [cmd], cell="drop", proc_root=proc) is True
     monkeypatch.setattr("swarph_cli.scripts.wake_watchdog.time.time", lambda: 10_000 + 181)
-    assert _watching(str(inbox), [cmd]) is False
+    assert _watching(str(inbox), [cmd], cell="drop", proc_root=proc) is False
 
 
 def test_spawn_channel_flag_is_off_unless_asked(monkeypatch, tmp_path):

@@ -158,12 +158,10 @@ def test_escalation_is_one_dm_to_the_peer_and_not_to_itself(tmp_path):
     reason="Windows cannot execute the POSIX swarph stub as argv0; the self-outage assertions run on Linux",
 )
 def test_outage_of_the_sender_itself_marks_once_and_does_not_realert(tmp_path):
-    """Card #1237: the dead cell IS the --as sender. mesh_send refuses the
-    self-send, which used to leave the outage unmarked, so every tick posted
-    the card and DM'd the escalation peer again (112 of each for one outage).
-    The self DM is skipped and counted as sent: the card post and the
-    escalate DM carry the alert, the outage is marked once, and a second
-    pass sends nothing."""
+    """Card #1237 marked the self-outage once so it would not re-alert every
+    tick. Card #1256 replaces the card post and the escalate DM: the dead
+    --as cell gets one commander-held row and no self DM. A second pass
+    inside the re-alert interval sends nothing."""
     root = tmp_path / "state"
     _cell(root, "lab-ovh")
     state_path = tmp_path / "wake.json"
@@ -187,8 +185,9 @@ def test_outage_of_the_sender_itself_marks_once_and_does_not_realert(tmp_path):
     subprocess.run(run, env=env, check=True)
     text = log.read_text()
     assert "mesh send lab-ovh" not in text, "no self DM was attempted"
-    assert "cards say 729" in text, "the card post still carries the alert"
-    assert text.count("mesh send drop-on-meta-edge") == 1
+    assert text.count("--holder commander") == 1
+    assert "cards say 729" not in text
+    assert "mesh send drop-on-meta-edge" not in text
     assert json.loads(state_path.read_text())["lab-ovh"]["outage"] is True
     log.write_text("")
     subprocess.run(run, env=env, check=True)
@@ -264,24 +263,53 @@ def test_failed_send_is_not_saved_as_alerted_and_the_next_run_retries(tmp_path):
     assert done["nobody"]["outage"] is True
 
 
-def test_a_channel_cell_with_a_fresh_heartbeat_is_watched(tmp_path):
+def _cell_yaml(config: Path, name: str, role: str, session_id: str = "") -> None:
+    directory = config / "swarph" / "cells"
+    directory.mkdir(parents=True)
+    sid = f"session_id: {session_id}\n" if session_id else ""
+    (directory / f"{role}.yaml").write_text(
+        "schema_version: v1\n"
+        f"name: {name}\n"
+        f"role: {role}\n"
+        f"cwd: \"{Path.cwd().as_posix()}\"\n"
+        "provider: claude\n"
+        + sid,
+        encoding="utf-8",
+    )
+
+
+def _fake_proc(root: Path, pid: int, ppid: int, argv: list[str]) -> None:
+    child = root / str(pid)
+    child.mkdir(parents=True)
+    (child / "stat").write_text(f"{pid} (child) S {ppid} 0 0\n", encoding="utf-8")
+    parent = root / str(ppid)
+    parent.mkdir(parents=True)
+    (parent / "cmdline").write_bytes(b"\0".join(part.encode() for part in argv) + b"\0")
+
+
+def test_a_channel_cell_with_a_fresh_heartbeat_is_watched(tmp_path, monkeypatch):
     """Live 2026-09-28: `swarph channel-serve` has no inbox path on its command line, so the
     old cmdline match never fired and every channel cell was paged 'DM wake is dead' (msgs
-    53556-54021). Fails on main: scan alerts although the heartbeat is 5 s old."""
+    53556-54021). A fresh heartbeat whose parent is the cell's claude is watched.
+    Card #1256: the parent has to be that session; a 10 min old heartbeat is not."""
     import time as _t
-    inbox = tmp_path / "mesh-sidecar" / "inbox.log"
+    inbox = tmp_path / "drop" / "mesh-sidecar" / "inbox.log"
     inbox.parent.mkdir(parents=True)
     inbox.write_text("")
     hb = inbox.parent / "channel_heartbeat.json"
     cells = {"drop": str(inbox)}
     channel_ps = ["/usr/bin/python3 /home/ubuntu/.local/bin/swarph channel-serve"]
+    proc = tmp_path / "proc"
+    _fake_proc(proc, 4242, 111, ["claude", "--name", "drop"])
+    _cell_yaml(tmp_path / "config", "drop", role="drop")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     state = {}
-    hb.write_text(json.dumps({"pid": 1, "ts": _t.time() - 5}))
-    assert scan(cells, channel_ps, state, now=0) == []
-    assert scan(cells, channel_ps, state, now=120) == []
-    hb.write_text(json.dumps({"pid": 1, "ts": _t.time() - 600}))  # server died 10 min ago
-    assert scan(cells, channel_ps, state, now=130) == []
-    assert scan(cells, channel_ps, state, now=200) == ["drop"]
+    hb.write_text(json.dumps({"pid": 4242, "ts": _t.time() - 5}))
+    assert scan(cells, channel_ps, state, now=0, proc_root=proc) == []
+    assert scan(cells, channel_ps, state, now=120, proc_root=proc) == []
+    hb.write_text(json.dumps({"pid": 4242, "ts": _t.time() - 600}))  # server died 10 min ago
+    assert scan(cells, channel_ps, state, now=130, proc_root=proc) == []
+    assert scan(cells, channel_ps, state, now=200, proc_root=proc) == ["drop"]
 
 
 def test_a_one_shot_mesh_wait_for_the_cell_is_a_watcher(tmp_path):
