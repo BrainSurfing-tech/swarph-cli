@@ -56,7 +56,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install (editable + dev + server extras)
-        run: python -m pip install --upgrade pip && pip install -e ".[dev,gateway,service]"
+        run: python -m pip install --upgrade pip && pip install -e ".[dev,gateway,service,mcp]"
 
       # card #1219: the suite's egress-probe tests need a real netns. Installed
       # before pytest so those tests run, rather than failing closed for a

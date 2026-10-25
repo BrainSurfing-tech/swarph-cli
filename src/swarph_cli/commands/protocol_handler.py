@@ -13,10 +13,10 @@ Linux (primary target)
 Writes a ``.desktop`` file under ``~/.local/share/applications`` and
 registers it for the ``x-scheme-handler/swarph`` MIME type via
 ``xdg-mime default`` + ``update-desktop-database``. The ``.desktop``
-entry uses ``Terminal=true`` because ``swarph add`` shows the artifact
-and prompts for confirmation on non-builtin installs — it MUST run in a
-terminal where the user sees that prompt/output. ``%u`` passes the
-clicked URL through as the argument.
+entry uses ``Terminal=true`` because ``swarph add`` asks before writing
+unless ``--yes`` is passed, and a clicked URL does not pass ``--yes``.
+It MUST run in a terminal where the user sees that prompt. ``%u`` passes
+the clicked URL through as the argument.
 
 macOS / Windows
 ---------------
@@ -69,10 +69,10 @@ def resolve_swarph_bin() -> str:
 def _desktop_entry(swarph_bin: str) -> str:
     """Return a valid freedesktop ``.desktop`` entry for the scheme handler.
 
-    ``Terminal=true`` is REQUIRED — ``swarph add`` displays the artifact and
-    prompts for confirmation on non-builtin installs, so it must run in a
-    terminal where the user can see the prompt/output. ``%u`` passes the
-    clicked ``swarph://...`` URL through as the single argument.
+    ``Terminal=true`` is REQUIRED — ``swarph add`` asks before writing unless
+    ``--yes`` is passed, and a clicked URL does not pass ``--yes``. It must
+    run in a terminal where the user can answer. ``%u`` passes the clicked
+    ``swarph://...`` URL through as the single argument.
     """
     return (
         "[Desktop Entry]\n"

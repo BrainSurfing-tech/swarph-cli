@@ -102,22 +102,10 @@ def test_search_passes_token_when_given():
 _VALID_URI = "swarph://hook/swarph-builtin/cell-resilience@1.0#abc"
 
 
-def test_add_installed_true_on_zero():
-    with mock.patch(
-        "swarph_cli.commands.add.run_add", return_value=0
-    ) as m_run:
+def test_add_never_calls_run_add():
+    with mock.patch("swarph_cli.commands.add.run_add") as m_run:
         out = mcp_server._add(_VALID_URI)
-    m_run.assert_called_once()
-    assert out["installed"] is True
-    assert out["code"] == 0
-
-
-def test_add_installed_false_on_nonzero():
-    with mock.patch(
-        "swarph_cli.commands.add.run_add", return_value=2
-    ) as m_run:
-        out = mcp_server._add(_VALID_URI)
-    m_run.assert_called_once()
+    m_run.assert_not_called()
     assert out["installed"] is False
     assert out["code"] == 2
 

@@ -38,7 +38,7 @@ def test_empty_list_is_documented_as_could_not_run():
 
 def test_add_and_describe_doc_match_the_return():
     add = mcp.swarph_add.__doc__
-    assert "non-interactively" in add
+    assert "does not install" in add
     assert "installed" in add and "code" in add and "detail" in add
     desc = mcp.swarph_describe.__doc__
     for key in ("class", "publisher", "name", "version", "sha256"):

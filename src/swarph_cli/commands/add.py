@@ -78,14 +78,28 @@ class ArtifactRef:
     sha256: str | None = None
 
 
+def _control_in(text: str) -> str | None:
+    """The first C0, DEL, or Unicode line-separator in ``text``, as U+XXXX."""
+    for ch in text:
+        code = ord(ch)
+        if code < 0x20 or code == 0x7F or ch in ("\u2028", "\u2029", "\u0085"):
+            return f"U+{code:04X}"
+    return None
+
+
 def parse_uri(s: str) -> ArtifactRef:
     """Parse a ``swarph://`` artifact URI into an :class:`ArtifactRef`.
 
     Raises :class:`ValueError` for any malformed input: a wrong scheme,
     the wrong number of ``class/publisher/rest`` segments, an unknown
-    class, or any empty required field (publisher, name, the value after
-    ``@``, or the value after ``#``).
+    class, any empty required field (publisher, name, the value after
+    ``@``, or the value after ``#``), or a control character in any
+    field (the raw URI, so ``#sha256``, ``@version``, a query, and the
+    class, publisher, and name are all covered).
     """
+    bad = _control_in(s)
+    if bad:
+        raise ValueError(f"control character {bad} in URI {s!r}")
     if not s.startswith(_SCHEME):
         raise ValueError(f"not a swarph:// URI: {s!r}")
 
@@ -1265,9 +1279,15 @@ def _default_pip_runner(args: list) -> int:
     Uses ``sys.executable`` so the lib lands in the SAME environment swarph-cli
     runs in. Tests inject a fake callable instead of shelling out.
     """
-    return subprocess.run(
-        [sys.executable, "-m", "pip", *args]
-    ).returncode
+    completed = subprocess.run(
+        [sys.executable, "-m", "pip", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if completed.stdout:
+        sys.stderr.buffer.write(completed.stdout)
+        sys.stderr.buffer.flush()
+    return completed.returncode
 
 
 class LibHandler:
@@ -1431,6 +1451,18 @@ def build_registry(
     }
 
 
+def _confirm_install(ref: ArtifactRef) -> bool:
+    """Ask on stderr before any write. Empty, EOF, and anything but y/yes
+    are a no. ``--yes`` never reaches this. A URL click has no ``--yes``.
+    """
+    print(f"swarph add: install {format_uri(ref)}? [y/N]", file=sys.stderr)
+    try:
+        answer = sys.stdin.readline()
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
 def dispatch_add(ref: ArtifactRef, *, assume_yes: bool, out, registry) -> int:
     """Route ``ref`` to its per-class handler and run ``add``.
 
@@ -1475,7 +1507,7 @@ def run_add(
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="skip confirmation prompts (no-op for trusted builtins)",
+        help="install without asking; a URL click does not pass this",
     )
 
     try:
@@ -1498,6 +1530,10 @@ def run_add(
         libs_path=libs_path,
         pip_runner=pip_runner,
     )
+
+    if not args.yes and not _confirm_install(ref):
+        print("swarph add: aborted — nothing written.", file=sys.stderr)
+        return 1
 
     try:
         return dispatch_add(ref, assume_yes=args.yes, out=print, registry=registry)

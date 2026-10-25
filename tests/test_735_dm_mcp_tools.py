@@ -18,6 +18,7 @@ import os
 import pytest
 
 from swarph_cli.commands import mcp_server
+from swarph_cli.dm_frame import frame_text
 
 MUTATE = os.environ.get("SWARPH_735_MUTATE", "")
 
@@ -81,10 +82,10 @@ def _assert_complete(result: dict, source: list[dict]):
     assert set(got) == {m["id"] for m in source}, (set(got), {m["id"] for m in source})
     for src in source:
         body = got[src["id"]]["content"]
-        assert body == src["content"], (
-            f"message {src['id']} body differs from the source: got {len(body)} chars, "
-            f"source {len(src['content'])} chars; tail={body[-8:]!r}")
-        assert body.encode("utf-8") == src["content"].encode("utf-8")
+        framed = frame_text(src)
+        assert body == framed, (
+            f"message {src['id']} is not the DATA frame of the source")
+        assert src["content"].replace("\n", " ") in body
     assert result["n"] == len(source) and result["not_returned"] == 0
     assert not {k for k in result if "cursor" in k or k in ("next", "previous", "close")}, result.keys()
 
@@ -119,7 +120,7 @@ def test_ceiling_is_loud_and_never_shortens(monkeypatch):
     out = mcp_server._dm_unread()
     assert out["n"] == mcp_server.DM_CEILING == 100 and out["not_returned"] == 50 and out["unread_seen"] == 150
     assert [m["id"] for m in out["messages"]] == [m["id"] for m in many[:100]]      # the OLDEST, in full
-    assert all(m["content"] == src["content"] for m, src in zip(out["messages"], many[:100]))
+    assert all(m["content"] == frame_text(src) for m, src in zip(out["messages"], many[:100]))
 
 
 def test_gateway_error_is_loud_not_an_empty_inbox(monkeypatch):
@@ -156,9 +157,10 @@ def test_thread_returns_the_conversation_in_full(monkeypatch):
                                                                      "to_node=lab-ovh": {"messages": FIXTURE, "n": 5}}))
     out = mcp_server._dm_thread(32004)
     assert out["thread_id"] == "81570cab-0000-4000-8000-000000000001" and out["n"] == 2
-    assert [m["content"] for m in out["messages"]] == [m["content"] for m in convo]
+    assert [m["content"] for m in out["messages"]] == [frame_text(m) for m in convo]
     single = mcp_server._dm_thread(32002)
-    assert single["thread_id"] is None and single["n"] == 1 and single["messages"][0]["content"] == FIXTURE[1]["content"]
+    assert single["thread_id"] is None and single["n"] == 1
+    assert single["messages"][0]["content"] == frame_text(FIXTURE[1])
 
 
 def test_no_cursor_no_ack_verbs_on_the_tool_surface():

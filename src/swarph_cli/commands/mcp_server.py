@@ -106,28 +106,26 @@ def _search(query: str, *, url: str, token: str | None = None) -> list[dict]:
 
 
 def _add(uri: str) -> dict:
-    """Install a swarph artifact by its ``swarph://`` URI.
+    """Refuse to install. A model-supplied argument cannot confirm a write.
 
-    Parses the URI FIRST — a malformed URI returns an error dict WITHOUT
-    calling :func:`add.run_add` (so a bad URI never reaches the installer).
-    Otherwise delegates to ``add.run_add([uri, "--yes"])``, whose trust gate +
-    static-scan watchtower decide whether anything installs, and reports the
-    int exit code (0 = installed).
+    Parses the URI first. A malformed URI is code 2. A well-formed URI is
+    also code 2 and does not call :func:`add.run_add`: there is no confirm
+    flag the model can set. A human runs ``swarph add <uri>`` in a terminal,
+    which asks before writing.
     """
     try:
         add.parse_uri(uri)
     except ValueError as exc:
         return {"installed": False, "code": 2, "detail": str(exc)}
-
-    code = add.run_add([uri, "--yes"])
-    if code == 0:
-        detail = f"installed {uri}"
-    else:
-        detail = (
-            f"not installed (exit {code}) — likely trust-gated "
-            f"(untrusted publisher) or failed the security scan"
-        )
-    return {"installed": code == 0, "code": code, "detail": detail}
+    return {
+        "installed": False,
+        "code": 2,
+        "detail": (
+            "swarph_add does not install. A model-supplied argument cannot "
+            "confirm a write. Run `swarph add <uri>` in a terminal; it asks "
+            "before writing."
+        ),
+    }
 
 
 def _describe(uri: str) -> dict:
@@ -286,11 +284,16 @@ def _dm_session(self_name: str | None = None) -> tuple[str, str, str]:
 
 
 def _lean(m: dict) -> dict:
-    """Typed fields with FULL content. Keys whose value is null/empty are dropped
-    (the gateway echoes read_at/channel/mentions/cc/related_task_id as noise);
-    `content` is always present and byte-identical to the source."""
+    """Typed fields. Keys whose value is null/empty are dropped.
+
+    ``content`` is always present and is :func:`dm_frame.frame_text` of the
+    row, the same sentence the channel path prints. The body is inside that
+    DATA frame, not a raw second copy.
+    """
+    from swarph_cli.dm_frame import frame_text
+
     out = {k: m.get(k) for k in DM_FIELDS if m.get(k) not in (None, "", [], {})}
-    out["content"] = m.get("content") or ""
+    out["content"] = frame_text(m)
     return out
 
 
@@ -406,10 +409,11 @@ try:
 
     @mcp.tool()
     def swarph_add(uri: str) -> dict:
-        """Install a swarph:// artifact on this server host, non-interactively.
+        """Refuse to install a swarph:// artifact. Nothing is written.
 
-        The installer is invoked with --yes in this process. It does not prompt.
-        Returns {installed: bool, code: int, detail: str}. code 0 means installed.
+        A model-supplied argument cannot confirm a write, so this tool does not install.
+        Returns {installed: false, code: 2, detail: str}.
+        A human runs `swarph add <uri>` in a terminal, which asks first.
         A malformed URI is code 2 and does not reach the installer.
         """
         return _add(uri)
