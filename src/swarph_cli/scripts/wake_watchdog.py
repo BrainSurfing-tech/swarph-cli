@@ -547,12 +547,26 @@ def retain_registered(cells: dict[str, str], state: dict,
     return {name: inbox for name, inbox in cells.items() if name in names}
 
 
-def _close_recovered_commander_rows(swarph: str, sender: str, token_file: str,
-                                    now: float) -> None:
-    """Close this sender's open dead-wake rows on card 729, once.
+def _board_line(proc: subprocess.CompletedProcess) -> str:
+    text = proc.stdout if (proc.stdout or "").strip() else proc.stderr
+    lines = (text or "").splitlines()
+    return lines[0] if lines else ""
 
-    A later pass lists the same card and finds them closed, so it does not
-    close again. The evidence names the recovery time.
+
+def _log_board(label: str, proc: subprocess.CompletedProcess) -> None:
+    print(
+        f"wake_watchdog: {label} rc={proc.returncode} {_board_line(proc)}",
+        file=sys.stderr, flush=True)
+
+
+def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
+                                      now: float, state: dict, state_path: Path) -> None:
+    """Withdraw this sender's untaken dead-wake rows on card 729.
+
+    The running gateway refuses a close of a commander-held row from the
+    cell token. The creator may withdraw an untaken row. A row the
+    commander has already taken is left alone and logged once. Every
+    board call's return code and first output line are logged.
     """
     argv = [swarph, "board", "obligations", "list", "--card", "729",
             "--holder", "commander", "--status", "open", "--json",
@@ -562,6 +576,7 @@ def _close_recovered_commander_rows(swarph: str, sender: str, token_file: str,
     listed = subprocess.run(
         argv, capture_output=True, text=True, encoding="utf-8",
         errors="replace", check=False)
+    _log_board("obligations list", listed)
     if listed.returncode != 0:
         return
     try:
@@ -572,10 +587,12 @@ def _close_recovered_commander_rows(swarph: str, sender: str, token_file: str,
     if not isinstance(rows, list):
         return
     when = _format_ts(now)
-    # Real obligation rows have no `what` column. The list is already
-    # card 729, holder commander, status open. created_by is the sender
-    # who minted the row, and the accept carries WAKE-DEAD <sender>.
     marker = f"WAKE-DEAD {sender}"
+    rec = state.setdefault(sender, {})
+    logged = rec.setdefault("logged_taken", [])
+    if not isinstance(logged, list):
+        logged = []
+        rec["logged_taken"] = logged
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -592,12 +609,22 @@ def _close_recovered_commander_rows(swarph: str, sender: str, token_file: str,
         oid = row.get("id")
         if not oid:
             continue
-        close = [swarph, "board", "obligations", "close", str(oid),
-                 "--outcome", "pass", "--evidence", f"recovered {when}",
-                 "--as", sender]
+        if row.get("taken_at"):
+            if oid not in logged and str(oid) not in logged:
+                print(
+                    f"wake_watchdog: taken {oid} left for the commander",
+                    file=sys.stderr, flush=True)
+                logged.append(oid)
+                save_state(state_path, state)
+            continue
+        withdraw = [swarph, "board", "obligations", "withdraw", str(oid),
+                    "--reason", f"recovered {when}", "--as", sender]
         if token_file:
-            close.extend(["--token-file", token_file])
-        subprocess.run(close, check=False)
+            withdraw.extend(["--token-file", token_file])
+        done = subprocess.run(
+            withdraw, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=False)
+        _log_board(f"obligations withdraw {oid}", done)
 
 
 def cells_under(root: Path) -> dict[str, str]:
@@ -777,7 +804,8 @@ def main(argv: list[str] | None = None) -> int:
     rc = 0
     if (sender in cells
             and _watching(cells[sender], cmdlines, cell=sender)):
-        _close_recovered_commander_rows(swarph, sender, token_file, now)
+        _release_recovered_commander_rows(
+            swarph, sender, token_file, now, state, state_path)
     for name in alert:
         print(f"outage {name}", flush=True)
         # Card #1256: the dead cell is this unit's own --as identity. A DM
