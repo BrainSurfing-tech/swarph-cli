@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 
 from swarph_cli.commands.add import _default_pip_runner, parse_uri, run_add
 from swarph_cli.commands import mcp_server
@@ -72,12 +73,30 @@ def test_mcp_add_cannot_install_from_model_arguments():
     assert out["code"] == 2
 
 
+def _stdout_until_id2(stream, lines, seen_id2):
+    """Read stdout on its own thread. select() rejects a pipe on Windows."""
+    for line in stream:
+        lines.append(line)
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            msg = None
+        if isinstance(msg, dict) and msg.get("id") == 2:
+            seen_id2.set()
+
+
+def _drain(stream):
+    for _line in stream:
+        pass
+
+
 def test_mcp_server_add_writes_nothing_but_protocol_frames(tmp_path):
     """The tool call's stdout is only JSON-RPC lines. Install text and a
     child's stdout would show up here, because both share fd 1.
 
-    stdin is closed after the call so the server exits. communicate waits
-    on the pipes; select() cannot, it rejects a pipe on Windows.
+    stdin stays open until the id-2 frame is read, then it is closed so
+    the server can exit. Closing it inside communicate(), before that
+    frame, lets the server see EOF and quit without answering.
     """
     env = {
         **os.environ,
@@ -110,12 +129,30 @@ def test_mcp_server_add_writes_nothing_but_protocol_frames(tmp_path):
             "params": {"name": "swarph_add", "arguments": {"uri": _URI}},
         }),
     ]) + "\n"
+    lines = []
+    seen_id2 = threading.Event()
+    reader = threading.Thread(
+        target=_stdout_until_id2, args=(proc.stdout, lines, seen_id2),
+        daemon=True)
+    drainer = threading.Thread(target=_drain, args=(proc.stderr,), daemon=True)
+    reader.start()
+    drainer.start()
     try:
-        text, _err = proc.communicate(messages, timeout=20)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        text, _err = proc.communicate()
-        raise AssertionError("mcp server did not exit")
+        proc.stdin.write(messages)
+        proc.stdin.flush()
+        if not seen_id2.wait(20):
+            raise AssertionError("id 2 frame was not read before stdin closed")
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("mcp server did not exit")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        reader.join(timeout=5)
+    text = "".join(lines)
     seen_call = False
     for line in text.splitlines():
         try:
