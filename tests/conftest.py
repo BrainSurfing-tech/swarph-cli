@@ -143,6 +143,9 @@ _SWARPH_ENV = (
     # card #1248: the price cache path. A developer's file must not become
     # the suite's table. Tests that want one set it themselves.
     "SWARPH_BENCH_PRICE_CACHE",
+    # card #1250: the price source URL. A developer's override must not
+    # become the suite's source. Tests that want one set it themselves.
+    "SWARPH_BENCH_PRICE_URL",
     # card #1243: session injection reads this repo. A developer's checkout
     # must not become the suite's source. Tests that want one set it.
     "SWARPH_PROVEN_REPO",

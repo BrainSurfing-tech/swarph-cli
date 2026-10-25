@@ -16,11 +16,19 @@ Public API:
 """
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
+import tempfile
 
 log = logging.getLogger("swarph.bench.prices")
+
+# card #1250. A cache older than this is refreshed on load(). Exactly this
+# age is still fresh: "older than", not "at least".
+PRICE_CACHE_TTL_S = 7 * 24 * 60 * 60
+# Both load()-triggered fetches. refresh_prices.main() keeps its own 30s.
+LOAD_FETCH_TIMEOUT_S = 5
 
 
 def _default_cache_path() -> str:
@@ -40,6 +48,8 @@ def _default_cache_path() -> str:
 
 _CACHE_PATH = _default_cache_path()
 _MAP: dict | None = None
+# lookup() warns once per model per process when a loaded table has no row.
+_FALLBACK_WARNED: set[str] = set()
 
 # Reconciled fallbacks ($/Mtok input, output) — used ONLY when a model isn't in
 # the refreshed cache. The cache is the real source; these are the safety net.
@@ -50,38 +60,65 @@ _FALLBACK = {
 }
 
 
-def _read_cache() -> dict:
+def _now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _read_payload() -> dict | None:
     try:
         with open(_CACHE_PATH) as f:
-            return (json.load(f) or {}).get("prices", {}) or {}
+            data = json.load(f) or {}
+        return data if isinstance(data, dict) else None
     except Exception:
+        return None
+
+
+def _prices_of(payload: dict | None) -> dict:
+    if not payload:
         return {}
+    prices = payload.get("prices")
+    return prices if isinstance(prices, dict) else {}
 
 
-def _fetch_into_cache() -> dict:
-    """Fill the user cache from the LiteLLM price JSON. Never writes inside
-    this package (that path is site-packages once the wheel is installed)."""
+def _generated_at(payload: dict | None) -> datetime.datetime | None:
+    """UTC timestamp, or None when the field is missing or unparseable."""
+    if not payload:
+        return None
+    raw = payload.get("generated_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
     try:
-        from .refresh_prices import fetch
-        fresh = fetch()
-    except Exception as e:
-        log.warning("llm price fetch failed (%s)", e)
-        return {}
-    if not fresh:
-        return {}
-    import datetime
-    import tempfile
+        parsed = datetime.datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
+def _age_days_label(generated: datetime.datetime | None) -> str:
+    if generated is None:
+        return "unknown"
+    return str(max(0, int((_now() - generated).total_seconds() // 86400)))
+
+
+def _read_cache() -> dict:
+    return _prices_of(_read_payload())
+
+
+def _write_cache(prices: dict) -> None:
+    """Atomic write of the user cache. Never writes inside this package."""
     dest = os.path.abspath(_CACHE_PATH)
     pkg = os.path.dirname(os.path.abspath(__file__))
     if dest == pkg or dest.startswith(pkg + os.sep):
         log.warning(
             "refusing to write the price table into the package tree (%s)", dest)
-        return fresh
+        return
     payload = {
-        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "generated_at": _now().isoformat(),
         "source": "BerriAI/litellm model_prices_and_context_window.json",
-        "count": len(fresh),
-        "prices": fresh,
+        "count": len(prices),
+        "prices": prices,
     }
     try:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -91,7 +128,33 @@ def _fetch_into_cache() -> dict:
         os.replace(tmp, dest)
     except OSError as e:
         log.warning("llm price cache not written (%s)", e)
+
+
+def _fetch_into_cache() -> dict:
+    """Fill the user cache from the price source. Never writes inside
+    this package (that path is site-packages once the wheel is installed).
+
+    This is the empty-cache path. A stale cache goes through
+    ``refresh_prices.guard`` in ``load()`` before it is written.
+    """
+    try:
+        from .refresh_prices import fetch
+        fresh = fetch(timeout=LOAD_FETCH_TIMEOUT_S)
+    except Exception as e:
+        log.warning("llm price fetch failed (%s)", e)
+        return {}
+    if not fresh:
+        return {}
+    _write_cache(fresh)
     return fresh
+
+
+def _keep_stale(prior: dict, generated: datetime.datetime | None) -> dict:
+    log.warning(
+        "llm price refresh failed — keeping the stale table, %s days old",
+        _age_days_label(generated),
+    )
+    return prior
 
 
 def load(force: bool = False) -> dict:
@@ -100,11 +163,27 @@ def load(force: bool = False) -> dict:
 
     A missing cache is fetched once into the user cache. If that also fails,
     the empty table is a WARNING, not a DEBUG line: every later lookup is
-    then a built-in fallback (card #1248)."""
+    then a built-in fallback (card #1248).
+
+    A cache older than ``PRICE_CACHE_TTL_S``, or one whose ``generated_at``
+    is missing or unparseable, is refreshed through ``refresh_prices.guard``.
+    A failed refresh keeps the stale table (card #1250).
+    """
     global _MAP
     if _MAP is not None and not force:
         return _MAP
-    table = _read_cache() or _fetch_into_cache()
+    payload = _read_payload()
+    prior = _prices_of(payload)
+    generated = _generated_at(payload)
+    if prior and generated is not None:
+        age = (_now() - generated).total_seconds()
+        if age <= PRICE_CACHE_TTL_S:
+            _MAP = prior
+            return _MAP
+    if prior:
+        table = _refresh_stale(prior, generated)
+    else:
+        table = _fetch_into_cache()
     if not table:
         log.warning(
             "llm price table unavailable — pricing from the built-in "
@@ -116,6 +195,27 @@ def load(force: bool = False) -> dict:
         return _MAP
     _MAP = table
     return _MAP
+
+
+def _refresh_stale(prior: dict, generated: datetime.datetime | None) -> dict:
+    """Refetch a stale table. The guard runs only on this path, and the
+    guarded-count WARNING is logged only here — a first fill has no prior
+    to guard."""
+    try:
+        from .refresh_prices import fetch, guard
+        fresh = fetch(timeout=LOAD_FETCH_TIMEOUT_S)
+    except Exception as e:
+        log.warning("llm price fetch failed (%s)", e)
+        return _keep_stale(prior, generated)
+    if not fresh:
+        return _keep_stale(prior, generated)
+    merged, flagged = guard(fresh, prior)
+    log.warning(
+        "llm price refresh guarded %d change(s) against the stale table",
+        len(flagged),
+    )
+    _write_cache(merged)
+    return merged
 
 
 def _norm(model: str) -> str:
@@ -135,10 +235,22 @@ def lookup(model: str) -> tuple[float, float]:
     # substring fallback — ORDER MATTERS: lite is a substring of flash-lite
     # and must win over flash.
     if "lite" in m:
-        return _FALLBACK["lite"]
-    if "pro" in m:
-        return _FALLBACK["pro"]
-    return _FALLBACK["flash"]  # flash + safest default
+        chosen, label = _FALLBACK["lite"], "lite"
+    elif "pro" in m:
+        chosen, label = _FALLBACK["pro"], "pro"
+    else:
+        chosen, label = _FALLBACK["flash"], "flash"
+    # A loaded table that lacks this model is the #1248 defect class for a
+    # model upstream does not list yet. Once per model per process. An empty
+    # table already warned in load(); don't warn again on every lookup.
+    if prices and m not in _FALLBACK_WARNED:
+        _FALLBACK_WARNED.add(m)
+        log.warning(
+            "llm price for %s is not in the loaded table — using the %s "
+            "fallback %s",
+            m, label, chosen,
+        )
+    return chosen
 
 
 def is_known(model_id: str) -> bool:

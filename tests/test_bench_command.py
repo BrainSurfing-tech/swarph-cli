@@ -333,7 +333,10 @@ def test_prices_refresh_calls_refresh_module(monkeypatch, capsys, tmp_path):
         # simulate the real refresh: write the (patched) cache file, which
         # prices.load(force=True) then re-reads — no real network/disk.
         called["ran"] = True
-        cache_file.write_text(json.dumps({"prices": {"new-model": {"in": 5.0, "out": 6.0}}}))
+        cache_file.write_text(json.dumps({
+            "generated_at": "2099-01-01T00:00:00+00:00",
+            "prices": {"new-model": {"in": 5.0, "out": 6.0}},
+        }))
         return 0
 
     import swarph_cli.bench.refresh_prices as refresh_mod
