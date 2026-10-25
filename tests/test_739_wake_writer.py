@@ -33,9 +33,35 @@ def _cell(root: Path, name: str, *, fresh: bool) -> str:
     inbox = side / "inbox.log"
     inbox.write_text("row\n", encoding="utf-8")
     if fresh:
+        # Card #1256: a fresh timestamp is alive only with a live pid whose
+        # parent is this cell's claude. The autouse fixture builds that proc.
         (side / "channel_heartbeat.json").write_text(
-            json.dumps({"ts": time.time()}), encoding="utf-8")
+            json.dumps({"pid": 4242, "ts": time.time()}), encoding="utf-8")
     return str(inbox)
+
+
+@pytest.fixture(autouse=True)
+def _cell_claude_session(tmp_path, monkeypatch):
+    """A fake proc where pid 4242's parent is claude --name fixture-cell."""
+    proc = tmp_path / "proc"
+    child = proc / "4242"
+    child.mkdir(parents=True)
+    (child / "stat").write_text("4242 (child) S 111 0 0\n", encoding="utf-8")
+    parent = proc / "111"
+    parent.mkdir()
+    (parent / "cmdline").write_bytes(b"claude\0--name\0fixture-cell\0")
+    config = tmp_path / "cellcfg" / "swarph" / "cells"
+    config.mkdir(parents=True)
+    (config / "fixture-cell.yaml").write_text(
+        "schema_version: v1\n"
+        "name: fixture-cell\n"
+        "role: fixture-cell\n"
+        "cwd: /tmp\n"
+        "provider: claude\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WAKE_WATCHDOG_PROC", str(proc))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cellcfg"))
 
 
 def _absent(argv, **_kwargs):

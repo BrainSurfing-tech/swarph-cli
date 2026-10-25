@@ -1,10 +1,14 @@
 """IMMUNE (cell watchdog), card #729. Every pass, a cell with nobody reading its inbox is an outage.
 
-One DM per outage. A live watcher clears it, so the next gap can alert again.
+One alert per outage, then again every REALERT_SECONDS while it stays dead.
+A live watcher clears it, so the next gap can alert again.
+When the dead cell is this unit's own --as identity, the alert is one
+commander-held row, not a DM to the cell (card #1256).
 """
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import subprocess
@@ -15,6 +19,7 @@ from typing import Iterable
 
 GAP_SECONDS = 60
 WAIT_REARM_GRACE = 600
+REALERT_SECONDS = 6 * 60 * 60
 
 
 def writer_verdict(*, reader_alive: bool, monitor_rc: int) -> str:
@@ -119,18 +124,163 @@ def enforce_writers(cells: dict[str, str], *, status, run=None,
     return alert
 
 
-def _channel_alive(inbox: str, now: float | None = None) -> bool:
+def _channel_alive(inbox: str, now: float | None = None, *,
+                   cell: str | None = None, proc_root: Path | None = None) -> bool:
     """A channel server writes channel_heartbeat.json beside the inbox every 60 s.
 
     `swarph channel-serve` takes no inbox argument, so no command line names the
-    path; a fresh heartbeat is the only evidence the channel is reading.
+    path. A fresh timestamp is not enough (card #1256): the recorded pid must
+    still be alive, and that pid's parent must be this cell's claude session.
+    A reused pid, or a live server whose parent is not the session, is dead.
     """
     hb = Path(inbox).parent / "channel_heartbeat.json"
     try:
-        ts = float(json.loads(hb.read_text(encoding="utf-8")).get("ts") or 0)
+        payload = json.loads(hb.read_text(encoding="utf-8"))
+        ts = float(payload.get("ts") or 0)
+        pid = int(payload.get("pid") or 0)
     except (OSError, ValueError, TypeError, AttributeError):
         return False
-    return (time.time() if now is None else now) - ts < 180
+    if (time.time() if now is None else now) - ts >= 180:
+        return False
+    if proc_root is not None:
+        root = proc_root
+    else:
+        override = os.environ.get("WAKE_WATCHDOG_PROC", "").strip()
+        root = Path(override) if override else Path("/proc")
+    who = cell or Path(inbox).parent.parent.name
+    if not _pid_alive(pid, root):
+        return False
+    return _parent_is_cell_session(pid, who, root)
+
+
+def _pid_alive(pid: int, proc_root: Path) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        return (proc_root / str(pid)).is_dir()
+    except OSError:
+        return False
+
+
+def _read_ppid(pid: int, proc_root: Path) -> int | None:
+    try:
+        data = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+        after = data[data.rfind(")") + 2:].split()
+        return int(after[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _read_cmdline(pid: int, proc_root: Path) -> list[str]:
+    try:
+        raw = (proc_root / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return []
+    return [part for part in raw.decode("utf-8", "replace").split("\0") if part]
+
+
+def _flag(argv: list[str], flag: str) -> str | None:
+    prefix = flag + "="
+    for index, arg in enumerate(argv):
+        if arg == flag and index + 1 < len(argv):
+            return argv[index + 1]
+        if arg.startswith(prefix):
+            return arg[len(prefix):]
+    return None
+
+
+def _cell_spec(cell: str) -> tuple[str, str, str] | None:
+    """(yaml stem, role, session id) for the mesh peer `cell`, or None.
+
+    The spawn name is the file stem (`lab.yaml` → `swarph spawn lab`).
+    The role is the claude `--name`. The session id is the pinned resume.
+    """
+    from swarph_cli.cell import CellError, cells_dir, load_cell
+
+    root = cells_dir()
+    if not root.is_dir():
+        return None
+    for path in sorted(root.glob("*.yaml")):
+        try:
+            loaded = load_cell(path)
+        except (OSError, ValueError, CellError):
+            continue
+        if getattr(loaded, "name", None) == cell:
+            return path.stem, loaded.role or "", loaded.session_id or ""
+    return None
+
+
+def _parent_is_cell_session(pid: int, cell: str, proc_root: Path) -> bool:
+    """True when pid's parent is claude for this cell's session.
+
+    A pinned session_id must be the parent's `--resume` or `--session-id`.
+    With no pin, `--name` must be the cell's role. Any other parent, including
+    a live pid reused by an unrelated process, is not the session.
+    """
+    ppid = _read_ppid(pid, proc_root)
+    if not ppid:
+        return False
+    argv = _read_cmdline(ppid, proc_root)
+    if not argv or Path(argv[0]).name != "claude":
+        return False
+    spec = _cell_spec(cell)
+    if spec is None:
+        return False
+    _stem, role, session_id = spec
+    if session_id:
+        return (_flag(argv, "--resume") == session_id
+                or _flag(argv, "--session-id") == session_id)
+    if role:
+        return _flag(argv, "--name") == role
+    return False
+
+
+def _format_ts(ts: float) -> str:
+    return datetime.datetime.fromtimestamp(
+        ts, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+
+
+def _dead_since(inbox: str, rec: dict) -> str:
+    """The heartbeat timestamp, else the moment the watchdog first missed the cell."""
+    ts = 0.0
+    try:
+        raw = json.loads(
+            (Path(inbox).parent / "channel_heartbeat.json").read_text(encoding="utf-8")
+        ).get("ts")
+        ts = float(raw or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        ts = 0.0
+    if ts <= 0:
+        try:
+            ts = float((rec or {}).get("missing_since") or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+    if ts <= 0:
+        return "unknown"
+    return _format_ts(ts)
+
+
+def commander_alert(cell: str, since: str) -> str:
+    """The commander-held row. The spawn word is the cell yaml's stem."""
+    spec = _cell_spec(cell)
+    if spec is None:
+        spawn, pane = cell, cell
+    else:
+        stem, role, _session = spec
+        spawn = stem or cell
+        pane = role or stem or cell
+    return (f"{cell} DM wake dead since {since}; "
+            f"fix: /mcp reconnect in the {pane} pane, or swarph spawn {spawn}")
+
+
+def _clock() -> float:
+    raw = os.environ.get("WAKE_WATCHDOG_NOW", "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return time.time()
 
 
 def _waiter_just_delivered(inbox: str, now: float | None = None) -> bool:
@@ -146,15 +296,18 @@ def _waiter_just_delivered(inbox: str, now: float | None = None) -> bool:
     return 0 <= age < WAIT_REARM_GRACE  # a future mtime is not a delivery
 
 
-def _watching(inbox: str, cmdlines: Iterable[str]) -> bool:
+def _watching(inbox: str, cmdlines: Iterable[str], *,
+              cell: str | None = None, proc_root: Path | None = None) -> bool:
     """A reader is tail or dm_notify_filter with the inbox path as its own argument,
-    a channel server whose heartbeat is fresh, a one-shot `swarph mesh wait` for
-    this cell (running, or delivered within WAIT_REARM_GRACE), or the cell's own
-    monitor running with a tmux sink.
+    a channel server whose heartbeat is fresh and whose parent is the cell's
+    claude session, a one-shot `swarph mesh wait` for this cell (running, or
+    delivered within WAIT_REARM_GRACE), or the cell's own monitor running with
+    a tmux sink.
 
     A process that merely mentions the path (a prompt, a log line) is not a reader.
     """
-    if _channel_alive(inbox) or _waiter_just_delivered(inbox):
+    who = cell or Path(inbox).parent.parent.name
+    if _channel_alive(inbox, cell=who, proc_root=proc_root) or _waiter_just_delivered(inbox):
         return True
     cell = Path(inbox).parent.parent.name
     for cmd in cmdlines:
@@ -243,22 +396,38 @@ def _timer_watched(name: str, timers: Iterable[str]) -> bool:
 
 def scan(cells: dict[str, str], cmdlines: Iterable[str], state: dict,
          now: float, *, gap: float = GAP_SECONDS,
-         timers: Iterable[str] = (), crontab: str = "") -> list[str]:
-    """Return the cells that should get the one DM for this outage."""
+         timers: Iterable[str] = (), crontab: str = "",
+         proc_root: Path | None = None) -> list[str]:
+    """Return the cells that should be alerted on this pass.
+
+    The first pass after GAP_SECONDS is the down edge. While the wake stays
+    dead, another alert is due every REALERT_SECONDS, measured from alerted_at.
+    """
     alert = []
     timers = list(timers)
     for name, inbox in cells.items():
         rec = state.setdefault(name, {})
-        if (_watching(inbox, cmdlines) or _timer_watched(name, timers)
+        if (_watching(inbox, cmdlines, cell=name, proc_root=proc_root)
+                or _timer_watched(name, timers)
                 or _cron_watched(name, crontab)):
             rec["missing_since"] = None
             rec["outage"] = False
+            rec["alerted_at"] = None
             continue
         since = rec.get("missing_since")
         if since is None:
             rec["missing_since"] = now
             continue
-        if now - since > gap and not rec.get("outage"):
+        if now - since <= gap:
+            continue
+        if not rec.get("outage"):
+            alert.append(name)
+            continue
+        try:
+            alerted_at = float(rec.get("alerted_at"))
+        except (TypeError, ValueError):
+            continue
+        if now - alerted_at >= REALERT_SECONDS:
             alert.append(name)
     return alert
 
@@ -388,7 +557,8 @@ def main(argv: list[str] | None = None) -> int:
     crontab = _crontab()
     cells = cells_under(root)
     state = load_state(state_path)
-    alert = scan(cells, cmdlines, state, time.time(), timers=timers, crontab=crontab)
+    now = _clock()
+    alert = scan(cells, cmdlines, state, now, timers=timers, crontab=crontab)
     sender = args.sender.strip()
     escalate = (args.escalate or "").strip()
     if not args.dry_run and escalate and sender and escalate == sender:
@@ -433,18 +603,26 @@ def main(argv: list[str] | None = None) -> int:
     rc = 0
     for name in alert:
         print(f"outage {name}", flush=True)
-        # Card #1237: the outage cell can be the --as sender itself (the unit
-        # runs --as lab-ovh while watching lab-ovh). mesh_send refuses a
-        # self-send (rc 2), so the outage was never marked and every tick
-        # re-alerted (112 card posts + 112 escalate DMs for one outage).
-        # Skip the self DM and count it as sent, the same shape as the
-        # escalate != name guard below: the card post and the escalate DM
-        # still carry the alert, so the outage is marked once.
+        # Card #1256: the dead cell is this unit's own --as identity. A DM
+        # to it, a card post addressed to it, and an escalate to a peer who
+        # cannot respawn it all miss the commander. One commander-held row
+        # on card 729 shows in the You tab and does not need the cell's wake.
         if name == sender:
-            dm_ok = True
-        else:
-            dm_ok = mesh_send(
-                swarph, name, sender, "IMMUNE (cell watchdog): your DM wake is dead, re-arm", token_file) == 0
+            content = commander_alert(name, _dead_since(cells[name], state.get(name) or {}))
+            ask_argv = [swarph, "board", "cards", "ask", "729",
+                        "--holder", "commander", "--as", sender, content]
+            if token_file:
+                ask_argv.extend(["--token-file", token_file])
+            asked = subprocess.run(ask_argv, check=False)
+            if asked.returncode == 0:
+                state[name]["outage"] = True
+                state[name]["alerted_at"] = now
+                save_state(state_path, state)
+            else:
+                rc = 1
+            continue
+        dm_ok = mesh_send(
+            swarph, name, sender, "IMMUNE (cell watchdog): your DM wake is dead, re-arm", token_file) == 0
         card_argv = [swarph, "board", "cards", "say", "729", "--as", sender,
                      "--to", name, "--content", f"IMMUNE (cell watchdog) — {name}: DM wake is dead, re-arm"]
         if token_file:
@@ -458,6 +636,7 @@ def main(argv: list[str] | None = None) -> int:
             esc_ok = esc_rc == 0
         if dm_ok and card.returncode == 0 and esc_ok:
             state[name]["outage"] = True
+            state[name]["alerted_at"] = now
             save_state(state_path, state)
         else:
             rc = 1
