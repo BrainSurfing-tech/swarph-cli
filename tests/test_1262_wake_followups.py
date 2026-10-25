@@ -87,13 +87,24 @@ def _stub(tmp_path: Path) -> Path:
             fh.write(" ".join(sys.argv[1:]) + "\\n")
         closed = Path(os.environ["STUB_CLOSED"])
         if "obligations" in sys.argv and "list" in sys.argv:
-            rows = [] if closed.exists() else [{{
-                "id": 42,
-                "holder": "commander",
-                "card_id": 729,
-                "status": "open",
-                "what": "lab-ovh DM wake dead since 2026-10-01 00:00:00Z",
-            }}]
+            rows = [] if closed.exists() else [
+                {{
+                    "id": 42,
+                    "holder": "commander",
+                    "card_id": 729,
+                    "status": "open",
+                    "created_by": "lab-ovh",
+                    "accept": "WAKE-DEAD lab-ovh",
+                }},
+                {{
+                    "id": 43,
+                    "holder": "commander",
+                    "card_id": 729,
+                    "status": "open",
+                    "created_by": "someone-else",
+                    "accept": "WAKE-DEAD someone-else",
+                }},
+            ]
             print(json.dumps({{"obligations": rows}}))
         if "obligations" in sys.argv and "close" in sys.argv:
             closed.write_text("1", encoding="utf-8")
@@ -143,10 +154,49 @@ def test_recovered_sender_closes_its_commander_row_once(tmp_path):
         now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     assert text.count("obligations close") == 1
     assert f"recovered {when}" in text
-    assert "42" in text
+    assert "close 42 " in text
+    assert "close 43 " not in text
     log.write_text("", encoding="utf-8")
     subprocess.run(cmd, env=env, check=True)
     assert "obligations close" not in log.read_text(encoding="utf-8")
+
+
+def test_dead_sender_mints_a_wake_dead_accept_marker(tmp_path):
+    """A new dead-wake row carries --accept WAKE-DEAD <sender>. The close
+    matches that marker, not a what field the gateway does not store."""
+    root = tmp_path / "state"
+    inbox = root / "lab-ovh" / "mesh-sidecar" / "inbox.log"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text("", encoding="utf-8")
+    now = 1_700_000_000.0
+    _yaml(tmp_path / "config", "lab-ovh", "lab")
+    state_path = tmp_path / "wake.json"
+    state_path.write_text(json.dumps({
+        "lab-ovh": {"missing_since": now - 120, "outage": False},
+    }), encoding="utf-8")
+    log = tmp_path / "stub.log"
+    log.write_text("", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.path.abspath("src"),
+        "SWARPH_STATE_ROOT": str(root),
+        "WAKE_WATCHDOG_STATE": str(state_path),
+        "WAKE_WATCHDOG_NOW": str(now),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "SWARPH_BIN": str(_stub(tmp_path)),
+        "STUB_LOG": str(log),
+        "STUB_CLOSED": str(tmp_path / "closed"),
+        "STUB_RC": "0",
+    }
+    env.pop("SWARPH_SELF", None)
+    env.pop("MESH_GATEWAY_URL", None)
+    subprocess.run(
+        [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
+         "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"],
+        env=env, check=True)
+    text = log.read_text(encoding="utf-8")
+    assert "--accept WAKE-DEAD lab-ovh" in text
+    assert "obligations close" not in text
 
 
 def _peers():
@@ -211,4 +261,63 @@ def test_unregistered_and_disabled_peers_drop_out_of_the_state(tmp_path):
     saved = json.loads(state_path.read_text(encoding="utf-8"))
     for name in DEFUNCT:
         assert name not in saved
+    assert "lab-ovh" in saved
+
+
+def _peer_body(payload: str):
+    body = payload.encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            return
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{httpd.server_address[1]}", httpd
+
+
+def test_an_empty_peer_list_leaves_the_state_unchanged(tmp_path):
+    """A successful [] is unreadable. The scan set and the state stay."""
+    url, httpd = _peer_body("[]")
+    root = tmp_path / "state"
+    inbox = root / "lab-ovh" / "mesh-sidecar" / "inbox.log"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text("", encoding="utf-8")
+    state_path = tmp_path / "wake.json"
+    state = {name: {"outage": True, "alerted_at": None, "missing_since": 1.0}
+             for name in DEFUNCT}
+    state["lab-ovh"] = {"outage": False}
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    token = tmp_path / "token"
+    token.write_text("tok-1262\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.path.abspath("src"),
+        "SWARPH_STATE_ROOT": str(root),
+        "WAKE_WATCHDOG_STATE": str(state_path),
+        "MESH_GATEWAY_URL": url,
+        "SWARPH_BIN": str(_stub(tmp_path)),
+        "STUB_LOG": str(tmp_path / "stub.log"),
+        "STUB_CLOSED": str(tmp_path / "closed"),
+        "STUB_RC": "0",
+    }
+    env.pop("SWARPH_SELF", None)
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
+             "--as", "lab-ovh", "--escalate", "drop-on-meta-edge",
+             "--token-file", str(token)],
+            env=env, check=True)
+    finally:
+        httpd.shutdown()
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    for name in DEFUNCT:
+        assert name in saved
     assert "lab-ovh" in saved

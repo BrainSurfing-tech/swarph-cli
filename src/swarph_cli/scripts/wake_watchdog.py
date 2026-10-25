@@ -498,8 +498,10 @@ def _bearer(token_file: str, sender: str) -> str:
 def enabled_peer_names(gateway: str, token: str) -> set[str] | None:
     """Registered, enabled peer names. None when the list cannot be read.
 
-    A failed read leaves the watched set alone. An empty successful list is
-    a real answer: nobody is registered, so nobody is scanned.
+    A failed read leaves the watched set alone. An empty successful list
+    is treated the same way: a gateway hiccup that returns [] must not
+    drop every cell. A non-empty list is a real answer, and peers absent
+    from it, or present and disabled, are not scanned.
     """
     if not gateway:
         return None
@@ -514,7 +516,7 @@ def enabled_peer_names(gateway: str, token: str) -> set[str] | None:
         return None
     rows = data if isinstance(data, list) else (
         data.get("peers") if isinstance(data, dict) else None)
-    if not isinstance(rows, list):
+    if not isinstance(rows, list) or len(rows) == 0:
         return None
     names: set[str] = set()
     for peer in rows:
@@ -570,9 +572,22 @@ def _close_recovered_commander_rows(swarph: str, sender: str, token_file: str,
     if not isinstance(rows, list):
         return
     when = _format_ts(now)
-    marker = f"{sender} DM wake dead"
+    # Real obligation rows have no `what` column. The list is already
+    # card 729, holder commander, status open. created_by is the sender
+    # who minted the row, and the accept carries WAKE-DEAD <sender>.
+    marker = f"WAKE-DEAD {sender}"
     for row in rows:
-        if not isinstance(row, dict) or marker not in (row.get("what") or ""):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("card_id")) != "729":
+            continue
+        if row.get("holder") != "commander":
+            continue
+        if row.get("status") not in (None, "open"):
+            continue
+        if row.get("created_by") != sender:
+            continue
+        if marker not in (row.get("accept") or ""):
             continue
         oid = row.get("id")
         if not oid:
@@ -772,7 +787,9 @@ def main(argv: list[str] | None = None) -> int:
         if name == sender:
             content = commander_alert(name, _dead_since(cells[name], state.get(name) or {}))
             ask_argv = [swarph, "board", "cards", "ask", "729",
-                        "--holder", "commander", "--as", sender, content]
+                        "--holder", "commander",
+                        "--accept", f"WAKE-DEAD {sender}",
+                        "--as", sender, content]
             if token_file:
                 ask_argv.extend(["--token-file", token_file])
             asked = subprocess.run(ask_argv, check=False)
