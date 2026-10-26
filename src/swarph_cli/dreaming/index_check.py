@@ -233,7 +233,11 @@ def main() -> int:
             if line.startswith("- ") and TRUNC.search(line):
                 findings.append(f"TRUNCATED: {idx}:{n} ends mid-link — ...{line[-46:]}")
 
-    dangling = sorted(linked - files)
+    # An index file is not a missing memory. MEMORY.md (the index of indexes)
+    # links at index_*.md, and those names were removed from `files` above, so
+    # linked - files reported every one of them DANGLING (card #1278 rework).
+    # Subtract the index names too: dangling is a pointer to no existing .md.
+    dangling = sorted(linked - files - set(indexes))
     if dangling:
         findings.append(f"DANGLING: {len(dangling)} pointer(s) to a file that does not exist")
         findings += [f"    {d}" for d in dangling[:20]]

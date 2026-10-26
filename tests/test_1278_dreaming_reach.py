@@ -19,13 +19,15 @@ def _run_check(mem: Path) -> tuple[int, str]:
 def test_1278_pointer_only_in_index_md_is_not_an_orphan(tmp_path):
     mem = tmp_path / "mem"
     mem.mkdir()
-    (mem / "MEMORY.md").write_text("- [a](a.md)\n", encoding="utf-8")
+    (mem / "MEMORY.md").write_text(
+        "- [a](a.md)\n- [topics](index_topics.md)\n", encoding="utf-8")
     (mem / "MEMORY_FULL.md").write_text("- [a](a.md)\n", encoding="utf-8")
     (mem / "index_topics.md").write_text("- [b](b.md)\n", encoding="utf-8")
     (mem / "a.md").write_text("# a\n", encoding="utf-8")
     (mem / "b.md").write_text("# b\n", encoding="utf-8")
     rc, out = _run_check(mem)
     assert "ORPHANS" not in out, out
+    assert "DANGLING" not in out, out
     assert rc == 0, out
 
 
