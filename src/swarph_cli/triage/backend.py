@@ -34,7 +34,8 @@ class MemoryBackend:
                 f"create '{title}': project_id is required — the gateway "
                 f"refuses a card create without one (BoardCardCreate)")
         row = {"id": self.next_id, "title": title, "owner": owner,
-               "project_id": self.project_id, "status": "open"}
+               "project_id": self.project_id, "status": "open",
+               "labels": ["triage-row"]}
         self.next_id += 1
         self.rows[title] = row
         self.posts[title] = []
@@ -119,7 +120,10 @@ class BoardBackend:
                    "body": f"Daily triage row for {owner} (card #1073). "
                            "Items are appended by the triage job; "
                            "owners work them off the row.",
-                   "assignee": owner}
+                   "assignee": owner,
+                   # card #1269: the label is how offer_dispatch leaves the
+                   # minted rows unoffered. Rows stay requested.
+                   "labels": ["triage-row"]}
         try:
             status, body = self._http_post(
                 f"{self.gateway}/board/cards", payload, self.token)
