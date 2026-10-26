@@ -41,6 +41,25 @@ MEM = pathlib.Path(
     next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--mem-dir=")),
          str(pathlib.Path.home() / ".claude/projects/-home-ubuntu/memory")))
 INDEXES = ("MEMORY.md", "MEMORY_FULL.md")
+
+
+def index_names(mem: pathlib.Path) -> list[str]:
+    """Files whose pointers count: every MEMORY*.md and index_*.md.
+
+    MEMORY.md and MEMORY_FULL.md stay required, so a missing one is still
+    MISSING INDEX. Pointers also live in index_*.md after the index-of-indexes
+    restructure. A file named only there is not an orphan (card #1278).
+    """
+    found: list[str] = []
+    if mem.is_dir():
+        found = [
+            p.name for p in sorted(mem.glob("*.md"))
+            if p.name.startswith("MEMORY") or p.name.startswith("index_")
+        ]
+    for name in INDEXES:
+        if name not in found:
+            found.append(name)
+    return found
 BUDGET = 24985  # bytes, MEMORY.md only — stated in the file's own header comment
 # THE THIRD STATE. Without WARN this check reported "clean" at 24,972 bytes —
 # 13 bytes of headroom — which is the exact condition ORGANIZE exists to
@@ -189,9 +208,10 @@ def main() -> int:
         print(f"memory-index-check: {MEM} is not a directory", file=sys.stderr)
         return 1
 
-    files = {p.name for p in MEM.glob("*.md")} - set(INDEXES)
+    indexes = index_names(MEM)
+    files = {p.name for p in MEM.glob("*.md")} - set(indexes)
     linked: set[str] = set()
-    for i in INDEXES:
+    for i in indexes:
         linked |= links_in(i)
 
     findings: list[str] = []
@@ -203,7 +223,7 @@ def main() -> int:
         if len(orphans) > 20:
             findings.append(f"    … and {len(orphans) - 20} more")
 
-    for idx in INDEXES:
+    for idx in indexes:
         p = MEM / idx
         if not p.exists():
             findings.append(f"MISSING INDEX: {idx}")

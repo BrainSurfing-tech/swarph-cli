@@ -141,13 +141,67 @@ def apply(out: Path, verdicts, organized, cell: str, sender) -> bool:
     return True
 
 
+def _post_to_card(card: str, content: str) -> None:
+    """Put the finding on a card. A DM to the sender is refused (#185 / #409).
+
+    Card #864: a finding goes on a card. Card #1278: the dreaming unit is
+    lab-ovh notifying lab-ovh, so the send never arrives. Default card is 656,
+    whose rows are closed; a holder who posts to a card thread closes their
+    oldest open row on it, so do not point this at a card the sender holds.
+    """
+    import os
+
+    from swarph_cli.commands.board import (
+        _card_say_payload,
+        _http_get_json,
+        _post_json,
+        _project_owner_orchestrator,
+        _thread_recipient,
+    )
+    from swarph_cli.commands.mesh import _resolve_self_name, _resolve_token
+    from swarph_cli.gateway_default import env_gateway
+
+    gw = env_gateway()
+    self_name = os.environ.get("SWARPH_SELF") or _resolve_self_name(None)
+    token = _resolve_token(self_name, None)
+    status, card_row = _http_get_json(f"{gw}/board/cards/{card}", token)
+    if status != 200 or not isinstance(card_row, dict):
+        raise NotifySendError(f"cannot read card #{card}: {card_row}")
+    thread_uuid = card_row.get("thread_uuid")
+    if not thread_uuid:
+        raise NotifySendError(f"card #{card} has no bound thread")
+    owner = None
+    if not card_row.get("assignee"):
+        owner = _project_owner_orchestrator(gw, token, card_row.get("project_id"))
+    try:
+        to_node, _reason = _thread_recipient(card_row, None, owner_orchestrator=owner)
+    except RuntimeError as exc:
+        raise NotifySendError(str(exc)) from exc
+    status, payload = _post_json(
+        f"{gw}/messages",
+        _card_say_payload(self_name, to_node, "status", content, thread_uuid),
+        token,
+    )
+    if status < 200 or status >= 300:
+        raise NotifySendError(f"card #{card} post failed: {status} {payload}")
+
+
 def mesh_sender(cell: str, content: str) -> None:
-    """Same path as ``swarph mesh send``: one status DM, no second transport."""
+    """Same path as ``swarph mesh send``, unless that send would be a self-wake.
+
+    SWARPH_SELF equal to the notify cell is the dreaming unit. Mesh send
+    refuses it and the run exits 4. Post the same body to the dreaming card.
+    """
     import argparse
+    import os
 
     from swarph_cli.commands.mesh import _run_send
     from swarph_cli.gateway_default import env_gateway
 
+    self_name = os.environ.get("SWARPH_SELF")
+    if self_name and cell == self_name:
+        _post_to_card(os.environ.get("SWARPH_DREAMING_CARD", "656"), content)
+        return
     ns = argparse.Namespace(
         to=cell,
         kind="status",
