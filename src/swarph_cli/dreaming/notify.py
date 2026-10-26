@@ -147,10 +147,8 @@ def _post_to_card(card: str, content: str) -> None:
     Card #864: a finding goes on a card. Card #1278: the dreaming unit is
     lab-ovh notifying lab-ovh, so the send never arrives. Default card is 656,
     whose rows are closed; a holder who posts to a card thread closes their
-    oldest open row on it, so do not point this at a card the sender holds.
+    oldest open row on it,     so do not point this at a card the sender holds.
     """
-    import os
-
     from swarph_cli.commands.board import (
         _card_say_payload,
         _http_get_json,
@@ -162,7 +160,7 @@ def _post_to_card(card: str, content: str) -> None:
     from swarph_cli.gateway_default import env_gateway
 
     gw = env_gateway()
-    self_name = os.environ.get("SWARPH_SELF") or _resolve_self_name(None)
+    self_name = _resolve_self_name(None)
     token = _resolve_token(self_name, None)
     status, card_row = _http_get_json(f"{gw}/board/cards/{card}", token)
     if status != 200 or not isinstance(card_row, dict):
@@ -193,14 +191,13 @@ def mesh_sender(cell: str, content: str) -> None:
     refuses it and the run exits 4. Post the same body to the dreaming card.
     """
     import argparse
-    import os
 
-    from swarph_cli.commands.mesh import _run_send
+    from swarph_cli.commands.mesh import _resolve_self_name, _run_send
     from swarph_cli.gateway_default import env_gateway
 
-    self_name = os.environ.get("SWARPH_SELF")
-    if self_name and cell == self_name:
-        _post_to_card(os.environ.get("SWARPH_DREAMING_CARD", "656"), content)
+    self_name = _resolve_self_name(None)
+    if cell == self_name:
+        _post_to_card("656", content)
         return
     ns = argparse.Namespace(
         to=cell,
