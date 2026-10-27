@@ -108,6 +108,8 @@ _VERB_HANDLERS: dict[str, str] = {
     "peer-reply-drain": "swarph_cli.commands.peer_reply_drain.run_peer_reply_drain",
     "monitor": "swarph_cli.commands.monitor.run_monitor",
     "board": "swarph_cli.commands.board.run_board",
+    # card #1297: propose a decision or an action. The commander decides.
+    "commander": "swarph_cli.commands.commander.run_commander",
     "group": "swarph_cli.commands.group.run_group",
     "rights": "swarph_cli.commands.group.run_rights",
     "roster": "swarph_cli.commands.roster.run_roster",
