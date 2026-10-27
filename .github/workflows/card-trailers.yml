@@ -1,0 +1,34 @@
+# card-trailers.yml — the commit carries Swarph-Card and Swarph-Cell labels.
+#
+# Card #1320. The hook in tools/prepare-commit-msg-swarph.py writes the
+# labels. They are readable provenance, not a credential binding: a trailer
+# is text the writer chooses and cells share a GitHub login. The binding is
+# the merger's validated-head rule (card #1318).
+#
+# This job runs three injected label cases and refuses a head that names no
+# card. A green job is not a live read of the board.
+name: card-trailers
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  trailers:
+    name: card trailers are labels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Three cases, and this head names a card
+        run: |
+          python3 tools/check_card_trailers.py --self-test
+          python3 tools/check_card_trailers.py --head
