@@ -22,12 +22,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Three cases, and this head names a card
-        env:
-          PYTHONPATH: src
         run: |
-          python3 -m pytest tests/test_1320_commit_trailers.py -q
+          python3 tools/check_card_trailers.py --self-test
           python3 tools/check_card_trailers.py --head
