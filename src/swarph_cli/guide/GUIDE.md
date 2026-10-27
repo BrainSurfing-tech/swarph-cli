@@ -518,6 +518,7 @@ answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not comman
 - `swarph codegraph-hook` -- hook plumbing: the structural-search companion Claude Code hooks call.
 - `swarph codex-hook-output` -- hook plumbing: Codex SessionStart adapter for the shared context hook.
 - `swarph codex-waker` -- durable Codex App Server controller for host schedulers.
+- `swarph committee` -- the committee-room client: `motion <channel>` shows the open motion (id, phase, deadlines), `post <channel> --round positions|rebuttal|vote --body-file F [--outcome X]` posts a sealed ballot, and chair-only `rooms open`, `motion <channel> --open`, `recast`, `baseline-absent` drive the room.
 - `swarph compress` -- compress a machine-read context surface; dry-run by default.
 - `swarph daemon` -- foreground drain loop for a cell's inbox (PLAN.md section 16).
 - `swarph dreaming` -- verify/organize/enrich a CLONE of your memory corpus between sessions; never writes the live store (`run --corpus DIR --out DIR`).

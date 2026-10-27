@@ -117,6 +117,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "triage": "swarph_cli.commands.triage.run_triage_cmd",
     "mcp-server": "swarph_cli.commands.mcp_server.run_mcp_server",
     "compress": "swarph_cli.commands.compress.run_compress",
+    "committee": "swarph_cli.commands.committee.run_committee",
     "cell": "swarph_cli.commands.cell.run_cell",
     "brain-ask": "swarph_cli.commands.brain_ask.run_brain_ask",
     "brain": "swarph_cli.commands.brain.run_brain",
