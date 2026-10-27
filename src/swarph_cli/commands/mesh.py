@@ -35,6 +35,7 @@ import uuid
 
 from swarph_cli import identity
 import swarph_cli
+from swarph_cli.redact import redact_text, encode_outbound_json, redact_opt_out_context
 import urllib.request
 from collections import deque
 from collections.abc import MutableMapping
@@ -265,6 +266,10 @@ def _add_common(p: argparse.ArgumentParser) -> None:
         help="mesh-gateway base URL",
     )
     p.add_argument("--token-file", default=None, help="explicit bearer token file")
+    p.add_argument(
+        "--no-redact", action="store_true", default=False,
+        help="bypass outbound redaction (logged)",
+    )
 
 
 def _peer_token_path(self_name: str) -> Path:
@@ -441,7 +446,7 @@ def _post_json(
     timeout: float = 10.0,
 ) -> tuple[int, dict]:
     _require_absolute_gateway_url(url)
-    data = json.dumps(body).encode("utf-8")
+    data = encode_outbound_json(body, caller="mesh._post_json")
     req = urllib.request.Request(
         url,
         data=data,
@@ -674,6 +679,7 @@ def _run_send(args: argparse.Namespace) -> int:
     except ContentError as exc:
         print(f"swarph mesh send: {exc}", file=sys.stderr)
         return 1
+    content = redact_text(content, opt_out=getattr(args, "no_redact", False), caller="mesh.send") or ""
     self_name = _resolve_self_name(args.self_name)
     token = _resolve_token(self_name, args.token_file)
     cc = list(getattr(args, "cc", None) or [])
@@ -713,11 +719,12 @@ def _run_send(args: argparse.Namespace) -> int:
         print(refusal, file=sys.stderr)
         return 1
 
-    status, payload = _post_json(
-        f"{args.gateway.rstrip('/')}/messages",
-        body,
-        token,
-    )
+    with redact_opt_out_context(getattr(args, "no_redact", False)):
+        status, payload = _post_json(
+            f"{args.gateway.rstrip('/')}/messages",
+            body,
+            token,
+        )
     if status < 200 or status >= 300:
         detail = payload.get("detail", "<gateway error>")
         print(f"swarph mesh send: gateway {status}: {detail}", file=sys.stderr)
@@ -840,6 +847,7 @@ def _run_reply(args: argparse.Namespace) -> int:
     except ContentError as exc:
         print(f"swarph mesh reply: {exc}", file=sys.stderr)
         return 1
+    content = redact_text(content, opt_out=getattr(args, "no_redact", False), caller="mesh.reply") or ""
     self_name = _resolve_self_name(args.self_name)
     token = _resolve_token(self_name, args.token_file)
     gw = args.gateway.rstrip("/")
@@ -862,7 +870,8 @@ def _run_reply(args: argparse.Namespace) -> int:
     if thread_id:
         body["thread_id"] = thread_id
 
-    status, payload = _post_json(f"{gw}/messages", body, token)
+    with redact_opt_out_context(getattr(args, "no_redact", False)):
+        status, payload = _post_json(f"{gw}/messages", body, token)
     if status < 200 or status >= 300:
         print(f"swarph mesh reply: gateway {status}: "
               f"{payload.get('detail', '<gateway error>')}", file=sys.stderr)

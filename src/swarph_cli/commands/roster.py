@@ -35,6 +35,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from swarph_cli.redact import encode_outbound_json
+
 # card #1061 role vocabulary — mirrors the gateway's _ROSTER_ROLES. A role
 # the gateway does not know is refused here (exit 2) before its 400; when the
 # vocabulary grows, BOTH pins change together (gateway tests + test_1061 below).
@@ -49,7 +51,7 @@ def _http_get_json(url, token, *, timeout=10.0):
 def _http_put_json(url, body, token, *, timeout=10.0):
     from swarph_cli.commands.mesh import _require_absolute_gateway_url
     _require_absolute_gateway_url(url)
-    data = json.dumps(body).encode("utf-8")
+    data = encode_outbound_json(body, caller="roster._http_put_json")
     req = urllib.request.Request(
         url, data=data, method="PUT",
         headers={"Authorization": f"Bearer {token}",
@@ -342,8 +344,8 @@ def _post_message(gateway: str, token: str, to_node: str, content: str) -> bool:
     """DM the commander as the quota-writer service. True on HTTP 2xx."""
     from swarph_cli.commands.mesh import _require_absolute_gateway_url
     _require_absolute_gateway_url(gateway)
-    data = json.dumps({"from_node": "quota-writer", "to_node": to_node,
-                       "kind": "fyi", "content": content}).encode("utf-8")
+    data = encode_outbound_json({"from_node": "quota-writer", "to_node": to_node,
+                                 "kind": "fyi", "content": content}, caller="roster._post_message")
     req = urllib.request.Request(
         f"{gateway}/messages", data=data, method="POST",
         headers={"Authorization": f"Bearer {token}",

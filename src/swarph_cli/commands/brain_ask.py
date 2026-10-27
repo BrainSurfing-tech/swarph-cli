@@ -33,6 +33,7 @@ import urllib.request
 
 from swarph_cli import identity
 from swarph_cli import tokens
+from swarph_cli.redact import encode_outbound_json
 from pathlib import Path
 from typing import Optional
 
@@ -204,7 +205,7 @@ def _resolve_token(token_file: Optional[str], self_name: str) -> Optional[str]:
 def _http_post(url: str, body: dict, token: str,
                accept: str = "application/json, text/event-stream",
                timeout: int = 30) -> str:
-    data = json.dumps(body).encode("utf-8")
+    data = encode_outbound_json(body, caller="brain_ask._http_post")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", accept)

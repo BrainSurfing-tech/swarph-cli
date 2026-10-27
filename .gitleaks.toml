@@ -31,3 +31,11 @@ id = "gcp-api-key"
 paths = [
   '''tests/test_scrub\.py''',
 ]
+
+[[rules]]
+id = "curl-auth-user"
+[rules.allowlist]
+paths = [
+  '''tests/test_1321_layered_redaction\.py''',
+]
+

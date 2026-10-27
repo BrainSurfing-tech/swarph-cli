@@ -25,8 +25,8 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Optional
 from swarph_cli.gateway_default import env_gateway, require_gateway
+from swarph_cli.redact import encode_outbound_json
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -97,7 +97,7 @@ def _resolve_witness(arg: Optional[str]) -> str:
 def _http_json(
     url: str, *, token: str, method: str = "GET", body: Optional[dict] = None
 ) -> tuple[int, dict]:
-    data = json.dumps(body).encode("utf-8") if body is not None else None
+    data = encode_outbound_json(body, caller="ratify._http_json") if body is not None else None
     req = urllib.request.Request(
         url,
         data=data,

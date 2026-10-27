@@ -43,6 +43,7 @@ from swarph_cli.commands.mesh import (
     _resolve_self_name,
     _resolve_token,
 )
+from swarph_cli.redact import redact_text, redact_value, encode_outbound_json
 
 
 _SENTINEL = object()
@@ -51,7 +52,7 @@ _SENTINEL = object()
 # ── HTTP: PATCH (mesh.py has GET + POST; the board needs PATCH for move/link) ──
 
 def _patch_json(url: str, body: dict, token: str, *, timeout: float = 10.0) -> tuple[int, dict]:
-    data = json.dumps(body).encode("utf-8")
+    data = encode_outbound_json(body, caller="board._patch_json")
     req = urllib.request.Request(
         url, data=data, method="PATCH",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
@@ -89,11 +90,12 @@ def _normalize_due_at(value: str) -> str:
 
 
 def _card_add_payload(actor, project_id, title, *, body=None, ai2=False, priority=0,
-                      labels=None, due_at=None) -> dict:
+                      labels=None, due_at=None, opt_out=False) -> dict:
+    title = redact_text(title, opt_out=opt_out, caller="board.cards.add")
     p = {"actor": actor, "project_id": int(project_id), "title": title,
          "ai2": bool(ai2), "priority": int(priority)}
     if body:
-        p["body"] = body
+        p["body"] = redact_text(body, opt_out=opt_out, caller="board.cards.add")
     if labels:
         p["labels"] = list(labels)
     if due_at is not None:
@@ -151,7 +153,7 @@ def _format_obligations(data: dict) -> str:
 
 
 def _card_edit_payload(actor, title, body, *, due_at=_SENTINEL, project_id=None,
-                       priority=None) -> dict:
+                       priority=None, opt_out=False) -> dict:
     """#191: the edit patch — title and/or body, the two fields that made a
     card's text write-once until the gateway grew them (BoardCardPatch).
 
@@ -173,9 +175,9 @@ def _card_edit_payload(actor, title, body, *, due_at=_SENTINEL, project_id=None,
     """
     patch = {"actor": actor}
     if title is not None:
-        patch["title"] = title
+        patch["title"] = redact_text(title, opt_out=opt_out, caller="board.cards.edit")
     if body is not None:
-        patch["body"] = body
+        patch["body"] = redact_text(body, opt_out=opt_out, caller="board.cards.edit")
     if due_at is not _SENTINEL:
         # "" is the gateway's CLEAR sentinel; None means "not mentioned" and the
         # write is skipped while the old date is echoed back (#901).
@@ -190,7 +192,7 @@ def _card_edit_payload(actor, title, body, *, due_at=_SENTINEL, project_id=None,
     return patch
 
 
-def _write_card_preimage(actor, gateway, card_id, card, patch) -> Path:
+def _write_card_preimage(actor, gateway, card_id, card, patch, *, opt_out=False) -> Path:
     """Append the card's CURRENT title and body to a local log BEFORE an edit
     replaces them. Returns the path written.
 
@@ -213,10 +215,10 @@ def _write_card_preimage(actor, gateway, card_id, card, patch) -> Path:
         "gateway": gateway,
         "card": card_id,
         "body_version": card.get("body_version"),
-        "prev_title": card.get("title"),
-        "prev_body": card.get("body"),
-        "new_title": patch.get("title"),
-        "new_body": patch.get("body"),
+        "prev_title": redact_text(card.get("title"), opt_out=opt_out, caller="board.cards.edit"),
+        "prev_body": redact_text(card.get("body"), opt_out=opt_out, caller="board.cards.edit"),
+        "new_title": redact_text(patch.get("title"), opt_out=opt_out, caller="board.cards.edit"),
+        "new_body": redact_text(patch.get("body"), opt_out=opt_out, caller="board.cards.edit"),
     }
     path = card_preimage_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,10 +253,11 @@ def _apply_label(current: list, action: str, label: str) -> list:
     return [x for x in cur if x != lab]
 
 
-def _project_add_payload(actor, slug, title, *, goal=None) -> dict:
+def _project_add_payload(actor, slug, title, *, goal=None, opt_out: bool = False) -> dict:
+    title = redact_text(title, opt_out=opt_out, caller="board.projects")
     p = {"actor": actor, "slug": slug, "title": title}
     if goal:
-        p["goal"] = goal
+        p["goal"] = redact_text(goal, opt_out=opt_out, caller="board.projects")
     return p
 
 
@@ -546,7 +549,8 @@ def _say_line(resp: dict, card_id, to_node: str, *, reason: Optional[str] = None
 
 
 def _card_say_payload(from_node: str, to_node: str, kind: str, content: str,
-                      thread_uuid: str) -> dict:
+                      thread_uuid: str, *, opt_out=False) -> dict:
+    content = redact_text(content, opt_out=opt_out, caller="board.cards.say")
     return {
         "from_node": from_node,
         "to_node": to_node,
@@ -726,7 +730,7 @@ def _json_flag(flag: str, value: str):
 
 def _ask_payload(self_name, what, *, holder=None, step=None, needs=None, hours=None,
                  done=None, accept=None, accept_json=None, kind="action",
-                 timeout_hours=None, task=None, task_needs=None) -> dict:
+                 timeout_hours=None, task=None, task_needs=None, opt_out=False) -> dict:
     """POST /board/cards/{id}/ask body. None = not mentioned = key ABSENT (#191's
     rule; test_532 pins that a null `accept` on the wire would overwrite the
     gateway's own normalization). No holder → `requested`; `me` → the caller's
@@ -736,6 +740,7 @@ def _ask_payload(self_name, what, *, holder=None, step=None, needs=None, hours=N
     if accept is not None and accept_json is not None:
         raise ValueError("pass --accept or --accept-json, not both — "
                          "one check per row")
+    what = redact_text(what, opt_out=opt_out, caller="board.cards.ask")
     p = {"what": what, "created_by": self_name, "kind": kind}
     if holder is not None:
         p["holder"] = self_name if holder == "me" else holder
@@ -746,11 +751,11 @@ def _ask_payload(self_name, what, *, holder=None, step=None, needs=None, hours=N
     if hours is not None:
         p["hours"] = hours
     if done is not None:
-        p["done"] = done
+        p["done"] = redact_text(done, opt_out=opt_out, caller="board.cards.ask")
     if accept is not None:
-        p["accept"] = accept
+        p["accept"] = redact_text(accept, opt_out=opt_out, caller="board.cards.ask")
     if accept_json is not None:
-        p["accept_json"] = accept_json
+        p["accept_json"] = redact_value(accept_json, opt_out=opt_out, caller="board.cards.ask")
     if timeout_hours is not None:
         p["timeout_hours"] = timeout_hours
     if task is not None:
@@ -830,7 +835,7 @@ def _ask_line(d) -> str:
     return line
 
 
-def _confirm_flow_payload(actor: str, holders, what=None) -> dict:
+def _confirm_flow_payload(actor: str, holders, what=None, *, opt_out=False) -> dict:
     """#801: {actor, holders: {step: peer}, what}. `--holder STEP=PEER` is parsed here so a
     malformed override is refused before the request, naming the form."""
     body = {"actor": actor}
@@ -844,7 +849,7 @@ def _confirm_flow_payload(actor: str, holders, what=None) -> dict:
             out[step] = peer
         body["holders"] = out
     if what:
-        body["what"] = what
+        body["what"] = redact_text(what, opt_out=opt_out, caller="board.cards.confirm-flow")
     return body
 
 
@@ -924,7 +929,7 @@ def _move_line(x) -> str:
     return line
 
 
-def _close_payload(outcome, evidence=None, evidence_json=None) -> dict:
+def _close_payload(outcome, evidence=None, evidence_json=None, *, opt_out=False) -> dict:
     """POST /board/obligations/{id}/close body (#1068): --evidence and/or
     --evidence-json, at least one. The CLI cannot know the row's stored
     accept, so it sends what it was given — the gateway requires the map
@@ -934,15 +939,15 @@ def _close_payload(outcome, evidence=None, evidence_json=None) -> dict:
                          "--evidence-json")
     p = {"outcome": outcome}
     if evidence is not None:
-        p["evidence"] = evidence
+        p["evidence"] = redact_text(evidence, opt_out=opt_out, caller="board.obligations.close")
     if evidence_json is not None:
-        p["evidence_json"] = evidence_json
+        p["evidence_json"] = redact_value(evidence_json, opt_out=opt_out, caller="board.obligations.close")
     return p
 
 
 def _amend_payload(step=None, holder=None, accept=None, hours=None,
                    needs_add=None, needs_remove=None, needs=None,
-                   accept_json=None) -> dict:
+                   accept_json=None, *, opt_out=False) -> dict:
     """PATCH /board/obligations/{id}/amend body. None = not mentioned; an empty
     `holder` is a REAL value (clears → `requested`), so the test is
     `is not None`, never truthiness (#191). `needs` is the contract's signed
@@ -953,6 +958,10 @@ def _amend_payload(step=None, holder=None, accept=None, hours=None,
     if accept is not None and accept_json is not None:
         raise ValueError("pass --accept or --accept-json, not both — "
                          "one check per row")
+    if accept is not None:
+        accept = redact_text(accept, opt_out=opt_out, caller="board.obligations")
+    if accept_json is not None:
+        accept_json = redact_value(accept_json, opt_out=opt_out, caller="board.obligations")
     signed = _step_list(needs)
     add = _step_list(needs_add) + [x for x in signed if not x.startswith("-")]
     rem = _step_list(needs_remove) + [x[1:] for x in signed if x.startswith("-")]
@@ -1313,7 +1322,7 @@ def run_board(argv: list[str]) -> int:
             st, d = _http_get_json(f"{gw}/board/projects", token)
             return _out(st, d, _format_projects, aj)
         if args.command == "add":
-            st, d = _post_json(f"{gw}/board/projects", _project_add_payload(self_name, args.slug, args.title, goal=args.goal), token)
+            st, d = _post_json(f"{gw}/board/projects", _project_add_payload(self_name, args.slug, args.title, goal=args.goal, opt_out=getattr(args, "no_redact", False)), token)
             return _out(st, d, lambda x: f"created project #{x.get('id')} ({x.get('slug')})", aj)
 
     if args.group == "obligations":
@@ -1332,7 +1341,8 @@ def run_board(argv: list[str]) -> int:
             try:
                 evidence_json = (_json_flag("--evidence-json", args.evidence_json)
                                  if args.evidence_json is not None else None)
-                payload = _close_payload(args.outcome, evidence, evidence_json)
+                payload = _close_payload(args.outcome, evidence, evidence_json,
+                                         opt_out=getattr(args, "no_redact", False))
             except ValueError as exc:
                 print(f"swarph board obligations close: {exc}", file=sys.stderr)
                 return 2
@@ -1362,8 +1372,9 @@ def run_board(argv: list[str]) -> int:
             st, d = _post_json(f"{gw}/board/obligations/{args.id}/take", {}, token)
             return _out(st, d, _obligation_act_line, aj)
         if args.command == "decline":
+            why = redact_text(args.why, opt_out=getattr(args, "no_redact", False), caller="board.obligations")
             st, d = _post_json(f"{gw}/board/obligations/{args.id}/decline",
-                               {"why": args.why}, token)
+                               {"why": why}, token)
             return _out(st, d, _obligation_act_line, aj)
         if args.command == "amend":
             try:
@@ -1373,7 +1384,8 @@ def run_board(argv: list[str]) -> int:
                                        accept=args.accept, hours=args.hours,
                                        needs_add=args.needs_add,
                                        needs_remove=args.needs_remove, needs=args.needs,
-                                       accept_json=accept_json)
+                                       accept_json=accept_json,
+                                       opt_out=getattr(args, "no_redact", False))
             except ValueError as exc:
                 print(f"swarph board obligations amend: {exc}", file=sys.stderr)
                 return 2
@@ -1385,6 +1397,7 @@ def run_board(argv: list[str]) -> int:
                 print("swarph board obligations withdraw: --reason is "
                       "whitespace-only", file=sys.stderr)
                 return 2
+            reason = redact_text(reason, opt_out=getattr(args, "no_redact", False), caller="board.obligations")
             st, d = _post_json(
                 f"{gw}/board/obligations/{args.id}/withdraw",
                 {"reason": reason}, token)
@@ -1441,7 +1454,7 @@ def run_board(argv: list[str]) -> int:
             st, d = _post_json(f"{gw}/board/cards", _card_add_payload(
                 self_name, pid, title, body=body, ai2=args.ai2,
                 priority=args.priority, labels=getattr(args, "labels", None),
-                due_at=args.due), token)
+                due_at=args.due, opt_out=getattr(args, "no_redact", False)), token)
             return _out(st, d, lambda x: f"created card #{x.get('id')} [{x.get('stage')}] (stage defaults to proposed — use `cards move` to advance)", aj)
         if args.command == "label":
             # READ the current set before replacing it. If the GET fails we must
@@ -1491,7 +1504,8 @@ def run_board(argv: list[str]) -> int:
             try:
                 patch = _card_edit_payload(
                     self_name, title_text, body_text, due_at=args.due,
-                    project_id=project_id, priority=args.priority)
+                    project_id=project_id, priority=args.priority,
+                    opt_out=getattr(args, "no_redact", False))
             except ValueError as exc:
                 print(f"swarph board cards edit: {exc}", file=sys.stderr)
                 return 2
@@ -1508,7 +1522,8 @@ def run_board(argv: list[str]) -> int:
                       f"an unrecoverable one", file=sys.stderr)
                 return 1
             try:
-                pre = _write_card_preimage(self_name, gw, args.id, cur, patch)
+                pre = _write_card_preimage(self_name, gw, args.id, cur, patch,
+                                           opt_out=getattr(args, "no_redact", False))
             except OSError as exc:
                 print(f"swarph board cards edit: cannot write the pre-image log "
                       f"({exc}) — refusing to write, for the same reason: the "
@@ -1541,7 +1556,7 @@ def run_board(argv: list[str]) -> int:
             # the row in one gateway call, or neither.
             if args.holder is not None and args.holder_flag is not None:
                 print("swarph board cards ask: holder given twice (positional and "
-                      "--holder) — pass one", file=sys.stderr)
+                       "--holder) — pass one", file=sys.stderr)
                 return 2
             holder = args.holder_flag or args.holder
             if holder is None and args.step is None:
@@ -1562,7 +1577,8 @@ def run_board(argv: list[str]) -> int:
                                     done=args.done, accept=args.accept,
                                     accept_json=accept_json, kind=args.kind,
                                     timeout_hours=args.timeout_hours,
-                                    task=args.task, task_needs=args.task_needs)
+                                    task=args.task, task_needs=args.task_needs,
+                                    opt_out=getattr(args, "no_redact", False))
             except ValueError as exc:
                 print(f"swarph board cards ask: {exc}", file=sys.stderr)
                 return 2
@@ -1570,7 +1586,8 @@ def run_board(argv: list[str]) -> int:
             return _out(st, d, _ask_line, args.json)
         if args.command == "confirm-flow":
             try:
-                body = _confirm_flow_payload(self_name, args.holder, args.what)
+                body = _confirm_flow_payload(self_name, args.holder, args.what,
+                                            opt_out=getattr(args, "no_redact", False))
             except ValueError as e:
                 print(f"swarph board cards confirm-flow: {e}", file=sys.stderr)
                 return 2
@@ -1614,7 +1631,8 @@ def run_board(argv: list[str]) -> int:
                 return 1
             st, d = _post_json(
                 f"{gw}/messages",
-                _card_say_payload(self_name, to_node, args.kind, content, thread_uuid),
+                _card_say_payload(self_name, to_node, args.kind, content, thread_uuid,
+                                  opt_out=getattr(args, "no_redact", False)),
                 token,
             )
             # A 403 here carries the gateway's explanation that attaching PUBLISHES

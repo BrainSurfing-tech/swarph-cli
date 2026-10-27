@@ -153,6 +153,10 @@ _SWARPH_ENV = (
     "MESH_CALLER_BINDING_ENFORCE",
     "MESH_REVOCATION_ENFORCE",
     "MESH_GROUP_ADMINS",
+    # card #1321: layered outbound redaction settings
+    "SWARPH_REDACT_AUDIT_LOG",
+    "SWARPH_REDACT_CUSTOM_RULES",
+    "SWARPH_REDACT_OPTOUT",
 )
 
 

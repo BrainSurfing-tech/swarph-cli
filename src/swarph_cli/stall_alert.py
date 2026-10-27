@@ -21,6 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from swarph_cli.console_safe import print_safe
+from swarph_cli.redact import encode_outbound_json
 
 _STALL_FIRST = 60  # first alert after this many consecutive deferred ticks
 _CARD = 989
@@ -85,7 +86,7 @@ def _open_url(req, timeout):
 
 
 def _request(method: str, url: str, token: str, payload: dict | None = None) -> dict:
-    data = None if payload is None else json.dumps(payload).encode()
+    data = None if payload is None else encode_outbound_json(payload, caller="stall_alert._request")
     req = urllib.request.Request(
         url, data=data, method=method,
         headers={"Authorization": f"Bearer {token}",

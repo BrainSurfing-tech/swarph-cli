@@ -48,6 +48,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
+from swarph_cli.redact import encode_outbound_json
+
 import jwt  # PyJWT — B1 Meta-Edge RS256 identity-token verification (gateway extra)
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -4467,7 +4469,7 @@ def _brain_query_upstream(question: str, limit: int) -> list:
             "params": {"name": "query",
                        "arguments": {"query": question, "limit": limit, "expand": False}}}
     req = urllib.request.Request(
-        GATEWAY_GBRAIN_URL, data=json.dumps(body).encode("utf-8"), method="POST")
+        GATEWAY_GBRAIN_URL, data=encode_outbound_json(body, caller="gateway._brain_query_upstream"), method="POST")
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "application/json, text/event-stream")
     req.add_header("Authorization", f"Bearer {GATEWAY_GBRAIN_TOKEN}")

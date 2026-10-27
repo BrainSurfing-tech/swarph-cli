@@ -4,6 +4,8 @@ protocol; production rows live on board cards titled "<owner> triage".
 """
 from __future__ import annotations
 
+from swarph_cli.redact import redact_text, redact_value
+
 
 class BackendError(RuntimeError):
     """A named board failure: what was attempted, the HTTP status, and
@@ -29,6 +31,7 @@ class MemoryBackend:
         return self.rows.get(title)
 
     def create_row(self, title, owner):
+        title = redact_text(title, caller="triage.MemoryBackend.create_row") or ""
         if self.project_id is None:
             raise BackendError(
                 f"create '{title}': project_id is required — the gateway "
@@ -45,6 +48,7 @@ class MemoryBackend:
         return list(self.posts.get(row["title"], []))
 
     def append(self, row, body, kind="item"):
+        body = redact_text(body, caller="triage.MemoryBackend.append") or ""
         if row["title"] not in self.posts:
             raise BackendError(
                 f"post to '{row['title']}': no such thread — the row was "
@@ -124,6 +128,7 @@ class BoardBackend:
                    # card #1269: the label is how offer_dispatch leaves the
                    # minted rows unoffered. Rows stay requested.
                    "labels": ["triage-row"]}
+        payload = redact_value(payload, caller="triage.BoardBackend.create_row")
         try:
             status, body = self._http_post(
                 f"{self.gateway}/board/cards", payload, self.token)
@@ -177,6 +182,7 @@ class BoardBackend:
                 for m in msgs if isinstance(m, dict)]
 
     def append(self, row, body, kind="item"):
+        body = redact_text(body, caller="triage.BoardBackend.append") or ""
         thread_uuid = self._thread_uuid(row)
         try:
             status, resp = self._http_post(

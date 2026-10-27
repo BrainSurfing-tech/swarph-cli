@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import urllib.error
 import urllib.request
 from typing import Any
+
+
+def _encode_outbound(body: Any) -> bytes:
+    encode_outbound_json = importlib.import_module("swarph_cli.redact").encode_outbound_json
+    return encode_outbound_json(body, caller="operator.request_json")
 
 
 def request_json(
@@ -16,7 +22,7 @@ def request_json(
     *,
     timeout: float = 20.0,
 ) -> dict[str, Any] | list[Any]:
-    data = None if body is None else json.dumps(body).encode("utf-8")
+    data = None if body is None else _encode_outbound(body)
     headers = {"Authorization": f"Bearer {token}"}
     if body is not None:
         headers["Content-Type"] = "application/json"
