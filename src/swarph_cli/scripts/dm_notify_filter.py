@@ -40,6 +40,8 @@ import threading
 import time
 from typing import IO, Any, Optional
 
+from swarph_cli.dm_frame import sender_label
+
 _IDLE_DEFAULT_SECONDS = 1800
 
 # Card #1066 (quiet wakes): TAKEN receipts and repo.merged events are logged
@@ -122,12 +124,13 @@ def _flush_due(held: list, now: float, cap_s: float, stdout: IO[str]) -> list:
 
 def _format_dm(d: dict[str, Any]) -> Optional[str]:
     mid, frm, kind = d.get("id"), d.get("from_node"), d.get("kind")
-    if not (mid and frm):
+    who = sender_label(d)
+    if not (mid and frm and who):
         return None
     body = (d.get("content") or "").replace("\n", " ")[:110]
     if body.startswith("receipt:"):
         return None
-    return f"[MESH DM] id={mid} from={frm} kind={kind} | {body}"
+    return f"[MESH DM] id={mid} from={who} kind={kind} | {body}"
 
 
 def run_filter(
