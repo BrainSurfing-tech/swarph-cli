@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from swarph_cli.console_safe import print_safe
+
 # Stated false-positive budget constant: 0.0% false positives permitted on the reference corpus
 FALSE_POSITIVE_BUDGET: float = 0.0
 
@@ -254,7 +256,7 @@ def _handle_opt_out(text: str, caller: str, opt_out_reason: str) -> None:
         "chars": len(text),
     }
     OPT_OUT_EVENTS.append(event)
-    print(
+    print_safe(
         f"[swarph-redact] OPT-OUT caller={caller} reason={reason} ts={ts} chars={len(text)}",
         file=sys.stderr,
     )
