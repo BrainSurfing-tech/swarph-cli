@@ -146,6 +146,7 @@ esac
     env["RELEASE_UNITS_FILE"] = str(units)
     env["RELEASE_VERIFY_CMD"] = "true"
     env["RELEASE_PYPI_SLEEP"] = "0"
+    env["RELEASE_INSTALL_EPOCH"] = "1"
     proc = _run(["bash", str(RELEASE), "--resume", "9.9.9"], env)
     assert proc.returncode == 0, proc.stderr + proc.stdout
     text = log.read_text()
@@ -201,6 +202,7 @@ esac
     env["RELEASE_UNITS_FILE"] = str(units)
     env["RELEASE_VERIFY_CMD"] = "true"
     env["RELEASE_PYPI_SLEEP"] = "0"
+    env["RELEASE_INSTALL_EPOCH"] = "1"
     if extra_env:
         env.update(extra_env)
     proc = _run(["bash", str(RELEASE), "--resume", "9.9.9"], env)

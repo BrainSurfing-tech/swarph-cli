@@ -16,6 +16,10 @@ import sys
 import time
 
 DIST_INFO = re.compile(rb"swarph_cli-(\d+\.\d+\.\d+)\.dist-info")
+# card #1301: /proc btime is a whole second, so a restart in the same second
+# as the cutoff can read up to 1s early. The check still fails a process
+# that started earlier than that.
+_START_SKEW_S = 1.0
 VERSION_LINE = {
     "pyproject": re.compile(r'^version = "[^"]+"', re.M),
     "init": re.compile(r'^__version__ = "[^"]+"', re.M),
@@ -25,6 +29,27 @@ VERSION_LINE = {
 
 def versions_in_image(blob: bytes) -> set[str]:
     return {m.decode() for m in DIST_INFO.findall(blob)}
+
+
+def installed_record_mtime(version: str, record: str | None = None) -> float:
+    """mtime of the installed dist-info RECORD for this version.
+
+    That file is written by pip at the install, which is the moment the
+    restart check should measure from. ``record`` is a test path."""
+    from pathlib import Path
+
+    if record:
+        path = Path(record)
+    else:
+        import importlib.util
+        spec = importlib.util.find_spec("swarph_cli")
+        if spec is None or not spec.origin:
+            raise SystemExit("release: swarph_cli is not installed")
+        site = Path(spec.origin).resolve().parent.parent
+        path = site / f"swarph_cli-{version}.dist-info" / "RECORD"
+    if not path.is_file():
+        raise SystemExit(f"release: no dist-info RECORD at {path}")
+    return path.stat().st_mtime
 
 
 def start_epoch_from_stat(stat_text: str, btime: float, clk_tck: float) -> float:
@@ -92,7 +117,7 @@ def verify_until_loaded(
         sleep = time.sleep
     if monotonic is None:
         monotonic = time.monotonic
-    if start < install_epoch:
+    if start < install_epoch - _START_SKEW_S:
         raise SystemExit(
             f"FAIL pid {pid} started at {start:.3f} before the install at {install_epoch:.3f}"
         )
@@ -251,6 +276,10 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("discover")
 
+    r = sub.add_parser("record-mtime")
+    r.add_argument("--version", required=True)
+    r.add_argument("--record", default=None)
+
     args = p.parse_args(argv)
     if args.cmd == "approval-at-head":
         reviews = json.load(sys.stdin)
@@ -267,6 +296,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "verify":
         return _cmd_verify(args)
+    if args.cmd == "record-mtime":
+        print(f"{installed_record_mtime(args.version, args.record):.3f}")
+        return 0
     return 2
 
 
