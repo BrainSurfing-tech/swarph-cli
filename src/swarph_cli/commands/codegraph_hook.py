@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 from swarph_cli import identity
 from swarph_cli.gateway_default import env_gateway
+from swarph_cli.redact import encode_outbound_json
 
 TIMEOUT_S = 6
 MAX_ROWS = 6
@@ -326,7 +327,7 @@ def query_gateway(term: str, gateway: str, token: str,
                          "gateway host (#578) — the graph was never asked"}
     req = urllib.request.Request(
         f"{gateway.rstrip('/')}/codegraph",
-        data=json.dumps({"query": term, "limit": limit}).encode(),
+        data=encode_outbound_json({"query": term, "limit": limit}, caller="codegraph_hook.query_gateway"),
         headers={"Authorization": f"Bearer {token}",
                  "Content-Type": "application/json"},
         method="POST",

@@ -3,7 +3,6 @@
 import argparse
 import datetime
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -92,7 +91,7 @@ def perform_restore(cell: Cell) -> Optional[str]:
 
             if dest:
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dest)
+                dest.write_bytes(src.read_bytes())
 
     current_task = cell.cwd / "CURRENT_TASK.md"
     if current_task.exists():
@@ -145,11 +144,20 @@ def run_memory_sync(argv: list[str]) -> int:
         dest = repo_dir / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            content = abs_path.read_text(encoding="utf-8")
-            redacted = redact_text(content, caller="memory-sync") or ""
-            dest.write_text(redacted, encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            shutil.copy2(abs_path, dest)
+            raw_bytes = abs_path.read_bytes()
+        except OSError as exc:
+            print(f"swarph memory-sync: refusing to sync unreadable file {abs_path}: {exc}", file=sys.stderr)
+            return 1
+        try:
+            content = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            print(
+                f"swarph memory-sync: warning: {abs_path} contains non-UTF-8 bytes; decoding with replacement before redaction",
+                file=sys.stderr,
+            )
+            content = raw_bytes.decode("utf-8", errors="replace")
+        redacted = redact_text(content, caller="memory-sync") or ""
+        dest.write_text(redacted, encoding="utf-8")
         subprocess.run(["git", "-C", str(repo_dir), "add", str(dest)], check=True)
 
     diff_check = subprocess.run(["git", "-C", str(repo_dir), "diff", "--cached", "--quiet"])

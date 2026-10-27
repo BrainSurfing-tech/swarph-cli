@@ -7,6 +7,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from swarph_cli.redact import encode_outbound_json
+
 
 def request_json(
     method: str,
@@ -16,7 +18,7 @@ def request_json(
     *,
     timeout: float = 20.0,
 ) -> dict[str, Any] | list[Any]:
-    data = None if body is None else json.dumps(body).encode("utf-8")
+    data = None if body is None else encode_outbound_json(body, caller="operator.request_json")
     headers = {"Authorization": f"Bearer {token}"}
     if body is not None:
         headers["Content-Type"] = "application/json"

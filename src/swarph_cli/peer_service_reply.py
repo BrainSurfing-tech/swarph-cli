@@ -19,6 +19,7 @@ from typing import Protocol
 
 from swarph_cli.commands.mesh import _post_json
 from swarph_cli.peer_executor import PeerExecutorError, PeerSpool, output_digest
+from swarph_cli.redact import redact_text
 
 
 class PeerReplyError(RuntimeError):
@@ -42,6 +43,7 @@ class MeshGatewayReplyTransport:
         self.self_name = self_name
 
     def send(self, destination: str, content: str, *, idempotency_key: str) -> None:
+        content = redact_text(content, caller="peer_service_reply") or ""
         status, _ = _post_json(
             f"{self.gateway}/messages",
             {

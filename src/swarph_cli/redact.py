@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import json
 import math
 import os
@@ -15,6 +16,26 @@ FALSE_POSITIVE_BUDGET: float = 0.0
 
 # Audit / Opt-out event tracking
 OPT_OUT_EVENTS: list[dict] = []
+
+# ContextVar for propagating opt-out through call chains into HTTP choke points
+_OPT_OUT_CTX: contextvars.ContextVar[bool] = contextvars.ContextVar("_OPT_OUT_CTX", default=False)
+
+
+class redact_opt_out_context:
+    """Context manager to propagate opt-out status through the call chain to HTTP choke points."""
+
+    def __init__(self, opt_out: bool = True):
+        self.opt_out = opt_out
+        self.token = None
+
+    def __enter__(self):
+        if self.opt_out:
+            self.token = _OPT_OUT_CTX.set(True)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.token is not None:
+            _OPT_OUT_CTX.reset(self.token)
 
 
 def get_opt_out_events() -> list[dict]:
@@ -62,12 +83,19 @@ _SAFE_PLACEHOLDERS = {
 def _is_standalone_secret(tok: str) -> bool:
     if len(tok) < 24:
         return False
-    # Exclude pure hex (git commits 40 chars, sha256 64 chars)
-    if _HEX_RE.fullmatch(tok):
+    core = tok.rstrip("=")
+    # Exclude pure hex (git commits 40 chars, sha256 64 chars, md5 32 chars) in any case
+    if _HEX_RE.fullmatch(core):
         return False
     # Exclude UUIDs
-    if len(tok) == 36 and _UUID_RE.fullmatch(tok):
+    if len(core) == 36 and _UUID_RE.fullmatch(core):
         return False
+    # Exclude tokens with a prefix followed by a hex digest of length >= 16 (e.g. branch-40hex)
+    for sep in ("-", "_"):
+        if sep in core:
+            suffix = core.rsplit(sep, 1)[-1]
+            if len(suffix) >= 16 and _HEX_RE.fullmatch(suffix):
+                return False
     # Exclude tokens containing __ or more than 2 underscores/hyphens
     if "__" in tok or (tok.count("_") + tok.count("-")) > 2:
         return False
@@ -135,22 +163,26 @@ _SECRET_ASSIGN_RE = re.compile(
     r"(?i)\b([a-z0-9_]*(?:token|secret|key|pass|cred|auth|private)[a-z0-9_]*)\b(\s*[:=]\s*)(['\"]?)(?!\[REDACTED)([A-Za-z0-9/+=\-_]{16,})\3"
 )
 
-# Standalone high-entropy secret token candidates
+# Standalone high-entropy secret token candidates: '=' only at trailing padding
 _STANDALONE_CANDIDATE_RE = re.compile(
-    r"(?<![A-Za-z0-9/+=\-_/.])([A-Za-z0-9/+=\-_]{24,})(?![A-Za-z0-9/+=\-_/.])"
+    r"(?<![A-Za-z0-9/+\-_/.])([A-Za-z0-9/+\-_]{24,}=*)(?![A-Za-z0-9/+\-_/.])"
 )
 
 
 def _normalize_custom_rules(custom_rules) -> list[tuple[str, re.Pattern]]:
     rules: list[tuple[str, re.Pattern]] = []
     if custom_rules:
+        if not isinstance(custom_rules, (list, tuple)):
+            raise ValueError(f"custom_rules must be a list or tuple, got {type(custom_rules).__name__}")
         for item in custom_rules:
             if isinstance(item, (list, tuple)) and len(item) == 2:
                 name, pat = item[0], item[1]
             elif isinstance(item, dict) and "name" in item and "pattern" in item:
                 name, pat = item["name"], item["pattern"]
             else:
-                continue
+                raise ValueError(f"Invalid custom redaction rule: {item!r}")
+            if not str(name).strip():
+                raise ValueError(f"Custom rule name cannot be empty: {item!r}")
             safe_name = re.sub(r"[^A-Za-z0-9]", "_", str(name)).upper()
             if isinstance(pat, str):
                 pat = re.compile(pat)
@@ -158,22 +190,22 @@ def _normalize_custom_rules(custom_rules) -> list[tuple[str, re.Pattern]]:
 
     env_rules = os.environ.get("SWARPH_REDACT_CUSTOM_RULES")
     if env_rules:
-        try:
-            parsed = json.loads(env_rules)
-            if isinstance(parsed, list):
-                for item in parsed:
-                    if isinstance(item, (list, tuple)) and len(item) == 2:
-                        name, pat = item[0], item[1]
-                    elif isinstance(item, dict) and "name" in item and "pattern" in item:
-                        name, pat = item["name"], item["pattern"]
-                    else:
-                        continue
-                    safe_name = re.sub(r"[^A-Za-z0-9]", "_", str(name)).upper()
-                    if isinstance(pat, str):
-                        pat = re.compile(pat)
-                    rules.append((safe_name, pat))
-        except Exception:
-            pass
+        parsed = json.loads(env_rules)
+        if not isinstance(parsed, list):
+            raise ValueError("SWARPH_REDACT_CUSTOM_RULES must be a JSON list")
+        for item in parsed:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                name, pat = item[0], item[1]
+            elif isinstance(item, dict) and "name" in item and "pattern" in item:
+                name, pat = item["name"], item["pattern"]
+            else:
+                raise ValueError(f"Invalid custom redaction rule in SWARPH_REDACT_CUSTOM_RULES: {item!r}")
+            if not str(name).strip():
+                raise ValueError(f"Custom rule name cannot be empty: {item!r}")
+            safe_name = re.sub(r"[^A-Za-z0-9]", "_", str(name)).upper()
+            if isinstance(pat, str):
+                pat = re.compile(pat)
+            rules.append((safe_name, pat))
     return rules
 
 
@@ -185,7 +217,8 @@ def _replace_secret_assignment(m: re.Match) -> str:
     val_lower = val.lower()
     if any(p in val_lower for p in _SAFE_PLACEHOLDERS):
         return m.group(0)
-    if len(val) in (40, 64) and _HEX_RE.fullmatch(val):
+    # Exempt ANY pure hex value of length >= 16 (in lower, upper, or mixed case) and UUIDs
+    if len(val) >= 16 and _HEX_RE.fullmatch(val):
         return m.group(0)
     if len(val) == 36 and _UUID_RE.fullmatch(val):
         return m.group(0)
@@ -253,9 +286,11 @@ def redact_text(
     if not isinstance(text, str):
         return text
 
+    is_ctx_optout = _OPT_OUT_CTX.get()
     is_env_optout = os.environ.get("SWARPH_REDACT_OPTOUT", "").strip().lower() in ("1", "true", "yes")
-    if opt_out or is_env_optout:
-        _handle_opt_out(text, caller, opt_out_reason)
+    if opt_out or is_env_optout or is_ctx_optout:
+        if not is_ctx_optout or opt_out:
+            _handle_opt_out(text, caller, opt_out_reason)
         return text
 
     out = text
@@ -350,3 +385,31 @@ def redact_value(
             for item in value
         )
     return value
+
+
+def encode_outbound_json(
+    body: Any,
+    *,
+    custom_rules=None,
+    opt_out: bool = False,
+    caller: str = "http",
+    opt_out_reason: str = "",
+    already_logged_opt_out: bool = False,
+) -> bytes:
+    """Single outbound JSON choke point: redacts ``body`` via :func:`redact_value`
+    and returns UTF-8 JSON bytes ready for HTTP transport."""
+    is_ctx_optout = _OPT_OUT_CTX.get()
+    is_env_optout = os.environ.get("SWARPH_REDACT_OPTOUT", "").strip().lower() in ("1", "true", "yes")
+    if opt_out or is_env_optout or is_ctx_optout:
+        raw_str = json.dumps(body)
+        if not already_logged_opt_out and not is_ctx_optout:
+            _handle_opt_out(raw_str, caller, opt_out_reason)
+        return raw_str.encode("utf-8")
+    redacted = redact_value(
+        body,
+        custom_rules=custom_rules,
+        opt_out=False,
+        caller=caller,
+        opt_out_reason=opt_out_reason,
+    )
+    return json.dumps(redacted).encode("utf-8")

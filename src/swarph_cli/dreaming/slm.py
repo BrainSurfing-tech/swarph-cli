@@ -35,6 +35,8 @@ import os
 import urllib.error
 import urllib.request
 
+from swarph_cli.redact import encode_outbound_json
+
 ENDPOINT_ENV = "SWARPH_SLM_ENDPOINT"
 MODEL_ENV = "SWARPH_SLM_MODEL"
 # NOT ``SWARPH_SLM_API_KEY``. The membranes' billing scrub
@@ -84,11 +86,11 @@ class SLMClient:
                              else os.environ.get(TIMEOUT_ENV) or 120)
 
     def generate(self, prompt: str) -> str:
-        body = json.dumps({
+        body = encode_outbound_json({
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
-        }).encode()
+        }, caller="dreaming.slm.generate")
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"

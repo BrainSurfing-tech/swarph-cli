@@ -43,6 +43,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from swarph_cli.redact import encode_outbound_json
+
 from swarph_cli.console_safe import print_safe
 
 # Card #513 — the card that names the gap. The alarm row lands on it.
@@ -160,7 +162,7 @@ def _open_url(req, timeout):
 
 
 def _request(method: str, url: str, token: str, payload: "dict | None" = None) -> dict:
-    data = None if payload is None else json.dumps(payload).encode()
+    data = None if payload is None else encode_outbound_json(payload, caller="duplicate_session._request")
     req = urllib.request.Request(
         url, data=data, method=method,
         headers={"Authorization": f"Bearer {token}",

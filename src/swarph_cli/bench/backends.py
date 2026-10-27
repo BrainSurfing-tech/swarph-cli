@@ -38,6 +38,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol
 
+from swarph_cli.redact import encode_outbound_json
+
 
 @dataclass
 class BackendResult:
@@ -510,7 +512,7 @@ class TypedHttpBackend:
             body = _request_body(prompt, system)
             req = urllib.request.Request(
                 endpoint,
-                data=json.dumps(body).encode(),
+                data=encode_outbound_json(body, caller="bench.SystemOneBackend.generate"),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -626,7 +628,7 @@ class HttpBackend:
                 scheme = self.auth.get("scheme") or ""
                 token = f"{scheme} {value}".strip() if scheme else value
                 headers[self.auth["header"]] = token
-            raw_body = json.dumps(body).encode()
+            raw_body = encode_outbound_json(body, caller="bench.HttpBackend.generate")
             self.calls += 1
             if self.transport is not None:
                 status, reason, raw = self.transport(endpoint, headers, raw_body)
@@ -919,7 +921,7 @@ class DecisionsBackend:
                 scheme = self.auth.get("scheme") or ""
                 token = f"{scheme} {value}".strip() if scheme else value
                 headers[self.auth["header"]] = token
-            raw_body = json.dumps(body).encode()
+            raw_body = encode_outbound_json(body, caller="bench.DecisionsBackend.generate")
             self.calls += 1
             if self.transport is not None:
                 status, reason, raw = self.transport(endpoint, headers, raw_body)

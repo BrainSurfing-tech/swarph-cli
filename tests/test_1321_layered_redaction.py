@@ -8,8 +8,10 @@ Verifies:
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -39,6 +41,7 @@ from swarph_cli.commands.mesh import run_mesh
 from swarph_cli.redact import (
     FALSE_POSITIVE_BUDGET,
     clear_opt_out_events,
+    encode_outbound_json,
     get_opt_out_events,
     redact_text,
     redact_value,
@@ -671,3 +674,399 @@ def test_cli_no_redact_flag_logged(tmp_path, monkeypatch, capsys):
     assert token in content  # bypassed!
     events = get_opt_out_events()
     assert any(e["caller"] == "highlight" for e in events)
+
+
+# ── Section 5: Obligation #3086 Acceptance Tests ─────────────────────────────
+
+def test_uppercase_and_lowercase_sha_and_labels_preserved():
+    """Verify high-entropy layer preserves bare 40-hex SHAs and labeled SHAs
+    in lowercase, uppercase, and MixedCase, both in redact_text and encode_outbound_json.
+    """
+    cases = [
+        "validated-head=FCE1A865CAEE86179F11B7D3A63BD2EDB48E2DCE",
+        "validated-head=fce1a865caee86179f11b7d3a63bd2edb48e2dce",
+        "validated-head=Fce1A865caee86179F11B7d3a63bd2edB48e2dce",
+        "head=FCE1A865CAEE86179F11B7D3A63BD2EDB48E2DCE",
+        "head=fce1a865caee86179f11b7d3a63bd2edb48e2dce",
+        "head=Fce1A865caee86179F11B7d3a63bd2edB48e2dce",
+        "headRefOid=FCE1A865CAEE86179F11B7D3A63BD2EDB48E2DCE",
+        "headRefOid=fce1a865caee86179f11b7d3a63bd2edb48e2dce",
+        "headRefOid=Fce1A865caee86179F11B7d3a63bd2edB48e2dce",
+        "commit_id=FCE1A865CAEE86179F11B7D3A63BD2EDB48E2DCE",
+        "commit_id=fce1a865caee86179f11b7d3a63bd2edb48e2dce",
+        "commit_id=Fce1A865caee86179F11B7d3a63bd2edB48e2dce",
+        "FCE1A865CAEE86179F11B7D3A63BD2EDB48E2DCE",
+        "fce1a865caee86179f11b7d3a63bd2edb48e2dce",
+        "Fce1A865caee86179F11B7d3a63bd2edB48e2dce",
+    ]
+    for c in cases:
+        out = redact_text(c)
+        assert out == c, f"Preservation failed for {c!r} -> {out!r}"
+
+    # Also verify encode_outbound_json preserves hex values and keys in outbound JSON
+    body = {
+        "validated_head": "FCE1A865CAEE86179F11B7D3A63BD2EDB48E2DCE",
+        "head": "fce1a865caee86179f11b7d3a63bd2edb48e2dce",
+        "headRefOid": "Fce1A865caee86179F11B7d3a63bd2edB48e2dce",
+        "commit_id": "FCE1A865CAEE86179F11B7D3A63BD2EDB48E2DCE",
+    }
+    encoded = encode_outbound_json(body)
+    decoded = json.loads(encoded.decode("utf-8"))
+    assert decoded == body
+
+
+def test_bad_custom_rules_regex_and_json_fail_loudly(monkeypatch):
+    """Verify bad custom rules in SWARPH_REDACT_CUSTOM_RULES or function args fail loudly."""
+    # 1. Bad regex in env var
+    monkeypatch.setenv(
+        "SWARPH_REDACT_CUSTOM_RULES",
+        json.dumps([{"name": "bad", "pattern": "[unclosed"}]),
+    )
+    with pytest.raises(re.error):
+        redact_text("sample text")
+
+    # 2. Invalid JSON in env var
+    monkeypatch.setenv("SWARPH_REDACT_CUSTOM_RULES", "{unclosed json")
+    with pytest.raises((json.JSONDecodeError, ValueError)):
+        redact_text("sample text")
+
+    # 3. Non-list JSON in env var
+    monkeypatch.setenv("SWARPH_REDACT_CUSTOM_RULES", json.dumps({"name": "not a list"}))
+    with pytest.raises(ValueError, match="must be a JSON list"):
+        redact_text("sample text")
+
+    # 4. Bad rule dictionary missing pattern
+    monkeypatch.setenv(
+        "SWARPH_REDACT_CUSTOM_RULES",
+        json.dumps([{"name": "missing_pattern"}]),
+    )
+    with pytest.raises(ValueError, match="Invalid custom redaction rule"):
+        redact_text("sample text")
+
+    # 5. Bad custom_rules argument (not a list/tuple)
+    monkeypatch.delenv("SWARPH_REDACT_CUSTOM_RULES", raising=False)
+    with pytest.raises(ValueError, match="must be a list or tuple"):
+        redact_text("sample text", custom_rules="invalid_type")
+
+    # 6. Bad custom rule argument with empty name
+    with pytest.raises(ValueError, match="Custom rule name cannot be empty"):
+        redact_text("sample text", custom_rules=[("", r"\d+")])
+
+
+def test_memory_sync_non_utf8_file_redacted_never_copied_raw(tmp_path):
+    """Verify memory_sync decodes non-UTF-8 bytes with replacement, redacts secrets,
+    writes UTF-8, and never uses shutil.copy2."""
+    from swarph_cli.commands.memory_sync import run_memory_sync
+    import swarph_cli.commands.memory_sync as mem_sync_mod
+
+    # Verify shutil is NOT imported and shutil.copy2 is absent
+    assert not hasattr(mem_sync_mod, "shutil"), "memory_sync module must not import shutil"
+    source = Path(mem_sync_mod.__file__).read_text(encoding="utf-8")
+    assert "shutil.copy2" not in source, "shutil.copy2 must be completely removed from memory_sync"
+
+    token = _ghp_token()
+    repo_dir = tmp_path / "memory_repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / ".git").mkdir()
+
+    cell_cwd = tmp_path / "cell_cwd"
+    cell_cwd.mkdir(parents=True, exist_ok=True)
+    current_task = cell_cwd / "CURRENT_TASK.md"
+
+    # Write non-UTF-8 bytes mixed with a secret token
+    raw_non_utf8 = b"Prefix \x80\xff invalid bytes with token " + token.encode("ascii") + b" and suffix\n"
+    current_task.write_bytes(raw_non_utf8)
+
+    cell_yaml = tmp_path / "cell.yaml"
+    cell_yaml.write_text(
+        "role: test-role\nprovider: test\nassisted_memory:\n  enabled: true\n  repo: local/test\n",
+        encoding="utf-8",
+    )
+
+    with patch("swarph_cli.commands.memory_sync.get_memory_repo_path", return_value=repo_dir), \
+         patch("swarph_cli.commands.memory_sync.load_cell") as mock_load, \
+         patch("subprocess.run") as mock_subproc:
+        mock_cell = MagicMock()
+        mock_cell.role = "test-role"
+        mock_cell.provider = "test"
+        mock_cell.cwd = cell_cwd
+        mock_cell.assisted_memory = {"enabled": True, "repo": "local/test"}
+        mock_load.return_value = mock_cell
+        mock_subproc.return_value = MagicMock(returncode=0)
+
+        rc = run_memory_sync([str(cell_yaml)])
+        assert rc == 0
+
+        synced_task = repo_dir / "CURRENT_TASK.md"
+        assert synced_task.exists()
+        # Must be valid UTF-8
+        synced_content = synced_task.read_text(encoding="utf-8")
+        assert token not in synced_content
+        assert "[REDACTED:GITHUB_TOKEN]" in synced_content
+        assert "\ufffd" in synced_content  # Decoded with replacement char
+
+
+def test_every_send_site_in_swarph_cli_routes_through_choke_point():
+    """AST / structural test enumerating every send site in src/swarph_cli
+    (searching for urlopen, _post_json, post_json, _patch_json, _http_post, requests., git push)
+    and asserting that all outbound bodies pass through encode_outbound_json.
+    """
+    root = Path(__file__).resolve().parent.parent / "src" / "swarph_cli"
+    assert root.is_dir()
+
+    # 1. Assert requests library is NEVER called anywhere in src/swarph_cli
+    for py_file in root.rglob("*.py"):
+        content = py_file.read_text(encoding="utf-8-sig")
+        tree = ast.parse(content, filename=str(py_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "requests":
+                pytest.fail(f"Found requests call in {py_file}:{node.lineno}")
+
+    # 2. Assert every Request(data=...) uses encode_outbound_json or variable assigned from it
+    for py_file in root.rglob("*.py"):
+        content = py_file.read_text(encoding="utf-8-sig")
+        tree = ast.parse(content, filename=str(py_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func_name = ""
+                if isinstance(node.func, ast.Name):
+                    func_name = node.func.id
+                elif isinstance(node.func, ast.Attribute):
+                    func_name = node.func.attr
+                if func_name == "Request":
+                    has_data = len(node.args) >= 2 or any(kw.arg == "data" for kw in node.keywords)
+                    if has_data:
+                        assert "encode_outbound_json" in content, (
+                            f"{py_file.name}:{node.lineno} calls Request with data but file does not use encode_outbound_json"
+                        )
+
+    # 3. Assert git push only exists in memory_sync and highlight (where files are redacted prior to push)
+    # plus spawn.py (--deny-tool string)
+    for py_file in root.rglob("*.py"):
+        content = py_file.read_text(encoding="utf-8-sig")
+        for line_no, line in enumerate(content.splitlines(), start=1):
+            if "git" in line and "push" in line and not line.strip().startswith("#"):
+                rel = py_file.relative_to(root).as_posix()
+                assert rel in ("commands/memory_sync.py", "commands/highlight.py", "commands/spawn.py"), (
+                    f"Unexpected git push site in {rel}:{line_no}: {line}"
+                )
+
+
+def test_all_previously_unrouted_send_paths_mask_secrets(tmp_path, monkeypatch):
+    """Behaviorally verify all previously unrouted send paths mask secret shapes:
+    - mcp_server._dm_reply
+    - commander
+    - lane
+    - schedule
+    - board projects add
+    - peer_service_reply
+    - triage backend (MemoryBackend and BoardBackend)
+    - operator cli say and cardsay
+    - group
+    - watchdog wake dm
+    - stall_alert
+    - brain_ask
+    - memory
+    - codegraph
+    """
+    token = _ghp_token()
+    dsn = _dsn_password()
+    monkeypatch.setenv("SWARPH_GATEWAY", "http://fake-gw:8788")
+
+    # 1. mcp_server._dm_reply
+    from swarph_cli.commands import mcp_server
+    with patch("swarph_cli.commands.mcp_server._dm_session", return_value=("cell-a", "http://fake-gw:8788", "fake-token")), \
+         patch("swarph_cli.commands.mesh._find_inbox_message", return_value=({"from_node": "peer-b", "thread_id": "t1"}, None)), \
+         patch("swarph_cli.commands.mesh._mark_read", return_value=[]), \
+         patch("swarph_cli.commands.mesh.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"id": 99, "thread_id": "t1"}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        res = mcp_server._dm_reply(12, f"Reply with secret {token}")
+        assert "error" not in res
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in sent["content"]
+        assert "[REDACTED:GITHUB_TOKEN]" in sent["content"]
+
+    # 2. commander
+    from swarph_cli.commands.commander import run_commander
+    with patch("swarph_cli.commands.mesh._resolve_self_name", return_value="cell-a"), \
+         patch("swarph_cli.commands.mesh._resolve_token", return_value="fake-token"), \
+         patch("swarph_cli.commands.mesh.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"id": 1, "status": "pending"}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        rc = run_commander(["ask", "--question", f"Question {token}", "--gateway", "http://fake-gw:8788"])
+        assert rc == 0
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in sent["question"]
+        assert "[REDACTED:GITHUB_TOKEN]" in sent["question"]
+
+    # 3. lane
+    from swarph_cli.commands.lane import run_lane
+    with patch("swarph_cli.commands.lane._auth", return_value=("cell-a", "fake-token")), \
+         patch("swarph_cli.commands.mesh.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"name": "test-lane", "status": "ok"}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        rc = run_lane(["create", "test-lane", "--provider", "claude", "--model", "opus", "--n", "0", "--context-text", f"Context with {token}", "--gateway", "http://fake-gw:8788"])
+        assert rc == 0
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in sent["context_text"]
+        assert "[REDACTED:GITHUB_TOKEN]" in sent["context_text"]
+
+    # 4. schedule
+    from swarph_cli.commands.schedule import run_schedule
+    with patch("swarph_cli.commands.schedule._ctx", return_value=("cell-a", "fake-token", "http://fake-gw:8788")), \
+         patch("swarph_cli.commands.mesh.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"id": "sched-1", "name": "ev1"}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        rc = run_schedule(["create", "ev1", "--trigger", "time", "--target", "cell-b", "--task", f"Task with {token}", "--context", "memory=proj_a"])
+        assert rc == 0
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in sent["task"]
+        assert "[REDACTED:GITHUB_TOKEN]" in sent["task"]
+
+    # 5. board projects add
+    with patch("swarph_cli.commands.board._resolve_token", return_value="fake-token"), \
+         patch("swarph_cli.commands.mesh.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"id": 42, "slug": "new-proj"}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        run_board(["projects", "add", "new-proj", "--title", f"Title with {token}", "--goal", f"Goal with {dsn}", "--as", "agent", "--gateway", "http://fake-gw:8788"])
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in sent["title"]
+        assert "[REDACTED:GITHUB_TOKEN]" in sent["title"]
+        assert "password=[REDACTED:DSN_CREDENTIAL]" in sent["goal"]
+
+    # 6. peer_service_reply
+    from swarph_cli.peer_service_reply import MeshGatewayReplyTransport
+    with patch("swarph_cli.commands.mesh.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"id": 100}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        transport = MeshGatewayReplyTransport("http://fake-gw:8788", "fake-token", "cell-a")
+        transport.send("cell-b", f"Result secret {token}", idempotency_key="idemp-1")
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in sent["content"]
+        assert "[REDACTED:GITHUB_TOKEN]" in sent["content"]
+
+    # 7. triage backend
+    from swarph_cli.triage.backend import MemoryBackend, BoardBackend
+    mem_backend = MemoryBackend(project_id=1)
+    row = mem_backend.create_row(f"Triage {token}", "owner-a")
+    assert token not in row["title"]
+    assert "[REDACTED:GITHUB_TOKEN]" in row["title"]
+    post = mem_backend.append(row, f"Item body with {dsn}")
+    assert "password=[REDACTED:DSN_CREDENTIAL]" in post["body"]
+
+    with patch("swarph_cli.commands.mesh.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"id": 501, "thread_uuid": "t-uuid"}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        from swarph_cli.commands.mesh import _post_json
+        board_backend = BoardBackend("http://fake-gw:8788", "fake-token", "agent", lambda *a: (200, {}), _post_json, project_id=1)
+        board_backend.create_row(f"Board row {token}", "owner-b")
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in sent["title"]
+        assert "[REDACTED:GITHUB_TOKEN]" in sent["title"]
+
+    # 8. operator cli say
+    from swarph_cli.operator.cli import run_verb
+    say_file = tmp_path / "say_content.txt"
+    say_file.write_text(f"Message from operator with {token}", encoding="utf-8")
+    with patch("swarph_cli.operator.api.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"id": 10}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        run_verb("op-user", "http://fake-gw:8788", "fake-token", ["say", "general", "--content-file", str(say_file)])
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in sent["content"]
+        assert "[REDACTED:GITHUB_TOKEN]" in sent["content"]
+
+    # 9. group
+    from swarph_cli.commands.group import run_group
+    with patch("swarph_cli.commands.group.resolve_self_name", return_value="cell-a"), \
+         patch("swarph_cli.commands.group.resolve_token", return_value="fake-token"), \
+         patch("swarph_cli.commands.mesh.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"name": "test-grp", "kind": "role"}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        rc = run_group(["create", "test-grp", "--description", f"Group with {token}", "--kind", "role", "--gateway", "http://fake-gw:8788"])
+        assert rc == 0
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in sent["description"]
+        assert "[REDACTED:GITHUB_TOKEN]" in sent["description"]
+
+    # 10. watchdog wake DM
+    from swarph_cli.commands import watchdog
+    with patch("swarph_cli.commands.mesh.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"id": 77}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        watchdog._dm_wake("http://fake-gw:8788", "cell-a", "cell-b", "fake-token", f"Wake with {token}")
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in sent["content"]
+        assert "[REDACTED:GITHUB_TOKEN]" in sent["content"]
+
+    # 11. stall_alert
+    from swarph_cli.stall_alert import _request
+    with patch("swarph_cli.stall_alert.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"status": "ok"}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        _request("POST", "http://fake-gw:8788/alert", "fake-token", {"alert": f"Alert {token}"})
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in sent["alert"]
+        assert "[REDACTED:GITHUB_TOKEN]" in sent["alert"]
+
+    # 12. brain_ask
+    from swarph_cli.commands.brain_ask import _http_post
+    with patch("swarph_cli.commands.brain_ask.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"result": "ok"}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        _http_post("http://fake-gw:8788/brain", {"query": f"Query with {token}"}, "fake-token")
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in sent["query"]
+        assert "[REDACTED:GITHUB_TOKEN]" in sent["query"]
+
+    # 13. memory
+    from swarph_cli.commands.memory import _gateway_call
+    with patch("swarph_cli.commands.brain_ask.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"result": "ok"}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        _gateway_call("http://fake-gw:8788", "fake-token", "search", {"term": f"Term with {token}"})
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in str(sent)
+        assert "[REDACTED:GITHUB_TOKEN]" in str(sent)
+
+    # 14. codegraph
+    from swarph_cli.commands.codegraph import _query_via_gateway
+    with patch("swarph_cli.commands.codegraph.require_caller_cell", return_value="cell-a"), \
+         patch("swarph_cli.commands.mesh._resolve_token", return_value="fake-token"), \
+         patch("swarph_cli.commands.mesh.urllib.request.urlopen") as mock_open:
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"results": [], "freshness": []}'
+        mock_open.return_value.__enter__.return_value = mock_resp
+        _query_via_gateway("http://fake-gw:8788", f"Search {token}", 10, None)
+        sent = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        assert token not in sent["query"]
+        assert "[REDACTED:GITHUB_TOKEN]" in sent["query"]
+

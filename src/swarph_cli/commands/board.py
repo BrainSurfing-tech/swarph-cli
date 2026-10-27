@@ -43,7 +43,7 @@ from swarph_cli.commands.mesh import (
     _resolve_self_name,
     _resolve_token,
 )
-from swarph_cli.redact import redact_text, redact_value
+from swarph_cli.redact import redact_text, redact_value, encode_outbound_json
 
 
 _SENTINEL = object()
@@ -52,7 +52,7 @@ _SENTINEL = object()
 # ── HTTP: PATCH (mesh.py has GET + POST; the board needs PATCH for move/link) ──
 
 def _patch_json(url: str, body: dict, token: str, *, timeout: float = 10.0) -> tuple[int, dict]:
-    data = json.dumps(body).encode("utf-8")
+    data = encode_outbound_json(body, caller="board._patch_json")
     req = urllib.request.Request(
         url, data=data, method="PATCH",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
@@ -253,10 +253,11 @@ def _apply_label(current: list, action: str, label: str) -> list:
     return [x for x in cur if x != lab]
 
 
-def _project_add_payload(actor, slug, title, *, goal=None) -> dict:
+def _project_add_payload(actor, slug, title, *, goal=None, opt_out: bool = False) -> dict:
+    title = redact_text(title, opt_out=opt_out, caller="board.projects")
     p = {"actor": actor, "slug": slug, "title": title}
     if goal:
-        p["goal"] = goal
+        p["goal"] = redact_text(goal, opt_out=opt_out, caller="board.projects")
     return p
 
 
@@ -1321,7 +1322,7 @@ def run_board(argv: list[str]) -> int:
             st, d = _http_get_json(f"{gw}/board/projects", token)
             return _out(st, d, _format_projects, aj)
         if args.command == "add":
-            st, d = _post_json(f"{gw}/board/projects", _project_add_payload(self_name, args.slug, args.title, goal=args.goal), token)
+            st, d = _post_json(f"{gw}/board/projects", _project_add_payload(self_name, args.slug, args.title, goal=args.goal, opt_out=getattr(args, "no_redact", False)), token)
             return _out(st, d, lambda x: f"created project #{x.get('id')} ({x.get('slug')})", aj)
 
     if args.group == "obligations":

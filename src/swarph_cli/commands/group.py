@@ -40,12 +40,13 @@ from swarph_cli.commands._gateway_client import (
     resolve_self_name,
     resolve_token,
 )
+from swarph_cli.redact import encode_outbound_json
 
 
 # ── HTTP: DELETE-with-body (revoke needs {grant_type,target} on the DELETE) ──
 
 def _delete_json_body(url: str, body: dict, token: str, *, timeout: float = 10.0) -> tuple[int, dict]:
-    data = json.dumps(body).encode("utf-8")
+    data = encode_outbound_json(body, caller="group._delete_json_body")
     req = urllib.request.Request(
         url, data=data, method="DELETE",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},

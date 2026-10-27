@@ -47,6 +47,7 @@ from swarph_cli.commands import codegraph
 from swarph_cli.commands import brain_ask, memory, timeline
 from swarph_cli.commands import mesh as _mesh
 from swarph_cli.gateway_default import env_gateway
+from swarph_cli.redact import encode_outbound_json, redact_text
 
 # --------------------------------------------------------------------------- #
 # Config
@@ -91,7 +92,7 @@ def _search(query: str, *, url: str, token: str | None = None) -> list[dict]:
     payload: dict = {"message": query}
     if token:
         payload["token"] = token
-    data = json.dumps(payload).encode("utf-8")
+    data = encode_outbound_json(payload, caller="mcp_server._search")
     req = urllib.request.Request(
         endpoint,
         data=data,
@@ -409,7 +410,7 @@ def _dm_reply(message_id: int, text: str, kind: str = "answer",
         to = original.get("from_node")
         if not to:
             return {"error": f"message {message_id} has no sender recorded; nobody to reply to"}
-        body = {"from_node": who, "to_node": to, "kind": kind, "content": text}
+        body = {"from_node": who, "to_node": to, "kind": kind, "content": redact_text(text, caller="mcp_server._dm_reply") or ""}
         if original.get("thread_id"):
             body["thread_id"] = original["thread_id"]
         st, d = _mesh._post_json(f"{gw}/messages", body, tok)

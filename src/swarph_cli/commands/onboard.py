@@ -37,6 +37,7 @@ from swarph_cli import identity
 from swarph_cli import tokens
 from swarph_cli.console_safe import print_safe
 from swarph_cli.gateway_default import env_gateway, require_gateway
+from swarph_cli.redact import encode_outbound_json
 
 
 _HANDSHAKE_TEMPLATE = """\
@@ -476,7 +477,7 @@ def _post_json(
 
     Returns (status, parsed_body). On non-2xx, parsed_body is the error
     JSON payload (best-effort) so callers can surface gateway error text."""
-    data = json.dumps(body).encode("utf-8")
+    data = encode_outbound_json(body, caller="onboard._post_json")
     req = urllib.request.Request(
         url,
         data=data,

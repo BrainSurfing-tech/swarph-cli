@@ -145,9 +145,11 @@ def gateway_memory_list(gateway: str, token: str, timeout: int = 15) -> list[str
     gateway; :8792 is gbrain itself and speaks MCP at /mcp, where POST /memory is
     correctly refused. A route named without its coordinate cost a peer a
     measurement on 2026-09-05."""
+    from swarph_cli.redact import encode_outbound_json
+
     req = urllib.request.Request(
         gateway.rstrip("/") + "/memory",
-        data=json.dumps({"op": "list", "arguments": {}}).encode(),
+        data=encode_outbound_json({"op": "list", "arguments": {}}, caller="cell_probe.gateway_memory_list"),
         headers={"Authorization": "Bearer " + token,
                  "Content-Type": "application/json"})
     doc = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
