@@ -18,6 +18,7 @@ from ._gateway_client import (
     resolve_token,
 )
 from swarph_cli.console_safe import print_safe
+from swarph_cli.dm_frame import sender_label
 from swarph_cli.redact import redact_text
 
 
@@ -95,7 +96,7 @@ def _format_channel_messages(payload) -> str:
         body = sanitize_terminal((m.get("content") or "").replace("\n", " "))
         if len(body) > 120:
             body = body[:117] + "..."
-        who = sanitize_terminal(m.get("from_node"))
+        who = sanitize_terminal(sender_label(m))
         lines.append(f"[{m.get('id')}] {who} ({sanitize_terminal(m.get('kind'))}): {body}")
     return "\n".join(lines)
 

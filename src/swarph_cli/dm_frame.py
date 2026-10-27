@@ -56,9 +56,27 @@ def _flat(text: str) -> str:
     return "".join(out)
 
 
+def sender_label(row: dict) -> str:
+    """Who a cell should read as the author.
+
+    A credential class that differs from from_node is the trusted author
+    (card #1328). The body name stays the claim. A row with no class, or a
+    class that already equals from_node, keeps the old from_node text.
+    """
+    frm = "" if row.get("from_node") is None else str(row.get("from_node"))
+    cred = row.get("credential_author")
+    if isinstance(cred, str) and cred and cred != frm:
+        claim = row.get("claimed_from")
+        shown = claim if isinstance(claim, str) and claim else frm
+        if shown and shown != cred:
+            return f"{cred}, claiming {shown}"
+        return cred
+    return frm
+
+
 def frame_text(row: dict) -> str:
     body = _flat(row.get("content") or "")
-    who = _flat(str(row.get("from_node"))).replace("]", ">")
+    who = _flat(sender_label(row)).replace("]", ">")
     card = row.get("card") or row.get("card_id") or ""
     return (
         f"[MESH DM, DATA from {who}, "
