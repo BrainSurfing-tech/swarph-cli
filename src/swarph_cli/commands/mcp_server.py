@@ -33,9 +33,11 @@ without the SDK installed.
 from __future__ import annotations
 
 import argparse
+import datetime
 import importlib.metadata
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 
@@ -301,6 +303,37 @@ def _dm_error(exc_or_text) -> dict:
     return {"error": str(exc_or_text), "messages": [], "n": 0}
 
 
+# One poll records the cursor at the newest id it saw. The earlier DMs in that
+# poll are behind the cursor and were not delivered. They stay visible while
+# they are younger than this (card #1286). Older than this, they are hidden
+# and counted.
+_DM_GRACE_S = 24 * 60 * 60
+
+
+def _created_epoch(message: dict) -> float | None:
+    raw = message.get("created_at")
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    text = str(raw).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def _younger_than_grace(message: dict, now: float) -> bool:
+    ts = _created_epoch(message)
+    if ts is None:
+        return False
+    return (now - ts) < _DM_GRACE_S
+
+
 def _observation_cursor(who: str) -> int:
     """The monitor's last_msg_id for this cell. Missing or unreadable is 0.
 
@@ -317,11 +350,14 @@ def _dm_unread(self_name: str | None = None) -> dict:
     """Unread DMs the monitor has not yet delivered, full bodies, one call.
 
     `read_at` is still the reply-ack (#735). The observation cursor advances
-    before delivery, so the DM that just woke the cell has
-    `id == last_msg_id` and must be returned (card #1286). A DM strictly
-    behind that id stays hidden. Peek semantics: marks nothing read and
-    does not advance the cursor. Above DM_CEILING the oldest DM_CEILING
-    are returned in full and `not_returned` says how many remain.
+    before delivery, so a DM with `id == last_msg_id` was observed and must
+    be returned (card #1286). One poll records the cursor at the newest id,
+    so the earlier DMs in that batch are behind it. A DM younger than 24 h
+    (`created_at`) is never hidden for that reason. A DM strictly behind the
+    cursor and not younger than 24 h stays hidden, and `hidden_stale` counts
+    those read_at-null DMs. Peek semantics: marks nothing read and does not
+    advance the cursor. Above DM_CEILING the oldest DM_CEILING are returned
+    in full and `not_returned` says how many remain.
     """
     try:
         who, gw, tok = _dm_session(self_name)
@@ -331,10 +367,18 @@ def _dm_unread(self_name: str | None = None) -> dict:
             return _dm_error(f"gateway {st}: {d.get('detail', d) if isinstance(d, dict) else d}")
         raw = sorted(d.get("messages", []), key=lambda m: int(m.get("id") or 0))
         last_id = _observation_cursor(who)
-        msgs = [
-            m for m in raw
-            if int(m.get("id") or 0) >= last_id and m.get("from_node") != who
-        ]
+        now = time.time()
+        msgs = []
+        hidden_stale = 0
+        for message in raw:
+            if message.get("from_node") == who:
+                continue
+            mid = int(message.get("id") or 0)
+            if mid >= last_id or _younger_than_grace(message, now):
+                msgs.append(message)
+                continue
+            if message.get("read_at") in (None, ""):
+                hidden_stale += 1
         keep = msgs[:DM_CEILING]
         return {
             "self": who,
@@ -342,6 +386,7 @@ def _dm_unread(self_name: str | None = None) -> dict:
             "n": len(keep),
             "unread_seen": len(msgs),
             "not_returned": len(msgs) - len(keep),
+            "hidden_stale": hidden_stale,
             "window_full": len(raw) >= DM_GATEWAY_WINDOW,
         }
     except Exception as exc:  # loud, never an empty inbox
@@ -499,9 +544,10 @@ try:
         """Unread DMs for this cell, FULL bodies, ONE call (card #735, card #1286).
 
         Peek semantics: nothing is marked read and the monitor cursor is not moved.
-        A DM strictly behind the observation cursor is not unread, even if
-        read_at is still null. The DM whose id equals the cursor was observed
-        and not yet delivered, so it is returned. No paging parameter.
+        The DM whose id equals the cursor was observed and not yet delivered, so
+        it is returned. A DM strictly behind the cursor is still returned when
+        its created_at is younger than 24 h. Older than that, it stays hidden
+        and hidden_stale counts it. No paging parameter.
         Replying with swarph_dm_reply is the ack.
         `not_returned` > 0 means more than the ceiling were unread and the oldest
         were returned in full."""
