@@ -198,7 +198,7 @@ open_release_pr() {
 }
 
 if [ "$RESTART_ONLY" -eq 1 ]; then
-  install_epoch="${RELEASE_INSTALL_EPOCH:-$(date +%s)}"
+  install_epoch="${RELEASE_INSTALL_EPOCH:-$(python3 "$LIB" record-mtime --version "$VERSION")}"
   restart_importers "$install_epoch"
   exit 0
 fi
@@ -211,7 +211,7 @@ if [ "$RESUME" -eq 1 ]; then
   tag_merged_release "$number"
   wait_for_pypi
   install_release
-  install_epoch=$(date +%s)
+  install_epoch="${RELEASE_INSTALL_EPOCH:-$(python3 "$LIB" record-mtime --version "$VERSION")}"
   restart_importers "$install_epoch"
   exit 0
 fi
