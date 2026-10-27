@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Fail a PR whose commits do not name their card, or name a cell that is not
-the card's build-row holder.
+"""Label check for Swarph-Card and Swarph-Cell trailers.
 
-Card #1320. Same family as review-signature: a trailer is a claim, and this
-check is what makes a wrong claim red. The holder comparison is `evaluate`.
-GitHub-hosted runners cannot read the board, so the three cases are the CI
-proof of that comparison, and `--head` refuses a head that names no card.
+Card #1320, after the card author's correction: a trailer is text the writer
+chooses, and cells share a GitHub login, so this check cannot bind a commit
+to the build-row holder. It only checks the label shape. The binding is the
+merger's validated-head rule (card #1318), which compares the PR head to the
+head a build row cited when that row was closed_by its holder.
+
+`evaluate` still has the three label cases (no card, cell other than the
+injected holder, cell equal to that holder). `--head` refuses a head that
+names no card. Neither one reads the live board.
 """
 from __future__ import annotations
 

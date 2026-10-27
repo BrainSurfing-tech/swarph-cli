@@ -1,12 +1,12 @@
-# card-trailers.yml — a commit for a card names the card and the cell.
+# card-trailers.yml — the commit carries Swarph-Card and Swarph-Cell labels.
 #
-# Card #1320. Sibling of review-signature.yml. The hook in
-# tools/prepare-commit-msg-swarph.py writes Swarph-Card and Swarph-Cell.
-# This job runs the check's three cases and refuses a head that names no card.
+# Card #1320. The hook in tools/prepare-commit-msg-swarph.py writes the
+# labels. They are readable provenance, not a credential binding: a trailer
+# is text the writer chooses and cells share a GitHub login. The binding is
+# the merger's validated-head rule (card #1318).
 #
-# The holder comparison is `evaluate` in tools/check_card_trailers.py.
-# GitHub-hosted runners are not on the tailnet, so they cannot read the live
-# build-row holder; the three cases inject that holder.
+# This job runs three injected label cases and refuses a head that names no
+# card. A green job is not a live read of the board.
 name: card-trailers
 
 on:
