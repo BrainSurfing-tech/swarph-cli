@@ -2,10 +2,10 @@
 """Label check for Swarph-Card and Swarph-Cell trailers.
 
 Card #1320, after the card author's correction: a trailer is text the writer
-chooses, and cells share a GitHub login, so this check cannot bind a commit
-to the build-row holder. It only checks the label shape. The binding is the
-merger's validated-head rule (card #1318), which compares the PR head to the
-head a build row cited when that row was closed_by its holder.
+chooses, and cells share a GitHub login, so this check cannot bind a commit.
+It only checks the label shape. The binding is card #1327 build row #3112,
+which compares the PR head to the head a build row cited when that row was
+closed_by its holder.
 
 `evaluate` still has the three label cases (no card, cell other than the
 injected holder, cell equal to that holder). `--head` refuses a head that
@@ -37,10 +37,10 @@ def evaluate(messages, holder_of):
     cell = cells[0]
     holder = holder_of(card_id)
     if not holder:
-        return False, f"card #{card_id} has no build-row holder"
+        return False, f"card #{card_id} has no injected label"
     if cell != holder:
-        return False, f"trailer cell {cell} is not the build-row holder {holder}"
-    return True, f"card #{card_id} trailer cell {cell} is the build-row holder"
+        return False, f"trailer cell {cell} is not the injected label {holder}"
+    return True, f"card #{card_id} trailer cell {cell} matches the injected label"
 
 
 def _self_test() -> int:

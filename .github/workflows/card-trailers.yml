@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   trailers:
-    name: card trailers name the build-row holder
+    name: card trailers are labels
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
