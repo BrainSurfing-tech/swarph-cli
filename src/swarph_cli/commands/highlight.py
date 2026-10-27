@@ -33,6 +33,7 @@ from pathlib import Path
 
 from swarph_cli import identity
 from swarph_cli.commands.mesh import _post_json, _resolve_token
+from swarph_cli.redact import redact_text
 from swarph_cli.timeline_paths import timeline_dir
 
 _PUSH_RETRIES = 8
@@ -155,7 +156,8 @@ def _is_gateway_clone(repo: Path) -> bool:
 
 def _log_via_gateway(gateway: str, cell: str, highlight: str,
                      memory: str, when: str, token_file: str | None,
-                     *, cell_source: str = "unknown") -> int | None:
+                     *, cell_source: str = "unknown",
+                     opt_out: bool = False) -> int | None:
     """POST the highlight to the gateway `/highlights` — the gateway holds the git
     push credential, so the cell needs only its mesh peer token (no GitHub PAT).
 
@@ -173,6 +175,9 @@ def _log_via_gateway(gateway: str, cell: str, highlight: str,
     into a duplicate local line. A reset belongs under status 0 only when
     it beats the send (URLError); post-send resets escape ``_post_json``.
     """
+    highlight = redact_text(highlight, opt_out=opt_out, caller="highlight")
+    if memory:
+        memory = redact_text(memory, opt_out=opt_out, caller="highlight")
     url = gateway.rstrip("/") + "/highlights"
     body: dict = {"highlight": highlight, "cell": cell, "when": when}
     if memory:
@@ -225,7 +230,11 @@ def _collapse(s: str) -> str:
     return s.replace("\n", " ").replace("\r", " ")
 
 
-def _format_line(ts: str, cell: str, highlight: str, memory: str) -> str:
+def _format_line(ts: str, cell: str, highlight: str, memory: str,
+                 *, opt_out: bool = False) -> str:
+    highlight = redact_text(highlight, opt_out=opt_out, caller="highlight")
+    if memory:
+        memory = redact_text(memory, opt_out=opt_out, caller="highlight")
     line = f"- {ts} · **{cell}** · {highlight}"
     if memory:
         line += f" · → {memory}"
@@ -350,6 +359,8 @@ def run_highlight(argv: list) -> int:
                    help="ISO8601 event time for a backfilled highlight; default now")
     p.add_argument("--no-push", action="store_true",
                    help="commit locally only, never push")
+    p.add_argument("--no-redact", action="store_true", default=False,
+                   help="bypass outbound redaction (logged)")
     p.add_argument("--gateway", default=None,
                    help="gateway base URL for the peer-token ingest path "
                    "(else SWARPH_HIGHLIGHT_GATEWAY / SWARPH_GATEWAY / SWARPH_BRAIN_GATEWAY)")
@@ -361,8 +372,9 @@ def run_highlight(argv: list) -> int:
 
     repo = _resolve_dir(args.timeline_dir)
     cell, cell_source = _resolve_cell(args.cell, repo)
-    highlight = _collapse(args.highlight)
-    memory = _collapse(args.memory)
+    no_redact = getattr(args, "no_redact", False)
+    highlight = redact_text(_collapse(args.highlight), opt_out=no_redact, caller="highlight")
+    memory = redact_text(_collapse(args.memory), opt_out=no_redact, caller="highlight") if args.memory else ""
     # Always stamp `when` so a gateway commit and a local fallback are
     # byte-identical (merge=union collapses the duplicate). The gateway
     # accepts the client's minute verbatim.
@@ -376,7 +388,8 @@ def run_highlight(argv: list) -> int:
     fallback = False
     if gateway:
         gw_rc = _log_via_gateway(gateway, cell, highlight, memory, when,
-                                 args.token_file, cell_source=cell_source)
+                                 args.token_file, cell_source=cell_source,
+                                 opt_out=no_redact)
         if gw_rc is not None:
             return gw_rc
         fallback = True
@@ -400,7 +413,7 @@ def run_highlight(argv: list) -> int:
             return 1
 
     tl = repo / "TIMELINE.md"
-    entry = _format_line(ts, cell, highlight, memory) + "\n"
+    entry = _format_line(ts, cell, highlight, memory, opt_out=no_redact) + "\n"
     with tl.open("a", encoding="utf-8") as f:
         f.write(entry)
     add = _git(repo, "add", "TIMELINE.md")

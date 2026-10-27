@@ -18,6 +18,7 @@ from ._gateway_client import (
     resolve_token,
 )
 from swarph_cli.console_safe import print_safe
+from swarph_cli.redact import redact_text
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -74,9 +75,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 # ── pure helpers (unit-tested) ────────────────────────────────────────────────
 
-def _post_payload(self_name: str, channel: str, kind: str, content: str) -> dict:
+def _post_payload(self_name: str, channel: str, kind: str, content: str, *, opt_out: bool = False) -> dict:
     """A channel post carries ``channel`` and NEVER ``to_node`` — the gateway
     rejects a message with both ("exactly one of {to_node, channel} required")."""
+    content = redact_text(content, opt_out=opt_out, caller="channel.post")
     return {"from_node": self_name, "channel": channel, "kind": kind, "content": content}
 
 
@@ -120,7 +122,7 @@ def _run_create(args: argparse.Namespace) -> int:
     if args.visibility is not None:
         body["visibility"] = args.visibility
     if args.description is not None:
-        body["description"] = args.description
+        body["description"] = redact_text(args.description, opt_out=getattr(args, "no_redact", False), caller="channel.create")
     status, payload = post_json(f"{base}/channels", body, token)
     if not _ok(status):
         return _fail("create", status, payload)
@@ -178,9 +180,10 @@ def _run_post(args: argparse.Namespace) -> int:
     except ContentError as exc:
         print(f"swarph channel post: {exc}", file=sys.stderr)
         return 1
+    content = redact_text(content, opt_out=getattr(args, "no_redact", False), caller="channel.post") or ""
     self_name, token, base = _ctx(args)
     status, payload = post_json(
-        f"{base}/messages", _post_payload(self_name, args.name, args.kind, content), token
+        f"{base}/messages", _post_payload(self_name, args.name, args.kind, content, opt_out=getattr(args, "no_redact", False)), token
     )
     if not _ok(status):
         return _fail("post", status, payload)

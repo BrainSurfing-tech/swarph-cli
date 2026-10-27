@@ -35,6 +35,7 @@ import uuid
 
 from swarph_cli import identity
 import swarph_cli
+from swarph_cli.redact import redact_text
 import urllib.request
 from collections import deque
 from collections.abc import MutableMapping
@@ -265,6 +266,10 @@ def _add_common(p: argparse.ArgumentParser) -> None:
         help="mesh-gateway base URL",
     )
     p.add_argument("--token-file", default=None, help="explicit bearer token file")
+    p.add_argument(
+        "--no-redact", action="store_true", default=False,
+        help="bypass outbound redaction (logged)",
+    )
 
 
 def _peer_token_path(self_name: str) -> Path:
@@ -674,6 +679,7 @@ def _run_send(args: argparse.Namespace) -> int:
     except ContentError as exc:
         print(f"swarph mesh send: {exc}", file=sys.stderr)
         return 1
+    content = redact_text(content, opt_out=getattr(args, "no_redact", False), caller="mesh.send") or ""
     self_name = _resolve_self_name(args.self_name)
     token = _resolve_token(self_name, args.token_file)
     cc = list(getattr(args, "cc", None) or [])
@@ -840,6 +846,7 @@ def _run_reply(args: argparse.Namespace) -> int:
     except ContentError as exc:
         print(f"swarph mesh reply: {exc}", file=sys.stderr)
         return 1
+    content = redact_text(content, opt_out=getattr(args, "no_redact", False), caller="mesh.reply") or ""
     self_name = _resolve_self_name(args.self_name)
     token = _resolve_token(self_name, args.token_file)
     gw = args.gateway.rstrip("/")

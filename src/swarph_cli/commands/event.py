@@ -20,6 +20,7 @@ from ._gateway_client import (
     resolve_self_name,
     resolve_token,
 )
+from swarph_cli.redact import redact_text
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -73,6 +74,7 @@ def _post_channel(
     # _require_absolute_gateway_url then refuses by name rather than raising
     # `ValueError: unknown url type` from Request(). Checked in review of #318.
     base = (gateway or env_gateway()).rstrip("/")
+    payload = redact_text(payload, caller="event.emit") or ""
     ev: dict = {"event": event, "payload": payload}
     if chain_token is not None:  # carry an explicit "" through; only omit when unset
         ev["chain_token"] = chain_token

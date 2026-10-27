@@ -38,6 +38,7 @@ from typing import Optional
 
 from swarph_cli import identity
 from swarph_cli.commands.highlight import _log_via_gateway, _resolve_gateway
+from swarph_cli.redact import redact_text
 
 _SUPPRESS_WINDOW = dt.timedelta(minutes=30)
 _SNIPPET_CHARS = 120
@@ -90,7 +91,8 @@ def _snippet(path: Path) -> str:
                     if fm.strip().lower().startswith("description:"):
                         d = fm.split(":", 1)[1].strip().strip('"').strip("'")
                         if d:
-                            return " ".join(d.split())[:_SNIPPET_CHARS]
+                            val = " ".join(d.split())[:_SNIPPET_CHARS]
+                            return redact_text(val, caller="memory-emit-hook") or ""
                 body = lines[i + 1:]
                 break
         else:
@@ -98,7 +100,8 @@ def _snippet(path: Path) -> str:
     for line in body:
         s = line.strip().lstrip("#").strip()
         if s and s != "---":          # a stray delimiter is never a summary
-            return " ".join(s.split())[:_SNIPPET_CHARS]
+            val = " ".join(s.split())[:_SNIPPET_CHARS]
+            return redact_text(val, caller="memory-emit-hook") or ""
     return ""
 
 
@@ -171,6 +174,7 @@ def run_memory_emit_hook(argv: list[str] | None = None) -> int:
 
         snippet = _snippet(Path(file_path))
         text = f"memory cached: {snippet}" if snippet else "memory cached"
+        text = redact_text(text, caller="memory-emit-hook") or ""
         gateway = _resolve_gateway(None)
         if not gateway:
             return 0  # no gateway configured -> nowhere to emit; silent by design

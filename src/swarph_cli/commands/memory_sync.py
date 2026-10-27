@@ -11,6 +11,7 @@ from typing import Optional
 
 from swarph_cli.cell import Cell, load_cell, CellError
 from swarph_cli.commands.spawn import MEMBRANES
+from swarph_cli.redact import redact_text
 
 
 def get_memory_repo_path(cell: Cell) -> Path:
@@ -143,7 +144,12 @@ def run_memory_sync(argv: list[str]) -> int:
     for rel_path, abs_path in files_to_sync:
         dest = repo_dir / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(abs_path, dest)
+        try:
+            content = abs_path.read_text(encoding="utf-8")
+            redacted = redact_text(content, caller="memory-sync") or ""
+            dest.write_text(redacted, encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            shutil.copy2(abs_path, dest)
         subprocess.run(["git", "-C", str(repo_dir), "add", str(dest)], check=True)
 
     diff_check = subprocess.run(["git", "-C", str(repo_dir), "diff", "--cached", "--quiet"])
