@@ -12,12 +12,13 @@ from swarph_cli.dm_frame import frame_text
 
 
 def test_1286_stale_unread_behind_the_cursor_is_not_new(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
         mcp_server, "_dm_session", lambda self_name=None: ("lab-ovh", "http://gw", "tok"),
     )
-    state = tmp_path / "swarph_state" / "lab-ovh" / "mesh-sidecar"
-    state.mkdir(parents=True)
+    state = tmp_path / "mesh-sidecar"
+    state.mkdir()
+    # Path.home() ignores HOME on Windows, so point the sidecar helper itself.
+    monkeypatch.setattr(mcp_server._mesh, "_default_sidecar_state_dir", lambda who: state)
     cursor = state / "cursor.json"
     cursor.write_text(json.dumps({"last_msg_id": 200}), encoding="utf-8")
     before = cursor.read_bytes()
