@@ -1,0 +1,33 @@
+# card-trailers.yml — a commit for a card names the card and the cell.
+#
+# Card #1320. Sibling of review-signature.yml. The hook in
+# tools/prepare-commit-msg-swarph.py writes Swarph-Card and Swarph-Cell.
+# This job runs the check's three cases and refuses a head that names no card.
+#
+# The holder comparison is `evaluate` in tools/check_card_trailers.py.
+# GitHub-hosted runners are not on the tailnet, so they cannot read the live
+# build-row holder; the three cases inject that holder.
+name: card-trailers
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  trailers:
+    name: card trailers name the build-row holder
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Three cases, and this head names a card
+        env:
+          PYTHONPATH: src
+        run: |
+          python3 -m pytest tests/test_1320_commit_trailers.py -q
+          python3 tools/check_card_trailers.py --head
