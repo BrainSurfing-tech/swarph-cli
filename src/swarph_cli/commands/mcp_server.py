@@ -314,12 +314,13 @@ def _observation_cursor(who: str) -> int:
 
 
 def _dm_unread(self_name: str | None = None) -> dict:
-    """Unread DMs newer than the monitor cursor, full bodies, one call.
+    """Unread DMs the monitor has not yet delivered, full bodies, one call.
 
-    `read_at` is still the reply-ack (#735). The monitor's live notion of
-    new mail is `id > last_msg_id`, so a stale never-acked DM the cursor has
-    already passed is not unread here. Peek semantics: marks nothing read
-    and does not advance the cursor. Above DM_CEILING the oldest DM_CEILING
+    `read_at` is still the reply-ack (#735). The observation cursor advances
+    before delivery, so the DM that just woke the cell has
+    `id == last_msg_id` and must be returned (card #1286). A DM strictly
+    behind that id stays hidden. Peek semantics: marks nothing read and
+    does not advance the cursor. Above DM_CEILING the oldest DM_CEILING
     are returned in full and `not_returned` says how many remain.
     """
     try:
@@ -332,7 +333,7 @@ def _dm_unread(self_name: str | None = None) -> dict:
         last_id = _observation_cursor(who)
         msgs = [
             m for m in raw
-            if int(m.get("id") or 0) > last_id and m.get("from_node") != who
+            if int(m.get("id") or 0) >= last_id and m.get("from_node") != who
         ]
         keep = msgs[:DM_CEILING]
         return {
@@ -498,9 +499,10 @@ try:
         """Unread DMs for this cell, FULL bodies, ONE call (card #735, card #1286).
 
         Peek semantics: nothing is marked read and the monitor cursor is not moved.
-        A DM the monitor cursor has already passed is not unread, even if read_at
-        is still null. No paging parameter. Replying with swarph_dm_reply is the
-        ack; anything unanswered and still past the cursor keeps appearing here.
+        A DM strictly behind the observation cursor is not unread, even if
+        read_at is still null. The DM whose id equals the cursor was observed
+        and not yet delivered, so it is returned. No paging parameter.
+        Replying with swarph_dm_reply is the ack.
         `not_returned` > 0 means more than the ceiling were unread and the oldest
         were returned in full."""
         return _dm_unread()
