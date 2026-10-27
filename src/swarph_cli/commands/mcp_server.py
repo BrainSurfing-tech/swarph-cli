@@ -301,17 +301,39 @@ def _dm_error(exc_or_text) -> dict:
     return {"error": str(exc_or_text), "messages": [], "n": 0}
 
 
+def _observation_cursor(who: str) -> int:
+    """The monitor's last_msg_id for this cell. Missing or unreadable is 0.
+
+    Peek only: nothing here writes cursor.json or marks a message read.
+    """
+    path = _mesh._default_sidecar_state_dir(who) / "cursor.json"
+    try:
+        return int(_mesh._read_cursor(path).get("last_msg_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _dm_unread(self_name: str | None = None) -> dict:
-    """ALL unread DMs for self, full bodies, one call. Peek semantics: marks nothing
-    read. Above DM_CEILING the oldest DM_CEILING are returned in full and
-    `not_returned` says how many remain — never a shortened body, never silence."""
+    """Unread DMs newer than the monitor cursor, full bodies, one call.
+
+    `read_at` is still the reply-ack (#735). The monitor's live notion of
+    new mail is `id > last_msg_id`, so a stale never-acked DM the cursor has
+    already passed is not unread here. Peek semantics: marks nothing read
+    and does not advance the cursor. Above DM_CEILING the oldest DM_CEILING
+    are returned in full and `not_returned` says how many remain.
+    """
     try:
         who, gw, tok = _dm_session(self_name)
         st, d = _mesh._http_get_json(
             f"{gw}/messages?to={who}&unread_only=true&limit={DM_GATEWAY_WINDOW}", tok)
         if not (200 <= st < 300):
             return _dm_error(f"gateway {st}: {d.get('detail', d) if isinstance(d, dict) else d}")
-        msgs = sorted(d.get("messages", []), key=lambda m: int(m.get("id", 0)))
+        raw = sorted(d.get("messages", []), key=lambda m: int(m.get("id") or 0))
+        last_id = _observation_cursor(who)
+        msgs = [
+            m for m in raw
+            if int(m.get("id") or 0) > last_id and m.get("from_node") != who
+        ]
         keep = msgs[:DM_CEILING]
         return {
             "self": who,
@@ -319,7 +341,7 @@ def _dm_unread(self_name: str | None = None) -> dict:
             "n": len(keep),
             "unread_seen": len(msgs),
             "not_returned": len(msgs) - len(keep),
-            "window_full": len(msgs) >= DM_GATEWAY_WINDOW,
+            "window_full": len(raw) >= DM_GATEWAY_WINDOW,
         }
     except Exception as exc:  # loud, never an empty inbox
         return _dm_error(f"{type(exc).__name__}: {exc}")
@@ -473,10 +495,14 @@ try:
 
     @mcp.tool()
     def swarph_dm_unread() -> dict:
-        """ALL unread DMs for this cell, FULL bodies, ONE call (card #735). Peek semantics:
-        nothing is marked read. No paging, no cursor. Replying with swarph_dm_reply is the
-        ack; anything unanswered keeps appearing here. `not_returned` > 0 means more than
-        the ceiling were unread and the oldest were returned in full."""
+        """Unread DMs for this cell, FULL bodies, ONE call (card #735, card #1286).
+
+        Peek semantics: nothing is marked read and the monitor cursor is not moved.
+        A DM the monitor cursor has already passed is not unread, even if read_at
+        is still null. No paging parameter. Replying with swarph_dm_reply is the
+        ack; anything unanswered and still past the cursor keeps appearing here.
+        `not_returned` > 0 means more than the ceiling were unread and the oldest
+        were returned in full."""
         return _dm_unread()
 
     @mcp.tool()

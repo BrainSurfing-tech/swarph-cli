@@ -44,7 +44,10 @@ FIXTURE = [
 
 
 @pytest.fixture(autouse=True)
-def _session(monkeypatch: pytest.MonkeyPatch):
+def _session(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Card #1286 reads the monitor cursor. These tests are about the unread
+    # payload, so they observe from a private home whose cursor is absent.
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(mcp_server, "_dm_session", lambda self_name=None: ("lab-ovh", "http://gw", "tok"))
     if MUTATE == "truncate":
         real = mcp_server._lean
