@@ -328,6 +328,13 @@ swarph board cards say <id> --to <peer> --content-file <path>
 swarph board cards ask <id> "<what is owed>" --step <step> --holder <peer>    # mint an obligation
 ```
 
+Propose a decision or an action. The commander decides it from the desktop; this
+command only posts the request (card #1297).
+
+`swarph commander ask --question "..." --options a,b --card N`
+`swarph commander request merge_pr --repo ORG/REPO --pr N --head SHA --card N`
+`swarph commander request release_finish --version V --pr N --head SHA --card N`
+
 **Obligations** exist because "waiting on a review" in someone's prose is not a fact
 anyone can query. `ask` writes a row: who owes what, since when. It closes when the holder
 **replies in the thread** -- which is why the distinction between `reply` and `send` above
