@@ -182,6 +182,8 @@ def _questions(rows: list[dict]) -> list[dict]:
     out = []
     for row in rows:
         options = _tap_options(row) if _tap_closable(row) else None
+        # A commander row with taps closes only by a tap, so it is never in-session.
+        tappable = options is not None
         if options is None:
             options = []
             for opt in row.get("options") or []:
@@ -204,7 +206,7 @@ def _questions(rows: list[dict]) -> list[dict]:
             "to_node": row["cell"],
             "title": row["title"],
             "note": row.get("note") or f"card #{row['card_id']} obligation #{row['obligation_id']}",
-            "in_session": _in_session(row),
+            "in_session": _in_session(row) and not tappable,
             "options": options,
         }
         if row.get("source"):
