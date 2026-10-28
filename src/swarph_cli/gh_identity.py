@@ -390,9 +390,233 @@ def _mask_quoted(command: str) -> str:
     return "".join(out)
 
 
+# Card #1346. A shell-executing string is command text, not a mention of gh.
+# The depth cap is the bound: a nested `bash -c` cannot recurse without limit,
+# and a hostile string returns False instead of raising. Quote masking stays
+# card #1340's: a quoted mention is still not a command word.
+_MAX_SHELL_DEPTH = 32
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash"})
+_GH_EXACT = re.compile(rf"{_GH_WORD}\Z")
+_AT_WORD = re.compile(
+    rf"{_START}{_LEAD}{_ENVPFX}{_WRAPPFX}\Z", re.MULTILINE)
+_SHELL_BIN = r"(?:(?:/[\w.-]+)*/)?(?:bash|zsh|dash|sh)"
+_SHELL_AT = re.compile(
+    rf"{_START}{_LEAD}{_ENVPFX}{_WRAPPFX}(?P<bin>{_SHELL_BIN})(?=[ \t]|$)",
+    re.MULTILINE)
+_EVAL_AT = re.compile(
+    rf"{_START}{_LEAD}{_ENVPFX}{_WRAPPFX}(?:(?:/[\w.-]+)*/)?eval(?=[ \t]|$)",
+    re.MULTILINE)
+_WATCH_AT = re.compile(
+    rf"{_START}{_LEAD}{_ENVPFX}{_WRAPPFX}(?:(?:/[\w.-]+)*/)?watch(?=[ \t]|$)",
+    re.MULTILINE)
+_XARGS_AT = re.compile(
+    rf"{_START}{_LEAD}{_ENVPFX}{_WRAPPFX}(?:(?:/[\w.-]+)*/)?xargs(?=[ \t]|$)",
+    re.MULTILINE)
+_BASH_TAKES_ARG = frozenset({"-o", "--rcfile", "--init-file"})
+_WATCH_TAKES_ARG = frozenset({"-n", "--interval", "-e", "--errexit"})
+_XARGS_TAKES_ARG = frozenset({
+    "-I", "-i", "-n", "-P", "-a", "-d", "-E", "-L", "-s", "-J",
+    "--replace", "--max-args", "--max-procs", "--arg-file", "--delimiter",
+    "--eof", "--max-lines", "--max-chars",
+})
+
+
+def _quoted_body(command: str, i: int) -> tuple[str, int]:
+    """Unquoted text of the quote at ``i``, and the index just after it.
+
+    An unterminated quote runs to the end and still returns. It does not raise.
+    """
+    q = command[i]
+    n = len(command)
+    j = i + 1
+    if q == "'":
+        k = command.find("'", j)
+        if k < 0:
+            return command[j:], n
+        return command[j:k], k + 1
+    buf: list[str] = []
+    while j < n and command[j] != '"':
+        if command[j] == "\\" and j + 1 < n:
+            buf.append(command[j + 1])
+            j += 2
+            continue
+        buf.append(command[j])
+        j += 1
+    if j >= n:
+        return "".join(buf), n
+    return "".join(buf), j + 1
+
+
+def _next_token(command: str, i: int) -> Optional[tuple]:
+    n = len(command)
+    while i < n and command[i] in " \t":
+        i += 1
+    if i >= n:
+        return None
+    if command[i] in ";\n&|":
+        return ("sep", i, i + 1, "")
+    if command[i] in "'\"":
+        body, end = _quoted_body(command, i)
+        return ("word", i, end, body)
+    buf: list[str] = []
+    j = i
+    while j < n and command[j] not in " \t;\n&|":
+        if command[j] in "'\"":
+            break
+        if command[j] == "\\" and j + 1 < n:
+            buf.append(command[j + 1])
+            j += 2
+            continue
+        buf.append(command[j])
+        j += 1
+    if j == i:
+        return None
+    return ("word", i, j, "".join(buf))
+
+
+def _is_shell_word(word: str) -> bool:
+    return word.rsplit("/", 1)[-1] in _SHELLS
+
+
+def _c_argument(command: str, i: int) -> Optional[str]:
+    """The command string of ``shell -c``, or None when this is ``shell script``."""
+    while True:
+        tok = _next_token(command, i)
+        if tok is None or tok[0] == "sep":
+            return None
+        word = tok[3]
+        i = tok[2]
+        if word == "--":
+            continue
+        if word.startswith("-"):
+            short = not word.startswith("--")
+            if word == "-c" or (short and "c" in word[1:]):
+                nxt = _next_token(command, i)
+                if nxt is None or nxt[0] != "word":
+                    return None
+                return nxt[3]
+            base = word.split("=", 1)[0]
+            if base in _BASH_TAKES_ARG and "=" not in word:
+                nxt = _next_token(command, i)
+                if nxt is not None and nxt[0] == "word":
+                    i = nxt[2]
+            continue
+        return None
+
+
+def _joined_words(command: str, i: int) -> Optional[str]:
+    parts: list[str] = []
+    while True:
+        tok = _next_token(command, i)
+        if tok is None or tok[0] == "sep":
+            break
+        if not parts and tok[3] == "--":
+            i = tok[2]
+            continue
+        parts.append(tok[3])
+        i = tok[2]
+    if not parts:
+        return None
+    return " ".join(parts)
+
+
+def _watch_command(command: str, i: int) -> Optional[str]:
+    parts: list[str] = []
+    while True:
+        tok = _next_token(command, i)
+        if tok is None or tok[0] == "sep":
+            break
+        word = tok[3]
+        i = tok[2]
+        if not parts and word.startswith("-"):
+            base = word.split("=", 1)[0]
+            attached_n = (
+                word.startswith("-n") and not word.startswith("--") and len(word) > 2
+            )
+            if base in _WATCH_TAKES_ARG and "=" not in word and not attached_n:
+                nxt = _next_token(command, i)
+                if nxt is not None and nxt[0] == "word":
+                    i = nxt[2]
+            continue
+        parts.append(word)
+    if not parts:
+        return None
+    return " ".join(parts)
+
+
+def _xargs_shell(command: str, i: int) -> Optional[str]:
+    while True:
+        tok = _next_token(command, i)
+        if tok is None or tok[0] == "sep":
+            return None
+        word = tok[3]
+        i = tok[2]
+        if word.startswith("-"):
+            base = word.split("=", 1)[0]
+            if base in _XARGS_TAKES_ARG and "=" not in word:
+                nxt = _next_token(command, i)
+                if nxt is not None and nxt[0] == "word":
+                    i = nxt[2]
+            continue
+        if _is_shell_word(word):
+            return _c_argument(command, i)
+        return None
+
+
+def _shell_texts(command: str, visible: str) -> list[str]:
+    """String arguments of the shell forms card #1346 names, outside quotes."""
+    found: list[str] = []
+    for match in _SHELL_AT.finditer(visible):
+        inner = _c_argument(command, match.end())
+        if inner:
+            found.append(inner)
+    for match in _EVAL_AT.finditer(visible):
+        inner = _joined_words(command, match.end())
+        if inner:
+            found.append(inner)
+    for match in _WATCH_AT.finditer(visible):
+        inner = _watch_command(command, match.end())
+        if inner:
+            found.append(inner)
+    for match in _XARGS_AT.finditer(visible):
+        inner = _xargs_shell(command, match.end())
+        if inner:
+            found.append(inner)
+    return found
+
+
+def _quoted_gh_command_word(command: str, visible: str) -> bool:
+    """``"gh" pr view`` and ``'gh' pr list``: the command word is gh once unquoted."""
+    i = 0
+    n = len(command)
+    while i < n:
+        if command[i] not in "'\"":
+            i += 1
+            continue
+        body, end = _quoted_body(command, i)
+        if _GH_EXACT.match(body) and _AT_WORD.search(visible[:i]) is not None:
+            return True
+        i = end if end > i else i + 1
+    return False
+
+
 def targets_gh(command: str) -> bool:
     """True when the command actually invokes `gh`, not when a quote mentions it."""
-    return bool(_GH_INVOCATION.search(_mask_quoted(command or "")))
+    return _targets_gh(command or "", 0)
+
+
+def _targets_gh(command: str, depth: int) -> bool:
+    visible = _mask_quoted(command)
+    if _GH_INVOCATION.search(visible):
+        return True
+    if depth >= _MAX_SHELL_DEPTH:
+        return False
+    if _quoted_gh_command_word(command, visible):
+        return True
+    for inner in _shell_texts(command, visible):
+        if inner != command and _targets_gh(inner, depth + 1):
+            return True
+    return False
 
 
 def already_explicit(command: str) -> bool:
