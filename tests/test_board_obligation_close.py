@@ -50,7 +50,7 @@ def test_close_posts_the_explicit_act(monkeypatch, tmp_path, capsys):
     assert captured["url"].endswith("/board/obligations/22/close")
     assert captured["body"]["outcome"] == "pass"
     assert captured["body"]["evidence"] == "ran the check: A and B hold"
-    assert captured["body"]["usage"]["tokens_in"] == "unknown"
+    assert captured["body"]["usage"]["input_tokens"] == "unknown"
     assert captured["body"]["usage"]["model"] == "unknown"
     out = capsys.readouterr().out
     assert "CLOSED" in out and "pass" in out

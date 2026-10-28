@@ -1,8 +1,8 @@
-"""Card #1277 — usage read off the closing cell's own transcript.
+"""Card #1277 — usage from the closing session only.
 
-Numbers come from fields the harness wrote. A missing field stays
-"unknown". Nothing here estimates a token count from duration or from
-a character length.
+One session file, or every token field is unknown. Numbers are the
+TokenUsage fields the transcript actually wrote. A missing field stays
+"unknown". Nothing here turns a missing field into zero.
 """
 from __future__ import annotations
 
@@ -11,12 +11,11 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-_TOKEN_FIELDS = (
-    ("tokens_in", ("input_tokens",)),
-    ("tokens_out", ("output_tokens",)),
-    ("cache_read", ("cache_read_input_tokens",)),
-    ("cache_write", ("cache_creation_input_tokens",)),
-    ("thinking", ("thinking_tokens",)),
+_COUNT_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "thinking",
 )
 
 
@@ -35,6 +34,14 @@ def _parse_time(value):
     return parsed
 
 
+def _as_int(value):
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
 def _thinking(usage: dict):
     details = usage.get("output_tokens_details")
     if isinstance(details, dict) and "thinking_tokens" in details:
@@ -42,26 +49,31 @@ def _thinking(usage: dict):
     return usage.get("thinking_tokens")
 
 
-def _field(usage: dict, name: str):
-    if name == "thinking":
-        return _thinking(usage)
-    key = {"tokens_in": "input_tokens", "tokens_out": "output_tokens",
-           "cache_read": "cache_read_input_tokens",
-           "cache_write": "cache_creation_input_tokens"}[name]
-    return usage.get(key)
+def _cache_parts(usage: dict):
+    """(1h, 5m, unsplit) as ints or None. A present split is not also a flat total."""
+    created = usage.get("cache_creation")
+    if isinstance(created, dict) and (
+            "ephemeral_1h_input_tokens" in created or "ephemeral_5m_input_tokens" in created):
+        return (
+            _as_int(created.get("ephemeral_1h_input_tokens")),
+            _as_int(created.get("ephemeral_5m_input_tokens")),
+            None,
+        )
+    if "cache_creation_input_tokens" in usage:
+        return None, None, _as_int(usage.get("cache_creation_input_tokens"))
+    return None, None, None
 
 
 def sum_transcript(lines, taken_at, now) -> dict:
-    """Sum usage objects whose timestamp is inside [taken_at, now].
-
-    A usage object that omits a field makes that field unknown for the
-    whole window. Messages outside the window are not part of the sum.
-    """
+    """Sum one session's usage objects inside [taken_at, now]."""
     start = _parse_time(taken_at)
     end = _parse_time(now)
-    totals = {name: 0 for name, _ in _TOKEN_FIELDS}
-    seen = {name: False for name, _ in _TOKEN_FIELDS}
+    totals = {name: 0 for name in _COUNT_FIELDS}
+    seen = {name: False for name in _COUNT_FIELDS}
     missing = set()
+    one_h = five = unsplit = 0
+    saw_split = saw_flat = False
+    split_gap = flat_gap = False
     models = []
     counted = 0
     for line in lines:
@@ -82,55 +94,178 @@ def sum_transcript(lines, taken_at, now) -> dict:
         model = message.get("model") if isinstance(message, dict) else None
         if isinstance(model, str) and model.strip():
             models.append(model.strip())
-        for name, _keys in _TOKEN_FIELDS:
-            value = _field(usage, name)
-            if isinstance(value, bool) or not isinstance(value, int):
+        raw = {
+            "input_tokens": usage.get("input_tokens"),
+            "output_tokens": usage.get("output_tokens"),
+            "cache_read_tokens": usage.get("cache_read_input_tokens"),
+            "thinking": _thinking(usage),
+        }
+        for name in _COUNT_FIELDS:
+            value = _as_int(raw[name])
+            if value is None:
                 missing.add(name)
                 continue
             seen[name] = True
             totals[name] += value
+        hour, minute, flat = _cache_parts(usage)
+        if hour is not None or minute is not None:
+            saw_split = True
+            if hour is None or minute is None:
+                split_gap = True
+            else:
+                one_h += hour
+                five += minute
+        elif flat is not None:
+            saw_flat = True
+            unsplit += flat
+        else:
+            flat_gap = True
     out = {}
-    for name, _keys in _TOKEN_FIELDS:
+    for name in _COUNT_FIELDS:
         if name in missing or not seen[name] or counted == 0:
             out[name] = "unknown"
         else:
             out[name] = totals[name]
+    if counted == 0 or saw_split and saw_flat or split_gap or (not saw_split and (not saw_flat or flat_gap)):
+        out["cache_creation_1h_tokens"] = "unknown"
+        out["cache_creation_5m_tokens"] = "unknown"
+        out["cache_creation_unsplit_tokens"] = "unknown"
+    elif saw_split:
+        out["cache_creation_1h_tokens"] = one_h
+        out["cache_creation_5m_tokens"] = five
+        out["cache_creation_unsplit_tokens"] = "unknown"
+    else:
+        out["cache_creation_1h_tokens"] = "unknown"
+        out["cache_creation_5m_tokens"] = "unknown"
+        out["cache_creation_unsplit_tokens"] = unsplit
     distinct = set(models)
     out["model"] = models[0] if len(distinct) == 1 else "unknown"
     return out
 
 
-def _transcript_lines(env) -> list[str]:
-    explicit = env.get("SWARPH_CLAUDE_TRANSCRIPT")
-    if explicit:
-        path = Path(explicit)
-        if path.is_file():
-            return path.read_text(encoding="utf-8").splitlines()
-        if path.is_dir():
-            lines = []
-            for item in sorted(path.glob("*.jsonl")):
-                lines.extend(item.read_text(encoding="utf-8").splitlines())
-            return lines
-        return []
-    if not (env.get("CLAUDECODE") or env.get("CLAUDE_CODE_ENTRYPOINT")):
-        return []
+def _project_root(env) -> Path:
     cwd = env.get("PWD") or os.getcwd()
-    slug = "-" + cwd.strip("/").replace("/", "-")
     home = env.get("HOME") or str(Path.home())
-    root = Path(home) / ".claude" / "projects" / slug
-    if not root.is_dir():
+    slug = "-" + str(cwd).strip("/").replace("/", "-")
+    return Path(home) / ".claude" / "projects" / slug
+
+
+def _resolve_id(root: Path, value: str) -> Path | None:
+    direct = Path(value)
+    if direct.is_file() and direct.suffix == ".jsonl":
+        return direct
+    if value and root.is_dir():
+        named = root / f"{value}.jsonl"
+        if named.is_file():
+            return named
+    return None
+
+
+def _ppid(pid: int) -> int:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    end = stat.rfind(")")
+    if end < 0:
+        return 0
+    parts = stat[end + 2:].split()
+    if len(parts) < 2:
+        return 0
+    try:
+        return int(parts[1])
+    except ValueError:
+        return 0
+
+
+def _is_claude(pid: int) -> bool:
+    try:
+        comm = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return comm == "claude" or comm.startswith("claude")
+
+
+def _open_jsonl(pid: int) -> list[Path]:
+    found = []
+    seen = set()
+    try:
+        entries = list(Path(f"/proc/{pid}/fd").iterdir())
+    except OSError:
         return []
-    session = env.get("CLAUDE_SESSION_ID") or env.get("CLAUDE_CODE_SESSION_ID")
-    files = sorted(root.glob("*.jsonl"))
-    if session:
-        files = [item for item in files if item.stem == session]
-    lines = []
-    for item in files:
+    for entry in entries:
         try:
-            lines.extend(item.read_text(encoding="utf-8").splitlines())
+            target = os.readlink(entry)
         except OSError:
             continue
-    return lines
+        if not target.endswith(".jsonl"):
+            continue
+        path = Path(target)
+        if not path.is_file():
+            continue
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(path)
+    return found
+
+
+def _ancestor_jsonl() -> Path | None:
+    """The one jsonl the nearest ancestor claude process holds open."""
+    pid = _ppid(os.getpid())
+    seen = set()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        if _is_claude(pid):
+            files = _open_jsonl(pid)
+            if len(files) == 1:
+                return files[0]
+            if len(files) > 1:
+                return None
+        pid = _ppid(pid)
+    return None
+
+
+def _pinned_session(env, agent) -> str | None:
+    if not agent or agent in {".", ".."} or "/" in agent or "\\" in agent:
+        return None
+    home = env.get("HOME") or str(Path.home())
+    xdg = env.get("XDG_CONFIG_HOME") or str(Path(home) / ".config")
+    path = Path(xdg) / "swarph" / "cells" / f"{agent}.yaml"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("session_id:"):
+            value = stripped.split(":", 1)[1].strip().strip("'\"")
+            return value or None
+    return None
+
+
+def closing_session_file(env, agent) -> Path | None:
+    """Exactly one session file, or None.
+
+    Order: CLAUDE_SESSION_ID / CLAUDE_CODE_SESSION_ID if set; else the
+    jsonl held open by the nearest ancestor claude; else the session_id
+    pinned in the --as cell's swarph cell config when that names a file.
+    A set session id that does not name a file does not fall through.
+    """
+    root = _project_root(env)
+    session = env.get("CLAUDE_SESSION_ID") or env.get("CLAUDE_CODE_SESSION_ID")
+    if session:
+        return _resolve_id(root, session)
+    held = _ancestor_jsonl()
+    if held is not None:
+        return held
+    pinned = _pinned_session(env, agent)
+    if pinned:
+        return _resolve_id(root, pinned)
+    return None
 
 
 def _lane_model(env, taken_at, now) -> str:
@@ -169,10 +304,12 @@ def _blank(agent: str) -> dict:
     return {
         "agent": agent or "unknown",
         "model": "unknown",
-        "tokens_in": "unknown",
-        "tokens_out": "unknown",
-        "cache_read": "unknown",
-        "cache_write": "unknown",
+        "input_tokens": "unknown",
+        "output_tokens": "unknown",
+        "cache_read_tokens": "unknown",
+        "cache_creation_1h_tokens": "unknown",
+        "cache_creation_5m_tokens": "unknown",
+        "cache_creation_unsplit_tokens": "unknown",
         "thinking": "unknown",
         "wall_s": "unknown",
     }
@@ -188,12 +325,16 @@ def read_close_usage(agent=None, taken_at=None, now=None, env=None) -> dict:
         now = env.get("SWARPH_USAGE_NOW") or datetime.now(timezone.utc).isoformat()
     if not taken_at:
         return _blank(who)
-    lines = _transcript_lines(env)
-    if lines:
-        summed = sum_transcript(lines, taken_at, now)
-        summed["agent"] = who or "unknown"
-        summed["wall_s"] = "unknown"
-        return summed
-    found = _blank(who)
-    found["model"] = _lane_model(env, taken_at, now)
-    return found
+    path = closing_session_file(env, who)
+    if path is None:
+        found = _blank(who)
+        found["model"] = _lane_model(env, taken_at, now)
+        return found
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return _blank(who)
+    summed = sum_transcript(lines, taken_at, now)
+    summed["agent"] = who or "unknown"
+    summed["wall_s"] = "unknown"
+    return summed

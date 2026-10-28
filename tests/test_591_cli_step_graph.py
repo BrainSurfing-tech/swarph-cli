@@ -548,7 +548,7 @@ def test_close_accepts_skipped(monkeypatch):
     assert rc == 0
     posted = [call for call in calls if call[0] == "POST"]
     assert posted[0][2]["outcome"] == "skipped"
-    assert posted[0][2]["usage"]["tokens_in"] == "unknown"
+    assert posted[0][2]["usage"]["input_tokens"] == "unknown"
 
 
 def test_move_dispatch_prints_gate_warn(monkeypatch, capsys):

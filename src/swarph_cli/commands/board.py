@@ -1363,7 +1363,14 @@ def run_board(argv: list[str]) -> int:
             query.append("since=" + args.since)
         url = f"{gw}/board/cost" + (("?" + "&".join(query)) if query else "")
         st, d = _http_get_json(url, token)
-        return _out(st, d, format_cost, aj)
+        rates = None
+        if st and 200 <= st < 300:
+            try:
+                from swarph_shared.llm_cost import fetch_price_base
+                rates = fetch_price_base()
+            except Exception:
+                rates = None
+        return _out(st, d, lambda body: format_cost(body, rates), aj)
 
     if args.group == "obligations":
         if args.command == "close":

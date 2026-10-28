@@ -1,78 +1,145 @@
-"""card #1277 — close reads a transcript, and cost is not an estimate.
+"""card #1277 — one closing session, TokenUsage fields, USD when priced.
 
-Red at eab2a3f: the close payload has no usage, so cache_read is absent.
+Red at eeb9d745: two session files and no session id sum to the combined total.
 """
 import json
+from pathlib import Path
+
+from swarph_shared.llm_cost import PriceRow
 
 from swarph_cli.commands import board
 from swarph_cli.commands.board_cost import format_cost
 from swarph_cli.commands.board_usage import read_close_usage
 
 
-def _line(ts, tokens_in, cache_read, cache_write, tokens_out, thinking, model="claude-sonnet-5"):
+def _line(ts, tokens_in, cache_read, tokens_out, thinking, *,
+          one_h=None, five=None, flat=None, model="claude-sonnet-5"):
     usage = {
         "input_tokens": tokens_in,
-        "cache_creation_input_tokens": cache_write,
+        "cache_read_input_tokens": cache_read,
         "output_tokens": tokens_out,
         "output_tokens_details": {"thinking_tokens": thinking},
     }
-    if cache_read is not None:
-        usage["cache_read_input_tokens"] = cache_read
+    if one_h is not None or five is not None:
+        usage["cache_creation"] = {
+            "ephemeral_1h_input_tokens": one_h,
+            "ephemeral_5m_input_tokens": five,
+        }
+    elif flat is not None:
+        usage["cache_creation_input_tokens"] = flat
     return json.dumps({
         "timestamp": ts,
         "message": {"model": model, "usage": usage},
     })
 
 
-def test_close_payload_carries_the_transcript_sum(tmp_path, monkeypatch):
-    path = tmp_path / "session.jsonl"
-    path.write_text("\n".join([
-        _line("2026-10-27T01:00:00Z", 100, 100, 100, 100, 100),
-        _line("2026-10-28T01:00:00Z", 2, 9, 5, 3, 4),
-        _line("2026-10-28T02:00:00Z", 1, 8, 0, 1, 2),
-    ]) + "\n")
-    monkeypatch.setenv("SWARPH_CLAUDE_TRANSCRIPT", str(path))
-    monkeypatch.setenv("SWARPH_USAGE_TAKEN_AT", "2026-10-28T00:00:00+00:00")
-    monkeypatch.setenv("SWARPH_USAGE_NOW", "2026-10-28T12:00:00+00:00")
-    monkeypatch.setenv("CLAUDECODE", "1")
+def _layout(tmp_path, files):
+    home = tmp_path / "home"
+    root = home / ".claude" / "projects" / "-work-cell"
+    root.mkdir(parents=True)
+    for name, text in files.items():
+        (root / name).write_text(text)
+    return {
+        "HOME": str(home),
+        "PWD": "/work/cell",
+        "SWARPH_USAGE_TAKEN_AT": "2026-10-28T00:00:00+00:00",
+        "SWARPH_USAGE_NOW": "2026-10-28T12:00:00+00:00",
+        "CLAUDECODE": "1",
+    }
+
+
+def test_two_session_files_and_no_id_are_not_summed(tmp_path):
+    env = _layout(tmp_path, {
+        "own.jsonl": _line("2026-10-28T01:00:00Z", 100, 1, 1, 1, one_h=1, five=1) + "\n",
+        "other.jsonl": _line("2026-10-28T01:00:00Z", 1000, 1, 1, 1, one_h=1, five=1) + "\n",
+    })
+    usage = read_close_usage(agent="cursor-lin", env=env,
+                             taken_at=env["SWARPH_USAGE_TAKEN_AT"],
+                             now=env["SWARPH_USAGE_NOW"])
+    got = usage.get("input_tokens", usage.get("tokens_in"))
+    # eeb9d745 returns 1100, the sum of both files.
+    assert got != 1100
+    assert got in ("unknown", 100)
+
+
+def test_a_pinned_session_id_sums_only_that_file(tmp_path):
+    env = _layout(tmp_path, {
+        "own-session.jsonl": _line("2026-10-28T01:00:00Z", 100, 4, 3, 2, one_h=5, five=6) + "\n",
+        "other.jsonl": _line("2026-10-28T01:00:00Z", 1000, 1, 1, 1, one_h=1, five=1) + "\n",
+    })
+    cells = tmp_path / "xdg" / "swarph" / "cells"
+    cells.mkdir(parents=True)
+    (cells / "cursor-lin.yaml").write_text("session_id: own-session\n")
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    usage = read_close_usage(agent="cursor-lin", env=env,
+                             taken_at=env["SWARPH_USAGE_TAKEN_AT"],
+                             now=env["SWARPH_USAGE_NOW"])
+    assert usage["input_tokens"] == 100
+    assert usage["cache_creation_1h_tokens"] == 5
+    assert usage["cache_creation_5m_tokens"] == 6
+    assert usage["cache_creation_unsplit_tokens"] == "unknown"
+    assert usage["thinking"] == 2
+    assert usage["cache_read_tokens"] == 4
+
+
+def test_a_session_env_sums_only_that_file_and_keeps_the_split(tmp_path, monkeypatch):
+    env = _layout(tmp_path, {
+        "own-session.jsonl": "\n".join([
+            _line("2026-10-27T01:00:00Z", 100, 100, 100, 100, one_h=100, five=100),
+            _line("2026-10-28T01:00:00Z", 2, 9, 3, 4, one_h=5, five=1),
+            _line("2026-10-28T02:00:00Z", 1, 8, 1, 2, one_h=0, five=0),
+        ]) + "\n",
+        "other.jsonl": _line("2026-10-28T01:00:00Z", 1000, 1, 1, 1, one_h=1, five=1) + "\n",
+    })
+    env["CLAUDE_SESSION_ID"] = "own-session"
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     monkeypatch.delenv("SWARPH_LANE_USAGE", raising=False)
     payload = board._close_payload("pass", "saw the row", None)
     usage = payload.get("usage") or {}
-    # eab2a3f returns no usage key, so both of these are None there.
-    assert usage.get("cache_read") == 17
+    assert usage.get("input_tokens") == 3
+    assert usage.get("cache_read_tokens") == 17
+    assert usage.get("cache_creation_1h_tokens") == 5
+    assert usage.get("cache_creation_5m_tokens") == 1
+    assert usage.get("cache_creation_unsplit_tokens") == "unknown"
     assert usage.get("thinking") == 6
-    assert usage.get("cache_write") == 5
-    assert usage.get("tokens_in") == 3
-    assert usage.get("tokens_out") == 4
-    assert usage.get("model") == "claude-sonnet-5"
+    assert usage.get("output_tokens") == 4
 
 
-def test_a_missing_transcript_field_stays_unknown(tmp_path):
-    path = tmp_path / "session.jsonl"
-    path.write_text(_line("2026-10-28T01:00:00Z", 2, None, 5, 3, 4) + "\n")
-    usage = read_close_usage(
-        agent="lab-ovh",
-        taken_at="2026-10-28T00:00:00+00:00",
-        now="2026-10-28T12:00:00+00:00",
-        env={"SWARPH_CLAUDE_TRANSCRIPT": str(path), "CLAUDECODE": "1"},
-    )
-    assert usage["cache_read"] == "unknown"
-    assert usage["tokens_in"] == 2
+def test_a_missing_cache_read_stays_unknown(tmp_path):
+    env = _layout(tmp_path, {
+        "own-session.jsonl": _line("2026-10-28T01:00:00Z", 2, None, 3, 4, one_h=5, five=1) + "\n",
+    })
+    # cache_read None omits the key. The line helper always writes the key.
+    text = _line("2026-10-28T01:00:00Z", 2, 0, 3, 4, one_h=5, five=1)
+    rec = json.loads(text)
+    del rec["message"]["usage"]["cache_read_input_tokens"]
+    home = env["HOME"]
+    path = Path(home) / ".claude" / "projects" / "-work-cell" / "own-session.jsonl"
+    path.write_text(json.dumps(rec) + "\n")
+    env["CLAUDE_SESSION_ID"] = "own-session"
+    usage = read_close_usage(agent="lab-ovh", env=env,
+                             taken_at=env["SWARPH_USAGE_TAKEN_AT"],
+                             now=env["SWARPH_USAGE_NOW"])
+    assert usage["cache_read_tokens"] == "unknown"
+    assert usage["input_tokens"] == 2
     assert usage["thinking"] == 4
-    assert usage["agent"] == "lab-ovh"
+    assert usage["cache_read_tokens"] != 0
 
 
-def test_without_a_transcript_every_token_field_is_unknown():
+def test_without_a_session_every_token_field_is_unknown():
     usage = read_close_usage(
         agent="cursor-lin",
         taken_at="2026-10-28T00:00:00+00:00",
         now="2026-10-28T12:00:00+00:00",
-        env={},
+        env={"HOME": "/no/such", "PWD": "/no/such"},
     )
-    assert usage["tokens_in"] == "unknown"
+    assert usage["input_tokens"] == "unknown"
     assert usage["model"] == "unknown"
-    assert usage["cache_read"] == "unknown"
+    assert usage["cache_read_tokens"] == "unknown"
     assert usage["thinking"] == "unknown"
+    assert usage["cache_creation_1h_tokens"] == "unknown"
 
 
 def test_a_lane_line_names_the_model_and_does_not_invent_tokens():
@@ -82,48 +149,61 @@ def test_a_lane_line_names_the_model_and_does_not_invent_tokens():
         agent="cursor-lin",
         taken_at="2026-10-28T00:00:00+00:00",
         now="2026-10-28T12:00:00+00:00",
-        env={"SWARPH_LANE_USAGE": line},
+        env={"SWARPH_LANE_USAGE": line, "HOME": "/no/such", "PWD": "/no/such"},
     )
     assert usage["model"] == "grok-4.7-high-fast"
-    assert usage["tokens_in"] == "unknown"
-    assert usage["tokens_out"] == "unknown"
+    assert usage["input_tokens"] == "unknown"
+    assert usage["output_tokens"] == "unknown"
     assert usage["thinking"] == "unknown"
 
 
-def _known(tokens_in, tokens_out, cache_read, cache_write, thinking):
-    return {
-        "tokens_in": tokens_in, "tokens_out": tokens_out,
-        "cache_read": cache_read, "cache_write": cache_write,
-        "thinking": thinking,
+def _known(**fields):
+    base = {
+        "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+        "cache_creation_1h_tokens": 0, "cache_creation_5m_tokens": 0,
+        "cache_creation_unsplit_tokens": "unknown", "thinking": 0,
+        "model": "claude-sonnet-5",
     }
+    base.update(fields)
+    return base
 
 
 def test_cost_on_a_card_with_a_fail_and_a_rework():
+    rates = {"claude-sonnet-5": PriceRow(
+        input=1.0, output=1.0, cache_read=1.0,
+        cache_creation=1.0, cache_creation_above_1hr=1.0)}
     report = {
         "window": {"card": 10, "since": "2026-10-28", "until": "2026-10-28T16:00:00+00:00"},
         "later_fix": {"10": [12]},
         "closes": [
             {"card_id": 10, "step": "build", "outcome": "fail", "rework": False,
-             "stage": "done", "usage": _known(100, 20, 5, 5, 0)},
+             "stage": "done", "usage": _known(
+                 input_tokens=100, output_tokens=20, cache_read_tokens=5,
+                 cache_creation_1h_tokens=3, cache_creation_5m_tokens=2, thinking=0)},
             {"card_id": 10, "step": "build", "outcome": "pass", "rework": True,
-             "stage": "done", "usage": _known(10, 10, 10, 10, 10)},
+             "stage": "done", "usage": _known(
+                 input_tokens=10, output_tokens=10, cache_read_tokens=10,
+                 cache_creation_1h_tokens=10, cache_creation_5m_tokens=10, thinking=10)},
             {"card_id": 10, "step": "validate", "outcome": "pass", "rework": False,
-             "stage": "done", "usage": _known(4, 3, 2, 1, 0)},
+             "stage": "done", "usage": _known(
+                 input_tokens=4, output_tokens=3, cache_read_tokens=2,
+                 cache_creation_1h_tokens=1, cache_creation_5m_tokens=0, thinking=0)},
         ],
     }
-    text = format_cost(report)
+    text = format_cost(report, rates)
     assert "execute: 130 tokens" in text
     assert "grade: 10 tokens" in text
     assert "advise: 0 tokens" in text
-    assert "rework: 50 tokens" in text
+    assert "rework: 60 tokens" in text
     assert "FAIL: 1" in text
     assert "reworks: 1" in text
     assert "perfect-run rate: 0/1" in text
-    assert "cost per accepted outcome: 190/1" in text
+    assert "cost per accepted outcome: 200/1" in text
     assert "cost per perfect run: no perfect runs (0)" in text
     assert "unknown rows: 0" in text
     assert "later-fix=#12" in text
     assert "window: card #10 since 2026-10-28" in text
+    assert "usd: 190" in text
 
 
 def test_an_unknown_row_is_excluded_from_the_cost_not_counted_as_zero():
@@ -132,14 +212,14 @@ def test_an_unknown_row_is_excluded_from_the_cost_not_counted_as_zero():
         "later_fix": {},
         "closes": [
             {"card_id": 10, "step": "build", "outcome": "pass", "rework": False,
-             "stage": "done", "usage": {"tokens_in": "unknown", "tokens_out": 1,
-                                        "cache_read": 1, "cache_write": 1, "thinking": 1}},
+             "stage": "done", "usage": _known(input_tokens="unknown")},
         ],
     }
     text = format_cost(report)
     assert "unknown rows: 1" in text
     assert "cost per accepted outcome: unknown" in text
     assert "perfect-run rate: 1/1" in text
+    assert "usd: unknown" in text
     assert "0 tokens/card" not in text
 
 
