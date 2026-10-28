@@ -1,4 +1,7 @@
-"""Card #1328: a class that differs from from_node is what the cell reads."""
+"""Card #1328: a class that differs from from_node is what the cell reads.
+
+The wake line, the channel frame, and the channel read tag share one label.
+"""
 from swarph_cli.commands import channel
 from swarph_cli.dm_frame import frame_text, sender_label
 from swarph_cli.scripts.dm_notify_filter import _format_dm
