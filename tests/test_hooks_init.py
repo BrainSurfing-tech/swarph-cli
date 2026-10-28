@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from swarph_cli.commands.hooks import (
     RECOMMENDED_HOOKS,
     _load_settings,
@@ -25,6 +27,13 @@ from swarph_cli.commands.hooks import (
     resolve_builtin,
     run_hooks,
 )
+
+
+@pytest.fixture(autouse=True)
+def _doctor_allows_the_router(monkeypatch):
+    """These tests install the recommended set. Card #1340 skips the router when
+    doctor refuses, and this box's doctor is not the subject here."""
+    monkeypatch.setattr("swarph_cli.commands.gh_route.run_doctor", lambda: 0)
 
 
 def _binding_command(settings: dict, event: str, matcher: str) -> list:

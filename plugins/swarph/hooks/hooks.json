@@ -1,6 +1,18 @@
 {
-  "description": "gh-identity-router (#397). PreToolUse on Bash resolves this cell's gh identity. A cell gets it when the plugin is installed; settings.json is not edited by hand.",
+  "description": "gh-identity-router (#397, #1340). PreToolUse on Bash resolves this cell's gh identity. SessionStart runs gh-route doctor so an unmapped host is visible before the first gh call.",
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "swarph gh-route doctor",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",

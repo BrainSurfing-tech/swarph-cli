@@ -290,9 +290,109 @@ def _unreadable_note(unreadable) -> str:
             + ", ".join(str(f) for f in unreadable) + "\n")
 
 
+def _subst_end(command: str, open_paren: int) -> int:
+    """Index of the ``)`` matching ``command[open_paren] == '('``."""
+    depth = 1
+    i = open_paren + 1
+    n = len(command)
+    while i < n and depth:
+        c = command[i]
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if c == "'":
+            j = command.find("'", i + 1)
+            i = n if j < 0 else j + 1
+            continue
+        if c == '"':
+            i += 1
+            while i < n and command[i] != '"':
+                if command[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                i += 1
+            i = i + 1 if i < n else n
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return n
+
+
+def _mask_quoted(command: str) -> str:
+    """Blank the insides of quotes. A quoted ``gh`` is not a command (card #1340).
+
+    ``$(...)`` and backticks stay, including inside double quotes, because those
+    are command substitutions. Their contents are masked the same way, so a
+    quote inside a substitution does not hide a real ``gh`` and a quoted
+    substitution does not invent one.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(command)
+
+    def blanks(text: str) -> str:
+        return "".join("\n" if ch == "\n" else " " for ch in text)
+
+    while i < n:
+        c = command[i]
+        if c == "\\" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if c == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                out.append(c)
+                out.append(blanks(command[i + 1:]))
+                break
+            out.append(c)
+            out.append(blanks(command[i + 1:j]))
+            out.append("'")
+            i = j + 1
+            continue
+        if c == '"':
+            out.append(c)
+            i += 1
+            while i < n and command[i] != '"':
+                if command[i] == "\\" and i + 1 < n:
+                    out.append("  ")
+                    i += 2
+                    continue
+                if command[i] == "$" and i + 1 < n and command[i + 1] == "(":
+                    end = _subst_end(command, i + 1)
+                    inner = _mask_quoted(command[i + 2:end])
+                    out.append("$(" + inner + (")" if end < n else ""))
+                    i = end + 1 if end < n else n
+                    continue
+                if command[i] == "`":
+                    j = command.find("`", i + 1)
+                    if j < 0:
+                        out.append("`")
+                        out.append(_mask_quoted(command[i + 1:]))
+                        i = n
+                        break
+                    out.append("`" + _mask_quoted(command[i + 1:j]) + "`")
+                    i = j + 1
+                    continue
+                out.append("\n" if command[i] == "\n" else " ")
+                i += 1
+            if i < n and command[i] == '"':
+                out.append('"')
+                i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def targets_gh(command: str) -> bool:
-    """True when the command actually invokes `gh`."""
-    return bool(_GH_INVOCATION.search(command or ""))
+    """True when the command actually invokes `gh`, not when a quote mentions it."""
+    return bool(_GH_INVOCATION.search(_mask_quoted(command or "")))
 
 
 def already_explicit(command: str) -> bool:

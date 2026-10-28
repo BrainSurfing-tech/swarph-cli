@@ -6,13 +6,9 @@ consistent. The hazard is the SEQUENCE. `~/.config/swarph/gh-identities.json` do
 exist on lab-ovh, so installing the hook first makes the router refuse every `gh` call
 on the box, discovered one broken command at a time.
 
->>> AND THE BLAST RADIUS IS WIDER THAN `gh`, WHICH IS drop's MEASUREMENT AND NOT AN
-INFERENCE. <<< The invocation regex has 4 known false positives, all quoting. So
-
-    git commit -m "fix; gh routing was wrong"
-
-matches, resolves to an unmapped cell, and THE COMMIT IS REFUSED. An unmapped box does
-not merely lose `gh`; it loses every command that mentions one inside a string.
+Card #1340 closed the quoting false positive. `git commit -m "fix; gh routing was
+wrong"` is not a gh call. The doctor still refuses an unconfigured box, and it no
+longer claims that a quoted mention refuses the command.
 
 THE TEST THAT CARRIES THE TASK is not "the doctor refuses when the mapping is missing"
 — it is that the doctor reports on EVERY CELL ON THE BOX rather than on its caller. The
@@ -49,14 +45,18 @@ def test_doctor_REFUSES_when_the_mapping_is_absent(mapping, capsys):
 
 
 def test_the_refusal_names_the_WIDER_blast_radius(mapping, capsys):
-    """A refusal saying only "gh will not work" understates it. drop measured that a
-    quoted `gh` inside an unrelated command matches the invocation regex, so an
-    unmapped box loses commits too. The operator must be told the real radius before
-    deciding, not after."""
+    """The doctor still refuses an unconfigured box. A quoted mention of gh is not
+    part of that radius anymore (card #1340): the commit below is not a gh call,
+    and the doctor must not claim that quoting one refuses the command."""
+    from swarph_cli import gh_identity as ghid
+
+    quoted = 'git commit -m "fix; gh routing was wrong"'
+    assert not ghid.targets_gh(quoted)
     gh_route.run_doctor()
 
     err = capsys.readouterr().err
-    assert "QUOTES" in err or "quotes" in err
+    assert "DO NOT INSTALL THE HOOK" in err
+    assert "QUOTES" not in err
 
 
 def test_doctor_REPORTS_EVERY_CELL_ON_THE_BOX_not_just_the_caller(

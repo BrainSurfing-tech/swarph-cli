@@ -175,7 +175,16 @@ _GH_IDENTITY_ROUTER_SH = r"""#!/bin/sh
 # if it cannot run, the correct outcome is that the `gh` call does not silently
 # proceed under the ambient account. Swallowing its failure would reinstate exactly
 # the fallback the card forbids.
-exec swarph gh-route hook
+#
+# Card #1340: a hook PATH that cannot see `swarph` used to exit 127. Claude Code
+# blocks a PreToolUse call only on exit 2 or a deny, so that miss let `gh` run as
+# the ambient account. Resolve an absolute path, or exit 2 and say why.
+swarph_bin=$(command -v swarph 2>/dev/null)
+if [ -z "$swarph_bin" ]; then
+  echo "swarph gh-identity-router (#1340): swarph is not on PATH. Refusing this tool call so gh cannot run as the ambient account." >&2
+  exit 2
+fi
+exec "$swarph_bin" gh-route hook
 """
 
 
@@ -802,6 +811,23 @@ def install_hook(
 # --------------------------------------------------------------------------- #
 
 
+def _print_router_doctor(out) -> int:
+    """Run ``gh-route doctor`` and send its stdout and stderr through ``out``."""
+    import contextlib
+    import io
+
+    from swarph_cli.commands import gh_route
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        rc = gh_route.run_doctor()
+    text = (stdout.getvalue() + stderr.getvalue()).strip()
+    if text:
+        for line in text.splitlines():
+            out(line)
+    return rc
+
+
 def init_hooks(
     *,
     settings_path=_DEFAULT_SETTINGS_PATH,
@@ -820,9 +846,18 @@ def init_hooks(
 
     Returns 0 when every install succeeded, non-zero if any returned non-zero
     (the worst rc is propagated). Emits one summary line at the end.
+
+    Card #1340: ``gh-route doctor`` runs first. Its result is printed. A non-zero
+    doctor means the router would refuse a cell on this box, so the router is
+    not installed. The rest of the recommended set still is.
     """
     rc = 0
-    for name in RECOMMENDED_HOOKS:
+    names = list(RECOMMENDED_HOOKS)
+    doctor_rc = _print_router_doctor(out)
+    if doctor_rc != 0 and "gh-identity-router" in names:
+        out("hooks init: gh-route doctor refused, so gh-identity-router was not installed")
+        names = [name for name in names if name != "gh-identity-router"]
+    for name in names:
         bundle = resolve_builtin(name)
         one = install_hook(
             bundle,
@@ -834,7 +869,7 @@ def init_hooks(
         if one != 0 and rc == 0:
             rc = one
 
-    names = ", ".join(RECOMMENDED_HOOKS)
+    names = ", ".join(names)
     status = "all installed" if rc == 0 else "completed with errors"
     out(
         f"hooks init: recommended set [{names}] {status} "

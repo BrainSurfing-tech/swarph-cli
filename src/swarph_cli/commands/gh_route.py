@@ -203,11 +203,8 @@ def run_doctor() -> int:
     lab-ovh, so installing the hook first makes the router refuse EVERY `gh` call on
     the box, discovered one broken command at a time.
 
-    drop-on-meta-edge measured that the blast radius is WIDER THAN `gh`: the invocation
-    regex has 4 known false positives, all quoting, so
-    `git commit -m "fix; gh routing was wrong"` matches, resolves to an unmapped cell,
-    and the COMMIT is refused. An unmapped box does not merely lose `gh` — it loses
-    every command that mentions one inside a string.
+    A quoted mention is not a `gh` call (card #1340): `git commit -m "fix; gh routing
+    was wrong"` is left alone. The refusal is every real `gh` invocation.
 
     Exit 0 only when every cell on this box resolves. Non-zero is "do not install yet".
 
@@ -228,8 +225,8 @@ def run_doctor() -> int:
         print_safe(
             f"swarph gh-route doctor: REFUSED\n  {exc}\n"
             f"  >>> DO NOT INSTALL THE HOOK UNTIL THIS EXISTS. <<< The router correctly\n"
-            f"  refuses every `gh` call without it — and, per the invocation regex's\n"
-            f"  known false positives, every command that merely QUOTES one.",
+            f"  refuses every real `gh` call without it. A quoted mention of gh is not\n"
+            f"  one of those calls (card #1340).",
             file=sys.stderr)
         return 1
 
