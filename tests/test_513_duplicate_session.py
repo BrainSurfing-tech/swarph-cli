@@ -182,16 +182,46 @@ def test_a_pid_leaving_ps_is_not_a_confirmed_exit(monkeypatch):
     assert closes == []
 
 
-def test_a_quiet_non_monitor_raises_the_alarm(monkeypatch):
+def test_a_one_shot_is_not_a_duplicate_and_a_resident_is(monkeypatch):
     board = _Board()
     monkeypatch.setattr(ds.urllib.request, "urlopen", board.handle)
     monkeypatch.setattr(ds, "ps_entries", lambda: [
         (100, _monitor("opencode")),
-        (200, ["swarph", "mesh", "inbox", "--as", "opencode"]),
+        (200, ["swarph", "mesh", "wait", "--as", "opencode"]),
+        (201, ["swarph", "mesh", "send", "--as", "opencode"]),
+        (202, ["swarph", "board", "obligations", "list", "--as", "opencode"]),
+        (203, ["swarph", "mcp-server", "--as", "opencode"]),
+        (204, ["swarph", "channel-serve", "--as", "opencode"]),
+        (205, ["python3", "-m", "swarph_desktop", "--as", "opencode"]),
     ])
-    assert ds.check(_State(), my_pid=100) == [200]
-    asks = [c for c in board.calls if c[0] == "POST" and c[1].endswith("/ask")]
-    assert len(asks) == 1
+    assert ds.check(_State(), my_pid=100) == [203, 204, 205]
+
+
+def test_a_long_poll_still_wakes_within_90_seconds(monkeypatch):
+    import swarph_cli.commands.mesh as mesh
+
+    slept = []
+    monkeypatch.setattr(mesh.time, "sleep", lambda seconds: slept.append(seconds))
+
+    class _S:
+        shutdown_requested = False
+        log_prefix = "t"
+        self_name = "opencode"
+        sinks = []
+        gateway = "http://127.0.0.1:9"
+        token = "t"
+        state_dir = "/tmp"
+        poll_s = 300
+        disconnect_since = None
+        consecutive_empty = 0
+
+    def _stop(state, **kwargs):
+        state.shutdown_requested = True
+
+    monkeypatch.setattr(mesh, "_monitor_iteration", _stop)
+    mesh._monitor_loop(_S())
+    assert slept
+    assert slept[0] <= 90
 
 
 def test_the_alarm_names_a_fresh_instance_id(monkeypatch):

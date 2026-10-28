@@ -41,6 +41,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -127,16 +128,69 @@ def duplicate_monitor_pids(entries, cell: str, my_pid: int) -> list[int]:
     return sorted(found)
 
 
-def is_session_for(argv, cell: str) -> bool:
-    """True iff argv is a swarph process that names `cell`, monitor or not.
+# Card #1331 rework. A session is a long-running resident. A one-shot
+# (`mesh wait`, `mesh send`, `board ...`) names the cell and then exits;
+# counting it raises the alarm for a process that is already gone.
+_RESIDENT_VERBS = frozenset({"mcp-server", "channel-serve", "daemon"})
+CLAIM_INTERVAL = 90
 
-    Card #1331. A quiet `swarph mesh inbox --as <cell>` is a second session.
+
+def _is_desktop_daemon(parts: list[str]) -> bool:
+    for part in parts:
+        base = os.path.basename(str(part))
+        if base in {"swarph-desktop", "swarph_desktop"} or str(part).endswith("swarph_desktop"):
+            return True
+    return False
+
+
+def _is_resident(parts: list[str], verb_at: int) -> bool:
+    rest = parts[verb_at + 1:]
+    if rest[:2] == ["monitor", "start"]:
+        return True
+    return bool(rest) and rest[0] in _RESIDENT_VERBS
+
+
+def is_session_for(argv, cell: str) -> bool:
+    """True iff argv is a long-running resident for `cell`.
+
+    Residents: `swarph monitor start`, `swarph mcp-server`, `swarph channel-serve`,
+    `swarph daemon`, and the desktop daemon. A one-shot is not a session.
     A process that merely quotes the command is still not the process."""
     parts = list(argv) if isinstance(argv, (list, tuple)) else str(argv).split()
+    if _is_desktop_daemon(parts) and names_cell(parts, cell):
+        return True
     i = _is_swarph_argv(parts)
     if i is None:
         return False
+    if not _is_resident(parts, i):
+        return False
     return names_cell(parts[i:], cell)
+
+
+def wake_seconds(poll_s: int) -> int:
+    """How long the monitor may sleep and still claim inside the stale window.
+    A `--poll-seconds` longer than CLAIM_INTERVAL must not win."""
+    try:
+        poll = int(poll_s)
+    except (TypeError, ValueError):
+        poll = CLAIM_INTERVAL
+    if poll < 1:
+        poll = 1
+    return min(poll, CLAIM_INTERVAL)
+
+
+def claim_if_due(state, now: "float | None" = None) -> bool:
+    """Claim when the last success is at least CLAIM_INTERVAL ago. A failed
+    claim is not recorded, so the next wake tries again."""
+    if now is None:
+        now = time.monotonic()
+    last = getattr(state, "instance_claimed_at", None)
+    if last is not None and now - last < CLAIM_INTERVAL:
+        return False
+    if not claim_instance(state.gateway, state.token, instance_id()):
+        return False
+    state.instance_claimed_at = now
+    return True
 
 
 def duplicate_session_pids(entries, cell: str, my_pid: int) -> list[int]:
