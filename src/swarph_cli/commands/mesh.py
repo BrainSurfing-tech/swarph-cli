@@ -3836,6 +3836,11 @@ def _monitor_loop(state: MonitorState) -> int:
             print(f"{state.log_prefix} iteration error: {type(exc).__name__}: {exc}",
                   file=sys.stderr)
         time.sleep(_select_next_poll_seconds(state))
+    # A clean return is this process leaving on purpose. A pid that merely
+    # disappears, or an interrupt, is not a confirmed exit.
+    from swarph_cli import duplicate_session
+    duplicate_session.confirm_exit(
+        state.gateway, state.token, duplicate_session.instance_id())
     return 0
 
 

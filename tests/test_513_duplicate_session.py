@@ -128,6 +128,8 @@ class _Board:
             self.next_id += 1
             self.rows.append(row)
             return _Resp(json.dumps({"id": row["id"]}).encode())
+        if "/process-instances" in url:
+            return _Resp(b"{}")
         if req.get_method() == "POST" and "/close" in url:
             oid = int(url.rstrip("/").split("/")[-2])
             for row in self.rows:
@@ -162,7 +164,9 @@ def test_check_raises_exactly_one_row_for_a_duplicate(monkeypatch):
     assert body["holder"] != "opencode", "a cell cannot be told what it cannot receive"
 
 
-def test_check_closes_the_row_when_the_duplicate_is_gone(monkeypatch):
+def test_a_pid_leaving_ps_is_not_a_confirmed_exit(monkeypatch):
+    """Card #1331. Disappearance used to close the alarm. It stays open.
+    Confirmed exit is a different call."""
     board = _Board()
     monkeypatch.setattr(ds.urllib.request, "urlopen", board.handle)
 
@@ -173,7 +177,36 @@ def test_check_closes_the_row_when_the_duplicate_is_gone(monkeypatch):
 
     monkeypatch.setattr(ds, "ps_entries", lambda: [(100, _monitor("opencode"))])
     assert ds.check(_State(), my_pid=100) == []
-    assert all(r["status"] == "closed" for r in board.rows)
+    assert [r["status"] for r in board.rows] == ["open"]
+    closes = [c for c in board.calls if c[0] == "POST" and "/close" in c[1]]
+    assert closes == []
+
+
+def test_a_quiet_non_monitor_raises_the_alarm(monkeypatch):
+    board = _Board()
+    monkeypatch.setattr(ds.urllib.request, "urlopen", board.handle)
+    monkeypatch.setattr(ds, "ps_entries", lambda: [
+        (100, _monitor("opencode")),
+        (200, ["swarph", "mesh", "inbox", "--as", "opencode"]),
+    ])
+    assert ds.check(_State(), my_pid=100) == [200]
+    asks = [c for c in board.calls if c[0] == "POST" and c[1].endswith("/ask")]
+    assert len(asks) == 1
+
+
+def test_the_alarm_names_a_fresh_instance_id(monkeypatch):
+    monkeypatch.setenv("SWARPH_RESUME_SESSION", "resumed-session-1331")
+    board = _Board()
+    monkeypatch.setattr(ds.urllib.request, "urlopen", board.handle)
+    monkeypatch.setattr(ds, "ps_entries", lambda: [
+        (100, _monitor("opencode")), (200, _monitor("opencode"))])
+    ds.check(_State(), my_pid=100)
+    asks = [c for c in board.calls if c[0] == "POST" and c[1].endswith("/ask")]
+    body = json.loads(asks[0][2].decode())
+    assert "instance_id=" in body["what"]
+    assert "resumed-session-1331" not in body["what"]
+    claims = [c for c in board.calls if "/process-instances/claim" in c[1]]
+    assert len(claims) == 1
 
 
 def test_check_never_kills_anything(monkeypatch):
@@ -197,6 +230,13 @@ def test_enumeration_failure_is_not_a_duplicate(monkeypatch):
 
 
 # ── the monitor loop wires it in, throttled, off the first tick ─────────────
+
+
+def test_a_clean_monitor_return_confirms_exit():
+    import inspect
+    import swarph_cli.commands.mesh as mesh
+    src = inspect.getsource(mesh._monitor_loop)
+    assert "confirm_exit" in src
 
 
 def test_the_check_is_throttled_off_the_first_tick(monkeypatch):
