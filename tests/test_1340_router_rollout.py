@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+
+import pytest
 
 from swarph_cli import gh_identity as ghid
 from swarph_cli.commands import gh_route
@@ -38,14 +41,19 @@ def test_quoted_gh_commit_is_allowed_on_an_unmapped_cell(tmp_path, monkeypatch):
 
 
 def test_missing_swarph_exits_2(tmp_path):
+    shell = shutil.which("bash") or shutil.which("sh")
+    if shell is None:
+        pytest.skip("no POSIX shell on PATH")
     script = tmp_path / "gh-identity-router.sh"
-    script.write_text(_GH_IDENTITY_ROUTER_SH, encoding="utf-8")
+    script.write_text(_GH_IDENTITY_ROUTER_SH, encoding="utf-8", newline="\n")
     script.chmod(0o755)
+    empty = tmp_path / "empty-path"
+    empty.mkdir()
     env = os.environ.copy()
-    env["PATH"] = "/usr/bin:/bin"
+    env["PATH"] = str(empty)
     proc = subprocess.run(
-        [str(script)], env=env, capture_output=True, text=True, timeout=15)
-    assert proc.returncode == 2
+        [shell, str(script)], env=env, capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 2, proc.stderr
     assert "not on PATH" in proc.stderr
 
 
