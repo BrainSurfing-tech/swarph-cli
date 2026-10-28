@@ -101,13 +101,23 @@ def _graph_steps(http_get, gateway, token, card_id, cache):
         return None
     cache[card_id] = steps
     cache[(card_id, "stage")] = body.get("stage")
+    cache[(card_id, "owner_orchestrator")] = body.get("owner_orchestrator")
+    proj_id = body.get("project_id")
+    if proj_id is None and isinstance(body.get("menu"), dict):
+        src = str(body["menu"].get("source", ""))
+        if src.startswith("project:"):
+            try:
+                proj_id = int(src.split(":", 1)[1])
+            except (ValueError, TypeError):
+                pass
+    cache[(card_id, "project_id")] = proj_id
     return steps
 
 
-def _row_findings(rows, by_id, http_get, gateway, token, now):
+def _row_findings(rows, by_id, http_get, gateway, token, now, graph_cache=None):
     """Kind (a): one finding per (open taken waiter, unsatisfied old need)."""
     out = []
-    cache = {}
+    cache = graph_cache if graph_cache is not None else {}
     for w in rows:
         if w.get("status") != "open" or not w.get("taken_at"):
             continue
@@ -159,8 +169,30 @@ def _row_findings(rows, by_id, http_get, gateway, token, now):
                 "need_id": rid,
                 "blocker": blocker,
                 "age_days": _age_days(now, changed),
+                "blocker_changed": changed,
             })
     return out
+
+
+def _blocker_sig(f):
+    if f.get("kind") == "row":
+        return [f.get("need_id"), f.get("blocker"), f.get("blocker_changed")]
+    if f.get("kind") == "pr":
+        return [f.get("blocker"), f.get("approved")]
+    return []
+
+
+def _parse_state_entry(raw):
+    if isinstance(raw, str):
+        return {"last_sent": raw, "count": 1, "blocker_sig": None, "escalated": False}
+    if isinstance(raw, dict):
+        return {
+            "last_sent": raw.get("last_sent"),
+            "count": int(raw.get("count", 0) or 0),
+            "blocker_sig": raw.get("blocker_sig"),
+            "escalated": bool(raw.get("escalated", False)),
+        }
+    return {"last_sent": None, "count": 0, "blocker_sig": None, "escalated": False}
 
 
 def _pr_findings(named, gh_prs, repos, peers, now):
@@ -235,6 +267,70 @@ def _dm_content(f):
             f"with no review row naming it. Please land it or ask for review.")
 
 
+def _escalation_dm_content(f, send_count):
+    return (
+        f"STUCK-WORK SWEEP ESCALATION: after {send_count} unanswered "
+        f"sends to blocker {f['blocker']}, row #{f['waiter_id']} "
+        f"({f['waiter']}, {f['waiter_step']}, card #{f['card_id']}) "
+        f"is still blocked on row #{f['need_id']} ({f['need']}, "
+        f"unchanged {f['age_days']}d). Escalating to project "
+        f"owner_orchestrator."
+    )
+
+
+def _card_owner_orchestrator(http_get, gateway, token, card_id, graph_cache, owner_cache):
+    if card_id in owner_cache:
+        return owner_cache[card_id]
+
+    val = graph_cache.get((card_id, "owner_orchestrator"))
+    if isinstance(val, str) and val.strip():
+        owner_cache[card_id] = val.strip()
+        return val.strip()
+
+    project_id = graph_cache.get((card_id, "project_id"))
+    if project_id is None:
+        try:
+            status, card_body = http_get(f"{gateway}/board/cards/{card_id}", token)
+        except (Exception, AssertionError):
+            status, card_body = None, None
+        if status == 200 and isinstance(card_body, dict):
+            owner = card_body.get("owner_orchestrator")
+            if isinstance(owner, str) and owner.strip():
+                owner_cache[card_id] = owner.strip()
+                return owner.strip()
+            project_id = card_body.get("project_id")
+
+    if "__projects__" in owner_cache:
+        p_status, p_body = owner_cache["__projects__"]
+    else:
+        try:
+            p_status, p_body = http_get(f"{gateway}/board/projects", token)
+        except (Exception, AssertionError):
+            p_status, p_body = None, None
+        owner_cache["__projects__"] = (p_status, p_body)
+
+    if p_status == 200:
+        rows = (p_body if isinstance(p_body, list)
+                else (p_body.get("projects", []) if isinstance(p_body, dict) else []))
+        if not isinstance(rows, list):
+            rows = []
+        if project_id is not None:
+            for r in rows:
+                if isinstance(r, dict) and (r.get("id") == project_id or str(r.get("id")) == str(project_id)):
+                    owner = r.get("owner_orchestrator")
+                    if isinstance(owner, str) and owner.strip():
+                        owner_cache[card_id] = owner.strip()
+                        return owner.strip()
+        elif len(rows) == 1 and isinstance(rows[0], dict):
+            owner = rows[0].get("owner_orchestrator")
+            if isinstance(owner, str) and owner.strip():
+                owner_cache[card_id] = owner.strip()
+                return owner.strip()
+
+    owner_cache[card_id] = None
+    return None
+
+
 def run_sweep(*, gateway, token, sender, repos, state_file, report_file,
               now, http_get, http_post, gh_prs, dry_run=False):
     """One sweep. Returns (rc, findings): rc 1 only when the board itself is
@@ -262,7 +358,8 @@ def run_sweep(*, gateway, token, sender, repos, state_file, report_file,
     except Exception:
         peers = set()
 
-    findings = _row_findings(rows, by_id, http_get, gateway, token, now)
+    graph_cache = {}
+    findings = _row_findings(rows, by_id, http_get, gateway, token, now, graph_cache=graph_cache)
     findings += _pr_findings(_named_prs(rows), gh_prs, repos, peers, now)
 
     try:
@@ -272,39 +369,111 @@ def run_sweep(*, gateway, token, sender, repos, state_file, report_file,
     except (OSError, ValueError):
         sent = {}
     now_iso = datetime.fromtimestamp(now, timezone.utc).isoformat()
-    fresh, updates = [], {}
+    fresh = []
+    parsed_entries = {}
     for f in findings:
         key = _finding_key(f)
-        try:
-            last = _parse_ts(sent.get(key))
-        except Exception:
-            last = None
+        entry = _parse_state_entry(sent.get(key))
+        sig = _blocker_sig(f)
+        if entry["blocker_sig"] is not None and entry["blocker_sig"] != sig:
+            entry = {"last_sent": None, "count": 0, "blocker_sig": sig, "escalated": False}
+        last = _parse_ts(entry["last_sent"])
         if last is not None and now - last < _RESEND_H * 3600:
             continue
         fresh.append(f)
-        updates[key] = now_iso
+        parsed_entries[key] = (entry, sig)
 
     if dry_run:
         for f in fresh:
             print("DRY " + _report_line(now_iso, f))
         return 0, fresh
 
+    owner_cache = {}
+    updates = {}
     for f in fresh:
-        # DM only a blocker with a mesh peer: pinging the waiter instead is
-        # the FAIL, and inventing a recipient for a gh login is its cousin.
-        if f["blocker"] is not None and f["blocker"] in peers:
-            status, payload = http_post(
-                f"{gateway}/messages",
-                {"from_node": sender, "to_node": f["blocker"],
-                 "kind": "fyi", "content": _dm_content(f)},
-                token)
-            if status < 200 or status >= 300:
-                detail = (payload.get("detail", "<gateway error>")
-                          if isinstance(payload, dict) else "<gateway error>")
-                print(f"swarph sweep: DM to {f['blocker']} failed "
-                      f"{status}: {detail}", file=sys.stderr)
-                continue
-        line = _report_line(now_iso, f)
+        key = _finding_key(f)
+        entry, sig = parsed_entries.get(key, (_parse_state_entry(None), _blocker_sig(f)))
+        prior_count = entry["count"]
+        escalated = entry["escalated"]
+
+        if prior_count < 3 and not escalated:
+            if f["blocker"] == sender:
+                line = _report_line(now_iso, f) + f" UNROUTED (blocker={f['blocker']} is sender)"
+                updates[key] = {
+                    "count": prior_count + 1,
+                    "last_sent": now_iso,
+                    "blocker_sig": sig,
+                    "escalated": False,
+                }
+            elif f["blocker"] is not None and f["blocker"] in peers:
+                status, payload = http_post(
+                    f"{gateway}/messages",
+                    {"from_node": sender, "to_node": f["blocker"],
+                     "kind": "fyi", "content": _dm_content(f)},
+                    token)
+                if status < 200 or status >= 300:
+                    detail = (payload.get("detail", "<gateway error>")
+                              if isinstance(payload, dict) else "<gateway error>")
+                    print(f"swarph sweep: DM to {f['blocker']} failed "
+                          f"{status}: {detail}", file=sys.stderr)
+                    continue
+                line = _report_line(now_iso, f)
+                updates[key] = {
+                    "count": prior_count + 1,
+                    "last_sent": now_iso,
+                    "blocker_sig": sig,
+                    "escalated": False,
+                }
+            else:
+                line = _report_line(now_iso, f)
+                updates[key] = {
+                    "count": prior_count + 1,
+                    "last_sent": now_iso,
+                    "blocker_sig": sig,
+                    "escalated": False,
+                }
+        elif prior_count == 3 and not escalated:
+            owner = (_card_owner_orchestrator(
+                http_get, gateway, token, f["card_id"], graph_cache, owner_cache)
+                if f.get("kind") == "row" else None)
+            if owner is None or owner == sender or owner == f["blocker"] or owner not in peers:
+                line = _report_line(now_iso, f) + (
+                    f" UNROUTED (escalation target={owner} blocker={f['blocker']} sender={sender})"
+                )
+                updates[key] = {
+                    "count": prior_count + 1,
+                    "last_sent": now_iso,
+                    "blocker_sig": sig,
+                    "escalated": True,
+                }
+            else:
+                status, payload = http_post(
+                    f"{gateway}/messages",
+                    {"from_node": sender, "to_node": owner,
+                     "kind": "fyi", "content": _escalation_dm_content(f, prior_count)},
+                    token)
+                if status < 200 or status >= 300:
+                    detail = (payload.get("detail", "<gateway error>")
+                              if isinstance(payload, dict) else "<gateway error>")
+                    print(f"swarph sweep: escalation DM to {owner} failed "
+                          f"{status}: {detail}", file=sys.stderr)
+                    continue
+                line = _report_line(now_iso, f) + f" ESCALATED to={owner} after={prior_count}"
+                updates[key] = {
+                    "count": prior_count + 1,
+                    "last_sent": now_iso,
+                    "blocker_sig": sig,
+                    "escalated": True,
+                }
+        else:
+            line = _report_line(now_iso, f)
+            updates[key] = {
+                "count": prior_count,
+                "last_sent": now_iso,
+                "blocker_sig": sig,
+                "escalated": True,
+            }
+
         print(line)
         try:
             with open(report_file, "a", encoding="utf-8") as fp:

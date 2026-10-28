@@ -56,11 +56,12 @@ def _graph(needs, stage=None):
 class _Net:
     """Fake board+gh transport. Records every call; board writes are visible."""
 
-    def __init__(self, obligations, graphs, prs, peers=("waiter", "blocker", "author")):
+    def __init__(self, obligations, graphs, prs, peers=("waiter", "blocker", "author"), owner_orchestrator="owner"):
         self.obligations = obligations
         self.graphs = graphs
         self.prs = prs
         self.peers = peers
+        self.owner_orchestrator = owner_orchestrator
         self.calls = []
         self.posts = []
 
@@ -75,6 +76,11 @@ class _Net:
             return 200, {"obligations": self.obligations}
         if url.endswith("/peers"):
             return 200, {"peers": [{"name": p} for p in self.peers]}
+        if "/board/cards/" in url and not url.endswith("/graph"):
+            cid = int(url.split("/board/cards/")[1])
+            return 200, {"id": cid, "project_id": 1}
+        if url.endswith("/board/projects"):
+            return 200, {"projects": [{"id": 1, "owner_orchestrator": self.owner_orchestrator}]}
         raise AssertionError(f"unexpected GET {url}")
 
     def http_post(self, url, body, token, timeout=10.0):
@@ -88,12 +94,15 @@ class _Net:
 
 
 def _run(net, tmp_path, **kw):
-    return sweep.run_sweep(
-        gateway="http://gw:8788", token="tok", sender="sweep",
-        repos=["o/r"], state_file=str(tmp_path / "state.json"),
-        report_file=str(tmp_path / "report.log"),
-        now=NOW, http_get=net.http_get, http_post=net.http_post,
-        gh_prs=net.gh_prs, **kw)
+    args = {
+        "gateway": "http://gw:8788", "token": "tok", "sender": "sweep",
+        "repos": ["o/r"], "state_file": str(tmp_path / "state.json"),
+        "report_file": str(tmp_path / "report.log"),
+        "now": NOW, "http_get": net.http_get, "http_post": net.http_post,
+        "gh_prs": net.gh_prs,
+    }
+    args.update(kw)
+    return sweep.run_sweep(**args)
 
 
 def _state(tmp_path):
@@ -397,4 +406,142 @@ def test_parked_and_done_card_waiter_skipped_while_build_card_fires(tmp_path):
     assert findings[0]["waiter_id"] == 8
     assert len(net_build.posts) == 1
     assert net_build.posts[0]["to_node"] == "blocker"
+
+
+def test_fourth_run_escalates_to_project_owner_and_fifth_sends_no_dm(tmp_path):
+    """Card #1335: after 3 sends with blocking row unchanged, run 4 escalates
+    to card's project owner_orchestrator once, and run 5 sends no DM."""
+    net = _Net(
+        obligations=[
+            _row(8, holder="waiter", step="validate", card_id=7, taken_days=1),
+            _row(7, holder="blocker", step="build", card_id=7, taken_days=3),
+        ],
+        graphs={7: _graph({"validate": [("build", 7, False)], "build": []}, stage="build")},
+        prs={},
+        peers=("waiter", "blocker", "author", "owner"),
+        owner_orchestrator="owner",
+    )
+    # Run 1 (now = NOW): sends 1 DM to blocker
+    rc1, findings1 = _run(net, tmp_path, now=NOW)
+    assert rc1 == 0 and len(findings1) == 1
+    assert len(net.posts) == 1
+    assert net.posts[0]["to_node"] == "blocker"
+
+    # Run 2 (now = NOW + 25h): sends 2nd DM to blocker
+    rc2, findings2 = _run(net, tmp_path, now=NOW + 25 * 3600)
+    assert rc2 == 0 and len(findings2) == 1
+    assert len(net.posts) == 2
+    assert net.posts[1]["to_node"] == "blocker"
+
+    # Run 3 (now = NOW + 50h): sends 3rd DM to blocker
+    rc3, findings3 = _run(net, tmp_path, now=NOW + 50 * 3600)
+    assert rc3 == 0 and len(findings3) == 1
+    assert len(net.posts) == 3
+    assert net.posts[2]["to_node"] == "blocker"
+
+    # Run 4 (now = NOW + 75h): sends 1 escalation DM to project owner_orchestrator
+    rc4, findings4 = _run(net, tmp_path, now=NOW + 75 * 3600)
+    assert rc4 == 0 and len(findings4) == 1
+    assert len(net.posts) == 4
+    escalation_post = net.posts[3]
+    assert escalation_post["to_node"] == "owner"
+    assert "row #8" in escalation_post["content"]
+    assert "card #7" in escalation_post["content"]
+    assert "row #7" in escalation_post["content"]
+    assert "blocker" in escalation_post["content"]
+    assert "3" in escalation_post["content"]
+
+    # Run 5 (now = NOW + 100h): sends NO DM, report.log gets 5th line
+    rc5, findings5 = _run(net, tmp_path, now=NOW + 100 * 3600)
+    assert rc5 == 0 and len(findings5) == 1
+    assert len(net.posts) == 4
+    report_lines = (tmp_path / "report.log").read_text().splitlines()
+    assert len(report_lines) == 5
+    assert "ESCALATED to=owner after=3" in report_lines[3]
+
+
+def test_blocker_change_resets_send_count(tmp_path):
+    """Card #1335: a change in the blocking row resets the send count."""
+    net = _Net(
+        obligations=[
+            _row(8, holder="waiter", step="validate", card_id=7, taken_days=1),
+            _row(7, holder="blocker", step="build", card_id=7, taken_days=3),
+        ],
+        graphs={7: _graph({"validate": [("build", 7, False)], "build": []}, stage="build")},
+        prs={},
+        peers=("waiter", "blocker", "author", "owner", "new_blocker"),
+        owner_orchestrator="owner",
+    )
+    # Runs 1-4 (reaches escalation on run 4)
+    for i in range(4):
+        _run(net, tmp_path, now=NOW + i * 25 * 3600)
+    assert len(net.posts) == 4
+    assert net.posts[3]["to_node"] == "owner"
+
+    # Run 5 (now = NOW + 100h): no DM sent
+    _run(net, tmp_path, now=NOW + 100 * 3600)
+    assert len(net.posts) == 4
+
+    # Blocker row changes (e.g. taken_at updates or holder changes on row #7)
+    net.obligations[1]["holder"] = "new_blocker"
+    net.obligations[1]["taken_at"] = _iso(NOW - 3 * 86400 + 3600)
+
+    # Run 6 (now = NOW + 125h): count resets, sends fresh DM #1 to new blocker
+    rc6, findings6 = _run(net, tmp_path, now=NOW + 125 * 3600)
+    assert rc6 == 0 and len(findings6) == 1
+    assert len(net.posts) == 5
+    assert net.posts[4]["to_node"] == "new_blocker"
+
+
+def test_blocker_equal_to_sender_or_unroutable_escalation_writes_unrouted_and_makes_no_post(tmp_path):
+    """Card #1335: never POST a DM to --as itself or unroutable escalation target,
+    writing report-only UNROUTED lines instead."""
+    # Subcase A: blocker == sender ("sweep") for row finding and PR finding
+    d_sub_a = tmp_path / "sub_a"
+    d_sub_a.mkdir(parents=True, exist_ok=True)
+    net_a = _Net(
+        obligations=[
+            _row(8, holder="waiter", step="validate", card_id=7, taken_days=1),
+            _row(7, holder="sweep", step="build", card_id=7, taken_days=3),
+        ],
+        graphs={7: _graph({"validate": [("build", 7, False)], "build": []}, stage="build")},
+        prs={"o/r": [{"number": 5, "title": "my pr",
+                      "createdAt": _iso(NOW - 21 * 86400),
+                      "reviewDecision": "APPROVED",
+                      "url": "https://github.com/o/r/pull/5",
+                      "author": {"login": "sweep"}}]},
+        peers=("waiter", "sweep", "author"),
+    )
+    rc_a, findings_a = _run(net_a, d_sub_a, now=NOW, sender="sweep")
+    assert rc_a == 0
+    assert len(findings_a) == 2
+    assert net_a.posts == []
+    report_a = (d_sub_a / "report.log").read_text()
+    assert "UNROUTED (blocker=sweep is sender)" in report_a
+
+    # Subcase B: On the 4th run, escalation target equals sender or blocker -> UNROUTED, no POST
+    for bad_owner in ("sweep", "blocker"):
+        d_sub_b = tmp_path / f"sub_b_{bad_owner}"
+        d_sub_b.mkdir(parents=True, exist_ok=True)
+        net_b = _Net(
+            obligations=[
+                _row(8, holder="waiter", step="validate", card_id=7, taken_days=1),
+                _row(7, holder="blocker", step="build", card_id=7, taken_days=3),
+            ],
+            graphs={7: _graph({"validate": [("build", 7, False)], "build": []}, stage="build")},
+            prs={},
+            peers=("waiter", "blocker", "author", "sweep"),
+            owner_orchestrator=bad_owner,
+        )
+        for i in range(3):
+            _run(net_b, d_sub_b, now=NOW + i * 25 * 3600, sender="sweep")
+        assert len(net_b.posts) == 3
+
+        # 4th run: escalation target is bad_owner -> no 4th POST, report has UNROUTED
+        rc4, findings4 = _run(net_b, d_sub_b, now=NOW + 75 * 3600, sender="sweep")
+        assert rc4 == 0 and len(findings4) == 1
+        assert len(net_b.posts) == 3
+        report_b = (d_sub_b / "report.log").read_text()
+        assert "UNROUTED" in report_b
+
 
