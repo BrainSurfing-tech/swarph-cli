@@ -334,6 +334,7 @@ command only posts the request (card #1297).
 `swarph commander ask --question "..." --options a,b --card N`
 `swarph commander request merge_pr --repo ORG/REPO --pr N --head SHA --card N`
 `swarph commander request release_finish --version V --pr N --head SHA --card N`
+`swarph commander authorization check <scope>`   # card #1300: exit 0 only while the grant is active
 
 **Obligations** exist because "waiting on a review" in someone's prose is not a fact
 anyone can query. `ask` writes a row: who owes what, since when. It closes when the holder
@@ -520,6 +521,7 @@ answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not comman
 - `swarph codex-waker` -- durable Codex App Server controller for host schedulers.
 - `swarph committee` -- the committee-room client: `motion <channel>` shows the open motion (id, phase, deadlines), `post <channel> --round positions|rebuttal|vote --body-file F [--outcome X]` posts a sealed ballot, and chair-only `rooms open`, `motion <channel> --open`, `recast`, `baseline-absent` drive the room.
 - `swarph compress` -- compress a machine-read context surface; dry-run by default.
+- `swarph commander` -- read a standing authorization the commander recorded (card #1300). `swarph commander authorization check <scope>` exits 0 when an active grant exists and prints its id, text and granted_at. A revoked or expired grant exits 1.
 - `swarph daemon` -- foreground drain loop for a cell's inbox (PLAN.md section 16).
 - `swarph dreaming` -- verify/organize/enrich a CLONE of your memory corpus between sessions; never writes the live store (`run --corpus DIR --out DIR`).
 - `swarph event` -- emit an event to a mesh channel (event chaining).
