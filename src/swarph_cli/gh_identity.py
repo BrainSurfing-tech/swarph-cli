@@ -40,6 +40,23 @@ was fixed for (_cells_on_this_box).
 release both can name a login for one cell. Picking either silently is the identity
 substitution this module exists to end, one layer up; the operator decides which is
 right and deletes the other.
+
+#1347 — KNOWN LIMITS. This is a text matcher, not a sandbox. At the shell-string
+depth cap the matcher answers True, so a deeper nest is routed or denied rather
+than skipped (#360). These idioms still do not route, on main as well as here,
+and #1346 did not introduce them:
+
+- gh after the apostrophe idiom inside a -c string:
+  bash -c 'echo it'\\''s done; gh pr view 1'
+- ANSI-C quoting: bash -c $'gh pr view 1'
+- adjacent quoted pieces: bash -c 'echo 1;'"gh pr view 1"
+- a here-string: bash <<< "gh pr view 1"
+- a pipe into a shell: echo "gh pr view 1" | bash, and the same with | sh -s
+- a backslash command word: \\gh pr list
+- $(which gh) pr list
+- g""h pr list
+- bash -c "$(echo gh) pr view 1"
+- a variable: CMD="gh pr view 1"; bash -c "$CMD"
 """
 from __future__ import annotations
 
@@ -391,9 +408,9 @@ def _mask_quoted(command: str) -> str:
 
 
 # Card #1346. A shell-executing string is command text, not a mention of gh.
-# The depth cap is the bound: a nested `bash -c` cannot recurse without limit,
-# and a hostile string returns False instead of raising. Quote masking stays
-# card #1340's: a quoted mention is still not a command word.
+# The depth cap bounds the walk. At the cap the answer is True (#1347): a False
+# there is a bypass, and a false positive only denies an unmapped cell. Quote
+# masking stays card #1340's: a quoted mention is still not a command word.
 _MAX_SHELL_DEPTH = 32
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash"})
 _GH_EXACT = re.compile(rf"{_GH_WORD}\Z")
@@ -610,7 +627,7 @@ def _targets_gh(command: str, depth: int) -> bool:
     if _GH_INVOCATION.search(visible):
         return True
     if depth >= _MAX_SHELL_DEPTH:
-        return False
+        return True
     if _quoted_gh_command_word(command, visible):
         return True
     for inner in _shell_texts(command, visible):
