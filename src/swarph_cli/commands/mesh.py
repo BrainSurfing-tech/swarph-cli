@@ -3854,10 +3854,10 @@ def _monitor_loop(state: MonitorState) -> int:
     # (SIGINT, SIGTERM, `monitor stop`) confirms the exit before we leave.
     # Raising afterwards is deliberate: a normal return makes _run_pinned
     # delete monitor.pid, and the watchdog then cannot name the supervisor.
-    import signal
     from swarph_cli import duplicate_session
     previous = _install_stop_signals(state)
     exit_signal = None
+    interrupted = False
     try:
         next_poll_at = time.monotonic()
         while not state.shutdown_requested:
@@ -3865,8 +3865,10 @@ def _monitor_loop(state: MonitorState) -> int:
                 try:
                     _monitor_iteration(state)
                 except KeyboardInterrupt:
+                    # Re-raised below, after confirm_exit. A normal return would
+                    # let _run_pinned delete monitor.pid.
                     state.shutdown_requested = True
-                    state.exit_signal = signal.SIGINT
+                    interrupted = True
                 except Exception as exc:
                     print(f"{state.log_prefix} iteration error: {type(exc).__name__}: {exc}",
                           file=sys.stderr)
@@ -3901,6 +3903,8 @@ def _monitor_loop(state: MonitorState) -> int:
             state.gateway, state.token, duplicate_session.instance_id())
         exit_signal = getattr(state, "exit_signal", None)
         _restore_stop_signals(previous)
+    if interrupted:
+        raise KeyboardInterrupt
     if exit_signal:
         raise SystemExit(128 + int(exit_signal))
     return 0
