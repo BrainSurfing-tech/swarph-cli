@@ -929,20 +929,42 @@ def _move_line(x) -> str:
     return line
 
 
-def _close_payload(outcome, evidence=None, evidence_json=None, *, opt_out=False) -> dict:
+def _close_payload(outcome, evidence=None, evidence_json=None, *, opt_out=False,
+                   usage=None) -> dict:
     """POST /board/obligations/{id}/close body (#1068): --evidence and/or
     --evidence-json, at least one. The CLI cannot know the row's stored
     accept, so it sends what it was given — the gateway requires the map
-    for a JSON pass, the string everywhere else."""
+    for a JSON pass, the string everywhere else.
+
+    Card #1277: usage is attached on every close. When the caller does not
+    pass it, it is read from this cell's transcript (or left unknown)."""
     if evidence is None and evidence_json is None:
         raise ValueError("nothing observed — pass --evidence and/or "
                          "--evidence-json")
-    p = {"outcome": outcome}
+    if usage is None:
+        from swarph_cli.commands.board_usage import read_close_usage
+        usage = read_close_usage()
+    p = {"outcome": outcome, "usage": usage}
     if evidence is not None:
         p["evidence"] = redact_text(evidence, opt_out=opt_out, caller="board.obligations.close")
     if evidence_json is not None:
         p["evidence_json"] = redact_value(evidence_json, opt_out=opt_out, caller="board.obligations.close")
     return p
+
+
+def _obligation_taken_at(gw: str, token: str, obligation_id: int):
+    """The row's taken_at, or None when the list does not show it.
+
+    The transcript sum is bounded by this instant. Without it the close
+    sends unknown rather than summing some other window."""
+    status, body = _http_get_json(
+        f"{gw}/board/obligations?obligation_id={obligation_id}", token)
+    if not (status and 200 <= status < 300) or not isinstance(body, dict):
+        return None
+    for item in body.get("obligations") or []:
+        if isinstance(item, dict) and item.get("id") == obligation_id:
+            return item.get("taken_at")
+    return None
 
 
 def _amend_payload(step=None, holder=None, accept=None, hours=None,
@@ -1277,6 +1299,13 @@ def _build_parser() -> argparse.ArgumentParser:
     ow.add_argument("--reason", required=True,
                     help="why the row is withdrawn; whitespace is refused")
     ow.add_argument("--json", action="store_true"); _add_common(ow)
+    cost = top.add_parser(
+        "cost",
+        help="tokens by job, the perfect-run rate, and cost per accepted outcome")
+    cost.add_argument("--card", type=int, default=None)
+    cost.add_argument("--since", default=None, metavar="DATE")
+    cost.add_argument("--json", action="store_true")
+    _add_common(cost)
     return p
 
 
@@ -1325,6 +1354,24 @@ def run_board(argv: list[str]) -> int:
             st, d = _post_json(f"{gw}/board/projects", _project_add_payload(self_name, args.slug, args.title, goal=args.goal, opt_out=getattr(args, "no_redact", False)), token)
             return _out(st, d, lambda x: f"created project #{x.get('id')} ({x.get('slug')})", aj)
 
+    if args.group == "cost":
+        from swarph_cli.commands.board_cost import format_cost
+        query = []
+        if getattr(args, "card", None) is not None:
+            query.append(f"card={args.card}")
+        if getattr(args, "since", None):
+            query.append("since=" + args.since)
+        url = f"{gw}/board/cost" + (("?" + "&".join(query)) if query else "")
+        st, d = _http_get_json(url, token)
+        rates = None
+        if st and 200 <= st < 300:
+            try:
+                from swarph_shared.llm_cost import fetch_price_base
+                rates = fetch_price_base()
+            except Exception:
+                rates = None
+        return _out(st, d, lambda body: format_cost(body, rates), aj)
+
     if args.group == "obligations":
         if args.command == "close":
             # #562's CLI half: the explicit close act. The gateway guards the
@@ -1341,8 +1388,12 @@ def run_board(argv: list[str]) -> int:
             try:
                 evidence_json = (_json_flag("--evidence-json", args.evidence_json)
                                  if args.evidence_json is not None else None)
+                taken_at = _obligation_taken_at(gw, token, args.id)
+                from swarph_cli.commands.board_usage import read_close_usage
+                usage = read_close_usage(agent=self_name, taken_at=taken_at)
                 payload = _close_payload(args.outcome, evidence, evidence_json,
-                                         opt_out=getattr(args, "no_redact", False))
+                                         opt_out=getattr(args, "no_redact", False),
+                                         usage=usage)
             except ValueError as exc:
                 print(f"swarph board obligations close: {exc}", file=sys.stderr)
                 return 2

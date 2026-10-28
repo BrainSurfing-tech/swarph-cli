@@ -38,8 +38,12 @@ def test_amend_payload_refuses_both_accept_forms():
 
 
 def test_close_payload_sends_map_without_string():
-    p = board._close_payload("pass", None, {"c1": "a", "c2": "b"})
-    assert p == {"outcome": "pass", "evidence_json": {"c1": "a", "c2": "b"}}
+    p = board._close_payload("pass", None, {"c1": "a", "c2": "b"},
+                             usage={"input_tokens": "unknown"})
+    assert p["outcome"] == "pass"
+    assert p["evidence_json"] == {"c1": "a", "c2": "b"}
+    assert "evidence" not in p
+    assert p["usage"]["input_tokens"] == "unknown"
 
 
 def test_close_payload_refuses_neither_evidence():

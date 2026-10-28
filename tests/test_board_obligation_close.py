@@ -33,7 +33,11 @@ def _harness(monkeypatch, tmp_path, *, status=200, payload=None):
             "close_outcome": body["outcome"],
         }
 
+    def fake_get(url, token, *, timeout=10.0):
+        return 200, {"obligations": []}
+
     monkeypatch.setattr(board, "_post_json", fake_post)
+    monkeypatch.setattr(board, "_http_get_json", fake_get)
     return captured
 
 
@@ -44,8 +48,10 @@ def test_close_posts_the_explicit_act(monkeypatch, tmp_path, capsys):
                           "--evidence", "ran the check: A and B hold"])
     assert rc == 0
     assert captured["url"].endswith("/board/obligations/22/close")
-    assert captured["body"] == {"outcome": "pass",
-                                "evidence": "ran the check: A and B hold"}
+    assert captured["body"]["outcome"] == "pass"
+    assert captured["body"]["evidence"] == "ran the check: A and B hold"
+    assert captured["body"]["usage"]["input_tokens"] == "unknown"
+    assert captured["body"]["usage"]["model"] == "unknown"
     out = capsys.readouterr().out
     assert "CLOSED" in out and "pass" in out
 
