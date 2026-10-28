@@ -546,7 +546,9 @@ def test_close_accepts_skipped(monkeypatch):
     rc = board.run_board(["obligations", "close", "5", "--outcome", "skipped",
                           "--evidence", "optional step, not needed on this card"])
     assert rc == 0
-    assert calls[0][2]["outcome"] == "skipped"
+    posted = [call for call in calls if call[0] == "POST"]
+    assert posted[0][2]["outcome"] == "skipped"
+    assert posted[0][2]["usage"]["tokens_in"] == "unknown"
 
 
 def test_move_dispatch_prints_gate_warn(monkeypatch, capsys):
