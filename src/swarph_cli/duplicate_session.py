@@ -168,8 +168,10 @@ def is_session_for(argv, cell: str) -> bool:
 
 
 def wake_seconds(poll_s: int) -> int:
-    """How long the monitor may sleep and still claim inside the stale window.
-    A `--poll-seconds` longer than CLAIM_INTERVAL must not win."""
+    """The longest one sleep slice may be and still claim inside the stale window.
+
+    This caps a slice. It does not decide when the inbox poll runs: that
+    deadline stays `--poll-seconds` or the outage backoff."""
     try:
         poll = int(poll_s)
     except (TypeError, ValueError):

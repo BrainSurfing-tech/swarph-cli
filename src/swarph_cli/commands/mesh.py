@@ -3816,6 +3816,31 @@ def _maybe_duplicate_check(state: MonitorState) -> None:
     duplicate_session.check(state)
 
 
+def _install_stop_signals(state: MonitorState) -> dict:
+    """SIGINT and SIGTERM ask the loop to leave. The caller confirms the exit
+    on the way out and then restores whatever handlers were already installed."""
+    import signal
+
+    previous = {
+        signal.SIGINT: signal.getsignal(signal.SIGINT),
+        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+    }
+
+    def _handler(signum, frame):  # noqa: ARG001
+        state.shutdown_requested = True
+        state.exit_signal = signum
+
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
+    return previous
+
+
+def _restore_stop_signals(previous: dict) -> None:
+    import signal
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
 def _monitor_loop(state: MonitorState) -> int:
     print(
         f"{state.log_prefix} starting self={state.self_name} "
@@ -3823,28 +3848,61 @@ def _monitor_loop(state: MonitorState) -> int:
         f"gateway={state.gateway} state={state.state_dir}",
         flush=True,
     )
-    while not state.shutdown_requested:
-        try:
-            _monitor_iteration(state)
-        except KeyboardInterrupt:
-            # An interrupt during an iteration is not a clean return. Swallowing
-            # it and returning 0 made _run_pinned delete monitor.pid, so the
-            # watchdog then reported the cell unsupervised.
-            state.shutdown_requested = True
-            raise
-        except Exception as exc:
-            print(f"{state.log_prefix} iteration error: {type(exc).__name__}: {exc}",
-                  file=sys.stderr)
-        # Card #1331. The claim has to land inside half the 180s stale window
-        # even when --poll-seconds is longer than that.
-        from swarph_cli import duplicate_session
-        duplicate_session.claim_if_due(state)
-        time.sleep(duplicate_session.wake_seconds(_select_next_poll_seconds(state)))
-    # A clean return is this process leaving on purpose. A pid that merely
-    # disappears, or an interrupt, is not a confirmed exit.
+    # Card #1331. Two clocks. The inbox poll keeps the deadline from
+    # --poll-seconds or the outage backoff. The claim wakes on a slice of at
+    # most 90s, including while that deadline is still in the future. A stop
+    # (SIGINT, SIGTERM, `monitor stop`) confirms the exit before we leave.
+    # Raising afterwards is deliberate: a normal return makes _run_pinned
+    # delete monitor.pid, and the watchdog then cannot name the supervisor.
+    import signal
     from swarph_cli import duplicate_session
-    duplicate_session.confirm_exit(
-        state.gateway, state.token, duplicate_session.instance_id())
+    previous = _install_stop_signals(state)
+    exit_signal = None
+    try:
+        next_poll_at = time.monotonic()
+        while not state.shutdown_requested:
+            if time.monotonic() >= next_poll_at:
+                try:
+                    _monitor_iteration(state)
+                except KeyboardInterrupt:
+                    state.shutdown_requested = True
+                    state.exit_signal = signal.SIGINT
+                except Exception as exc:
+                    print(f"{state.log_prefix} iteration error: {type(exc).__name__}: {exc}",
+                          file=sys.stderr)
+                if state.shutdown_requested:
+                    break
+                delay = _select_next_poll_seconds(state)
+                try:
+                    delay = int(delay)
+                except (TypeError, ValueError):
+                    delay = state.poll_s
+                if delay < 1:
+                    delay = 1
+                next_poll_at = time.monotonic() + delay
+            if state.shutdown_requested:
+                break
+            duplicate_session.claim_if_due(state)
+            if state.shutdown_requested:
+                break
+            remaining = next_poll_at - time.monotonic()
+            # At most 90s before the next claim, but in 1s steps so SIGINT /
+            # SIGTERM (which only set a flag; PEP 475 finishes the current
+            # sleep) are noticed before the process leaves.
+            slice_s = duplicate_session.wake_seconds(
+                remaining if remaining > 0 else duplicate_session.CLAIM_INTERVAL)
+            slept = 0.0
+            while slept < slice_s and not state.shutdown_requested:
+                step = min(1.0, slice_s - slept)
+                time.sleep(step)
+                slept += step
+    finally:
+        duplicate_session.confirm_exit(
+            state.gateway, state.token, duplicate_session.instance_id())
+        exit_signal = getattr(state, "exit_signal", None)
+        _restore_stop_signals(previous)
+    if exit_signal:
+        raise SystemExit(128 + int(exit_signal))
     return 0
 
 
