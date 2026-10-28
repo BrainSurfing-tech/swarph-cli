@@ -64,8 +64,24 @@ def _cache_parts(usage: dict):
     return None, None, None
 
 
+def _response_key(rec, message):
+    """One Claude response is (message.id, requestId). Lines without an id stay separate."""
+    mid = message.get("id") if isinstance(message, dict) else None
+    if not isinstance(mid, str) or not mid:
+        return None
+    req = rec.get("requestId")
+    if not isinstance(req, str) or not req:
+        req = None
+    return (mid, req)
+
+
 def sum_transcript(lines, taken_at, now) -> dict:
-    """Sum one session's usage objects inside [taken_at, now]."""
+    """Sum one session's usage objects inside [taken_at, now].
+
+    Claude Code writes one JSONL line per content block and repeats the
+    whole usage on each. A response is counted once, keyed by message id
+    and request id. Thinking is stored and is not a separate total.
+    """
     start = _parse_time(taken_at)
     end = _parse_time(now)
     totals = {name: 0 for name in _COUNT_FIELDS}
@@ -76,6 +92,7 @@ def sum_transcript(lines, taken_at, now) -> dict:
     split_gap = flat_gap = False
     models = []
     counted = 0
+    seen_responses = set()
     for line in lines:
         try:
             rec = json.loads(line)
@@ -90,6 +107,11 @@ def sum_transcript(lines, taken_at, now) -> dict:
         usage = message.get("usage") if isinstance(message, dict) else None
         if not isinstance(usage, dict):
             continue
+        key = _response_key(rec, message if isinstance(message, dict) else {})
+        if key is not None:
+            if key in seen_responses:
+                continue
+            seen_responses.add(key)
         counted += 1
         model = message.get("model") if isinstance(message, dict) else None
         if isinstance(model, str) and model.strip():
@@ -315,6 +337,23 @@ def _blank(agent: str) -> dict:
     }
 
 
+def _session_lines(path: Path) -> list[str]:
+    """The session file plus that session's subagents/*.jsonl."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    folder = path.with_suffix("") / "subagents"
+    if not folder.is_dir():
+        return lines
+    for child in sorted(folder.glob("*.jsonl")):
+        try:
+            lines.extend(child.read_text(encoding="utf-8").splitlines())
+        except OSError:
+            continue
+    return lines
+
+
 def read_close_usage(agent=None, taken_at=None, now=None, env=None) -> dict:
     """Usage for one close. wall_s stays unknown: the gateway measures it."""
     env = os.environ if env is None else env
@@ -330,9 +369,8 @@ def read_close_usage(agent=None, taken_at=None, now=None, env=None) -> dict:
         found = _blank(who)
         found["model"] = _lane_model(env, taken_at, now)
         return found
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    lines = _session_lines(path)
+    if not lines and not path.is_file():
         return _blank(who)
     summed = sum_transcript(lines, taken_at, now)
     summed["agent"] = who or "unknown"

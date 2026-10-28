@@ -5,15 +5,17 @@ totals. It is never treated as zero.
 """
 from __future__ import annotations
 
-_ALWAYS = ("input_tokens", "output_tokens", "cache_read_tokens", "thinking")
-_JOBS = ("execute", "grade", "advise", "rework")
+_ALWAYS = ("input_tokens", "output_tokens", "cache_read_tokens")
+_JOBS = ("execute", "grade", "advise", "rework", "other")
 _GRADE = {"validate", "plan-review", "second-seat", "spec-review"}
 
 
 def job_of(row) -> str | None:
     if row.get("rework") or row.get("step") == "rework":
         return "rework"
-    step = row.get("step") or ""
+    step = row.get("step")
+    if step is None or step == "":
+        return "other"
     if step == "build":
         return "execute"
     if step in _GRADE:
@@ -32,6 +34,7 @@ def _as_int(value):
 def token_total(usage):
     """Sum the fields that were read. Unknown is not zero.
 
+    Thinking is a breakdown of output_tokens and is not added again.
     A cache split that was read is the cache total. A flat
     cache_creation with no split is the total instead. Having neither
     makes the row unknown."""
@@ -190,4 +193,7 @@ def format_cost(report: dict, rates=None) -> str:
         shown = int(total_usd) if total_usd == int(total_usd) else total_usd
         note = " (unsplit cache priced at the 5m rate)" if underestimated else ""
         lines.append(f"usd: {shown}{note}")
+    lines.append(
+        "sub-agent spend: included in each close "
+        "(that session's subagents, each response once)")
     return "\n".join(lines)

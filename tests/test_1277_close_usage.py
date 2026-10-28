@@ -13,7 +13,8 @@ from swarph_cli.commands.board_usage import read_close_usage
 
 
 def _line(ts, tokens_in, cache_read, tokens_out, thinking, *,
-          one_h=None, five=None, flat=None, model="claude-sonnet-5"):
+          one_h=None, five=None, flat=None, model="claude-sonnet-5",
+          message_id=None, request_id=None):
     usage = {
         "input_tokens": tokens_in,
         "cache_read_input_tokens": cache_read,
@@ -27,10 +28,13 @@ def _line(ts, tokens_in, cache_read, tokens_out, thinking, *,
         }
     elif flat is not None:
         usage["cache_creation_input_tokens"] = flat
-    return json.dumps({
-        "timestamp": ts,
-        "message": {"model": model, "usage": usage},
-    })
+    message = {"model": model, "usage": usage}
+    if message_id is not None:
+        message["id"] = message_id
+    rec = {"timestamp": ts, "message": message}
+    if request_id is not None:
+        rec["requestId"] = request_id
+    return json.dumps(rec)
 
 
 def _layout(tmp_path, files):
@@ -194,11 +198,13 @@ def test_cost_on_a_card_with_a_fail_and_a_rework():
     assert "execute: 130 tokens" in text
     assert "grade: 10 tokens" in text
     assert "advise: 0 tokens" in text
-    assert "rework: 60 tokens" in text
+    assert "rework: 50 tokens" in text
+    assert "other: 0 tokens" in text
     assert "FAIL: 1" in text
     assert "reworks: 1" in text
     assert "perfect-run rate: 0/1" in text
-    assert "cost per accepted outcome: 200/1" in text
+    assert "cost per accepted outcome: 190/1" in text
+    assert "sub-agent spend: included" in text
     assert "cost per perfect run: no perfect runs (0)" in text
     assert "unknown rows: 0" in text
     assert "later-fix=#12" in text
@@ -221,6 +227,75 @@ def test_an_unknown_row_is_excluded_from_the_cost_not_counted_as_zero():
     assert "perfect-run rate: 1/1" in text
     assert "usd: unknown" in text
     assert "0 tokens/card" not in text
+
+
+def test_three_lines_of_one_message_count_once(tmp_path):
+    block = _line(
+        "2026-10-28T01:00:00Z", 100, 4, 3, 6,
+        one_h=5, five=1, message_id="msg-1", request_id="req-1",
+    )
+    env = _layout(tmp_path, {"own-session.jsonl": (block + "\n") * 3})
+    env["CLAUDE_SESSION_ID"] = "own-session"
+    usage = read_close_usage(agent="cursor-lin", env=env,
+                             taken_at=env["SWARPH_USAGE_TAKEN_AT"],
+                             now=env["SWARPH_USAGE_NOW"])
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 3
+    assert usage["cache_read_tokens"] == 4
+    assert usage["thinking"] == 6
+    assert usage["input_tokens"] != 300
+
+
+def test_thinking_is_not_added_to_the_token_total():
+    report = {
+        "window": {"card": 10, "since": "2026-10-28", "until": "2026-10-28T16:00:00+00:00"},
+        "later_fix": {},
+        "closes": [
+            {"card_id": 10, "step": "build", "outcome": "pass", "rework": False,
+             "stage": "done", "usage": _known(
+                 input_tokens=10, output_tokens=4, cache_read_tokens=1,
+                 cache_creation_1h_tokens=0, cache_creation_5m_tokens=0, thinking=9)},
+        ],
+    }
+    text = format_cost(report)
+    assert "execute: 15 tokens" in text
+    assert "execute: 24 tokens" not in text
+
+
+def test_an_unstepped_row_is_other():
+    report = {
+        "window": {"card": 10, "since": None, "until": "2026-10-28T16:00:00+00:00"},
+        "later_fix": {},
+        "closes": [
+            {"card_id": 10, "step": None, "outcome": "pass", "rework": False,
+             "stage": "done", "usage": _known(input_tokens=7)},
+        ],
+    }
+    text = format_cost(report)
+    assert "other: 7 tokens" in text
+    assert "execute: 0 tokens" in text
+
+
+def test_a_subagent_file_is_counted_once(tmp_path):
+    main = _line(
+        "2026-10-28T01:00:00Z", 10, 1, 1, 1,
+        one_h=1, five=1, message_id="msg-main", request_id="req-main",
+    )
+    nested = _line(
+        "2026-10-28T01:05:00Z", 7, 1, 1, 1,
+        one_h=1, five=1, message_id="msg-sub", request_id="req-sub",
+    )
+    env = _layout(tmp_path, {"own-session.jsonl": main + "\n"})
+    folder = Path(env["HOME"]) / ".claude" / "projects" / "-work-cell" / "own-session" / "subagents"
+    folder.mkdir(parents=True)
+    (folder / "agent-a.jsonl").write_text((nested + "\n") * 3)
+    env["CLAUDE_SESSION_ID"] = "own-session"
+    usage = read_close_usage(agent="cursor-lin", env=env,
+                             taken_at=env["SWARPH_USAGE_TAKEN_AT"],
+                             now=env["SWARPH_USAGE_NOW"])
+    assert usage["input_tokens"] == 17
+    assert usage["input_tokens"] != 10
+    assert usage["input_tokens"] != 31
 
 
 def test_cost_command_parses():
