@@ -6,12 +6,13 @@ drained on their own within 7-25 min. The first alert waits 60 ticks (30 min
 at the 30s poll) so a long build is not paged at 3 min.
 
 Card #989: the surface is one obligation, never a DM to commander by default.
-Card #1135 (commander, 2026-10-14 08:30Z, restated in the 2026-10-23 triage):
-the row is held by the stalled cell, and the timeout escalates to that cell's
-responsible peer. lab-ovh is not the default recipient. lab-ovh's own stall is
-the exception: it is held by the other orchestrator. A second stall tick while
-the row is open opens nothing new. A drain closes it. Fail-safe: a failed POST
-never raises and never blocks delivery."""
+Card #1135: the row is held by the stalled cell. A valid responsible: key
+escalates to that peer within 2h. An unset, unreadable, or self-naming key
+escalates to lab-ovh within 2h (commander ruling 71915, applied 2026-10-28).
+lab-ovh's own stall is the exception: it is held by the other orchestrator
+and does not escalate to itself. A second stall tick while the row is open
+opens nothing new. A drain closes it. Fail-safe: a failed POST never raises
+and never blocks delivery."""
 from __future__ import annotations
 
 import json
@@ -31,10 +32,10 @@ _OTHER = "drop-on-meta-edge"
 # Card #1135. The `responsible:` key in the cell's OWN yaml names who the
 # timeout escalates to. This daemon runs inside the stalled cell, so that
 # yaml is local. claude_peers.owner is a Meta-Edge USER id, a person, and is
-# deliberately never read. An unset, unreadable, or self-naming key does not
-# escalate to lab-ovh: lab-ovh is not the default recipient.
+# deliberately never read. An unset, unreadable, or self-naming key escalates
+# to RESPONSIBLE_FOR_OWNERLESS (ruling 71915). One constant, not a second path.
 RESPONSIBLE_YAML_KEY = "responsible"
-RESPONSIBLE_FOR_OWNERLESS = "lab-ovh"  # not a recipient; lab-ovh is not the default
+RESPONSIBLE_FOR_OWNERLESS = "lab-ovh"
 # (2) Whether the commander also gets a copy at the first alert. Card #989: a DM
 #     to the commander is not a reminder, so the default is no.
 COMMANDER_COPY = False
@@ -138,15 +139,20 @@ def _holder_for(self_name: str) -> str:
 
 
 def _escalation_for(holder: str, self_name: str) -> str | None:
-    """The timeout target: the cell's responsible peer, or None.
+    """The timeout target: the responsible peer, else the one constant.
 
-    None when the key is unset, unreadable, names the holder, or names the
-    stalled cell. An absent key does not escalate to lab-ovh. A None here
-    omits timeout_hours, and the gateway never sweeps a null timeout_at."""
+    A valid responsible: key that names neither the holder nor the stalled
+    cell is the target. An unset, unreadable, or self-naming key escalates
+    to RESPONSIBLE_FOR_OWNERLESS, unless that constant is the holder or the
+    stalled cell (lab-ovh's own stall is already held by someone else). A
+    None here omits timeout_hours, and the gateway never sweeps a null
+    timeout_at."""
     responsible = _responsible_from_yaml(self_name)
-    if not responsible or responsible in (holder, self_name):
-        return None
-    return responsible
+    if responsible and responsible not in (holder, self_name):
+        return responsible
+    if RESPONSIBLE_FOR_OWNERLESS not in (holder, self_name):
+        return RESPONSIBLE_FOR_OWNERLESS
+    return None
 
 
 def pending_count(entries, self_name: str) -> int:
@@ -212,12 +218,12 @@ def send_stall_alert(gateway: str, token: str, self_name: str,
                      count: int, pending_n: int) -> bool:
     """Open one obligation on card #989 held by the stalled cell.
 
-    The timeout, when the cell has a responsible peer, escalates to that
-    peer. lab-ovh is not the default. True when that row is open (newly or
-    already). False on any error, including a holder the gateway refuses:
-    that refusal is not rerouted to lab-ovh, so the next tick can try again.
-    Never raises. DMs the commander only when COMMANDER_COPY is on. A second
-    call while the row is open opens nothing."""
+    The timeout escalates to the cell's responsible peer, or to lab-ovh when
+    that key is unset, unreadable, or names the cell. True when that row is
+    open (newly or already). False on any error, including a holder the
+    gateway refuses: that refusal is not retried, so the next tick can try
+    again. Never raises. DMs the commander only when COMMANDER_COPY is on.
+    A second call while the row is open opens nothing."""
     try:
         gateway = gateway.rstrip("/")
         if _live(gateway, token, self_name):

@@ -130,10 +130,10 @@ def test_stall_opens_one_obligation_held_by_the_stalled_cell(monkeypatch):
     assert "ticks=12" in body["what"]
     assert "pending_dms=3" in body["what"]
     assert "commander" not in json.dumps(body)
-    assert "fallback_target" not in body
-    assert "timeout_hours" not in body
+    assert body["fallback_target"] == "lab-ovh"
+    assert body["timeout_hours"] == 2
     assert body["holder"] != "lab-ovh"
-    assert board.rows[0]["timeout_at"] is None
+    assert board.rows[0]["timeout_at"] is not None
     assert all("/messages" not in c[1] for c in board.calls)
 
 
@@ -204,8 +204,8 @@ def _ask_body(board):
 
 
 def test_first_alert_names_the_stalled_cell_and_notifies_its_responsible_peer(monkeypatch):
-    """With no responsible peer, the row is held by the stalled cell and does
-    not escalate to lab-ovh. The yaml case is the card #1135 test below."""
+    """With no responsible peer, the row is held by the stalled cell and
+    escalates to lab-ovh within 2h. The yaml case is the card #1135 test below."""
     board = _Board()
     monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.is_alert_tick(60) is True
@@ -215,18 +215,21 @@ def test_first_alert_names_the_stalled_cell_and_notifies_its_responsible_peer(mo
     assert body["created_by"] == "cursor-win"
     assert "cell=cursor-win " in body["what"] and "cell=cursor-win " in body["accept"]
     assert body["holder"] != "lab-ovh"
-    assert "fallback_target" not in body
-    assert "timeout_hours" not in body
+    assert body["fallback_target"] == "lab-ovh"
+    assert body["timeout_hours"] == 2
 
 
 def test_responsible_peer_is_the_one_constant(monkeypatch):
-    """An ownerless stall is held by the cell. Flipping the old lab-ovh
-    constant does not move the holder and does not create an escalation."""
+    """An ownerless stall is held by the cell. The one constant is who the
+    timeout escalates to, so flipping it moves that target and not the holder."""
     assert st.RESPONSIBLE_FOR_OWNERLESS == "lab-ovh"
     board = _Board()
     monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
-    assert _ask_body(board)["holder"] == "cell-x"
+    body = _ask_body(board)
+    assert body["holder"] == "cell-x"
+    assert body["fallback_target"] == "lab-ovh"
+    assert body["timeout_hours"] == 2
 
     board2 = _Board()
     monkeypatch.setattr(st.urllib.request, "urlopen", board2.handle)
@@ -234,7 +237,8 @@ def test_responsible_peer_is_the_one_constant(monkeypatch):
     assert st.send_stall_alert("http://gw", "tok", "cell-y", 60, 1) is True
     body = _ask_body(board2)
     assert body["holder"] == "cell-y"
-    assert "fallback_target" not in body
+    assert body["fallback_target"] == "science-claude"
+    assert body["timeout_hours"] == 2
 
 
 def test_commander_copy_is_off_by_default_and_one_constant(monkeypatch):
@@ -321,14 +325,19 @@ def test_responsible_key_in_own_yaml_is_the_holder_at_the_first_alert(monkeypatc
     assert body["timeout_hours"] == 2
 
 
+def _assert_falls_back(body, cell="cell-x"):
+    assert body["holder"] == cell
+    assert body["fallback_target"] == st.RESPONSIBLE_FOR_OWNERLESS
+    assert body["fallback_target"] != cell
+    assert body["timeout_hours"] == st._TIMEOUT_HOURS
+
+
 def test_responsible_key_unset_falls_back_to_the_constant(monkeypatch, _isolated_cells_dir):
     _cell_yaml(_isolated_cells_dir, "cell-x", "name: cell-x\ngithub: someone\n")   # a yaml, no key
     board = _Board()
     monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
-    body = _ask_body(board)
-    assert body["holder"] == "cell-x"
-    assert "fallback_target" not in body
+    _assert_falls_back(_ask_body(board))
 
 
 def test_unreadable_yaml_falls_back_to_the_constant(monkeypatch, _isolated_cells_dir):
@@ -336,8 +345,7 @@ def test_unreadable_yaml_falls_back_to_the_constant(monkeypatch, _isolated_cells
     board = _Board()
     monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
-    assert _ask_body(board)["holder"] == "cell-x"
-    assert "fallback_target" not in _ask_body(board)
+    _assert_falls_back(_ask_body(board))
 
 
 def test_no_yaml_for_the_cell_falls_back_to_the_constant(monkeypatch, _isolated_cells_dir):
@@ -346,8 +354,7 @@ def test_no_yaml_for_the_cell_falls_back_to_the_constant(monkeypatch, _isolated_
     monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
     body = _ask_body(board)
-    assert body["holder"] == "cell-x"       # another cell's key is not this cell's
-    assert "fallback_target" not in body
+    _assert_falls_back(body)       # another cell's key is not this cell's
 
 
 def test_responsible_naming_the_cell_itself_falls_back_to_the_constant(monkeypatch, _isolated_cells_dir):
@@ -355,9 +362,29 @@ def test_responsible_naming_the_cell_itself_falls_back_to_the_constant(monkeypat
     board = _Board()
     monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
-    body = _ask_body(board)
-    assert body["holder"] == "cell-x"
-    assert "fallback_target" not in body
+    _assert_falls_back(_ask_body(board))
+
+
+def test_three_key_states_each_reach_another_party(monkeypatch, _isolated_cells_dir):
+    """Card #1135. Valid key, unset or unreadable, and a self-naming key.
+    Each row is held by the stalled cell and names another party within 2h.
+    Red at 5142c65, where an absent or self-naming key sets no fallback."""
+    cases = (
+        ("name: cell-x\nresponsible: workstation-lc\n", "workstation-lc"),
+        ("name: cell-x\ngithub: someone\n", "lab-ovh"),
+        ("name: [unterminated\n  responsible: {\n", "lab-ovh"),
+        ("name: cell-x\nresponsible: cell-x\n", "lab-ovh"),
+    )
+    for text, target in cases:
+        (_isolated_cells_dir / "cell-x.yaml").write_text(text, encoding="utf-8")
+        board = _Board()
+        monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
+        assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
+        body = _ask_body(board)
+        assert body["holder"] == "cell-x"
+        assert body["fallback_target"] == target
+        assert body["fallback_target"] != body["holder"]
+        assert body["timeout_hours"] == 2
 
 
 def test_lab_ovh_own_stall_ignores_a_responsible_key(monkeypatch, _isolated_cells_dir):
@@ -377,8 +404,7 @@ def test_a_value_that_is_not_a_peer_name_falls_back(monkeypatch, _isolated_cells
     monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
     body = _ask_body(board)
-    assert body["holder"] == "cell-x"
-    assert "fallback_target" not in body
+    _assert_falls_back(body)
 
 
 def test_yaml_claims_takes_a_key_and_the_default_is_unchanged(_isolated_cells_dir):
@@ -483,6 +509,8 @@ def test_no_minted_row_escalates_to_its_own_holder(monkeypatch, _isolated_cells_
         assert row["holder"] == cell
     if responsible and responsible not in (row["holder"], cell):
         assert row["fallback_target"] == responsible
+    elif st.RESPONSIBLE_FOR_OWNERLESS not in (row["holder"], cell):
+        assert row["fallback_target"] == st.RESPONSIBLE_FOR_OWNERLESS
     else:
         assert row["fallback_target"] is None
 
@@ -509,9 +537,9 @@ def test_lab_ovh_own_stall_mints_one_row_held_by_drop_with_no_timeout(monkeypatc
     assert board.rows[0]["fallback_target"] is None
 
 
-def test_drop_own_stall_has_no_escalation_either(monkeypatch, _isolated_cells_dir):
-    """drop-on-meta-edge stalled: the cell holds its own row. With no
-    responsible peer there is no escalation, and lab-ovh is not the holder."""
+def test_drop_own_stall_escalates_to_lab_ovh(monkeypatch, _isolated_cells_dir):
+    """drop-on-meta-edge stalled: the cell holds its own row, and with no
+    responsible peer the timeout escalates to lab-ovh. lab-ovh is not the holder."""
     import json
     board = _Board()
     monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
@@ -519,7 +547,8 @@ def test_drop_own_stall_has_no_escalation_either(monkeypatch, _isolated_cells_di
     body = json.loads(_asks(board)[0][2].decode())
     assert body["holder"] == "drop-on-meta-edge"
     assert body["holder"] != "lab-ovh"
-    assert "timeout_hours" not in body and "fallback_target" not in body
+    assert body["fallback_target"] == "lab-ovh"
+    assert body["timeout_hours"] == 2
 
 
 def test_every_other_case_still_escalates_with_a_2h_timeout(monkeypatch, _isolated_cells_dir):
@@ -531,7 +560,7 @@ def test_every_other_case_still_escalates_with_a_2h_timeout(monkeypatch, _isolat
     assert st.send_stall_alert("http://gw", "tok", "cell-y", 60, 1) is True
     plain = json.loads(_asks(board)[0][2].decode())
     assert plain["holder"] == "cell-y"
-    assert "fallback_target" not in plain and "timeout_hours" not in plain
+    assert plain["fallback_target"] == "lab-ovh" and plain["timeout_hours"] == 2
     board = _Board()
     monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
@@ -571,8 +600,8 @@ def test_the_three_refusal_codes_do_not_reroute_to_lab_ovh(monkeypatch, _isolate
 
 def test_card_1135_stall_is_held_by_the_cell_and_escalates_to_its_responsible_peer(
         monkeypatch, _isolated_cells_dir):
-    """Commander triage 2026-10-23. The row is held by the stalled cell.
-    The timeout escalates to that cell's responsible peer, not to lab-ovh."""
+    """The row is held by the stalled cell. A valid responsible: key
+    escalates to that peer. With no key the timeout escalates to lab-ovh."""
     _cell_yaml(_isolated_cells_dir, "cursor-win",
                "name: cursor-win\nresponsible: workstation-lc\n")
     board = _Board()
@@ -591,8 +620,8 @@ def test_card_1135_stall_is_held_by_the_cell_and_escalates_to_its_responsible_pe
     body2 = _ask_body(board2)
     assert body2["holder"] == "cell-x"
     assert body2["holder"] != "lab-ovh"
-    assert "fallback_target" not in body2
-    assert "timeout_hours" not in body2
+    assert body2["fallback_target"] == "lab-ovh"
+    assert body2["timeout_hours"] == 2
 
 
 def test_lab_ovh_stall_with_drop_refused_is_one_post_false_and_no_row(monkeypatch, _isolated_cells_dir):
