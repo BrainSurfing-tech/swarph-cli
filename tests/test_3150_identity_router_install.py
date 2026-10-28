@@ -2,7 +2,14 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from swarph_cli.commands.hooks import RECOMMENDED_HOOKS, _load_settings, init_hooks
+
+
+@pytest.fixture(autouse=True)
+def _doctor_allows_the_router(monkeypatch):
+    monkeypatch.setattr("swarph_cli.commands.gh_route.run_doctor", lambda: 0)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -33,3 +40,5 @@ def test_plugin_hooks_config_names_the_identity_router():
     assert binding["matcher"] == "Bash"
     command = binding["hooks"][0]["command"]
     assert command == "swarph gh-route hook"
+    start = cfg["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert start == "swarph gh-route doctor"
