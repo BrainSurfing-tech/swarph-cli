@@ -273,6 +273,36 @@ def test_only_the_commander_can_drop_a_question():
     assert cleared == []
 
 
+def test_a_tappable_commander_row_whose_accept_says_deploy_is_not_in_session():
+    """card #1333 — a commander row with taps closes only by a tap.
+
+    The accept can contain "deploy" and the row is still not in-session.
+    An untappable row whose accept contains "deploy" stays in-session.
+    """
+    sys.path.insert(0, str(SCRIPT.parent))
+    import build_board
+    tapped = build_board._questions([{
+        "cell": "commander",
+        "holder": "commander",
+        "step": "build",
+        "card_id": 2399,
+        "obligation_id": 2399,
+        "title": "Deploy it",
+        "accept": "Deploy it or wait | PASS = deployed",
+    }])[0]
+    assert tapped["in_session"] is False
+    plain = build_board._questions([{
+        "cell": "droplet",
+        "holder": "droplet",
+        "step": "build",
+        "card_id": 1,
+        "obligation_id": 1,
+        "title": "Ship",
+        "accept": "production deploy go",
+    }])[0]
+    assert plain["in_session"] is True
+
+
 def test_redeploy_is_in_session_and_deployment_notes_are_not():
     sys.path.insert(0, str(SCRIPT.parent))
     import build_board
