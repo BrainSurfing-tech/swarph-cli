@@ -194,7 +194,7 @@ def _any_yaml_login() -> bool:
     return False
 
 
-def run_doctor() -> int:
+def run_doctor(quiet: bool = False) -> int:
     """Would installing the router REFUSE anyone on this box? Answer BEFORE installing.
 
     >>> THE ORDERING IS THE HAZARD, NOT THE REFUSAL. <<< Rule 1 is CORRECT to refuse an
@@ -243,18 +243,24 @@ def run_doctor() -> int:
         return 1
 
     unmapped = []
+    rows = []
     for c in cells:
         try:
             res = ghid.resolve(c, cells=cells_dir())
         except ghid.RouterRefusal as exc:
             unmapped.append(c)
             why = str(exc).splitlines()[0]
-            print_safe(f"  REFUSED  {c} -> (unmapped)  [{why}]")
+            rows.append(f"  REFUSED  {c} -> (unmapped)  [{why}]")
             continue
         where = "yaml" if res.source.endswith(".yaml") else "json"
-        print_safe(f"  ok       {c} -> {res.login}  [{where}: {res.source}]")
-    print(f"\ncell yamls: {cells_dir()}  (read first, key '{ghid.YAML_KEY}:')")
-    print(f"mapping:    {mp}  (fallback, retiring)")
+        rows.append(f"  ok       {c} -> {res.login}  [{where}: {res.source}]")
+    # --quiet is one line when every cell resolves. A refusal still prints the
+    # full table: the operator has to see which cell, not only a count (#1346).
+    if unmapped or not quiet:
+        for line in rows:
+            print_safe(line)
+        print(f"\ncell yamls: {cells_dir()}  (read first, key '{ghid.YAML_KEY}:')")
+        print(f"mapping:    {mp}  (fallback, retiring)")
     if unmapped:
         print(f">>> {len(unmapped)} of {len(cells)} cells on this box would be REFUSED: "
               f"{', '.join(unmapped)}")
@@ -272,10 +278,14 @@ def run_gh_route(argv: list[str]) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("hook", help="PreToolUse hook body (reads the payload on stdin)")
     sub.add_parser("show", help="print what THIS cell resolves to; non-zero on refusal")
-    sub.add_parser("doctor", help="would installing the hook refuse anyone ON THIS BOX?")
+    doctor = sub.add_parser(
+        "doctor", help="would installing the hook refuse anyone ON THIS BOX?")
+    doctor.add_argument(
+        "--quiet", action="store_true",
+        help="one line when every cell resolves; the full table when one is refused")
     args = p.parse_args(argv)
     if args.cmd == "hook":
         return run_hook()
     if args.cmd == "doctor":
-        return run_doctor()
+        return run_doctor(quiet=args.quiet)
     return run_show()

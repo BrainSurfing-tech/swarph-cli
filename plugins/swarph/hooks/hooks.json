@@ -1,5 +1,5 @@
 {
-  "description": "gh-identity-router (#397, #1340). PreToolUse on Bash resolves this cell's gh identity. SessionStart runs gh-route doctor so an unmapped host is visible before the first gh call.",
+  "description": "gh-identity-router (#397, #1340, #1346). PreToolUse on Bash resolves this cell's gh identity. SessionStart runs gh-route doctor --quiet so an all-resolving box adds one line.",
   "hooks": {
     "SessionStart": [
       {
@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "swarph gh-route doctor",
+            "command": "swarph gh-route doctor --quiet",
             "timeout": 15
           }
         ]

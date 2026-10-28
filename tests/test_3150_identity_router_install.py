@@ -41,4 +41,4 @@ def test_plugin_hooks_config_names_the_identity_router():
     command = binding["hooks"][0]["command"]
     assert command == "swarph gh-route hook"
     start = cfg["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-    assert start == "swarph gh-route doctor"
+    assert start == "swarph gh-route doctor --quiet"
