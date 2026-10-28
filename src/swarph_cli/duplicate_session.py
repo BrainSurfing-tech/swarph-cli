@@ -29,9 +29,11 @@ DESIGN, and its scope stated so nobody later mistakes it for more than it is:
 WHAT THIS IS NOT (deliberately, per the card's build notes): it is ATTRIBUTION,
 not AUTHENTICATION — two processes with the same token are the same principal,
 and this only makes them distinguishable. It does not add a session_id column to
-claude_messages and it is not the gateway-side registry; it is the per-cell half
-the lean asked for. A duplicate that never spawns a monitor is out of scope here
-and is the periodic-sweep half (#513 notes).
+claude_messages. Card #1331 is the gateway half: this process mints an instance
+id at start, never reads one back from resumed state, and claims it. A swarph
+process that is not a monitor is still a session. A pid leaving `ps` is stopped
+reporting, not a confirmed exit. Confirmed exit is `confirm_exit`, which the
+process calls on its own way out.
 """
 from __future__ import annotations
 
@@ -39,9 +41,11 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 from swarph_cli.redact import encode_outbound_json
 
@@ -56,6 +60,16 @@ CARD = 513
 CHECK_EVERY = 4
 _OTHER = "drop-on-meta-edge"  # lab-ovh's own alert goes to the other orchestrator
 _PREFIX = f"DUPLICATE-SESSION card #{CARD}"
+_instance_id: "str | None" = None
+
+
+def instance_id() -> str:
+    """Minted once, the first time this process asks. Never read from an env
+    var, a resume file, or any saved session."""
+    global _instance_id
+    if _instance_id is None:
+        _instance_id = str(uuid.uuid4())
+    return _instance_id
 
 
 def _is_swarph_argv(parts: list[str]) -> "int | None":
@@ -114,6 +128,89 @@ def duplicate_monitor_pids(entries, cell: str, my_pid: int) -> list[int]:
     return sorted(found)
 
 
+# Card #1331 rework. A session is a long-running resident. A one-shot
+# (`mesh wait`, `mesh send`, `board ...`) names the cell and then exits;
+# counting it raises the alarm for a process that is already gone.
+_RESIDENT_VERBS = frozenset({"mcp-server", "channel-serve", "daemon"})
+CLAIM_INTERVAL = 90
+
+
+def _is_desktop_daemon(parts: list[str]) -> bool:
+    for part in parts:
+        base = os.path.basename(str(part))
+        if base in {"swarph-desktop", "swarph_desktop"} or str(part).endswith("swarph_desktop"):
+            return True
+    return False
+
+
+def _is_resident(parts: list[str], verb_at: int) -> bool:
+    rest = parts[verb_at + 1:]
+    if rest[:2] == ["monitor", "start"]:
+        return True
+    return bool(rest) and rest[0] in _RESIDENT_VERBS
+
+
+def is_session_for(argv, cell: str) -> bool:
+    """True iff argv is a long-running resident for `cell`.
+
+    Residents: `swarph monitor start`, `swarph mcp-server`, `swarph channel-serve`,
+    `swarph daemon`, and the desktop daemon. A one-shot is not a session.
+    A process that merely quotes the command is still not the process."""
+    parts = list(argv) if isinstance(argv, (list, tuple)) else str(argv).split()
+    if _is_desktop_daemon(parts) and names_cell(parts, cell):
+        return True
+    i = _is_swarph_argv(parts)
+    if i is None:
+        return False
+    if not _is_resident(parts, i):
+        return False
+    return names_cell(parts[i:], cell)
+
+
+def wake_seconds(poll_s: int) -> int:
+    """The longest one sleep slice may be and still claim inside the stale window.
+
+    This caps a slice. It does not decide when the inbox poll runs: that
+    deadline stays `--poll-seconds` or the outage backoff."""
+    try:
+        poll = int(poll_s)
+    except (TypeError, ValueError):
+        poll = CLAIM_INTERVAL
+    if poll < 1:
+        poll = 1
+    return min(poll, CLAIM_INTERVAL)
+
+
+def claim_if_due(state, now: "float | None" = None) -> bool:
+    """Claim when the last success is at least CLAIM_INTERVAL ago. A failed
+    claim is not recorded, so the next wake tries again."""
+    if now is None:
+        now = time.monotonic()
+    last = getattr(state, "instance_claimed_at", None)
+    if last is not None and now - last < CLAIM_INTERVAL:
+        return False
+    if not claim_instance(state.gateway, state.token, instance_id()):
+        return False
+    state.instance_claimed_at = now
+    return True
+
+
+def duplicate_session_pids(entries, cell: str, my_pid: int) -> list[int]:
+    """Other live swarph sessions for `cell`, monitor or quiet. `my_pid` is
+    never counted. Pure."""
+    found = set()
+    for pid, argv in entries:
+        try:
+            ipid = int(pid)
+        except (TypeError, ValueError):
+            continue
+        if ipid == my_pid:
+            continue
+        if is_session_for(argv, cell):
+            found.add(ipid)
+    return sorted(found)
+
+
 def ps_entries() -> list[tuple[int, list[str]]]:
     """(pid, argv) for every process on the box, via `ps -eo pid,args`. [] on any
     error — an enumeration that cannot run is not a duplicate, and must never
@@ -140,7 +237,8 @@ def _what(cell: str, pids: list[int]) -> str:
     return (
         f"{_PREFIX}\n"
         f"cell={cell} duplicates={len(pids)} pids={','.join(str(p) for p in pids)}\n"
-        "Two live monitor sessions hold this one identity on this box. Recorded for "
+        f"instance_id={instance_id()}\n"
+        "Two live sessions hold this one identity on this box. Recorded for "
         "a human to act on; NOTHING IS EVER KILLED."
     )
 
@@ -240,9 +338,39 @@ def send_duplicate_alert(gateway: str, token: str, cell: str, pids: list[int]) -
         return False
 
 
+def claim_instance(gateway: str, token: str, instance_id: str) -> bool:
+    """Present this process's minted id. The gateway stores it as a column.
+    False on any error. Never raises."""
+    try:
+        _request(
+            "POST", f"{gateway.rstrip('/')}/process-instances/claim", token,
+            {"instance_id": instance_id})
+        return True
+    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as exc:
+        print_safe(f"[swarph-monitor] instance claim failed: {exc}",
+                   file=sys.stderr, flush=True)
+        return False
+
+
+def confirm_exit(gateway: str, token: str, instance_id: str) -> bool:
+    """This process, on its own way out. A pid leaving `ps` is not this.
+    False on any error. Never raises."""
+    try:
+        quoted = urllib.parse.quote(instance_id, safe="")
+        _request(
+            "POST", f"{gateway.rstrip('/')}/process-instances/{quoted}/exit",
+            token, {})
+        return True
+    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as exc:
+        print_safe(f"[swarph-monitor] instance exit failed: {exc}",
+                   file=sys.stderr, flush=True)
+        return False
+
+
 def clear_duplicate_alert(gateway: str, token: str, cell: str) -> bool:
-    """Close the open duplicate-session row after the duplicate is gone. True when
-    none remain open. False on any error. Never raises."""
+    """Close the open duplicate-session row. Not used when a pid disappears:
+    that is stopped reporting, not a confirmed exit. True when none remain
+    open. False on any error. Never raises."""
     evidence = (
         f"{_PREFIX} cell={cell} resolved. Only one live monitor session holds this "
         "identity, so this row is closed."
@@ -263,23 +391,21 @@ def clear_duplicate_alert(gateway: str, token: str, cell: str) -> bool:
 def check(state, *, entries=None, my_pid: "int | None" = None) -> list[int]:
     """The per-cell check called from the monitor loop.
 
-    Enumerate the live monitors for `state.self_name`, then:
-      - >1 (a duplicate): raise ONE deduped alarm row on card #513.
-      - exactly 1 (only us): close any open duplicate row (it resolved).
-    Returns the duplicate pids found (empty when alone). NEVER kills anything and
-    NEVER raises: enumeration and network failures are swallowed to []/False so
-    the delivery loop is never interrupted."""
+    Claim this process's instance id, then enumerate live swarph sessions for
+    `state.self_name` (a monitor or a quiet command). A second session raises
+    ONE deduped alarm row on card #513. A pid that has left `ps` is not a
+    confirmed exit, so this does not close the row. Returns the duplicate
+    pids (empty when alone). NEVER kills anything and NEVER raises."""
     cell = state.self_name
     if my_pid is None:
         my_pid = os.getpid()
     if entries is None:
         entries = ps_entries()
-    dups = duplicate_monitor_pids(entries, cell, my_pid)
+    dups = duplicate_session_pids(entries, cell, my_pid)
     try:
+        claim_instance(state.gateway, state.token, instance_id())
         if dups:
             send_duplicate_alert(state.gateway, state.token, cell, dups)
-        else:
-            clear_duplicate_alert(state.gateway, state.token, cell)
     except Exception as exc:  # noqa: BLE001 - never break the deliver loop
         print_safe(f"[swarph-monitor] duplicate-session check error: {exc}",
                    file=sys.stderr, flush=True)
