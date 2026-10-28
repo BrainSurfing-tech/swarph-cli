@@ -28,6 +28,7 @@ the probe's own code. Measured on the lab host at this change: 152s.
 | src/swarph_cli/commands/daemon.py | urllib.request.urlopen | mesh gateway HTTP API | daemon status/registration requests with bearer token | opt-in (daemon run) |
 | src/swarph_cli/commands/codegraph_hook.py | urllib.request.urlopen | mesh gateway HTTP API | codegraph hook event posts as JSON with bearer token | opt-in (hook installed) |
 | src/swarph_cli/commands/cell_probe.py | urllib.request.urlopen | mesh gateway HTTP API | cell probe queries with bearer token | opt-in (command run) |
+| src/swarph_cli/commands/commander.py | urllib.request.urlopen | mesh gateway HTTP API (configured base URL) | GET /commander/authorizations?scope= with the caller's bearer token; the grant text is not sent | opt-in (command run) |
 | src/swarph_cli/commands/brain_ask.py | urllib.request.urlopen | fixed tailnet URL (brain service) | question text as JSON | opt-in (command run) |
 | src/swarph_cli/commands/mcp_server.py | urllib.request.urlopen | mesh gateway HTTP API | MCP tool-call requests as JSON with bearer token | opt-in (server run) |
 | src/swarph_cli/commands/watchdog.py | urllib.request.urlopen | mesh gateway HTTP API | watchdog status posts as JSON with bearer token | opt-in (daemon run) |
