@@ -1,0 +1,17 @@
+{
+  "description": "gh-identity-router (#397). PreToolUse on Bash resolves this cell's gh identity. A cell gets it when the plugin is installed; settings.json is not edited by hand.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "swarph gh-route hook",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

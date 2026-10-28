@@ -1,7 +1,7 @@
 """``swarph hooks init`` (T5) — install the recommended bundled set.
 
-``init_hooks`` installs every name in ``RECOMMENDED_HOOKS`` (currently just
-``cell-resilience``) via ``install_hook(resolve_builtin(name), ...)``. It is:
+``init_hooks`` installs every name in ``RECOMMENDED_HOOKS`` (cell-resilience
+and gh-identity-router) via ``install_hook(resolve_builtin(name), ...)``. It is:
 
 * **complete**: each recommended builtin's bindings land in settings + its
   script is written under ``hooks_home``;
@@ -105,6 +105,7 @@ def test_init_idempotent(tmp_path):
     # no duplicate actions — each binding's hooks[] length 1 after two runs
     assert len(_binding_command(settings, "StopFailure", "rate_limit")) == 1
     assert len(_binding_command(settings, "Stop", "")) == 1
+    assert len(_binding_command(settings, "PreToolUse", "Bash")) == 1
 
 
 def test_init_cli_seam(tmp_path):

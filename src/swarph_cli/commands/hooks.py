@@ -280,9 +280,10 @@ BUILTIN_HOOKS: dict = {
 
 
 # The curated set a fresh cell should start with — the recommended bundled
-# hooks ``swarph hooks init`` installs in one shot. Today just cell-resilience
-# (the push-side throttle detector); add future builtins here, not at call sites.
-RECOMMENDED_HOOKS: tuple = ("cell-resilience",)
+# hooks ``swarph hooks init`` installs in one shot. cell-resilience is the
+# push-side throttle detector; gh-identity-router (#397) is the PreToolUse
+# gh identity hook. Add future builtins here, not at call sites.
+RECOMMENDED_HOOKS: tuple = ("cell-resilience", "gh-identity-router")
 
 
 def touch_activity(argv: list[str] | None = None) -> int:
