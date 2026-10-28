@@ -39,7 +39,7 @@ def _row(i, holder="waiter", status="open", step="validate", card_id=7,
     return r
 
 
-def _graph(needs):
+def _graph(needs, stage=None):
     """needs: {step: [(need_step, row_id, satisfied)]}."""
     steps = []
     for step, lst in needs.items():
@@ -47,7 +47,10 @@ def _graph(needs):
             {"step": ns, "row_id": rid, "satisfied": sat,
              "state": "closed:pass" if sat else "open"}
             for ns, rid, sat in lst]})
-    return {"steps": steps}
+    out = {"steps": steps}
+    if stage is not None:
+        out["stage"] = stage
+    return out
 
 
 class _Net:
@@ -330,3 +333,68 @@ def test_unresolvable_pr_author_is_report_only(tmp_path):
     assert findings[0]["blocker"] == "stranger"
     assert net.posts == []
     assert len((tmp_path / "report.log").read_text().splitlines()) == 1
+
+
+def test_parked_and_done_card_waiter_skipped_while_build_card_fires(tmp_path):
+    """Card #1329: a waiter whose card is parked or done is skipped — no finding,
+    no DM, reading the stage from the existing card graph (zero extra requests).
+    The exact same row on a build-stage card still fires."""
+    # 1. Parked card: skipped
+    d_parked = tmp_path / "parked"
+    d_parked.mkdir(parents=True, exist_ok=True)
+    net_parked = _Net(
+        obligations=[
+            _row(8, holder="waiter", step="validate", card_id=7, taken_days=1),
+            _row(7, holder="blocker", step="build", card_id=7, taken_days=3),
+        ],
+        graphs={7: _graph({"validate": [("build", 7, False)], "build": []}, stage="parked")},
+        prs={})
+    rc, findings = _run(net_parked, d_parked)
+    assert rc == 0
+    assert findings == []
+    assert net_parked.posts == []
+    # Verify no extra requests: obligations, peers, and exactly one card graph GET
+    assert [c for c in net_parked.calls if c[0] == "GET"] == [
+        ("GET", "http://gw:8788/board/obligations"),
+        ("GET", "http://gw:8788/peers"),
+        ("GET", "http://gw:8788/board/cards/7/graph"),
+    ]
+
+    # 2. Done card: skipped
+    d_done = tmp_path / "done"
+    d_done.mkdir(parents=True, exist_ok=True)
+    net_done = _Net(
+        obligations=[
+            _row(8, holder="waiter", step="validate", card_id=7, taken_days=1),
+            _row(7, holder="blocker", step="build", card_id=7, taken_days=3),
+        ],
+        graphs={7: _graph({"validate": [("build", 7, False)], "build": []}, stage="done")},
+        prs={})
+    rc, findings = _run(net_done, d_done)
+    assert rc == 0
+    assert findings == []
+    assert net_done.posts == []
+    assert [c for c in net_done.calls if c[0] == "GET"] == [
+        ("GET", "http://gw:8788/board/obligations"),
+        ("GET", "http://gw:8788/peers"),
+        ("GET", "http://gw:8788/board/cards/7/graph"),
+    ]
+
+    # 3. Build card: fires
+    d_build = tmp_path / "build"
+    d_build.mkdir(parents=True, exist_ok=True)
+    net_build = _Net(
+        obligations=[
+            _row(8, holder="waiter", step="validate", card_id=7, taken_days=1),
+            _row(7, holder="blocker", step="build", card_id=7, taken_days=3),
+        ],
+        graphs={7: _graph({"validate": [("build", 7, False)], "build": []}, stage="build")},
+        prs={})
+    rc, findings = _run(net_build, d_build)
+    assert rc == 0
+    assert len(findings) == 1
+    assert findings[0]["blocker"] == "blocker"
+    assert findings[0]["waiter_id"] == 8
+    assert len(net_build.posts) == 1
+    assert net_build.posts[0]["to_node"] == "blocker"
+

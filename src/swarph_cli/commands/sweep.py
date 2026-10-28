@@ -100,6 +100,7 @@ def _graph_steps(http_get, gateway, token, card_id, cache):
     if not isinstance(steps, list):
         return None
     cache[card_id] = steps
+    cache[(card_id, "stage")] = body.get("stage")
     return steps
 
 
@@ -118,6 +119,9 @@ def _row_findings(rows, by_id, http_get, gateway, token, now):
             continue
         steps = _graph_steps(http_get, gateway, token, card_id, cache)
         if steps is None:
+            continue
+        stage = cache.get((card_id, "stage"))
+        if stage in ("done", "parked"):
             continue
         entry = next((e for e in steps
                       if isinstance(e, dict) and e.get("step") == step), None)
