@@ -1299,6 +1299,15 @@ def _build_parser() -> argparse.ArgumentParser:
     ow.add_argument("--reason", required=True,
                     help="why the row is withdrawn; whitespace is refused")
     ow.add_argument("--json", action="store_true"); _add_common(ow)
+    orel = obl.add_parser(
+        "release",
+        help="RELEASE a taken row back to offered (creator, orchestrator, "
+             "project owner, or the commander's SSO session). Clears the "
+             "holder and the clock. Writes no outcome. A closed row is refused")
+    orel.add_argument("id", type=int, help="the obligation id")
+    orel.add_argument("--reason", required=True,
+                      help="why the row is released; whitespace is refused")
+    orel.add_argument("--json", action="store_true"); _add_common(orel)
     cost = top.add_parser(
         "cost",
         help="tokens by job, the perfect-run rate, and cost per accepted outcome")
@@ -1456,6 +1465,21 @@ def run_board(argv: list[str]) -> int:
                 f"obligation #{_s(x.get('id', args.id))} WITHDRAWN by "
                 f"{_s(x.get('closed_by', self_name))}"
                 + (f" task {_s(x.get('task'))}" if x.get("task") else "")
+            ), aj)
+        if args.command == "release":
+            reason = args.reason
+            if not reason.strip():
+                print("swarph board obligations release: --reason is "
+                      "whitespace-only", file=sys.stderr)
+                return 2
+            reason = redact_text(reason, opt_out=getattr(args, "no_redact", False), caller="board.obligations")
+            st, d = _post_json(
+                f"{gw}/board/obligations/{args.id}/release",
+                {"reason": reason}, token)
+            return _out(st, d, lambda x: (
+                f"obligation #{_s(x.get('id', args.id))} RELEASED "
+                f"state={_s(x.get('state', 'offered'))} "
+                f"holder={_s(x.get('holder'))}"
             ), aj)
 
     if args.group == "cards":
