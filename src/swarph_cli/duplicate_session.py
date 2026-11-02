@@ -60,6 +60,8 @@ CARD = 513
 CHECK_EVERY = 4
 _OTHER = "drop-on-meta-edge"  # lab-ovh's own alert goes to the other orchestrator
 _PREFIX = f"DUPLICATE-SESSION card #{CARD}"
+_REAL_SUBPROCESS_RUN = subprocess.run
+_PROC_ROOT = "/proc"
 _instance_id: "str | None" = None
 
 
@@ -136,10 +138,32 @@ CLAIM_INTERVAL = 90
 
 
 def _is_desktop_daemon(parts: list[str]) -> bool:
-    for part in parts:
-        base = os.path.basename(str(part))
-        if base in {"swarph-desktop", "swarph_desktop"} or str(part).endswith("swarph_desktop"):
-            return True
+    """True iff argv[0..2] is the swarph-desktop daemon entry point:
+    - argv[0] has basename swarph-desktop or swarph_desktop, OR
+    - argv[0] is a python interpreter and:
+      * argv[1:3] is `-m swarph_desktop` (or `-m swarph-desktop` / `swarph_desktop.*`), or
+      * argv[1] is a path ending in `swarph-desktop` / `swarph_desktop` or the
+        `run-desktop*.py` launcher (`ExecStart=/home/ubuntu/swarph-desktop/venv/bin/python run-desktop-8766.py`).
+    Never scans later argv tokens, so a command that merely mentions or quotes
+    swarph-desktop in flags or positional arguments is never counted."""
+    if not parts or not parts[0]:
+        return False
+    b0 = os.path.basename(str(parts[0]))
+    if b0 in {"swarph-desktop", "swarph_desktop"}:
+        return True
+    if not b0.startswith("python") or len(parts) < 2 or not parts[1]:
+        return False
+    p1 = str(parts[1])
+    b1 = os.path.basename(p1)
+    if p1 == "-m":
+        if len(parts) < 3 or not parts[2]:
+            return False
+        mod = str(parts[2]).split(".")[0]
+        return mod in {"swarph_desktop", "swarph-desktop"}
+    if b1 in {"swarph-desktop", "swarph_desktop"} or p1.endswith(("swarph-desktop", "swarph_desktop")):
+        return True
+    if b1.startswith("run-desktop") and b1.endswith(".py"):
+        return True
     return False
 
 
@@ -211,17 +235,51 @@ def duplicate_session_pids(entries, cell: str, my_pid: int) -> list[int]:
     return sorted(found)
 
 
-def ps_entries() -> list[tuple[int, list[str]]]:
-    """(pid, argv) for every process on the box, via `ps -eo pid,args`. [] on any
-    error — an enumeration that cannot run is not a duplicate, and must never
-    raise into the monitor loop."""
+def _is_unmocked_run(fn) -> bool:
+    return fn is _REAL_SUBPROCESS_RUN or getattr(fn, "__name__", "") == "_guarded_run"
+
+
+def ps_entries(proc_root: "str | os.PathLike | None" = None) -> list[tuple[int, list[str]]]:
+    """(pid, argv) for every process on the box.
+
+    Reads true NUL-separated argv from `/proc/<pid>/cmdline` on Linux so that
+    words inside one quoted argument (e.g. `--accept "PASS = ... swarph-desktop ..."`)
+    are never split into whitespace tokens.
+
+    Falls back to `ps -eo pid,args` when `/proc` is unavailable or when
+    `subprocess.run` has been monkeypatched in tests. Returns [] on any error
+    — an enumeration that cannot run is not a duplicate, and must never raise
+    into the monitor loop."""
+    root = proc_root if proc_root is not None else _PROC_ROOT
+    if proc_root is not None or (_is_unmocked_run(subprocess.run) and os.path.isdir(root)):
+        try:
+            names = os.listdir(root)
+        except OSError:
+            return []
+        entries: list[tuple[int, list[str]]] = []
+        for name in names:
+            if not name.isdigit():
+                continue
+            cmd_path = os.path.join(root, name, "cmdline")
+            try:
+                with open(cmd_path, "rb") as f:
+                    raw = f.read()
+            except OSError:
+                continue
+            raw = raw.rstrip(b"\x00")
+            if not raw:
+                continue
+            argv = [tok.decode("utf-8", errors="replace") for tok in raw.split(b"\x00")]
+            entries.append((int(name), argv))
+        return entries
+
     try:
         proc = subprocess.run(
             ["ps", "-eo", "pid,args"], capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=10)
     except (OSError, subprocess.SubprocessError):
         return []
-    entries: list[tuple[int, list[str]]] = []
+    entries = []
     for line in proc.stdout.splitlines()[1:]:
         line = line.strip()
         if not line:
