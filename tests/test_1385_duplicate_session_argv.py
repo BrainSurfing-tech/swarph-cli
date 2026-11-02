@@ -58,9 +58,14 @@ def test_board_cards_ask_mentioning_swarph_desktop_is_not_a_session():
     assert ds.duplicate_session_pids([(1833816, argv_b_split)], "lab-ovh", my_pid=100) == []
 
 
-def test_real_desktop_daemon_argv_on_lab_ovh_is_a_session():
-    """Test (c): the real daemon argv on lab-ovh (ExecStart from systemctl cat swarph-desktop)
-    with its --as still IS a session for lab-ovh, but not for other cells."""
+def test_synthetic_desktop_launcher_argv_with_as_appended_is_a_session():
+    """Test (c): SYNTHETIC launcher argv with --as appended. The live daemon on lab-ovh runs ["/home/ubuntu/swarph-desktop/venv/bin/python", "run-desktop-8766.py"] with no --as; appending --as lab-ovh is a synthetic launcher argv that counts as a session for lab-ovh."""
+    # Live daemon argv on lab-ovh with no --as is NOT a session for lab-ovh
+    assert not ds.is_session_for(
+        ["/home/ubuntu/swarph-desktop/venv/bin/python", "run-desktop-8766.py"],
+        "lab-ovh",
+    )
+
     argv_c = [
         "/home/ubuntu/swarph-desktop/venv/bin/python",
         "run-desktop-8766.py",
@@ -124,7 +129,7 @@ def test_ps_entries_proc_cmdline_nul_split(tmp_path, monkeypatch):
     ]
     (p_b / "cmdline").write_bytes(b"\x00".join(tok.encode("utf-8") for tok in argv_b) + b"\x00")
 
-    # (c) real desktop daemon
+    # (c) synthetic desktop launcher argv with --as appended
     p_c = tmp_path / "1800578"
     p_c.mkdir()
     argv_c = [

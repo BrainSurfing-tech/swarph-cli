@@ -81,6 +81,7 @@ def test_ps_output_is_parsed_into_pid_argv(monkeypatch):
     class _P:
         stdout = out
 
+    monkeypatch.setattr(ds, "_PROC_ROOT", None)
     monkeypatch.setattr(ds.subprocess, "run", lambda *a, **k: _P())
     entries = ds.ps_entries()
     assert (100, ["swarph", "monitor", "start", "--as", "opencode"]) in entries

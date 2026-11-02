@@ -60,8 +60,8 @@ CARD = 513
 CHECK_EVERY = 4
 _OTHER = "drop-on-meta-edge"  # lab-ovh's own alert goes to the other orchestrator
 _PREFIX = f"DUPLICATE-SESSION card #{CARD}"
-_REAL_SUBPROCESS_RUN = subprocess.run
-_PROC_ROOT = "/proc"
+_PROC_ROOT: "str | os.PathLike | None" = "/proc"
+_USE_DEFAULT_PROC = object()
 _instance_id: "str | None" = None
 
 
@@ -235,44 +235,48 @@ def duplicate_session_pids(entries, cell: str, my_pid: int) -> list[int]:
     return sorted(found)
 
 
-def _is_unmocked_run(fn) -> bool:
-    return fn is _REAL_SUBPROCESS_RUN or getattr(fn, "__name__", "") == "_guarded_run"
+def _proc_entries(proc_root: "str | os.PathLike | None") -> "list[tuple[int, list[str]]] | None":
+    """Read (pid, argv) from `<proc_root>/<pid>/cmdline` (NUL-separated).
+    Returns None when `proc_root` is None or not a readable directory so
+    `ps_entries` falls back to `ps -eo pid,args`."""
+    if proc_root is None or not os.path.isdir(proc_root):
+        return None
+    try:
+        names = os.listdir(proc_root)
+    except OSError:
+        return None
+    entries: list[tuple[int, list[str]]] = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        cmd_path = os.path.join(proc_root, name, "cmdline")
+        try:
+            with open(cmd_path, "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        raw = raw.rstrip(b"\x00")
+        if not raw:
+            continue
+        argv = [tok.decode("utf-8", errors="replace") for tok in raw.split(b"\x00")]
+        entries.append((int(name), argv))
+    return entries
 
 
-def ps_entries(proc_root: "str | os.PathLike | None" = None) -> list[tuple[int, list[str]]]:
+def ps_entries(proc_root: "str | os.PathLike | None" = _USE_DEFAULT_PROC) -> list[tuple[int, list[str]]]:
     """(pid, argv) for every process on the box.
 
-    Reads true NUL-separated argv from `/proc/<pid>/cmdline` on Linux so that
-    words inside one quoted argument (e.g. `--accept "PASS = ... swarph-desktop ..."`)
-    are never split into whitespace tokens.
+    On Linux, reads true NUL-separated argv from `/proc/<pid>/cmdline`
+    because `/proc` is a readable directory (`_proc_entries`), so words
+    inside one quoted argument are never split into whitespace tokens.
 
-    Falls back to `ps -eo pid,args` when `/proc` is unavailable or when
-    `subprocess.run` has been monkeypatched in tests. Returns [] on any error
-    — an enumeration that cannot run is not a duplicate, and must never raise
-    into the monitor loop."""
-    root = proc_root if proc_root is not None else _PROC_ROOT
-    if proc_root is not None or (_is_unmocked_run(subprocess.run) and os.path.isdir(root)):
-        try:
-            names = os.listdir(root)
-        except OSError:
-            return []
-        entries: list[tuple[int, list[str]]] = []
-        for name in names:
-            if not name.isdigit():
-                continue
-            cmd_path = os.path.join(root, name, "cmdline")
-            try:
-                with open(cmd_path, "rb") as f:
-                    raw = f.read()
-            except OSError:
-                continue
-            raw = raw.rstrip(b"\x00")
-            if not raw:
-                continue
-            argv = [tok.decode("utf-8", errors="replace") for tok in raw.split(b"\x00")]
-            entries.append((int(name), argv))
-        return entries
-
+    Falls back to `ps -eo pid,args` when `/proc` is not a readable directory
+    or when a caller/test passes `proc_root=None` (or monkeypatches
+    `_PROC_ROOT = None` / `_proc_entries`). Returns [] on any error."""
+    root = _PROC_ROOT if proc_root is _USE_DEFAULT_PROC else proc_root
+    from_proc = _proc_entries(root)
+    if from_proc is not None:
+        return from_proc
     try:
         proc = subprocess.run(
             ["ps", "-eo", "pid,args"], capture_output=True, text=True,
