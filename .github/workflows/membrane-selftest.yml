@@ -55,7 +55,11 @@ jobs:
         # would also print the lines of this multi-line command, which sits in an env value).
         # A secret-shaped name in the runner would be a finding.
         compgen -e | sort | tr '\n' ' ' | fold -w 200; echo
-        if compgen -e | grep -E -i 'SECRET|PASSWORD|MESH|TAILSCALE|^GH_TOKEN$|^GITHUB_TOKEN$|^INPUT_'; then
+        # PGPASSWORD is the one name allowed: windows-latest sets it machine-wide for its
+        # preinstalled PostgreSQL (actions/runner-images, Install-PostgreSQL.ps1 line 15).
+        # It comes from the runner image, not from this repo or org, and the first selftest
+        # run printed it on windows-latest. Any other secret-shaped name fails the run.
+        if compgen -e | grep -E -i 'SECRET|PASSWORD|MESH|TAILSCALE|TOKEN|^INPUT_' | grep -v -x 'PGPASSWORD'; then
           echo "SECRET-SHAPED ENVIRONMENT NAME PRESENT"; exit 3
         fi
         echo "no secret-shaped environment names"
