@@ -1,16 +1,17 @@
 """``swarph board cards dev-extract`` — a small pinned "dev extract" for spec/plan
-cards (card #1396, #559 phase 2).
+cards (card #1410, #559 phase 2; re-spec of #1396).
 
 The extract JOINS two halves, each with its own as-of pin:
 
 * Codegraph half (READ-ONLY ``~/.swarph/codegraph/index.db``): target symbols
-  with file:line, caller counts, matching routes + params, covering tests.
-  Per repo: commit sha from that repo's ``.codegraph/indexed_origin_main``
-  file (card #1393) plus the index time from ``repos.indexed_at``.
+  with file:line, caller counts, matching routes + params. Per repo: commit
+  sha from that repo's ``.codegraph/indexed_origin_main``
+  file (card #1393) plus the index time from ``repos.indexed_at``. No
+  covering-tests section (name-match is not coverage — removed #1410).
 * Federation half (READ-ONLY ``~/.swarph/codegraph/federation-report.txt`` +
-  ``structurizr/workspace.json``): repos/services depending on the targets
-  (blast-radius + import sites + structurizr relationships), the subject card
-  that cites them, deploy units running them. Pinned with the federation
+  ``structurizr/workspace.json``): import-site hits for the visible target
+  repos, deploy units running them. NO rels of any kind are printed
+  (structurizr relationships removed #1410). Pinned with the federation
   build time; labelled STALE when older than the last repo.merged for a repo.
 
 Posting is via the existing board path: the built body is posted with the
@@ -23,14 +24,25 @@ Honesty rules (graded r4): every zero is printed as a FLOOR
 (``0 callers (floor: HTTP callers not linked yet)``), never as a fact; a
 missing or unreadable source prints ``unavailable: <reason>``, never a zero.
 
-Privacy rule: a card's readers must not receive symbols from a repo they
-cannot read today. The registry rule applied here is the same one as
-``swarph_cli/commands/codegraph.py:145`` (``_visible_repos``): public repos
-are always visible, private repos require the caller in the allowlist — and
-a card-posted artifact has no per-reader allowlist to check against, so
-private (or unknown-visibility) repos are WITHHELD and the extract NAMES the
-withheld repo + why instead of leaking symbol details. There is no
-``allowlist.json`` beside a card; fail closed (#111), never open.
+Privacy rule (#1410): a card's readers must not receive symbols from a
+repo they cannot read today. The composition mirrors
+``swarph_cli/commands/codegraph.py:145`` (``_visible_repos``: public repos
+are always visible; a private repo is visible when the caller is in
+``allowlist[repo]``) with the caller replaced by the card's board project:
+public repos are always visible, and the repos listed for the card's project
+slug in ``~/.swarph/codegraph/card-allowlist.json`` (commander-approved,
+``{project_slug: [repo, ...]}``) are visible too. The card's project is
+resolved the way the board resolves it for a card artifact — the card row
+carries ``project_id`` (``GET /board/cards/{id}`` has no slug field) and the
+slug comes from the ``GET /board/projects`` rows matched by id (same
+int-or-str equality as ``board._project_owner_orchestrator``). Malformed or
+absent file, or a project with no entry, means public only (fail closed).
+Private (or unknown-visibility) repos outside that set are WITHHELD and the
+extract NAMES the withheld repo + why instead of leaking symbol details.
+``~/.swarph/codegraph/allowlist.json`` is NEVER read here (different
+meaning: per-cell read authority). Fail closed (#111), never open.
+Withheld-name filtering scans path components too, and no rels of any kind
+are printed.
 
 Bounded queries: EVERY row-returning SQL statement in this module carries an
 explicit ``LIMIT`` (see ``test_1396_dev_extract.py::test_every_row_query_is_bounded``,
@@ -56,20 +68,20 @@ DEFAULT_STRUCTURIZR_WS = os.path.expanduser(
     "~/.swarph/codegraph/structurizr/workspace.json"
 )
 DEFAULT_FED_DOCS_DB = os.path.expanduser("~/.swarph/federation/outputs/fed-docs.db")
+DEFAULT_CARD_ALLOWLIST = os.path.expanduser(
+    "~/.swarph/codegraph/card-allowlist.json"
+)
 
 MAX_AUTO_TOKENS = 8
 ROW_LIMIT = 8
 FED_REPORT_LINE_CAP = 300
-STRUCTURIZR_REL_CAP = 5000
 DEFAULT_MAX_LINES = 60
 
 FLOOR_CALLERS = "0 callers (floor: HTTP callers not linked yet)"
 FLOOR_ROUTES = "0 routes (floor: route registry not linked for this symbol)"
-FLOOR_TESTS = "0 covering tests (floor: name-match only, semantic coverage not linked)"
-FLOOR_DOWNSTREAM = "0 downstream services (floor: HTTP-call reach not linked yet)"
 
 _TOKEN_RE = re.compile(r"`([^`]+)`")
-_SNAKE_RE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){1,}\b")
+_SNAKE_RE = re.compile(r"(?<![A-Za-z0-9_])_?[a-z][a-z0-9]*(?:_[a-z0-9]+){1,}")
 _ROUTE_RE = re.compile(r"(?:POST|GET|PUT|PATCH|DELETE)\s+/\S+|/\S*chat\S*|/\S*sync\S*")
 
 # Junk-target stoplist (card #788 mines backticked `?` and `none`; neither
@@ -105,18 +117,39 @@ def is_lookup_token(tok: str) -> bool:
     return True
 
 
+def _normalize_token(tok: str) -> str:
+    """Call-site / def-site spelling → bare symbol name (pure).
+
+    `_format_graph(rows)` (call with args) and `def _format_graph` (def-site)
+    must both resolve `_format_graph` (#1410). Only a bare identifier with a
+    trailing ``(...)`` arg list is stripped — a dotted or spaced span is never
+    a call, so junk like ``json.loads(row["menu_json`` keeps its brackets and
+    still fails the lookup filter.
+    """
+    t = (tok or "").strip()
+    m = re.match(r"(?i)^\s*def\s+(.+?)\s*$", t)
+    if m:
+        t = m.group(1).strip()
+    m2 = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\(.*\)$", t)
+    if m2:
+        t = m2.group(1)
+    return t
+
+
 def extract_card_tokens(card: dict, cap: int = MAX_AUTO_TOKENS) -> list:
     """Candidate symbol tokens from a card's title+body (bounded to `cap`).
 
     Backtick spans first (explicit author intent), then bare snake_case
-    identifiers, then route-like paths. Pure; the caller still resolves each
+    identifiers (leading underscore allowed: `_format_graph`), then
+    route-like paths. Tokens are normalized (call/def spellings → bare name)
+    before the lookup filter. Pure; the caller still resolves each
     token against the index (unknown tokens resolve to nothing, not to text).
     """
-    text = f"{card.get('title') or ''}\n{card.get('body') or ''}"
+    text = f"{(card or {}).get('title') or ''}\n{(card or {}).get('body') or ''}"
     seen: list = []
 
     def _add(tok: str):
-        tok = tok.strip().strip("\"'.,;:()[]")
+        tok = _normalize_token(tok).strip().strip("\"'.,;:()[]")
         if tok and tok not in seen and len(tok) <= 80 and is_lookup_token(tok):
             seen.append(tok)
 
@@ -214,14 +247,76 @@ def repo_registry(con) -> dict:
     return out
 
 
-def split_visible(registry: dict) -> tuple:
-    """Public repos are visible; private/unknown are WITHHELD (fail closed).
+def load_card_allowlist(path: str | None = DEFAULT_CARD_ALLOWLIST) -> dict:
+    """Load the commander-approved card allowlist (`{project_slug: [repo]}`).
 
-    Same rule as codegraph._visible_repos (public always; private needs an
-    allowlist entry) with no per-reader allowlist available for a card
-    artifact, so anything not explicitly public is withheld and named.
+    Fail closed: an absent file, unreadable bytes, non-JSON, a non-dict, or
+    non-list values all yield `{}` (public only) — never raise, never open.
     """
-    visible = sorted(n for n, m in registry.items() if m.get("visibility") == "public")
+    if not path:
+        return {}
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for key, val in data.items():
+        if isinstance(key, str) and key.strip() and isinstance(val, list):
+            out[key.strip()] = sorted(
+                {str(r).strip() for r in val if isinstance(r, str) and str(r).strip()})
+    return out
+
+
+def card_project_slug(card: dict | None, projects: list | None = None) -> str | None:
+    """The card's board project slug (pure; None when unresolvable).
+
+    Mirrors the board's real rule for a card artifact: a card row carries
+    ``project_id`` (``GET /board/cards/{id}`` has no slug field) and the slug
+    is read off the ``GET /board/projects`` rows matched by id — same
+    int-or-str equality as ``board._project_owner_orchestrator``. A card dict
+    that already carries a ``project``/``project_slug`` string (tests, offline
+    use) returns it directly. None means the caller runs public-only.
+    """
+    if not isinstance(card, dict):
+        return None
+    for key in ("project", "project_slug", "slug"):
+        val = card.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    pid = card.get("project_id")
+    if pid is None or not projects:
+        return None
+    for proj in projects:
+        if not isinstance(proj, dict):
+            continue
+        if proj.get("id") == pid or str(proj.get("id")) == str(pid):
+            slug = proj.get("slug")
+            if isinstance(slug, str) and slug.strip():
+                return slug.strip()
+    return None
+
+
+def split_visible(registry: dict, project_slug: str | None = None,
+                  card_allowlist: dict | None = None) -> tuple:
+    """Public repos + the card project's allowlisted repos are visible.
+
+    Composition mirrors codegraph._visible_repos (public always; private needs
+    an allowlist entry) with the card's board project slug in the caller's
+    seat: ``card_allowlist[project_slug]`` plays the role of
+    ``allowlist[repo]`` membership. Anything else — including
+    unknown-visibility repos — is WITHHELD (fail closed). Malformed/absent
+    file (``{}``), or a project with no entry, means public only.
+    """
+    allowed = set()
+    if isinstance(card_allowlist, dict) and project_slug:
+        for repo in card_allowlist.get(project_slug) or []:
+            if isinstance(repo, str) and repo:
+                allowed.add(repo)
+    visible = sorted(n for n, m in registry.items()
+                     if m.get("visibility") == "public" or n in allowed)
     withheld = sorted(n for n in registry if n not in visible)
     return visible, withheld
 
@@ -342,19 +437,24 @@ def find_symbols_by_path(con, path_arg: str, visible: list,
     ]
 
 
-def _target_stem(tok: str) -> str:
-    """Covering-test stem for a target token — never raises, never empty-loops.
+def _path_withholds(file_path: str | None, withheld) -> bool:
+    """True when a WITHHELD repo name appears as a PATH COMPONENT (#1410).
 
-    Route-mined tokens can end in '/' (e.g. a card body citing
-    'POST /api/chat-sync/'), where the old `tok.split('/')[-1].split()[-1]`
-    raised IndexError on the empty tail. Strip trailing slashes and fall back
-    to the token itself; '' (unusable as a LIKE stem) stays ''.
+    Separator-insensitive equality: `mesh-gateway`, `mesh_gateway`, and
+    `mesh.gateway` are the same component. Prefixes do not count — a
+    component `gateway` is not `mesh-gateway`.
     """
-    base = (tok or "").rstrip("/") or (tok or "")
-    tail = base.split("/")[-1] if base else ""
-    parts = tail.split()
-    stem = (parts[-1] if parts else base)[:40]
-    return stem if any(c.isalnum() for c in stem) else ""
+    if not file_path or not withheld:
+        return False
+    comps = [p for p in re.split(r"[\\/]+", file_path) if p]
+    for repo in withheld or []:
+        want = _name_parts(repo)
+        if not want:
+            continue
+        for comp in comps:
+            if _name_parts(comp) == want:
+                return True
+    return False
 
 
 def find_routes(con, token: str, visible: list, limit: int = ROW_LIMIT) -> list:
@@ -405,62 +505,6 @@ def caller_count(con, symbol_id: int, visible: list) -> int | None:
         return None
 
 
-def covering_test_files(con, file_stem: str, visible: list, limit: int = ROW_LIMIT) -> list:
-    """Test FILES whose path mentions the symbol's file stem (bounded LIMIT).
-
-    Name-match alone misses suites like tests/test_1073_triage.py covering
-    src/.../triage.py — the file stem bridges that gap, still name-based
-    (semantic coverage stays unlinked, per the floor wording).
-    """
-    if not visible or not file_stem:
-        return []
-    qmarks = ",".join("?" * len(visible))
-    like = f"%{file_stem}%"
-    try:
-        rows = con.execute(
-            "SELECT repo, name, kind, file_path, start_line FROM symbols"
-            " WHERE kind = 'file' AND file_path LIKE '%test%' ESCAPE '\\'"
-            " AND (file_path LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\')"
-            f" AND repo IN ({qmarks}) LIMIT ?",
-            [like, like, *visible, limit],
-        ).fetchall()
-    except sqlite3.Error:
-        return []
-    return [
-        {"repo": r, "name": n, "kind": k, "file_path": fp, "start_line": ln}
-        for r, n, k, fp, ln in rows
-    ]
-
-
-def covering_tests(con, stem: str, visible: list, limit: int = ROW_LIMIT) -> list:
-    """Test symbols/files whose name mentions the stem (bounded LIMIT).
-
-    `kind = 'import'` rows are excluded: a stem matching a test FILE (e.g.
-    `delivery` matching tests/test_729_arm_check_delivery_gap.py) otherwise
-    lists every import in that file (`sys`, `json`, `os`, `time`, `pytest`)
-    as if it covered the target.
-    """
-    if not visible:
-        return []
-    qmarks = ",".join("?" * len(visible))
-    like = f"%{stem}%"
-    try:
-        rows = con.execute(
-            "SELECT repo, name, kind, file_path, start_line FROM symbols"
-            " WHERE (name LIKE ? ESCAPE '\\' OR file_path LIKE ? ESCAPE '\\')"
-            " AND (file_path LIKE '%test%' ESCAPE '\\' OR name LIKE 'test\\_%' ESCAPE '\\')"
-            " AND kind != 'import'"
-            f" AND repo IN ({qmarks}) LIMIT ?",
-            [like, like, *visible, limit],
-        ).fetchall()
-    except sqlite3.Error:
-        return []
-    return [
-        {"repo": r, "name": n, "kind": k, "file_path": fp, "start_line": ln}
-        for r, n, k, fp, ln in rows
-    ]
-
-
 def _names_whole_token(text: str, name: str) -> bool:
     """True when `name` occurs in `text` as a whole token (fail-closed match).
 
@@ -507,6 +551,19 @@ def _line_withholds(line: str, withheld: list, known: list) -> bool:
     for w in withheld:
         if _names_whole_token(line, w):
             return True
+    # Path components (#1410): a withheld repo name as a path component
+    # (e.g. `src/mesh_gateway/x.py:39`) must not leak through file paths.
+    # Only the withheld-equality rule applies here — never the unknown-name
+    # rule below (ordinary filenames are not registry names).
+    for span in _SLASH_SPAN_RE.findall(line or ""):
+        for comp in re.split(r"/+", span):
+            comp = (comp or "").strip().rstrip(":")
+            if not comp:
+                continue
+            for w in withheld:
+                want = _name_parts(w)
+                if want and _name_parts(comp) == want:
+                    return True
     withheld_parts = [_name_parts(w) for w in withheld]
     known_parts = [_name_parts(k) for k in known]
     scan = _SLASH_SPAN_RE.sub(" ", line or "")
@@ -579,17 +636,14 @@ def read_fed_report(path: str, repos: list, line_cap: int = FED_REPORT_LINE_CAP,
     }
 
 
-def read_structurizr(path: str, repos: list, rel_cap: int = STRUCTURIZR_REL_CAP,
-                     withheld=(), known=()) -> dict:
-    """Containers/relationships citing `repos` (bounded JSON scan).
+def read_structurizr(path: str, repos: list) -> dict:
+    """Containers/deploy units citing `repos` (bounded JSON scan).
 
-    Relationship entries whose label names a WITHHELD repo (a private
-    container) are dropped — same fail-closed rule as `read_fed_report` —
-    as is a label naming a container missing from the registry (`known` =
-    index repos + these containers): an unregistered destination is
-    withheld, never shown. `matched`/`deploy_units` name only visible
-    repos / host groups, so they need no filtering. `containers` lists
-    every container name (feeds the fed-report known set; additive).
+    #1410: relationships ("rels") are never read and never printed — no rels
+    of any kind appear in the output — so there is nothing to filter here.
+    `matched`/`deploy_units` name only visible repos / host groups, so they
+    need no filtering. `containers` lists every container name (feeds the
+    fed-report known set; additive).
     """
     try:
         with open(path, encoding="utf-8") as fh:
@@ -599,9 +653,8 @@ def read_structurizr(path: str, repos: list, rel_cap: int = STRUCTURIZR_REL_CAP,
     model = ws.get("model", {}) if isinstance(ws, dict) else {}
     systems = model.get("softwareSystems", []) or []
     # Repos live at CONTAINER level (one system, e.g. "Swarph Federation",
-    # holding a container per repo with `group` = deploy host). Index every
-    # container by name + id.
-    by_name, by_id = {}, {}
+    # holding a container per repo with `group` = deploy host).
+    by_name = {}
     for s in systems:
         if not isinstance(s, dict):
             continue
@@ -609,9 +662,7 @@ def read_structurizr(path: str, repos: list, rel_cap: int = STRUCTURIZR_REL_CAP,
             if not isinstance(c, dict):
                 continue
             by_name[str(c.get("name", "")).lower()] = c
-            by_id[str(c.get("id", ""))] = c
-    matched, downstream, deploy = [], [], []
-    rel_seen = 0
+    matched, deploy = [], []
     for repo in repos:
         c = by_name.get(repo.lower())
         if not isinstance(c, dict):
@@ -620,33 +671,15 @@ def read_structurizr(path: str, repos: list, rel_cap: int = STRUCTURIZR_REL_CAP,
         group = c.get("group")
         if group and str(group) not in deploy:
             deploy.append(str(group))
-        for rel in c.get("relationships", []) or []:
-            rel_seen += 1
-            if rel_seen > rel_cap:
-                break
-            if not isinstance(rel, dict):
-                continue
-            dest = by_id.get(str(rel.get("destinationId", "")))
-            label = (str(dest.get("name", "")) if isinstance(dest, dict)
-                     else str(rel.get("destinationId", "")))
-            if not label:
-                continue
-            entry = f"{label} ({rel.get('description', 'depends')})"
-            if entry not in downstream:
-                downstream.append(entry)
     containers = sorted(
         {str(c.get("name", "")) for s in systems if isinstance(s, dict)
          for c in s.get("containers", []) or []
          if isinstance(c, dict) and str(c.get("name", ""))})
-    known_all = list(dict.fromkeys([*(known or []), *containers]))
-    downstream = _drop_withheld_lines(downstream, withheld, known=known_all)
     return {
         "status": "ok",
         "matched": matched[:ROW_LIMIT],
-        "downstream": downstream[:ROW_LIMIT],
         "deploy_units": deploy[:ROW_LIMIT],
         "containers": containers,
-        "cut": rel_seen > rel_cap,
     }
 
 
@@ -684,8 +717,9 @@ def indexed_sha(repo_path: str | None) -> str | None:
         return None
 
 
-WITHHOLD_REASON = ("not public: card artifacts have no per-reader "
-                   "allowlist, so only public repos are shown")
+WITHHOLD_REASON = ("not public and not listed for this card's project in "
+                   "card-allowlist.json; card artifacts show public repos "
+                   "plus the card project allowlist only")
 
 
 def redact_for_json(ex: dict) -> dict:
@@ -728,11 +762,25 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
                   fed_docs_db: str = DEFAULT_FED_DOCS_DB,
                   card: dict | None = None,
                   paths: list | None = None,
-                  merged_lookup=None) -> dict:
-    """Assemble the extract dict. Never raises on bad sources (unavailable)."""
+                  merged_lookup=None,
+                  project_slug: str | None = None,
+                  card_allowlist: dict | None = None,
+                  card_allowlist_path: str | None = DEFAULT_CARD_ALLOWLIST) -> dict:
+    """Assemble the extract dict. Never raises on bad sources (unavailable).
+
+    Visibility: the card's board project slug (explicit `project_slug`, else
+    derived from `card` via `card_project_slug`) is looked up in the card
+    allowlist (explicit `card_allowlist`, else loaded from
+    `card_allowlist_path`, fail closed); those repos join the public set.
+    """
     merged_lookup = merged_lookup or last_merged_at
-    tokens = [t for t in (tokens or []) if is_lookup_token(t)]
+    tokens = [_normalize_token(t) for t in (tokens or [])]
+    tokens = [t for t in tokens if t and is_lookup_token(t)]
     fed_docs = fed_docs_state(fed_docs_db)
+    if project_slug is None and card:
+        project_slug = card_project_slug(card)
+    if card_allowlist is None:
+        card_allowlist = load_card_allowlist(card_allowlist_path)
     try:
         con = open_ro_index(index_path)
     except sqlite3.Error as exc:
@@ -744,11 +792,16 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
             return {"index": {"status": f"unavailable: {bad}"},
                     "tokens": tokens, "fed_docs": fed_docs}
         registry = repo_registry(con)
-        visible, withheld = split_visible(registry)
-        syms, routes, tests = [], [], []
+        visible, withheld = split_visible(registry, project_slug, card_allowlist)
+        missing_repos = sorted(
+            r for r in ((card_allowlist or {}).get(project_slug) or [])
+            if isinstance(r, str) and r and r not in registry)
+        syms, routes = [], []
         withheld_hits: dict = {}
 
         def _add_sym(s: dict):
+            if _path_withholds(s.get("file_path"), withheld):
+                return
             if s["id"] not in {x["id"] for x in syms}:
                 s["callers"] = caller_count(con, s["id"], visible)
                 syms.append(s)
@@ -760,23 +813,11 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
                     con, tok, withheld).items():
                 withheld_hits.setdefault(tok, {})[repo] = test_only
             routes.extend(r for r in find_routes(con, tok, visible)
-                          if r["name"] not in {x["name"] for x in routes})
-            stem = _target_stem(tok)
-            if stem:
-                tests.extend(t for t in covering_tests(con, stem, visible)
-                             if (t["name"], t["file_path"]) not in
-                             {(x["name"], x["file_path"]) for x in tests})
+                          if r["name"] not in {x["name"] for x in routes}
+                          and not _path_withholds(r.get("file_path"), withheld))
         for parg in (paths or [])[:MAX_AUTO_TOKENS]:
             for s in find_symbols_by_path(con, parg, visible):
                 _add_sym(s)
-        for s in syms:
-            file_stem = os.path.splitext(os.path.basename(
-                s.get("file_path") or ""))[0]
-            if file_stem and file_stem not in ("__init__",):
-                tests.extend(
-                    t for t in covering_test_files(con, file_stem, visible)
-                    if (t["name"], t["file_path"]) not in
-                    {(x["name"], x["file_path"]) for x in tests})
         repos_hit = sorted({s["repo"] for s in syms})
     finally:
         try:
@@ -785,8 +826,7 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
             pass
     # Structurizr first: its container names join the index registry as the
     # `known` universe for the fed-report unknown-name rule (fail-closed).
-    struct = read_structurizr(structurizr_ws, repos_hit, withheld=withheld,
-                             known=list(registry))
+    struct = read_structurizr(structurizr_ws, repos_hit)
     known = list(dict.fromkeys(
         [*registry, *((struct.get("containers") or [])
                        if struct.get("status") == "ok" else [])]))
@@ -810,9 +850,10 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
     return {
         "index": {"status": "ok", "path": index_path},
         "tokens": tokens, "paths": list(paths or []),
-        "symbols": syms, "routes": routes, "tests": tests,
+        "symbols": syms, "routes": routes,
         "repos_hit": repos_hit, "withheld_hits": withheld_hits,
         "visible": visible, "withheld": withheld, "registry": registry,
+        "project_slug": project_slug, "missing_repos": missing_repos,
         "federation_report": fed, "structurizr": struct,
         "fed_build": fed_build,
         # (d) absence is claimed ONLY when the file truly is absent; a
@@ -865,12 +906,16 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
     """Render the extract text with floor/unavailable wording + size cap.
 
     The cap reserves the tail (WITHHELD line, fed-docs line, freshness
-    section, cut line): only the middle (symbols/routes/tests/pins plus
-    the federation build/hits/rels) is truncated, so the 60-line budget
+    section, cut line): only the middle (symbols/routes/pins plus
+    the federation build/hits) is truncated, so the 60-line budget
     can never cut freshness away again (card #792 showed 0 STALE lines).
+    Three plain outcome lines (#1410), each distinct: `index unavailable`
+    (the index cannot be read/probed), `repo X is not in the index` (a
+    card-project repo with no indexed copy), `no symbol resolved` (lookups
+    found nothing). No covering-tests section and no rels of any kind.
     """
     cut_notes: list = []
-    head = ["# dev extract (card #1396, #559 phase 2) — pinned, small, dry-run-safe"]
+    head = ["# dev extract (card #1410, #559 phase 2) — pinned, small, dry-run-safe"]
     if ex.get("card"):
         head.append(f"subject: card #{ex['card'].get('id')}: "
                     f"{(ex['card'].get('title') or '')[:100]}")
@@ -879,7 +924,9 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
     head.append("")
     idx = ex.get("index", {})
     if idx.get("status") != "ok":
-        head.append(f"codegraph half: {idx.get('status', 'unavailable')}")
+        _detail = (idx.get("status") or "unavailable").partition(
+            "unavailable:")[2].strip() or idx.get("status", "unavailable")
+        head.append(f"index unavailable: {_detail}")
     else:
         head.append("## codegraph half (index.db, READ-ONLY)")
         # Card #1404: the index can miss WHOLE files (mesh-gateway server.py,
@@ -898,6 +945,8 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
                 "index coverage is partial: a withheld repo's main module can "
                 "have 0 rows (card #1404); a visible match is the indexed "
                 "copy, not evidence the deployed code is here")
+        for repo in ex.get("missing_repos", []):
+            head.append(f"repo {repo} is not in the index")
         for s in ex.get("symbols", [])[:ROW_LIMIT]:
             loc = f"{s['file_path']}:{s['start_line']}"
             n = s.get("callers")
@@ -909,13 +958,17 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
                 head.append(f"  sig: {s['signature'][:120]}")
             # Card #1404: swarph-cli also carries a gateway copy — say so with
             # the hit, since the deployed gateway is a withheld repo. Only
-            # for this path shape (swarph-cli rows under swarph_cli/gateway/).
+            # for this path shape (swarph-cli rows under swarph_cli/gateway/),
+            # and only while mesh-gateway is actually withheld: on a card
+            # whose project allowlists it, the deployed copy prints in full
+            # beside it and the warning would be false (#1410).
             if (s.get("repo") == "swarph-cli"
-                    and "swarph_cli/gateway/" in (s.get("file_path") or "")):
+                    and "swarph_cli/gateway/" in (s.get("file_path") or "")
+                    and "mesh-gateway" in (ex.get("withheld") or [])):
                 head.append("  swarph-cli gateway copy; "
                              "the deployed gateway is a withheld repo")
         if not ex.get("symbols"):
-            head.append("- 0 symbols (floor: exact-name match only, FTS broader search not run)")
+            head.append("no symbol resolved")
         if len(ex.get("symbols", [])) > ROW_LIMIT:
             cut_notes.append(f"symbols cut after {ROW_LIMIT}")
         for tok in ex.get("tokens", []):
@@ -941,17 +994,8 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
         else:
             head.append(f"routes: {FLOOR_ROUTES}")
         head.append("")
-        tests = ex.get("tests", [])
-        if tests:
-            head.append("covering tests:")
-            for t in tests[:ROW_LIMIT]:
-                head.append(f"- {t['name']} {t['repo']} "
-                             f"{t['file_path']}:{t['start_line']}")
-        else:
-            head.append(f"tests: {FLOOR_TESTS}")
-        if len(tests) > ROW_LIMIT:
-            cut_notes.append(f"tests cut after {ROW_LIMIT}")
-        head.append("")
+        # #1410: no covering-tests section — name-match is not coverage, and
+        # no real data backs it. Nothing is printed here at all.
         head.append("pins (per repo: indexed sha + index time):")
         for repo, p in ex.get("pins", {}).items():
             sha = p.get("sha") or "sha unavailable: .codegraph/indexed_origin_main missing"
@@ -971,22 +1015,19 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
             for h in fed.get("hits", []):
                 head.append(f"- {h[:140]}")
             if not fed.get("hits"):
-                head.append(f"- {FLOOR_DOWNSTREAM}")
+                head.append("- federation: no hits for these targets "
+                            "(floor: report not linked for these repos)")
             if fed.get("cut"):
                 cut_notes.append(f"fed-report scanned first {FED_REPORT_LINE_CAP} lines")
         if st.get("status") != "ok":
             head.append(f"structurizr: {st.get('status', 'unavailable')}")
         else:
+            # #1410: no rels of any kind in output — downstream is never
+            # printed (neither entries nor floor). Deploy units stay.
             if st.get("deploy_units"):
                 head.append(f"deploy units: {', '.join(st['deploy_units'])}")
             else:
                 head.append("deploy units: unavailable (floor: no group-tagged container matched)")
-            if st.get("downstream"):
-                head.append(f"downstream rels: {', '.join(st['downstream'])}")
-            else:
-                head.append(f"downstream: {FLOOR_DOWNSTREAM}")
-            if st.get("cut"):
-                cut_notes.append(f"structurizr rels cut after {STRUCTURIZR_REL_CAP}")
     # Reserved tail: WITHHELD (ONE names-list line), the fed-docs state,
     # and the freshness section. The cap truncates `head` only, so these
     # are never cut away.
@@ -994,8 +1035,9 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
     withheld = ex.get("withheld", [])
     if withheld:
         tail.append(f"WITHHELD: {', '.join(withheld)} ({WITHHOLD_REASON} — "
-                    "same public/private rule as codegraph._visible_repos; "
-                    "full list in --json)")
+                    "same public+allowlist composition as "
+                    "codegraph._visible_repos, caller replaced by the card's "
+                    "project slug; full list in --json)")
     _fed_docs = ex.get("fed_docs") or \
         "unavailable: fed-docs state not recorded"
     if isinstance(_fed_docs, str) and _fed_docs.startswith("unavailable"):

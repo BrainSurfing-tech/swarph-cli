@@ -1773,10 +1773,25 @@ def run_board(argv: list[str]) -> int:
                       "and no readable --card to mine tokens from",
                       file=sys.stderr)
                 return 2
+            # card #1410: the card's board project slug resolves the same
+            # way as every other card-artifact project read (card row
+            # carries project_id; the slug lives on GET /board/projects,
+            # matched by id). Unresolvable -> None -> public only.
+            proj_slug = None
+            if card:
+                try:
+                    _pst, _pdata = _http_get_json(
+                        f"{gw.rstrip('/')}/board/projects", token)
+                    _rows = (_pdata if isinstance(_pdata, list)
+                             else (_pdata or {}).get("projects", []))
+                    if _pst and 200 <= _pst < 300:
+                        proj_slug = _de_mod.card_project_slug(card, _rows)
+                except Exception:
+                    proj_slug = None
             ex = _de_mod.build_extract(
                 tokens=tokens, index_path=args.index,
                 fed_report=args.fed_report, structurizr_ws=args.structurizr_ws,
-                card=card, paths=paths)
+                card=card, paths=paths, project_slug=proj_slug)
             if getattr(args, "json", False):
                 # card #1396: redact WITHHELD registry entries (no private
                 # paths/index times in machine-readable output).

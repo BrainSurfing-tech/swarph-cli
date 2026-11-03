@@ -170,12 +170,14 @@ def test_zero_callers_prints_floor_verbatim(idx, fed):
     assert "0 callers (floor: HTTP callers not linked yet)" in text
 
 
-def test_zero_routes_tests_downstream_print_floors(idx, fed):
+def test_zero_routes_prints_floor_and_removed_sections_absent(idx, fed):
+    # #1410: routes floor stays; the covering-tests section and every
+    # downstream/rels line are gone from the output entirely.
     ex = _build(idx, fed, ["board_cards"])
     text = de.render(ex)
     assert "0 routes (floor: route registry not linked for this symbol)" in text
-    assert ("0 covering tests (floor: name-match only, semantic coverage "
-            "not linked)") in text
+    assert "covering tests" not in text.lower()
+    assert "downstream" not in text.lower()
 
 
 def test_missing_index_prints_unavailable_never_zero(tmp_path, fed):
@@ -187,24 +189,28 @@ def test_missing_index_prints_unavailable_never_zero(tmp_path, fed):
 
 
 def test_structurizr_container_match_names_deploy_unit(idx, fed):
+    # #1410: deploy units stay; downstream rels are never read nor printed.
     ex = _build(idx, fed, ["chat_sync"])
     assert ex["structurizr"]["status"] == "ok"
     assert ex["structurizr"]["deploy_units"] == ["lab-ovh"]
-    assert ex["structurizr"]["downstream"] == ["swarph-mesh (imports)"]
+    assert "downstream" not in ex["structurizr"]
+    text = de.render(ex)
+    assert "deploy units: lab-ovh" in text
+    assert "downstream" not in text.lower()
 
 
-def test_file_stem_surfaces_test_suite(idx, fed):
-    # chat_sync lives in gateway/server.py: stem 'server' must surface the
-    # tests/test_server.py FILE row (name-match alone only finds the test
-    # whose name contains the symbol).
+def test_no_covering_tests_section(idx, fed):
+    # #1410: the covering-tests section is gone — no `tests` key, no tests
+    # text in the output — while the symbol itself still resolves.
     ex = _build(idx, fed, ["chat_sync"])
-    names = {(t["name"], t["file_path"]) for t in ex["tests"]}
-    assert ("test_server.py", "tests/test_server.py") in names
-    assert ("test_chat_sync_requires_auth", "tests/test_server.py") in names
-    # ... but must not leak into an unrelated symbol's extract.
+    assert "tests" not in ex
+    rows = [s for s in ex["symbols"] if s["name"] == "chat_sync"]
+    assert len(rows) == 1
+    text = de.render(ex)
+    assert "covering tests" not in text.lower()
     ex2 = _build(idx, fed, ["board_cards"])
-    names2 = {(t["name"], t["file_path"]) for t in ex2["tests"]}
-    assert ("test_server.py", "tests/test_server.py") not in names2
+    assert "tests" not in ex2
+    assert "covering tests" not in de.render(ex2).lower()
 
 
 def test_missing_federation_sources_print_unavailable(tmp_path, idx):
@@ -352,7 +358,7 @@ def test_card_body_trailing_slash_print_only_exits_zero(idx, fed, monkeypatch,
     assert "Traceback" not in out.out and "Traceback" not in out.err
     assert ("routes + params:" in out.out
             or "no visible target repo" in out.out
-            or "0 symbols" in out.out)
+            or "no symbol resolved" in out.out)
 
 
 # ── rework r4: STALE compares instants, not strings, across offsets ──
@@ -470,7 +476,8 @@ def _unavailable_ex(tmp_path, fed, index_path):
 def _assert_unavailable_index(ex):
     assert "unavailable" in ex["index"]["status"]
     text = de.render(ex)
-    assert "codegraph half: unavailable" in text
+    assert "index unavailable" in text
+    assert "codegraph half: unavailable" not in text
     assert "## codegraph half (index.db" not in text
     as_json = json.loads(json.dumps(ex, default=str))
     assert "unavailable" in as_json["index"]["status"]
@@ -533,8 +540,9 @@ def test_federation_half_drops_lines_naming_withheld_repo(idx, tmp_path):
     assert ex["federation_report"]["status"] == "ok"
     assert ex["federation_report"]["hits"] == \
         ["• swarph-cli       → (nothing depends on it)"]
-    # private container rel dropped; public rel + deploy unit kept.
-    assert ex["structurizr"]["downstream"] == ["swarph-mesh (calls)"]
+    # #1410: rels are never read nor printed — no downstream key at all —
+    # while the deploy unit stays.
+    assert "downstream" not in ex["structurizr"]
     assert ex["structurizr"]["deploy_units"] == ["lab-ovh"]
     text = de.render(ex)
     # #3779 r4 old->new: WITHHELD moved from five per-repo lines ABOVE the
@@ -542,7 +550,7 @@ def test_federation_half_drops_lines_naming_withheld_repo(idx, tmp_path):
     # the federation middle), so the leak check scopes to the fed lines
     # themselves — the notice MUST name mesh-gateway (asserted elsewhere).
     fed_lines = [ln for ln in text.splitlines()
-                 if ln.startswith("- •") or ln.startswith("downstream rels:")
+                 if ln.startswith("- •")
                  or ln.startswith("deploy units:")]
     assert any("nothing depends on it" in ln for ln in fed_lines)
     assert any("swarph-cli" in ln for ln in fed_lines)  # visible kept
@@ -550,6 +558,7 @@ def test_federation_half_drops_lines_naming_withheld_repo(idx, tmp_path):
         assert "mesh-gateway" not in ln, ln  # no private name via fed lines
         assert "mystery" not in ln, ln
     assert "swarph-cli" in text.split("## federation half")[1]
+    assert "downstream" not in text.lower()
 
 
 # ── #3757(c): --json redacts WITHHELD registry entries ──
@@ -642,7 +651,8 @@ def test_coverage_line_absent_when_index_unavailable(tmp_path, fed):
     ex = de.build_extract(tokens=["chat_sync"], index_path=str(tmp_path / "no.db"),
                           fed_report=str(rep), structurizr_ws=str(wsp))
     text = de.render(ex)
-    assert "codegraph half: unavailable" in text
+    assert "index unavailable" in text
+    assert "codegraph half: unavailable" not in text
     assert "index coverage is partial:" not in text
 
 
@@ -662,6 +672,15 @@ def test_gateway_copy_note_absent_for_other_paths(idx, fed):
     text = de.render(ex)
     assert "index coverage is partial:" in text  # r1 still prints
     assert "gateway copy" not in text
+
+
+def test_gateway_copy_note_absent_when_gateway_visible(idx, fed):
+    # #1410: the note warns the deployed gateway is WITHHELD — on a card
+    # whose project allowlists mesh-gateway the deployed copy prints in
+    # full beside it, so the warning would be false and must not print.
+    ex = _allow_build(idx, fed, ["chat_sync"], "board", _ALLOW)
+    assert any(s["repo"] == "mesh-gateway" for s in ex["symbols"])
+    assert "gateway copy" not in de.render(ex)
 
 
 # ── #3776 r3: withheld test-helper rows worded as test code ──
@@ -782,17 +801,17 @@ def test_import_rows_never_resolve_as_symbols(tmp_path, fed):
     # card #792: `swarph_cli` resolved to import sites, not the symbol.
     ex = _import_shape_extract(tmp_path, fed, ["swarph_cli"])
     assert ex["symbols"] == []
-    assert "- 0 symbols (floor:" in de.render(ex)
+    assert "no symbol resolved" in de.render(ex)
 
 
 def test_import_rows_excluded_from_covering_tests(tmp_path, fed):
-    # card #788: the delivery stem matched a test FILE and listed every
-    # import in it (sys, json, os, time, pytest) as coverage.
+    # card #788 shape, #1410 contract: a stem-like token resolves nothing
+    # (exact-name only — `delivery` is not a symbol here) and the extract
+    # carries no covering-tests at all, so no import row can pose as one.
     ex = _import_shape_extract(tmp_path, fed, ["delivery"])
-    kinds = {t["kind"] for t in ex["tests"]}
-    assert "import" not in kinds
-    assert ("test_delivery_ok", "tests/test_thing_delivery.py") in \
-        {(t["name"], t["file_path"]) for t in ex["tests"]}
+    assert ex["symbols"] == []
+    assert "tests" not in ex
+    assert "covering tests" not in de.render(ex).lower()
 
 
 def test_import_rows_excluded_from_also_defined(tmp_path, fed):
@@ -934,7 +953,7 @@ def test_probe_rejects_dropped_signature_column(tmp_path, fed):
                           fed_docs_db=str(tmp_path / "no-fed.db"),
                           merged_lookup=lambda p: None)
     assert "unavailable" in ex["index"]["status"]
-    assert "codegraph half: unavailable" in de.render(ex)
+    assert "index unavailable" in de.render(ex)
 
 
 def test_probe_rejects_dropped_repos_path_column(tmp_path, fed):
@@ -973,7 +992,8 @@ def test_empty_index_reads_unavailable_not_ok(tmp_path, fed):
     assert "unavailable" in ex["index"]["status"]
     assert "empty index" in ex["index"]["status"]
     text = de.render(ex)
-    assert "codegraph half: unavailable" in text
+    assert "index unavailable" in text
+    assert "no symbol resolved" not in text  # symbol section never renders
     assert "- 0 symbols" not in text
 
 
@@ -1093,13 +1113,269 @@ def test_federation_drops_dotted_slashed_and_unknown_names(tmp_path):
 
 
 def test_structurizr_drops_withheld_and_unregistered_rels(tmp_path):
+    # #1410: rels are never read nor printed — no downstream key, no rel
+    # text — while deploy units and the fed-report filtering stay.
     p = _r5_db(tmp_path)
     rep, wsp = _r5_sources(tmp_path)
     ex = de.build_extract(tokens=["chat_sync"], index_path=str(p),
                           fed_report=str(rep), structurizr_ws=str(wsp),
                           fed_docs_db=str(tmp_path / "no-fed.db"),
                           merged_lookup=lambda p: None)
-    # mesh-gateway is withheld; phantom-svc names no container or repo, so
-    # it is withheld fail-closed; swarph-mesh is a known container, kept.
-    assert ex["structurizr"]["downstream"] == ["swarph-mesh (calls)"]
+    assert "downstream" not in ex["structurizr"]
     assert ex["structurizr"]["deploy_units"] == ["lab-ovh"]
+    text = de.render(ex)
+    assert "downstream" not in text.lower()
+    assert "rels" not in text.lower()
+    assert "phantom-svc" not in text
+    assert "mesh_gateway" not in text.split("WITHHELD:")[0]
+
+
+# ── #1410: project allowlist visibility (card-allowlist.json) ──
+
+_ALLOW = {"board": ["mesh-gateway", "lab-orchestrator"],
+          "other": ["mystery"]}
+
+
+def _allow_build(idx, fed, tokens, project_slug, allowlist, **kw):
+    rep, wsp = fed
+    kw.setdefault("merged_lookup", lambda p: None)
+    return de.build_extract(tokens=tokens, index_path=str(idx),
+                            fed_report=str(rep), structurizr_ws=str(wsp),
+                            fed_docs_db=str(rep) + ".nodb",
+                            project_slug=project_slug,
+                            card_allowlist=allowlist, **kw)
+
+
+def test_allowlisted_private_repo_visible_on_mapped_project(idx, fed):
+    ex = _allow_build(idx, fed, ["chat_sync"], "board", _ALLOW)
+    hit = {(s["repo"], s["name"], s["file_path"], s["start_line"])
+           for s in ex["symbols"]}
+    assert ("mesh-gateway", "chat_sync", "server.py", 12) in hit
+    assert ("swarph-cli", "chat_sync",
+            "src/swarph_cli/gateway/server.py", 3950) in hit
+    assert "mesh-gateway" not in ex["withheld"]
+    assert "mystery" in ex["withheld"]  # not mapped to board: stays out
+    text = de.render(ex)
+    assert "server.py:12" in text  # the private file:line now prints
+    assert "SECRET-SIG" in text  # ... with its full detail, like any row
+    assert "also defined in withheld mesh-gateway" not in text
+
+
+def test_repo_mapped_to_another_project_stays_withheld(idx, fed):
+    # mesh-gateway is allowlisted for `board`, not for `other`: on an
+    # `other` card it must behave exactly like public-only.
+    ex = _allow_build(idx, fed, ["chat_sync"], "other",
+                      {"board": ["mesh-gateway"]})
+    assert [s for s in ex["symbols"] if s["repo"] == "mesh-gateway"] == []
+    assert "mesh-gateway" in ex["withheld"]
+    text = de.render(ex)
+    assert "server.py:12" not in text
+    assert "SECRET-SIG" not in text
+    assert ("- chat_sync: also defined in withheld mesh-gateway; "
+            "the deployed copy may differ") in text
+
+
+def test_malformed_or_absent_allowlist_is_public_only(idx, fed, tmp_path):
+    rep, wsp = fed
+    missing = tmp_path / "no-allowlist.json"
+    garbage = tmp_path / "garbage.json"
+    garbage.write_text("{not json", encoding="utf-8")
+    lst = tmp_path / "list.json"
+    lst.write_text('["board"]', encoding="utf-8")
+    nonlist = tmp_path / "nonlist.json"
+    nonlist.write_text('{"board": "mesh-gateway"}', encoding="utf-8")
+    assert de.load_card_allowlist(str(missing)) == {}
+    assert de.load_card_allowlist(str(garbage)) == {}
+    assert de.load_card_allowlist(str(lst)) == {}
+    assert de.load_card_allowlist(str(nonlist)) == {}
+    for path in (str(missing), str(garbage), str(lst), str(nonlist)):
+        ex = de.build_extract(tokens=["chat_sync"], index_path=str(idx),
+                              fed_report=str(rep), structurizr_ws=str(wsp),
+                              fed_docs_db="x", merged_lookup=lambda p: None,
+                              project_slug="board",
+                              card_allowlist_path=path)
+        assert [s for s in ex["symbols"]
+                if s["repo"] == "mesh-gateway"] == []
+        assert "mesh-gateway" in ex["withheld"]
+
+
+def test_absent_file_means_public_only_without_path(idx, fed):
+    ex = _allow_build(idx, fed, ["chat_sync"], "board", None,
+                      card_allowlist_path="/nonexistent-1410/allow.json")
+    assert [s for s in ex["symbols"] if s["repo"] == "mesh-gateway"] == []
+
+
+def test_split_visible_mirrors_public_plus_allowlist():
+    reg = {"pub": {"visibility": "public"},
+           "priv": {"visibility": "private"},
+           "unk": {"visibility": None}}
+    vis, withheld = de.split_visible(reg)
+    assert vis == ["pub"] and withheld == ["priv", "unk"]
+    vis, withheld = de.split_visible(reg, "board", {"board": ["priv", "ghost"]})
+    assert vis == ["priv", "pub"]
+    assert withheld == ["unk"]
+    vis, withheld = de.split_visible(reg, "nope", {"board": ["priv"]})
+    assert vis == ["pub"]  # project with no entry: public only
+
+
+def test_card_project_slug_follows_board_rule():
+    projs = [{"id": 6, "slug": "board"}, {"id": "13", "slug": "omega-roadmap"}]
+    assert de.card_project_slug({"project_id": 6}, projs) == "board"
+    assert de.card_project_slug({"project_id": "13"}, projs) == "omega-roadmap"
+    assert de.card_project_slug({"project_id": 99}, projs) is None
+    assert de.card_project_slug({"project_id": 6}, None) is None
+    assert de.card_project_slug({"project": "board"}, projs) == "board"
+    assert de.card_project_slug(None, projs) is None
+
+
+# ── #1410: three separate plain lines ──
+
+def test_missing_allowlisted_repo_named_not_in_index(idx, fed):
+    ex = _allow_build(idx, fed, ["chat_sync"], "board",
+                      {"board": ["mesh-gateway", "ghost-repo"]})
+    assert ex["missing_repos"] == ["ghost-repo"]
+    text = de.render(ex)
+    assert "repo ghost-repo is not in the index" in text
+    assert "no symbol resolved" not in text  # symbols DID resolve
+    assert "index unavailable" not in text
+
+
+def test_no_symbol_resolved_line(idx, fed):
+    ex = _build(idx, fed, ["zz_no_such_symbol_anywhere"])
+    assert ex["symbols"] == [] and ex["routes"] == []
+    text = de.render(ex)
+    assert "no symbol resolved" in text
+    assert "- 0 symbols" not in text
+    assert "covering tests" not in text.lower()
+    assert "index unavailable" not in text
+    assert "is not in the index" not in text
+
+
+def test_index_unavailable_line_distinct(tmp_path, fed):
+    rep, wsp = fed
+    ex = de.build_extract(tokens=["chat_sync"],
+                          index_path=str(tmp_path / "no.db"),
+                          fed_report=str(rep), structurizr_ws=str(wsp))
+    text = de.render(ex)
+    assert "index unavailable" in text
+    assert "no symbol resolved" not in text
+    assert "is not in the index" not in text
+
+
+# ── #1410: path-component private-name filtering ──
+
+def test_path_component_withheld_name_dropped_from_fed_lines(tmp_path):
+    assert de._line_withholds(
+        "  ↳ imports mesh_gateway @ src/mesh_gateway/x.py:39",
+        ["mesh-gateway"], ["swarph-cli", "swarph-mesh"]) is True
+    assert de._line_withholds(
+        "    • swarph-cli       → (nothing depends on it)",
+        ["mesh-gateway"], ["swarph-cli", "swarph-mesh"]) is False
+    # ordinary filenames are not registry names: no false drop from the
+    # path-component rule (a visible repo's own path stays printable).
+    assert de._line_withholds(
+        "  ↳ uses swarph_mesh @ src/swarph_mesh/x.py:39",
+        ["mesh-gateway"],
+        ["swarph-cli", "swarph-mesh", "swarph-shared"]) is False
+    assert de._path_withholds("src/mesh_gateway/x.py", ["mesh-gateway"]) is True
+    assert de._path_withholds("src/swarph_cli/gateway/x.py",
+                              ["mesh-gateway"]) is False
+
+
+def test_symbol_with_withheld_path_component_skipped(tmp_path, fed):
+    p = tmp_path / "pc.db"
+    con = sqlite3.connect(str(p))
+    con.execute(REPOS_DDL)
+    con.execute(SYMBOLS_DDL)
+    con.execute(EDGES_DDL)
+    con.execute("INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                ("swarph-cli", "s", str(tmp_path), "public", "t", "full"))
+    con.execute("INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                ("mesh-gateway", "o/gw", str(tmp_path / "gw"),
+                 "private", "t", "full"))
+    con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (1, "swarph-cli", "chat_sync", "function",
+                 "src/mesh-gateway/x.py", 3, "", "", "", ""))
+    con.commit()
+    con.close()
+    rep, wsp = fed
+    ex = de.build_extract(tokens=["chat_sync"], index_path=str(p),
+                          fed_report=str(rep), structurizr_ws=str(wsp),
+                          fed_docs_db="x", merged_lookup=lambda p: None,
+                          card_allowlist={})
+    assert ex["symbols"] == []  # fail closed: path names a withheld repo
+    assert "src/mesh-gateway/x.py" not in de.render(ex)
+
+
+# ── #1410: underscore call/def spellings resolve ──
+
+def _underscore_db(tmp_path):
+    p = tmp_path / "u.db"
+    con = sqlite3.connect(str(p))
+    con.execute(REPOS_DDL)
+    con.execute(SYMBOLS_DDL)
+    con.execute(EDGES_DDL)
+    con.execute("INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                ("swarph-cli", "s", str(tmp_path), "public", "t", "full"))
+    con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (1, "swarph-cli", "_format_graph", "function",
+                 "src/swarph_cli/x.py", 77, "_format_graph",
+                 "", "def _format_graph(rows):", ""))
+    con.commit()
+    con.close()
+    return p
+
+
+def test_underscore_call_and_def_spellings_resolve(tmp_path, fed):
+    rep, wsp = fed
+    db = _underscore_db(tmp_path)
+    for tok in ("_format_graph(rows)", "def _format_graph", "_format_graph"):
+        ex = de.build_extract(tokens=[tok], index_path=str(db),
+                              fed_report=str(rep), structurizr_ws=str(wsp),
+                              fed_docs_db="x", merged_lookup=lambda p: None,
+                              card_allowlist={})
+        hit = [s for s in ex["symbols"] if s["name"] == "_format_graph"]
+        assert hit and hit[0]["start_line"] == 77, tok
+        assert "no symbol resolved" not in de.render(ex)
+    # mining: backticked call spelling and bare def-site spelling both mine
+    # the bare name; junk keeps its brackets and stays filtered.
+    card = {"title": "fix `_format_graph(rows)`",
+            "body": "see def _format_graph and `json.loads(row[\"menu_json`"}
+    toks = de.extract_card_tokens(card)
+    assert "_format_graph" in toks
+    assert "json.loads" not in toks
+    assert not any("(" in t or "[" in t for t in toks)
+
+
+# ── #1410: board plumbing resolves the project slug ──
+
+def test_board_dev_extract_uses_card_project_allowlist(idx, fed, monkeypatch,
+                                                       capsys):
+    from swarph_cli.commands import board as board_mod
+    rep, wsp = fed
+    card = {"id": 7, "project_id": 6, "title": "t", "body": "fix chat_sync"}
+    projs = {"projects": [{"id": 6, "slug": "board"}]}
+
+    def _fake_get(url, tok, **k):
+        if url.endswith("/board/cards/7"):
+            return 200, card
+        if url.endswith("/board/projects"):
+            return 200, projs
+        raise AssertionError(url)
+
+    monkeypatch.setattr(board_mod, "_resolve_self_name",
+                        lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_token",
+                        lambda *_a, **_k: "tok")
+    monkeypatch.setattr(board_mod, "_http_get_json", _fake_get)
+    monkeypatch.setattr(de, "load_card_allowlist",
+                        lambda path=None: {"board": ["mesh-gateway"]})
+    rc = board_mod.run_board(
+        ["cards", "dev-extract", "--card", "7", "--print-only",
+         "--index", str(idx), "--fed-report", str(rep),
+         "--structurizr-ws", str(wsp)])
+    out = capsys.readouterr()
+    assert rc == 0
+    # board project -> mesh-gateway visible: the private copy resolves.
+    assert "server.py:12" in out.out
+    assert "SECRET-SIG" in out.out
