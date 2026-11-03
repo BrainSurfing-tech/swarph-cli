@@ -560,6 +560,57 @@ def _card_say_payload(from_node: str, to_node: str, kind: str, content: str,
     }
 
 
+def _run_cards_say(gw: str, token: str, self_name: str, card_id: int,
+                   content: str, kind: str, to_node: Optional[str], aj: bool, *,
+                   opt_out: bool = False, verb: str = "say") -> int:
+    """Post `content` onto a card's thread (shared by `say` + `dev-extract`).
+
+    Factored out of the `say` block without behavior change: fetch the card,
+    refuse a threadless card by name, default the recipient
+    (--to > assignee > project owner_orchestrator), POST /messages, render the
+    confirmation (including any discharged obligation, #562). `dev-extract`
+    posts through this so both verbs keep ONE recipient/redaction path.
+    """
+    st, card = _http_get_json(f"{gw}/board/cards/{card_id}", token)
+    if st != 200:
+        print(f"swarph board cards {verb}: cannot read card #{card_id}: "
+              f"{card.get('detail', card)}", file=sys.stderr)
+        return 1
+    thread_uuid = card.get("thread_uuid")
+    if not thread_uuid:
+        # Named refusal, not a silent no-op. Same reason the gateway 409s.
+        print(f"swarph board cards {verb}: card #{card_id} has no bound thread "
+              f"(it predates #181a). Run scripts/migrate_card_threads.py on "
+              f"the gateway host.", file=sys.stderr)
+        return 1
+    # #864: card GET has no owner field — only fetch projects when the
+    # cheaper defaults (explicit --to, card assignee) are absent.
+    owner = None
+    if not to_node and not card.get("assignee"):
+        owner = _project_owner_orchestrator(gw, token, card.get("project_id"))
+    try:
+        to_node, reason = _thread_recipient(
+            card, to_node, owner_orchestrator=owner,
+        )
+    except RuntimeError as exc:
+        print(f"swarph board cards {verb}: {exc}", file=sys.stderr)
+        return 1
+    st, d = _post_json(
+        f"{gw}/messages",
+        _card_say_payload(self_name, to_node, kind, content, thread_uuid,
+                          opt_out=opt_out),
+        token,
+    )
+    # A 403 here carries the gateway's explanation that attaching PUBLISHES
+    # to everyone who can read the card, now and in future, so it needs an
+    # explicit `propose` grant. `_out` passes `detail` through whole; it does
+    # not need help, and a second copy of that logic is a second thing to
+    # keep in sync.
+    return _out(
+        st, d, lambda x: _say_line(x, card_id, to_node, reason=reason), aj,
+    )
+
+
 _NO_TIMEOUT = "NO TIMEOUT — this never goes red on its own; pass --timeout-hours if it should"
 
 
@@ -1113,6 +1164,20 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="recipient peer (default: card assignee, else project "
                          "owner_orchestrator; refused if neither resolves)")
     _add_common(cy)
+
+    # card #1396 (#559 phase 2): the pinned dev extract. Posts through the
+    # SAME thread machinery as `say` (shared `_run_cards_say` below), so the
+    # recipient rules, redaction, and post-confirmation stay in one place.
+    from swarph_cli.commands.dev_extract import build_parser as _de_build_parser
+    _de = _de_build_parser()
+    de = cards.add_parser(
+        "dev-extract", help="build (+ post) a pinned codegraph+federation "
+        "dev extract for a card (#1396)",
+        parents=[_de], add_help=False,
+        description=_de.description)
+    de.add_argument("--to", dest="to_node", default=None,
+                    help="recipient peer (same defaulting as `say`)")
+    _add_common(de)
 
     ck = cards.add_parser(
         "ask", intermixed=True,
@@ -1680,44 +1745,47 @@ def run_board(argv: list[str]) -> int:
             except ContentError as exc:
                 print(f"swarph board cards say: {exc}", file=sys.stderr)
                 return 1
-            st, card = _http_get_json(f"{gw}/board/cards/{args.id}", token)
-            if st != 200:
-                print(f"swarph board cards say: cannot read card #{args.id}: "
-                      f"{card.get('detail', card)}", file=sys.stderr)
-                return 1
-            thread_uuid = card.get("thread_uuid")
-            if not thread_uuid:
-                # Named refusal, not a silent no-op. Same reason the gateway 409s.
-                print(f"swarph board cards say: card #{args.id} has no bound thread "
-                      f"(it predates #181a). Run scripts/migrate_card_threads.py on "
-                      f"the gateway host.", file=sys.stderr)
-                return 1
-            # #864: card GET has no owner field — only fetch projects when the
-            # cheaper defaults (explicit --to, card assignee) are absent.
-            owner = None
-            if not args.to_node and not card.get("assignee"):
-                owner = _project_owner_orchestrator(gw, token, card.get("project_id"))
-            try:
-                to_node, reason = _thread_recipient(
-                    card, args.to_node, owner_orchestrator=owner,
-                )
-            except RuntimeError as exc:
-                print(f"swarph board cards say: {exc}", file=sys.stderr)
-                return 1
-            st, d = _post_json(
-                f"{gw}/messages",
-                _card_say_payload(self_name, to_node, args.kind, content, thread_uuid,
-                                  opt_out=getattr(args, "no_redact", False)),
-                token,
-            )
-            # A 403 here carries the gateway's explanation that attaching PUBLISHES
-            # to everyone who can read the card, now and in future, so it needs an
-            # explicit `propose` grant. `_out` passes `detail` through whole; it does
-            # not need help, and a second copy of that logic is a second thing to
-            # keep in sync.
-            return _out(
-                st, d, lambda x: _say_line(x, args.id, to_node, reason=reason), aj,
-            )
+            return _run_cards_say(
+                gw, token, self_name, args.id, content, args.kind,
+                args.to_node, aj, opt_out=getattr(args, "no_redact", False))
+        if args.command == "dev-extract":
+            # card #1396 (#559 phase 2). Token source: --symbol/--path, else
+            # the card's own title+body; post target: --card (via the shared
+            # `say` path) unless --print-only (dry-run: post nothing).
+            from swarph_cli.commands import dev_extract as _de_mod
+            card = None
+            if args.card is not None:
+                st, card = _http_get_json(f"{gw}/board/cards/{args.card}", token)
+                if st != 200:
+                    if not args.symbol and not args.path:
+                        print(f"swarph board cards dev-extract: cannot read "
+                              f"card #{args.card}: {card.get('detail', card)}",
+                              file=sys.stderr)
+                        return 1
+                    card = None
+            explicit = list(args.symbol or []) + list(args.path or [])
+            mined = _de_mod.extract_card_tokens(card) if card else []
+            tokens = explicit + [t for t in mined if t not in explicit]
+            if not tokens:
+                print("swarph board cards dev-extract: no --symbol/--path "
+                      "and no readable --card to mine tokens from",
+                      file=sys.stderr)
+                return 2
+            ex = _de_mod.build_extract(
+                tokens=tokens, index_path=args.index,
+                fed_report=args.fed_report, structurizr_ws=args.structurizr_ws,
+                card=card)
+            if getattr(args, "json", False):
+                print(json.dumps(ex, indent=2, default=str))
+                return 0
+            body = _de_mod.render(ex, max_lines=args.max_lines)
+            if args.print_only or args.card is None:
+                print(body, end="")
+                return 0
+            return _run_cards_say(
+                gw, token, self_name, args.card, body, "fyi",
+                args.to_node, aj, opt_out=getattr(args, "no_redact", False),
+                verb="dev-extract")
         if args.command == "ready":
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "move_ready": not args.clear}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} move_ready -> {x.get('move_ready')}", aj)
