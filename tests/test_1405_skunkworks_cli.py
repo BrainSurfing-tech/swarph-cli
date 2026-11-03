@@ -60,7 +60,8 @@ def env(tmp_path, monkeypatch):
     def factory(gw):
         return default_runners(gateway_url="http://gw.invalid", cell="cell-a", post=gw.post,
                                get=gw.get, claude_bin="/x/claude", research_run=claude,
-                               url_get=lambda url, **kw: Live())
+                               url_get=lambda url, **kw: Live(),
+                               url_resolve=lambda host: ["93.184.216.34"])
 
     class E:
         pass
