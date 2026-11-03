@@ -127,6 +127,39 @@ jobs:
   # `verdict` output (a rejected dispatch fails the run instead), so these stay green
   # while proving that no job starts on the target. The private repo is a real private
   # repo of this org: a run on it must be refused before any macOS or Windows minute.
+  # The returned files really come back, on every system: download what the three real
+  # runs uploaded and look inside. (windows-latest returned nothing in the first run.)
+  returned-files:
+    name: the named files and the exit code come back
+    needs: real
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: selftest-macos
+          path: got/macos
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: selftest-windows
+          path: got/windows
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: selftest-ubuntu
+          path: got/ubuntu
+      - name: Look inside
+        run: |
+          fail=0
+          want() { if [ -s "got/$1/$2" ]; then echo "ok   $1 returned $2"; else echo "FAIL $1 did not return $2"; fail=1; fi; }
+          for os in macos windows ubuntu; do
+            want $os membrane.log; want $os membrane.rc; want $os membrane-proof.txt
+            if [ "$(tr -d '\r\n ' < got/$os/membrane.rc)" = "0" ]; then echo "ok   $os exit code file says 0"; else echo "FAIL $os exit code file"; fail=1; fi
+          done
+          want macos README; want windows README.md; want ubuntu README.md
+          grep -q Darwin got/macos/membrane-proof.txt && grep -q Linux got/ubuntu/membrane-proof.txt && grep -q MINGW got/windows/membrane-proof.txt && echo "ok   each proof file names its own system" || { echo "FAIL proof files"; fail=1; }
+          exit $fail
+
   chain-repo-injection:
     uses: ./.github/workflows/membrane.yml
     permissions: {}
