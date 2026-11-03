@@ -12,6 +12,7 @@ import copy
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -130,7 +131,17 @@ def test_the_guard_catches_each_mutant(mutate, expect):
 
 # ---------------------------------------------------------------- the validator, for real
 
-needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def _find_bash():
+    # On windows-latest the bash found on PATH is the WSL launcher ("no installed
+    # distributions"), not Git Bash, so these tests skip there. The validator is run
+    # under the real Git Bash by membrane-selftest.yml (hostile inputs on windows-latest).
+    if sys.platform == "win32":
+        return None
+    return shutil.which("bash")
+
+
+BASH = _find_bash()
+needs_bash = pytest.mark.skipif(BASH is None, reason="no usable bash here (membrane-selftest covers Windows under Git Bash)")
 
 GOOD = dict(IN_OS="macos", IN_REPO="octocat/Hello-World", IN_REF="master", IN_ARTIFACTS="README\nsub/dir/out.xml", IN_NAME="membrane-out", IN_TIMEOUT="20")
 
@@ -139,7 +150,7 @@ def _validate(tmp_path, **override):
     env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "GITHUB_OUTPUT": str(tmp_path / "gho")}
     env.update(GOOD)
     env.update(override)
-    done = subprocess.run(["bash", str(VALIDATOR)], env=env, capture_output=True, text=True, cwd=tmp_path)
+    done = subprocess.run([BASH, str(VALIDATOR)], env=env, capture_output=True, text=True, cwd=tmp_path)
     outputs = (tmp_path / "gho").read_text(encoding="utf-8") if (tmp_path / "gho").exists() else ""
     return done, outputs
 
@@ -223,7 +234,7 @@ def test_a_validator_with_one_check_removed_is_caught_by_the_hostile_cases(tmp_p
     env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "GITHUB_OUTPUT": str(tmp_path / "gho")}
     env.update(GOOD)
     env[field] = value
-    done = subprocess.run(["bash", str(mutant)], env=env, capture_output=True, text=True, cwd=tmp_path)
+    done = subprocess.run([BASH, str(mutant)], env=env, capture_output=True, text=True, cwd=tmp_path)
     real, _ = _validate(tmp_path, **{field: value})
     assert real.returncode == 1 and f"REJECTED ({label})" in real.stdout, "the real validator did not reject it for this reason"
     assert f"REJECTED ({label})" not in done.stdout, "the mutant still rejected for the same reason: the removed line was not the one doing the work"
