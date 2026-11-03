@@ -537,10 +537,19 @@ def test_federation_half_drops_lines_naming_withheld_repo(idx, tmp_path):
     assert ex["structurizr"]["downstream"] == ["swarph-mesh (calls)"]
     assert ex["structurizr"]["deploy_units"] == ["lab-ovh"]
     text = de.render(ex)
-    fed_half = text.split("## federation half")[1]
-    assert "mesh-gateway" not in fed_half  # no private name via fed lines
-    assert "swarph-cli" in fed_half  # visible subject still shown
-    assert "nothing depends on it" in fed_half
+    # #3779 r4 old->new: WITHHELD moved from five per-repo lines ABOVE the
+    # federation header to ONE reserved names-list line in the tail (after
+    # the federation middle), so the leak check scopes to the fed lines
+    # themselves — the notice MUST name mesh-gateway (asserted elsewhere).
+    fed_lines = [ln for ln in text.splitlines()
+                 if ln.startswith("- •") or ln.startswith("downstream rels:")
+                 or ln.startswith("deploy units:")]
+    assert any("nothing depends on it" in ln for ln in fed_lines)
+    assert any("swarph-cli" in ln for ln in fed_lines)  # visible kept
+    for ln in fed_lines:
+        assert "mesh-gateway" not in ln, ln  # no private name via fed lines
+        assert "mystery" not in ln, ln
+    assert "swarph-cli" in text.split("## federation half")[1]
 
 
 # ── #3757(c): --json redacts WITHHELD registry entries ──
@@ -711,3 +720,386 @@ def test_withheld_mixed_test_and_real_rows_uses_plain_wording(tmp_path, fed):
     assert ("- chat_sync: also defined in withheld mesh-gateway; "
             "the deployed copy may differ") in text
     assert "(test code)" not in text
+
+
+# ── #3779 r1: kind=import rows never resolve ──
+
+def _import_shape_db(tmp_path):
+    """swarph_cli lives ONLY as import rows; one route row carries the token
+    in its path-embedding qualified_name; delivery's test file mixes a real
+    test with import rows (sys/json)."""
+    p = tmp_path / "imp.db"
+    con = sqlite3.connect(str(p))
+    con.execute(REPOS_DDL)
+    con.execute(SYMBOLS_DDL)
+    con.execute(EDGES_DDL)
+    con.execute("INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                ("swarph-cli", "s", str(tmp_path / "cli"),
+                 "public", "t", "full"))
+    con.execute("INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                ("mesh-gateway", "o/gw", str(tmp_path / "gw"),
+                 "private", "t", "full"))
+    con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (1, "swarph-cli", "swarph_cli", "import",
+                 "src/swarph_cli/channel.py", 16, "swarph_cli",
+                 "", "from swarph_cli import identity", ""))
+    con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (2, "swarph-cli", "POST /api/chat-sync", "route",
+                 "src/swarph_cli/gateway/server.py", 3949,
+                 "src/swarph_cli/gateway/server.py::POST:/api/chat-sync",
+                 "", "", ""))
+    con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (3, "swarph-cli", "test_delivery_ok", "function",
+                 "tests/test_thing_delivery.py", 5, "test_delivery_ok",
+                 "", "", ""))
+    con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (4, "swarph-cli", "sys", "import",
+                 "tests/test_thing_delivery.py", 1, "sys", "", "import sys", ""))
+    con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (5, "swarph-cli", "json", "import",
+                 "tests/test_thing_delivery.py", 2, "json", "", "import json", ""))
+    con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (6, "mesh-gateway", "swarph_cli", "import",
+                 "server.py", 3, "swarph_cli", "", "import swarph_cli", ""))
+    con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (7, "mesh-gateway", "chat_sync", "function",
+                 "server.py", 12, "chat_sync", "", "", ""))
+    con.commit()
+    con.close()
+    return p
+
+
+def _import_shape_extract(tmp_path, fed, tokens):
+    p = _import_shape_db(tmp_path)
+    rep, wsp = fed
+    return de.build_extract(tokens=tokens, index_path=str(p),
+                            fed_report=str(rep), structurizr_ws=str(wsp),
+                            fed_docs_db=str(tmp_path / "no-fed.db"),
+                            merged_lookup=lambda path: None)
+
+
+def test_import_rows_never_resolve_as_symbols(tmp_path, fed):
+    # card #792: `swarph_cli` resolved to import sites, not the symbol.
+    ex = _import_shape_extract(tmp_path, fed, ["swarph_cli"])
+    assert ex["symbols"] == []
+    assert "- 0 symbols (floor:" in de.render(ex)
+
+
+def test_import_rows_excluded_from_covering_tests(tmp_path, fed):
+    # card #788: the delivery stem matched a test FILE and listed every
+    # import in it (sys, json, os, time, pytest) as coverage.
+    ex = _import_shape_extract(tmp_path, fed, ["delivery"])
+    kinds = {t["kind"] for t in ex["tests"]}
+    assert "import" not in kinds
+    assert ("test_delivery_ok", "tests/test_thing_delivery.py") in \
+        {(t["name"], t["file_path"]) for t in ex["tests"]}
+
+
+def test_import_rows_excluded_from_also_defined(tmp_path, fed):
+    p = _import_shape_db(tmp_path)
+    con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    try:
+        reg = de.repo_registry(con)
+        vis, withheld = de.split_visible(reg)
+        assert de.withheld_symbol_repos(con, "swarph_cli", withheld) == {}
+        assert de.withheld_symbol_repos(con, "chat_sync", withheld) == \
+            {"mesh-gateway": False}
+    finally:
+        con.close()
+
+
+def test_path_lookup_excludes_import_rows(tmp_path, fed):
+    p = _import_shape_db(tmp_path)
+    con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    try:
+        reg = de.repo_registry(con)
+        vis, _ = de.split_visible(reg)
+        assert de.find_symbols_by_path(con, "src/swarph_cli/channel.py",
+                                       vis) == []
+    finally:
+        con.close()
+
+
+def test_routes_match_route_name_not_file_path(tmp_path, fed):
+    # card #792: token `swarph_cli` matched all 76 route qualified_names
+    # via the path-embedding `src/swarph_cli/...` prefix.
+    p = _import_shape_db(tmp_path)
+    con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    try:
+        reg = de.repo_registry(con)
+        vis, _ = de.split_visible(reg)
+        assert de.find_routes(con, "swarph_cli", vis) == []
+        hit = de.find_routes(con, "chat_sync", vis)
+        assert [r["name"] for r in hit] == ["POST /api/chat-sync"]
+        # mined card text with a trailing slash still hits the route row.
+        hit2 = de.find_routes(con, "POST /api/chat-sync/", vis)
+        assert [r["name"] for r in hit2] == ["POST /api/chat-sync"]
+        assert de.find_routes(con, "/", vis) == []
+    finally:
+        con.close()
+
+
+# ── #3779 r2: junk targets dropped before lookup ──
+
+def test_is_lookup_token_predicate():
+    for junk in ("?", "none", "NONE", "pip install -U",
+                 "python3 -m swarph_cli.scripts.dm_notify_filter",
+                 "swarph version", "import json, sys", "cards graph",
+                 "delivery = sd.get(\"delivery", "json.loads(row[\"menu_json",
+                 "", "x"):
+        assert not de.is_lookup_token(junk), junk
+    for keep in ("chat_sync", "delivery", "_check_delivery_container",
+                 "_step_menu_for", "dm_notify_filter", "swarph_cli",
+                 "POST /api/chat-sync", "POST /api/chat-sync/",
+                 "/api/chat-sync/"):
+        assert de.is_lookup_token(keep), keep
+
+
+def test_mined_card_tokens_skip_junk():
+    # card #788/#792 shaped text: backticked junk + shell + real symbols.
+    card = {"title": "render `?` for unknown, `none` for unchecked",
+            "body": ("run `pip install -U` and `import json, sys` "
+                     "(`swarph version`); fix `delivery` via "
+                     "`_check_delivery_container`; use POST /api/chat-sync")}
+    toks = de.extract_card_tokens(card)
+    assert "delivery" in toks
+    assert "_check_delivery_container" in toks
+    assert "POST /api/chat-sync" in toks
+    for junk in ("?", "none", "pip install -U", "import json, sys",
+                 "swarph version"):
+        assert junk not in toks, junk
+
+
+def test_build_extract_drops_explicit_junk_tokens(idx, fed):
+    ex = _build(idx, fed, ["none", "?", "delivery", "chat_sync"])
+    assert ex["tokens"] == ["delivery", "chat_sync"]
+    assert "none" not in de.render(ex).split("targets:")[1].splitlines()[0]
+
+
+# ── #3779 r3: unavailable index keeps true fed-docs; probe covers columns ──
+
+def test_unavailable_index_keeps_true_fed_docs_state(tmp_path, fed):
+    rep, wsp = fed
+    missing = tmp_path / "no-fed.db"
+    ex = de.build_extract(tokens=["chat_sync"],
+                          index_path=str(tmp_path / "no.db"),
+                          fed_report=str(rep), structurizr_ws=str(wsp),
+                          fed_docs_db=str(missing),
+                          merged_lookup=lambda p: None)
+    assert ex["fed_docs"].startswith("unavailable")
+    assert "not present on this box" in de.render(ex)
+    as_json = de.redact_for_json(ex)
+    assert as_json["fed_docs"] == ex["fed_docs"]
+    present = tmp_path / "fed.db"
+    present.write_bytes(b"")
+    ex2 = de.build_extract(tokens=["chat_sync"],
+                           index_path=str(tmp_path / "no.db"),
+                           fed_report=str(rep), structurizr_ws=str(wsp),
+                           fed_docs_db=str(present),
+                           merged_lookup=lambda p: None)
+    assert f"present ({present})" in de.render(ex2)
+
+
+def _col_drop_db(tmp_path, name, repos_ddl, symbols_ddl,
+                 repos_row, symbols_row):
+    p = tmp_path / name
+    con = sqlite3.connect(str(p))
+    con.execute(f"CREATE TABLE repos({repos_ddl})")
+    con.execute(f"CREATE TABLE symbols({symbols_ddl})")
+    con.execute(EDGES_DDL)
+    con.execute(f"INSERT INTO repos VALUES ({','.join('?' * len(repos_row))})",
+                repos_row)
+    con.execute(
+        f"INSERT INTO symbols VALUES ({','.join('?' * len(symbols_row))})",
+        symbols_row)
+    con.commit()
+    con.close()
+    return p
+
+
+def test_probe_rejects_dropped_signature_column(tmp_path, fed):
+    p = _col_drop_db(
+        tmp_path, "nosig.db",
+        "name TEXT PRIMARY KEY, slug TEXT, path TEXT,"
+        " visibility TEXT, indexed_at TEXT, mode TEXT",
+        "id INTEGER PRIMARY KEY, repo TEXT, name TEXT,"
+        " kind TEXT, file_path TEXT, start_line INTEGER,"
+        " qualified_name TEXT, docstring TEXT, name_search TEXT",
+        ("swarph-cli", "s", str(tmp_path), "public", "t", "full"),
+        (1, "swarph-cli", "chat_sync", "function", "s.py", 1,
+         "chat_sync", "", ""))
+    rep, wsp = fed
+    ex = de.build_extract(tokens=["chat_sync"], index_path=str(p),
+                          fed_report=str(rep), structurizr_ws=str(wsp),
+                          fed_docs_db=str(tmp_path / "no-fed.db"),
+                          merged_lookup=lambda p: None)
+    assert "unavailable" in ex["index"]["status"]
+    assert "codegraph half: unavailable" in de.render(ex)
+
+
+def test_probe_rejects_dropped_repos_path_column(tmp_path, fed):
+    p = _col_drop_db(
+        tmp_path, "nopath.db",
+        "name TEXT PRIMARY KEY, slug TEXT,"
+        " visibility TEXT, indexed_at TEXT, mode TEXT",
+        "id INTEGER PRIMARY KEY, repo TEXT, name TEXT,"
+        " kind TEXT, file_path TEXT, start_line INTEGER,"
+        " qualified_name TEXT, docstring TEXT, signature TEXT,"
+        " name_search TEXT",
+        ("swarph-cli", "s", "public", "t", "full"),
+        (1, "swarph-cli", "chat_sync", "function", "s.py", 1,
+         "chat_sync", "", "def chat_sync():", ""))
+    rep, wsp = fed
+    con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    try:
+        assert de.probe_index(con) is not None
+    finally:
+        con.close()
+
+
+def test_empty_index_reads_unavailable_not_ok(tmp_path, fed):
+    p = tmp_path / "empty.db"
+    con = sqlite3.connect(str(p))
+    con.execute(REPOS_DDL)
+    con.execute(SYMBOLS_DDL)
+    con.execute(EDGES_DDL)
+    con.commit()
+    con.close()
+    rep, wsp = fed
+    ex = de.build_extract(tokens=["chat_sync"], index_path=str(p),
+                          fed_report=str(rep), structurizr_ws=str(wsp),
+                          fed_docs_db=str(tmp_path / "no-fed.db"),
+                          merged_lookup=lambda p: None)
+    assert "unavailable" in ex["index"]["status"]
+    assert "empty index" in ex["index"]["status"]
+    text = de.render(ex)
+    assert "codegraph half: unavailable" in text
+    assert "- 0 symbols" not in text
+
+
+# ── #3779 r4: cap reserves freshness/withheld/cut; WITHHELD is one line ──
+
+def test_withheld_prints_as_one_names_list_line(idx, fed):
+    ex = _build(idx, fed, ["chat_sync"])
+    assert ex["withheld"] == ["mesh-gateway", "mystery"]
+    cov = [ln for ln in de.render(ex).splitlines()
+           if ln.startswith("WITHHELD")]
+    assert len(cov) == 1  # ONE line, not five per-repo lines
+    assert "mesh-gateway, mystery" in cov[0]
+    text = de.render(ex)
+    assert "+ 0 more withheld" not in text
+    assert "more withheld (full list in --json)" not in text
+    assert "withheld list cut after" not in text
+
+
+def test_output_cap_reserves_freshness_withheld_and_cut(idx, fed):
+    # Old code cut from the very end: at max_lines=20 the freshness
+    # section (and its STALE line) vanished first.
+    rep, wsp = fed
+    ex = de.build_extract(tokens=["chat_sync", "board_cards"],
+                          index_path=str(idx),
+                          fed_report=str(rep), structurizr_ws=str(wsp),
+                          fed_docs_db=str(rep) + ".nodb",
+                          merged_lookup=lambda p: "2027-01-01T00:00:00+00:00")
+    text = de.render(ex, max_lines=20)
+    assert len(text.splitlines()) <= 20
+    assert "cut:" in text
+    assert "WITHHELD:" in text
+    assert "fed-docs.db:" in text
+    assert "freshness (STALE when fed build < last repo.merged):" in text
+    assert "STALE (federation build" in text
+
+
+# ── #3779 r5: dotted/slashed private names + unknown registry names ──
+
+def _r5_db(tmp_path):
+    p = tmp_path / "r5.db"
+    con = sqlite3.connect(str(p))
+    con.execute(REPOS_DDL)
+    con.execute(SYMBOLS_DDL)
+    con.execute(EDGES_DDL)
+    con.execute("INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                ("swarph-cli", "s", str(tmp_path / "cli"),
+                 "public", "t", "full"))
+    con.execute("INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                ("proven", "o/proven", str(tmp_path / "pr"),
+                 "private", "t", "full"))
+    con.execute("INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                ("mesh-gateway", "o/gw", str(tmp_path / "gw"),
+                 "private", "t", "full"))
+    con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (1, "swarph-cli", "chat_sync", "function",
+                 "src/svc.py", 10, "chat_sync", "", "", ""))
+    con.commit()
+    con.close()
+    return p
+
+
+def _r5_sources(tmp_path):
+    rep = tmp_path / "fed.txt"
+    rep.write_text(
+        "# swarph federation — cross-repo connection map\n"
+        "# generated 2026-11-02T04:45:01Z by fed_refresh.sh (card #44 part 4)\n"
+        "\n"
+        "  Layer 2:\n"
+        "    • swarph-cli       → (nothing depends on it)\n"
+        "    • swarph-cli   [10720 nodes/26632 edges]  ──depends on──▶ proven.packs.secret_mod\n"
+        "    • swarph-cli   [10720 nodes/26632 edges]  ──depends on──▶ mesh_gateway.private_helper\n"
+        "    • swarph-cli   [10720 nodes/26632 edges]  ──depends on──▶ swarph-panel\n"
+        "    • swarph-cli   [10720 nodes/26632 edges]  ──depends on──▶ swarph-mesh\n",
+        encoding="utf-8",
+    )
+    ws = {"model": {"softwareSystems": [
+        {"name": "Swarph Federation", "containers": [
+            {"id": "8", "name": "swarph-cli", "group": "lab-ovh",
+             "relationships": [{"destinationId": "7",
+                                "description": "imports"},
+                               {"destinationId": "9",
+                                "description": "calls"},
+                               {"destinationId": "phantom-svc",
+                                "description": "uses"}]},
+            {"id": "7", "name": "mesh-gateway", "group": "lab-ovh",
+             "relationships": []},
+            {"id": "9", "name": "swarph-mesh", "group": "lab-ovh",
+             "relationships": []},
+        ]},
+    ]}}
+    wsp = tmp_path / "ws.json"
+    wsp.write_text(json.dumps(ws))
+    return rep, wsp
+
+
+def test_federation_drops_dotted_slashed_and_unknown_names(tmp_path):
+    p = _r5_db(tmp_path)
+    rep, wsp = _r5_sources(tmp_path)
+    ex = de.build_extract(tokens=["chat_sync"], index_path=str(p),
+                          fed_report=str(rep), structurizr_ws=str(wsp),
+                          fed_docs_db=str(tmp_path / "no-fed.db"),
+                          merged_lookup=lambda p: None)
+    hits = ex["federation_report"]["hits"]
+    # pure-visible lines kept, including the known-container swarph-mesh
+    # line (registered as a structurizr container, fail-closed keeps known).
+    assert "• swarph-cli       → (nothing depends on it)" in hits
+    assert any("swarph-mesh" in h for h in hits)
+    for h in hits:
+        assert "proven" not in h, h  # dotted private path dropped
+        assert "mesh_gateway" not in h, h  # slashed private path dropped
+        assert "swarph-panel" not in h, h  # unregistered name dropped
+    text = de.render(ex)
+    fed_half = text.split("## federation half")[1].split("WITHHELD:")[0]
+    assert "secret_mod" not in fed_half
+    assert "private_helper" not in fed_half
+    assert "swarph-panel" not in fed_half
+
+
+def test_structurizr_drops_withheld_and_unregistered_rels(tmp_path):
+    p = _r5_db(tmp_path)
+    rep, wsp = _r5_sources(tmp_path)
+    ex = de.build_extract(tokens=["chat_sync"], index_path=str(p),
+                          fed_report=str(rep), structurizr_ws=str(wsp),
+                          fed_docs_db=str(tmp_path / "no-fed.db"),
+                          merged_lookup=lambda p: None)
+    # mesh-gateway is withheld; phantom-svc names no container or repo, so
+    # it is withheld fail-closed; swarph-mesh is a known container, kept.
+    assert ex["structurizr"]["downstream"] == ["swarph-mesh (calls)"]
+    assert ex["structurizr"]["deploy_units"] == ["lab-ovh"]
