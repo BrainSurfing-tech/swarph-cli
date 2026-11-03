@@ -1,0 +1,249 @@
+# membrane.yml -- run ONE command on a real macOS, Windows or Linux GitHub-hosted
+# runner, on demand, against a chosen PUBLIC repo and ref. Card #1427.
+#
+# START IT AND READ IT, ONE LINE (needs write access to this repo and the gh CLI):
+#   gh workflow run membrane.yml -R BrainSurfing-tech/swarph-cli -f os=macos -f repo=OWNER/NAME -f ref=main -f command='pytest -q' -f artifacts=junit.xml && sleep 10 && gh run watch -R BrainSurfing-tech/swarph-cli --exit-status "$(gh run list -R BrainSurfing-tech/swarph-cli -w membrane.yml -L 1 --json databaseId -q '.[0].databaseId')"
+# `gh run watch --exit-status` ends with the run's result, which mirrors the
+# command's own exit code. Logs: `gh run view <id> -R ... --log` (step "Run the
+# command"), the exit code and a log tail are in the run summary, and
+# `gh run download <id> -R ... -n membrane-out` returns membrane.log, membrane.rc
+# and every path named in `artifacts`. One input (`os`) selects macos, windows or
+# ubuntu; the same file serves all three.
+#
+# WHAT THE RUNNER NEVER HOLDS, AND HOW THAT IS ENFORCED (#1195, #1427):
+#   * No Actions secret: no `secrets.` reference exists in this file, and the
+#     tests/test_1427_membrane_workflow.py guard fails if one appears.
+#   * No write token: `permissions: {}` at the top and on every job, so the
+#     GITHUB_TOKEN carries no scope at all. The command step does not receive
+#     it (it is passed to one step only, the public-repo check), and checkout
+#     runs with persist-credentials: false.
+#   * No tailnet, no mesh token: a GitHub-hosted runner is a fresh VM with no
+#     route to either, and nothing here installs or joins one.
+#   * Untrusted dispatch inputs are never interpolated into a shell script. Every
+#     `${{ inputs.* }}` sits in an `env:` or `with:` value; scripts read env
+#     variables. tools/membrane_validate.sh checks each field against a narrow
+#     pattern first, and its rejection text never echoes the input.
+#   * Public repos only: the target must answer 200 and private=false to the
+#     token-less API, so a private repo is refused before any macOS minute is
+#     spent (macOS minutes on a private repo are billed; the commander decides).
+#   * `command` IS the payload: it is code that runs on the runner, as a builder
+#     asked. What is withheld is everything it could reach beyond the runner.
+#
+# NOT A PERSISTENT OR INTERACTIVE ENVIRONMENT: one job, at most 60 minutes.
+name: membrane
+
+run-name: membrane ${{ inputs.os }} ${{ inputs.repo }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: Runner family
+        required: true
+        type: choice
+        options: [macos, windows, ubuntu]
+        default: macos
+      repo:
+        description: owner/name of a PUBLIC repository to check out
+        required: true
+        type: string
+      ref:
+        description: Branch, tag or commit sha
+        required: false
+        type: string
+        default: main
+      command:
+        description: Bash command run in the checkout; its exit code, logs and artifacts come back
+        required: true
+        type: string
+      artifacts:
+        description: Files or directories to return, one path per line, relative to the checkout
+        required: false
+        type: string
+        default: ""
+      artifact_name:
+        description: Name of the returned artifact
+        required: false
+        type: string
+        default: membrane-out
+      timeout_minutes:
+        description: Job time limit in minutes (1-60)
+        required: false
+        type: string
+        default: "20"
+  workflow_call:
+    inputs:
+      os:
+        required: true
+        type: string
+      repo:
+        required: true
+        type: string
+      ref:
+        required: false
+        type: string
+        default: main
+      command:
+        required: true
+        type: string
+      artifacts:
+        required: false
+        type: string
+        default: ""
+      artifact_name:
+        required: false
+        type: string
+        default: membrane-out
+      timeout_minutes:
+        required: false
+        type: string
+        default: "20"
+    outputs:
+      verdict:
+        description: accepted or rejected, from the input check
+        value: ${{ jobs.check.outputs.verdict }}
+      exit_code:
+        description: Exit code of the command
+        value: ${{ jobs.run.outputs.exit_code }}
+
+permissions: {}
+
+jobs:
+  check:
+    name: check inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      ok: ${{ steps.pub.outputs.ok || steps.v.outputs.ok }}
+      verdict: ${{ steps.pub.outputs.verdict || steps.v.outputs.verdict }}
+      runner: ${{ steps.v.outputs.runner }}
+    steps:
+      - name: Checkout the validator
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          sparse-checkout: tools/membrane_validate.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Validate the inputs (they reach the script as env variables only)
+        id: v
+        env:
+          IN_OS: ${{ inputs.os }}
+          IN_REPO: ${{ inputs.repo }}
+          IN_REF: ${{ inputs.ref }}
+          IN_ARTIFACTS: ${{ inputs.artifacts }}
+          IN_NAME: ${{ inputs.artifact_name }}
+          IN_TIMEOUT: ${{ inputs.timeout_minutes }}
+        run: bash tools/membrane_validate.sh
+
+      # The only step that sees a token, and the token has no scope. It reads
+      # PUBLIC metadata; a private or missing repo answers 404 and is refused.
+      - name: Public repositories only
+        id: pub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IN_REPO: ${{ inputs.repo }}
+        run: |
+          code=$(curl -sS -o "$RUNNER_TEMP/repo.json" -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$IN_REPO" || echo 000)
+          if [ "$code" = "200" ] && python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("private") is False else 1)' "$RUNNER_TEMP/repo.json"; then
+            echo "repo is public"
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "verdict=accepted" >> "$GITHUB_OUTPUT"
+          else
+            echo "REJECTED (repo): the repository is not public or does not exist (API answered $code); no job was started"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "verdict=rejected" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+  run:
+    name: ${{ inputs.os }}
+    needs: check
+    if: needs.check.outputs.ok == 'true'
+    runs-on: ${{ needs.check.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    permissions: {}
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      exit_code: ${{ steps.finish.outputs.exit_code }}
+    steps:
+      - name: Checkout the target
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.ref }}
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Printed before the command so a red command still leaves the box facts.
+      - name: Box facts
+        continue-on-error: true
+        run: |
+          uname -a || true
+          (sw_vers 2>/dev/null || ver 2>/dev/null || lsb_release -a 2>/dev/null) || true
+          echo "arch: $(uname -m)  bash: ${BASH_VERSION}"
+          git -C target log -1 --format='target HEAD %H %s' || true
+
+      - name: Run the command
+        id: cmd
+        working-directory: target
+        env:
+          MEMBRANE_COMMAND: ${{ inputs.command }}
+        run: |
+          set +e
+          bash -c -- "$MEMBRANE_COMMAND" 2>&1 | tee "$RUNNER_TEMP/membrane.log"
+          rc=${PIPESTATUS[0]}
+          echo "$rc" > "$RUNNER_TEMP/membrane.rc"
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Stage the returned files
+        if: always()
+        env:
+          IN_ARTIFACTS: ${{ inputs.artifacts }}
+        run: |
+          stage="$RUNNER_TEMP/stage"
+          mkdir -p "$stage"
+          cp "$RUNNER_TEMP/membrane.log" "$RUNNER_TEMP/membrane.rc" "$stage/" 2>/dev/null || true
+          missing=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%$'\r'}"
+            [ -z "$line" ] && continue
+            if ! (cd target && tar -cf - -- "$line") | tar -C "$stage" -xf - 2>/dev/null; then
+              missing=$((missing + 1))
+            fi
+          done <<EOF
+          $IN_ARTIFACTS
+          EOF
+          echo "returned files staged; $missing requested path(s) not found"
+          (cd "$stage" && find . -type f | sort | head -n 200)
+
+      - name: Return the artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ runner.temp }}/stage
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Verdict
+        id: finish
+        if: always()
+        run: |
+          rc=$(cat "$RUNNER_TEMP/membrane.rc" 2>/dev/null || echo 255)
+          {
+            echo "### membrane: exit code ${rc}"
+            echo
+            echo '```'
+            tail -n 60 "$RUNNER_TEMP/membrane.log" 2>/dev/null || echo "(no log: the command did not start)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"

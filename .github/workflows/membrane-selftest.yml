@@ -1,0 +1,117 @@
+# membrane-selftest.yml -- card #1427. Real runs of membrane.yml, and the input
+# validator under hostile text on all three operating systems.
+#
+# It runs when either membrane file changes (and on demand), so a change to the
+# membrane cannot land without one real macOS, Windows and Linux run at the head.
+# It does NOT change the behaviour of any existing workflow, and it adds no trigger
+# to membrane.yml. All repos used are public; no secret is referenced.
+name: membrane-selftest
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/membrane.yml"
+      - ".github/workflows/membrane-selftest.yml"
+      - "tools/membrane_validate.sh"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  real:
+    name: real run on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            repo: octocat/Hello-World
+            ref: master
+            readme: README
+          - os: windows
+            repo: octocat/Spoon-Knife
+            ref: main
+            readme: README.md
+          - os: ubuntu
+            repo: BrainSurfing-tech/swarph-cli
+            ref: main
+            readme: README.md
+    uses: ./.github/workflows/membrane.yml
+    permissions: {}
+    with:
+      os: ${{ matrix.os }}
+      repo: ${{ matrix.repo }}
+      ref: ${{ matrix.ref }}
+      artifact_name: selftest-${{ matrix.os }}
+      timeout_minutes: "10"
+      artifacts: |
+        ${{ matrix.readme }}
+        membrane-proof.txt
+      command: |
+        set -e
+        echo "kernel: $(uname -s) $(uname -m)"
+        echo "checkout HEAD: $(git rev-parse HEAD)"
+        # NAMES only, never values: a secret-shaped name in the runner would be a finding.
+        if env | cut -d= -f1 | grep -E -i 'SECRET|PASSWORD|MESH|TAILSCALE|^GH_TOKEN$|^GITHUB_TOKEN$|^INPUT_'; then
+          echo "SECRET-SHAPED ENVIRONMENT NAME PRESENT"; exit 3
+        fi
+        echo "no secret-shaped environment names"
+        # The text of this command reached bash as data: it is also in $MEMBRANE_COMMAND.
+        test -n "$MEMBRANE_COMMAND"
+        printf 'membrane proof from %s\n' "$(uname -s)" > membrane-proof.txt
+        cat membrane-proof.txt
+
+  validator-hostile:
+    name: hostile inputs rejected on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions: {}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      # Each case is a real hostile string handed to tools/membrane_validate.sh as an
+      # env variable, the way membrane.yml hands it over. The canary file is what an
+      # injection would create; none of these may reject for the wrong reason (the good
+      # case must be accepted) and none may leave the canary.
+      - name: Hostile cases (bash ${{ matrix.os }})
+        run: |
+          echo "bash $BASH_VERSION on $(uname -s)"
+          canary="$RUNNER_TEMP/CANARY"
+          rm -f "$canary"
+          fail=0
+          good() { env IN_OS=macos IN_REPO=octocat/Hello-World IN_REF=main IN_ARTIFACTS=README IN_NAME=membrane-out IN_TIMEOUT=20 "$@"; }
+          if good bash tools/membrane_validate.sh >/dev/null; then echo "ok   good case accepted"; else echo "FAIL good case rejected"; fail=1; fi
+          reject() {
+            label="$1"; shift
+            if good "$@" bash tools/membrane_validate.sh >/dev/null; then echo "FAIL not rejected: $label"; fail=1; else echo "ok   rejected: $label"; fi
+          }
+          reject "repo with ; and a command"   "IN_REPO=octocat/Hello-World; touch $canary #"
+          reject "repo with command substitution" "IN_REPO=\$(touch $canary)/x"
+          reject "repo with backticks"         "IN_REPO=a/b\`touch $canary\`"
+          reject "repo with newline"           "IN_REPO=$(printf 'a/b\nc/d')"
+          reject "repo without owner"          "IN_REPO=justaname"
+          reject "ref with quote and ;"        "IN_REF=main\"; touch $canary #"
+          reject "ref that is an option"       "IN_REF=--upload-pack=touch $canary"
+          reject "ref with double dot"         "IN_REF=../../x"
+          reject "ref with space"              "IN_REF=main extra"
+          reject "artifact path climbing"      "IN_ARTIFACTS=$(printf 'ok.txt\n../../etc/passwd')"
+          reject "artifact absolute path"      "IN_ARTIFACTS=/etc/passwd"
+          reject "artifact path with space"    "IN_ARTIFACTS=a b"
+          reject "artifact path with dollar"   "IN_ARTIFACTS=\$HOME/x"
+          reject "os self-hosted"              "IN_OS=self-hosted"
+          reject "os with trailing text"       "IN_OS=macos-latest"
+          reject "artifact_name with slash"    "IN_NAME=x/../y"
+          reject "timeout too big"             "IN_TIMEOUT=999"
+          reject "timeout zero"                "IN_TIMEOUT=0"
+          reject "timeout with command"        "IN_TIMEOUT=1; touch $canary"
+          if [ -e "$canary" ]; then echo "FAIL the canary exists: something executed an input"; fail=1; else echo "ok   no canary: no input was executed"; fi
+          exit $fail
