@@ -118,3 +118,86 @@ jobs:
           reject "timeout with command"        "IN_TIMEOUT=1; touch $canary"
           if [ -e "$canary" ]; then echo "FAIL the canary exists: something executed an input"; fail=1; else echo "ok   no canary: no input was executed"; fi
           exit $fail
+
+  # Full chain, hostile text. membrane.yml reports a rejection of a CALL through its
+  # `verdict` output (a rejected dispatch fails the run instead), so these stay green
+  # while proving that no job starts on the target. The private repo is a real private
+  # repo of this org: a run on it must be refused before any macOS or Windows minute.
+  chain-repo-injection:
+    uses: ./.github/workflows/membrane.yml
+    permissions: {}
+    with:
+      os: ubuntu
+      repo: "octocat/Hello-World; touch /tmp/CANARY #"
+      command: "echo should-never-run"
+
+  chain-ref-injection:
+    uses: ./.github/workflows/membrane.yml
+    permissions: {}
+    with:
+      os: macos
+      repo: octocat/Hello-World
+      ref: 'main"; touch /tmp/CANARY #'
+      command: "echo should-never-run"
+
+  chain-artifact-escape:
+    uses: ./.github/workflows/membrane.yml
+    permissions: {}
+    with:
+      os: windows
+      repo: octocat/Hello-World
+      ref: master
+      artifacts: "../../../etc/passwd"
+      command: "echo should-never-run"
+
+  chain-os-injection:
+    uses: ./.github/workflows/membrane.yml
+    permissions: {}
+    with:
+      os: self-hosted
+      repo: octocat/Hello-World
+      command: "echo should-never-run"
+
+  chain-private-repo:
+    uses: ./.github/workflows/membrane.yml
+    permissions: {}
+    with:
+      os: macos
+      repo: BrainSurfing-tech/lab-orchestrator
+      ref: main
+      command: "echo should-never-run"
+
+  assert-chain:
+    name: assert the full-chain verdicts
+    needs:
+      - real
+      - chain-repo-injection
+      - chain-ref-injection
+      - chain-artifact-escape
+      - chain-os-injection
+      - chain-private-repo
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: {}
+    steps:
+      - name: Each hostile call was rejected and started nothing; the real runs succeeded
+        env:
+          V_REPO: ${{ needs.chain-repo-injection.outputs.verdict }}
+          V_REF: ${{ needs.chain-ref-injection.outputs.verdict }}
+          V_ARTIFACT: ${{ needs.chain-artifact-escape.outputs.verdict }}
+          V_OS: ${{ needs.chain-os-injection.outputs.verdict }}
+          V_PRIVATE: ${{ needs.chain-private-repo.outputs.verdict }}
+          E_REPO: ${{ needs.chain-repo-injection.outputs.exit_code }}
+          E_PRIVATE: ${{ needs.chain-private-repo.outputs.exit_code }}
+          R_REAL: ${{ needs.real.result }}
+        run: |
+          fail=0
+          for pair in "repo-injection=$V_REPO" "ref-injection=$V_REF" "artifact-escape=$V_ARTIFACT" "os-injection=$V_OS" "private-repo=$V_PRIVATE"; do
+            if [ "${pair#*=}" = "rejected" ]; then echo "ok   ${pair%%=*} verdict rejected"; else echo "FAIL ${pair%%=*} verdict was '${pair#*=}'"; fail=1; fi
+          done
+          for pair in "repo-injection=$E_REPO" "private-repo=$E_PRIVATE"; do
+            if [ -z "${pair#*=}" ]; then echo "ok   ${pair%%=*} no command ran (no exit code)"; else echo "FAIL ${pair%%=*} a command ran, exit '${pair#*=}'"; fail=1; fi
+          done
+          if [ "$R_REAL" = "success" ]; then echo "ok   three real runs succeeded"; else echo "FAIL real runs: $R_REAL"; fail=1; fi
+          exit $fail
