@@ -1140,6 +1140,9 @@ _ALLOW = {"board": ["mesh-gateway", "lab-orchestrator"],
 def _allow_build(idx, fed, tokens, project_slug, allowlist, **kw):
     rep, wsp = fed
     kw.setdefault("merged_lookup", lambda p: None)
+    # Entitled composition (the pre-entitlement allowlist-always-applies
+    # behavior); unentitled composition is pinned separately below.
+    kw.setdefault("entitled", True)
     return de.build_extract(tokens=tokens, index_path=str(idx),
                             fed_report=str(rep), structurizr_ws=str(wsp),
                             fed_docs_db=str(rep) + ".nodb",
@@ -1212,10 +1215,16 @@ def test_split_visible_mirrors_public_plus_allowlist():
            "unk": {"visibility": None}}
     vis, withheld = de.split_visible(reg)
     assert vis == ["pub"] and withheld == ["priv", "unk"]
+    # Default is public only even when an allowlist is passed in: the
+    # allowlist contributes private repos only with entitled=True (#1410).
     vis, withheld = de.split_visible(reg, "board", {"board": ["priv", "ghost"]})
+    assert vis == ["pub"] and withheld == ["priv", "unk"]
+    vis, withheld = de.split_visible(
+        reg, "board", {"board": ["priv", "ghost"]}, entitled=True)
     assert vis == ["priv", "pub"]
     assert withheld == ["unk"]
-    vis, withheld = de.split_visible(reg, "nope", {"board": ["priv"]})
+    vis, withheld = de.split_visible(reg, "nope", {"board": ["priv"]},
+                                     entitled=True)
     assert vis == ["pub"]  # project with no entry: public only
 
 
@@ -1367,6 +1376,14 @@ def test_board_dev_extract_uses_card_project_allowlist(idx, fed, monkeypatch,
     monkeypatch.setattr(board_mod, "_resolve_token",
                         lambda *_a, **_k: "tok")
     monkeypatch.setattr(board_mod, "_http_get_json", _fake_get)
+
+    def _fake_post(url, body, tok, **k):
+        assert url.endswith("/authz/check")
+        assert body == {"peer": "lab-ovh", "grant_type": "board",
+                        "target": "board"}
+        return 200, {"allow": True, "via_group": None, "level": "execute"}
+
+    monkeypatch.setattr(board_mod, "_post_json", _fake_post)
     monkeypatch.setattr(de, "load_card_allowlist",
                         lambda path=None: {"board": ["mesh-gateway"]})
     rc = board_mod.run_board(
@@ -1375,9 +1392,11 @@ def test_board_dev_extract_uses_card_project_allowlist(idx, fed, monkeypatch,
          "--structurizr-ws", str(wsp)])
     out = capsys.readouterr()
     assert rc == 0
-    # board project -> mesh-gateway visible: the private copy resolves.
+    # board project + direct execute grant -> mesh-gateway visible.
     assert "server.py:12" in out.out
     assert "SECRET-SIG" in out.out
+    assert ("private rows: shown for project board (runner execute grant; "
+            "repos from card-allowlist)") in out.out
 
 
 # ── shape-only #1410: a card-named repo with no index row gets its own line ──
@@ -1469,3 +1488,294 @@ def test_board_unreadable_card_without_tokens_keeps_exit_1(idx, fed,
     out = capsys.readouterr()
     assert rc == 1
     assert "cannot read card #99" in out.err
+
+
+# ── #1410 msg 87862: entitlement gating (direct execute only) + post-safe ──
+
+def _fake_board_env(monkeypatch, *, authz, card=None, projects=None,
+                    thread_uuid=None):
+    """Fake the gateway seam for a dev-extract run; return authz call log.
+
+    `authz` is the `(status, body)` of POST /authz/check, or an exception
+    instance the POST raises. POST /messages is captured, never sent.
+    """
+    from swarph_cli.commands import board as board_mod
+    _card = {"id": 7, "project_id": 6, "title": "t",
+             "body": "fix chat_sync"} if card is None else card
+    if thread_uuid is not None:
+        _card = dict(_card, thread_uuid=thread_uuid, assignee="lab-ovh")
+    _projs = {"projects": [{"id": 6, "slug": "board"}]} \
+        if projects is None else projects
+    posted = {}
+
+    def _fake_get(url, tok, **k):
+        if url.endswith("/board/cards/7"):
+            return 200, _card
+        if url.endswith("/board/projects"):
+            return 200, _projs
+        raise AssertionError(url)
+
+    def _fake_post(url, body, tok, **k):
+        if url.endswith("/authz/check"):
+            if isinstance(authz, Exception):
+                raise authz
+            return authz
+        if url.endswith("/messages"):
+            posted["body"] = body
+            return 200, {"id": 4242}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(board_mod, "_resolve_self_name",
+                        lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_token",
+                        lambda *_a, **_k: "tok")
+    monkeypatch.setattr(board_mod, "_http_get_json", _fake_get)
+    monkeypatch.setattr(board_mod, "_post_json", _fake_post)
+    monkeypatch.setattr(de, "load_card_allowlist",
+                        lambda path=None: {"board": ["mesh-gateway"]})
+    return posted
+
+
+def _print_only_argv(idx, fed):
+    rep, wsp = fed
+    return (["cards", "dev-extract", "--card", "7", "--print-only",
+             "--index", str(idx), "--fed-report", str(rep),
+             "--structurizr-ws", str(wsp)])
+
+
+def test_execute_grant_sees_private_row(idx, fed, monkeypatch, capsys):
+    from swarph_cli.commands import board as board_mod
+    posted = _fake_board_env(
+        monkeypatch,
+        authz=(200, {"allow": True, "via_group": None, "level": "execute"}))
+    rc = board_mod.run_board(_print_only_argv(idx, fed))
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "server.py:12" in out.out  # the private file:line prints
+    assert "SECRET-SIG" in out.out
+    assert ("private rows: shown for project board (runner execute grant; "
+            "repos from card-allowlist)") in out.out
+    assert posted == {}  # print-only posts nothing
+
+
+def test_propose_via_all_grant_shows_public_only(idx, fed, monkeypatch,
+                                                 capsys):
+    from swarph_cli.commands import board as board_mod
+    _fake_board_env(
+        monkeypatch,
+        authz=(200, {"allow": True, "via_group": "ALL",
+                     "level": "propose"}))
+    rc = board_mod.run_board(_print_only_argv(idx, fed))
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "server.py:12" not in out.out
+    assert "SECRET-SIG" not in out.out
+    assert ("private rows: withheld for project board "
+            "(no execute grant: level=propose, via=ALL)") in out.out
+
+
+def test_direct_propose_grant_shows_public_only(idx, fed, monkeypatch,
+                                               capsys):
+    from swarph_cli.commands import board as board_mod
+    _fake_board_env(
+        monkeypatch,
+        authz=(200, {"allow": True, "via_group": None, "level": "propose"}))
+    rc = board_mod.run_board(_print_only_argv(idx, fed))
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "server.py:12" not in out.out
+    assert "SECRET-SIG" not in out.out
+    assert ("private rows: withheld for project board "
+            "(no execute grant: level=propose, via=direct)") in out.out
+
+
+def test_deny_names_level_none(idx, fed, monkeypatch, capsys):
+    from swarph_cli.commands import board as board_mod
+    _fake_board_env(
+        monkeypatch,
+        authz=(200, {"allow": False, "via_group": None, "level": None}))
+    rc = board_mod.run_board(_print_only_argv(idx, fed))
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "server.py:12" not in out.out
+    assert ("private rows: withheld for project board "
+            "(no execute grant: level=none, via=direct)") in out.out
+
+
+def test_grant_endpoint_error_is_public_only(idx, fed, monkeypatch, capsys):
+    from swarph_cli.commands import board as board_mod
+    for authz in (RuntimeError("boom"), (500, {"detail": "down"}),
+                  (200, "not-a-dict")):
+        _fake_board_env(monkeypatch, authz=authz)
+        rc = board_mod.run_board(_print_only_argv(idx, fed))
+        out = capsys.readouterr()
+        assert rc == 0, authz
+        assert "server.py:12" not in out.out, authz
+        assert "SECRET-SIG" not in out.out, authz
+        assert ("private rows: withheld for project board "
+                "(grant check unavailable)") in out.out, authz
+
+
+def test_post_path_with_execute_grant_posts_public_only(idx, fed, monkeypatch,
+                                                        capsys):
+    from swarph_cli.commands import board as board_mod
+    posted = _fake_board_env(
+        monkeypatch, thread_uuid="thr-1",
+        authz=(200, {"allow": True, "via_group": None, "level": "execute"}))
+    rep, wsp = fed
+    rc = board_mod.run_board(
+        ["cards", "dev-extract", "--card", "7",
+         "--index", str(idx), "--fed-report", str(rep),
+         "--structurizr-ws", str(wsp)])
+    out = capsys.readouterr()
+    assert rc == 0
+    content = posted["body"]["content"]
+    assert "server.py:12" not in content  # no private row in the post
+    assert "SECRET-SIG" not in content
+    assert "mesh-gateway" not in content  # no withheld NAMES (no oracle)
+    assert "mystery" not in content
+    assert "also defined in withheld" not in content
+    assert ("WITHHELD: 2 repos "
+            "(names not shown in posted extracts)") in content
+    # The terminal still states the runner's own entitlement basis.
+    assert ("private rows: shown for project board (runner execute grant; "
+            "repos from card-allowlist)") in out.out
+
+
+def test_print_path_same_execute_runner_shows_row(idx, fed, monkeypatch,
+                                                  capsys):
+    from swarph_cli.commands import board as board_mod
+    _fake_board_env(
+        monkeypatch,
+        authz=(200, {"allow": True, "via_group": None, "level": "execute"}))
+    rc = board_mod.run_board(_print_only_argv(idx, fed))
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "server.py:12" in out.out
+    assert "WITHHELD: mystery" in out.out  # print mode keeps names
+
+
+def test_post_safe_json_stdout_carries_no_withheld_names(idx, fed,
+                                                         monkeypatch, capsys):
+    from swarph_cli.commands import board as board_mod
+    _fake_board_env(
+        monkeypatch, thread_uuid="thr-1",
+        authz=(200, {"allow": True, "via_group": None, "level": "execute"}))
+    rep, wsp = fed
+    rc = board_mod.run_board(
+        ["cards", "dev-extract", "--card", "7", "--json",
+         "--index", str(idx), "--fed-report", str(rep),
+         "--structurizr-ws", str(wsp)])
+    out = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(out.out)
+    dumped = json.dumps(payload)
+    assert "server.py:12" not in dumped
+    assert "mesh-gateway" not in dumped
+    assert "mystery" not in dumped
+    assert payload["withheld"] == []
+    assert payload["withheld_count"] == 2
+    assert ("private rows: shown for project board (runner execute grant; "
+            "repos from card-allowlist)") in out.err
+
+
+def test_no_card_prints_no_card_line(idx, fed, monkeypatch, capsys):
+    from swarph_cli.commands import board as board_mod
+    monkeypatch.setattr(board_mod, "_resolve_self_name",
+                        lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_token",
+                        lambda *_a, **_k: "tok")
+    rep, wsp = fed
+    rc = board_mod.run_board(
+        ["cards", "dev-extract", "--symbol", "chat_sync", "--print-only",
+         "--index", str(idx), "--fed-report", str(rep),
+         "--structurizr-ws", str(wsp)])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert ("private rows: withheld "
+            "(no card, so no project grant to check)") in out.out
+    assert "server.py:12" not in out.out  # public rows only
+    assert "SECRET-SIG" not in out.out
+
+
+def test_unreadable_card_with_explicit_symbol_is_no_card(idx, fed, monkeypatch,
+                                                         capsys):
+    from swarph_cli.commands import board as board_mod
+    monkeypatch.setattr(board_mod, "_resolve_self_name",
+                        lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_token",
+                        lambda *_a, **_k: "tok")
+    monkeypatch.setattr(board_mod, "_http_get_json",
+                        lambda url, tok, **k: (404, {"detail": "no card"}))
+    rep, wsp = fed
+    rc = board_mod.run_board(
+        ["cards", "dev-extract", "--card", "7", "--symbol", "chat_sync",
+         "--print-only", "--index", str(idx), "--fed-report", str(rep),
+         "--structurizr-ws", str(wsp)])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert ("private rows: withheld "
+            "(no card, so no project grant to check)") in out.out
+    assert "server.py:12" not in out.out
+
+
+def test_unentitled_build_is_public_only_by_default(idx, fed):
+    # Default (no entitled flag) ignores the allowlist entirely — even the
+    # allowlist-derived missing-repo names stay out (no existence oracle).
+    ex = _allow_build(idx, fed, ["chat_sync"], "board",
+                      {"board": ["mesh-gateway", "ghost-repo"]},
+                      entitled=False)
+    assert [s for s in ex["symbols"] if s["repo"] == "mesh-gateway"] == []
+    assert "mesh-gateway" in ex["withheld"]
+    assert ex["missing_repos"] == []
+    text = de.render(ex)
+    assert "server.py:12" not in text
+    assert "ghost-repo" not in text
+
+
+def test_render_post_safe_hides_all_withheld_names(idx, fed):
+    ex = _allow_build(idx, fed, ["chat_sync"], "board",
+                      {"board": ["mesh-gateway"]}, entitled=False)
+    printed = de.render(ex)
+    assert "mesh-gateway" in printed  # print mode keeps names
+    safe = de.render(ex, post_safe=True)
+    assert "mesh-gateway" not in safe
+    assert "mystery" not in safe
+    assert "also defined in withheld" not in safe
+    assert ("WITHHELD: 2 repos "
+            "(names not shown in posted extracts)") in safe
+    assert "index coverage is partial: a withheld repo's main module" in safe
+
+
+def test_redact_post_safe_strips_withheld_names(idx, fed):
+    import json as _json
+    ex = _allow_build(idx, fed, ["chat_sync"], "board",
+                      {"board": ["mesh-gateway"]}, entitled=False)
+    plain = de.redact_for_json(ex)
+    assert "mesh-gateway" in _json.dumps(plain)  # print-shape keeps names
+    safe = de.redact_for_json(ex, post_safe=True)
+    dumped = _json.dumps(safe)
+    assert "mesh-gateway" not in dumped
+    assert "mystery" not in dumped
+    assert safe["withheld"] == []
+    assert safe["withheld_count"] == 2
+    assert safe["withheld_hits"] == {}
+    assert "swarph-cli" in safe["registry"]  # visible repos keep everything
+
+
+def test_privacy_line_texts():
+    from swarph_cli.commands.board import _dev_extract_privacy_line as line
+    assert line(None, None, False, None, None, False) == \
+        "private rows: withheld (no card, so no project grant to check)"
+    assert line({"id": 1}, None, False, None, None, False) == \
+        ("private rows: withheld (project unresolvable, "
+         "so no project grant to check)")
+    assert line({"id": 1}, "board", True, "execute", None, True) == \
+        ("private rows: shown for project board (runner execute grant; "
+         "repos from card-allowlist)")
+    assert line({"id": 1}, "board", False, "propose", "ALL", True) == \
+        ("private rows: withheld for project board "
+         "(no execute grant: level=propose, via=ALL)")
+    assert line({"id": 1}, "board", False, None, None, False) == \
+        ("private rows: withheld for project board "
+         "(grant check unavailable)")

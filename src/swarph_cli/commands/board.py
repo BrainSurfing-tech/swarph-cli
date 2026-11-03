@@ -509,6 +509,60 @@ def _thread_recipient(
     )
 
 
+def _dev_extract_entitlement(gw: str, token: str, self_name: str,
+                             project_slug: str) -> tuple:
+    """Runner entitlement for dev-extract private rows (card #1410, msg 87862).
+
+    Exactly ONE ``POST /authz/check`` ``{peer, grant_type: "board",
+    target: slug}`` per run. Entitled only on ``allow`` + ``level ==
+    "execute"`` + ``via_group is None`` — a DIRECT execute grant. A
+    group:ALL grant (``via_group`` set) or a propose-level grant does NOT
+    count. Returns ``(entitled, level, via_group, check_ok)``; any transport
+    failure, non-2xx status, or non-dict body yields ``(False, None, None,
+    False)`` (grant check unavailable — fail closed, never open).
+    """
+    try:
+        st, data = _post_json(
+            f"{gw.rstrip('/')}/authz/check",
+            {"peer": self_name, "grant_type": "board",
+             "target": project_slug},
+            token)
+    except Exception:
+        return False, None, None, False
+    if not (st and 200 <= st < 300) or not isinstance(data, dict):
+        return False, None, None, False
+    entitled = (data.get("allow") is True
+                and data.get("level") == "execute"
+                and data.get("via_group") is None)
+    return entitled, data.get("level"), data.get("via_group"), True
+
+
+def _dev_extract_privacy_line(card, project_slug, entitled: bool,
+                              level, via_group, check_ok: bool) -> str:
+    """The one plain private-rows line for a dev-extract run (card #1410).
+
+    Names the actual reason: the entitlement basis, the missing execute
+    grant with its level+via, an unavailable grant check, an unresolvable
+    project, or no card at all. Carries no repo names, so it is safe on
+    every path (print, post, --json stderr).
+    """
+    if card is None:
+        return "private rows: withheld (no card, so no project grant to check)"
+    if not project_slug:
+        return ("private rows: withheld (project unresolvable, "
+                "so no project grant to check)")
+    if entitled:
+        return (f"private rows: shown for project {project_slug} "
+                "(runner execute grant; repos from card-allowlist)")
+    if not check_ok:
+        return (f"private rows: withheld for project {project_slug} "
+                "(grant check unavailable)")
+    lvl = level if isinstance(level, str) and level else "none"
+    via = via_group if isinstance(via_group, str) and via_group else "direct"
+    return (f"private rows: withheld for project {project_slug} "
+            f"(no execute grant: level={lvl}, via={via})")
+
+
 def _say_line(resp: dict, card_id, to_node: str, *, reason: Optional[str] = None) -> str:
     """The post confirmation — AND any obligation the post just DISCHARGED.
 
@@ -1795,25 +1849,44 @@ def run_board(argv: list[str]) -> int:
                         proj_slug = _de_mod.card_project_slug(card, _rows)
                 except Exception:
                     proj_slug = None
+            # card #1410 (msg 87862): entitlement resolves ONCE per run — a
+            # direct execute grant on the card's project, or public only.
+            # Anything POSTED carries public rows only, whoever runs it.
+            entitled, _lvl, _via, _ok = (False, None, None, False)
+            if card is not None and proj_slug:
+                entitled, _lvl, _via, _ok = _dev_extract_entitlement(
+                    gw, token, self_name, proj_slug)
+            privacy_line = _dev_extract_privacy_line(
+                card, proj_slug, entitled, _lvl, _via, _ok)
+            posting = args.card is not None and not args.print_only
+            post_safe = posting
             ex = _de_mod.build_extract(
                 tokens=tokens, index_path=args.index,
                 fed_report=args.fed_report, structurizr_ws=args.structurizr_ws,
-                card=card, paths=paths, project_slug=proj_slug)
+                card=card, paths=paths, project_slug=proj_slug,
+                entitled=(entitled and not post_safe))
             if getattr(args, "json", False):
                 # card #1396: redact WITHHELD registry entries (no private
                 # paths/index times in machine-readable output). The
-                # no-tokens notice goes to stderr so stdout stays parseable.
+                # no-tokens notice goes to stderr so stdout stays parseable —
+                # and so does the privacy line. A posting-shaped run
+                # (--card without --print-only) builds post-safe: the
+                # withheld set is count-only even in --json.
                 if no_tokens_note:
                     print(no_tokens_note, file=sys.stderr)
-                print(json.dumps(_de_mod.redact_for_json(ex), indent=2,
-                                 default=str))
+                print(privacy_line, file=sys.stderr)
+                print(json.dumps(_de_mod.redact_for_json(ex, post_safe=post_safe),
+                                 indent=2, default=str))
                 return 0
-            body = _de_mod.render(ex, max_lines=args.max_lines)
+            body = _de_mod.render(ex, max_lines=args.max_lines,
+                                  post_safe=post_safe)
             if args.print_only or args.card is None:
                 if no_tokens_note:
                     print(no_tokens_note)
+                print(privacy_line)
                 print(body, end="")
                 return 0
+            print(privacy_line)
             return _run_cards_say(
                 gw, token, self_name, args.card, body, "fyi",
                 args.to_node, aj, opt_out=getattr(args, "no_redact", False),

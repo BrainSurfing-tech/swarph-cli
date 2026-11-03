@@ -33,18 +33,37 @@ are always visible; a private repo is visible when the caller is in
 ``allowlist[repo]``) with the caller replaced by the card's board project:
 public repos are always visible, and the repos listed for the card's project
 slug in ``~/.swarph/codegraph/card-allowlist.json`` (commander-approved,
-``{project_slug: [repo, ...]}``) are visible too. The card's project is
-resolved the way the board resolves it for a card artifact — the card row
-carries ``project_id`` (``GET /board/cards/{id}`` has no slug field) and the
-slug comes from the ``GET /board/projects`` rows matched by id (same
-int-or-str equality as ``board._project_owner_orchestrator``). Malformed or
-absent file, or a project with no entry, means public only (fail closed).
-Private (or unknown-visibility) repos outside that set are WITHHELD and the
-extract NAMES the withheld repo + why instead of leaking symbol details.
+``{project_slug: [repo, ...]}``) are visible too — BUT only when the
+running cell is itself entitled to them. Commander ruling (card #1410 msg
+87862): private rows print only if BOTH the running cell has its OWN direct
+``execute`` grant on the card's project (``POST /authz/check`` reporting
+``allow`` + ``level == "execute"`` + ``via_group is None`` — group:ALL or
+propose-level grants do NOT count) AND the repo is on that project's
+card-allowlist map. Anything POSTED to a card carries public rows only,
+whoever runs it. In code this is the explicit ``entitled`` flag on
+``split_visible``/``build_extract`` (default False = public only): the
+allowlist contributes private repos only when the caller passes
+``entitled=True``. Anything else — ``entitled=False``, malformed/absent
+file, or a project with no entry — means public only (fail closed).
+The card's project is resolved the way the board resolves it for a card
+artifact — the card row carries ``project_id`` (``GET /board/cards/{id}``
+has no slug field) and the slug comes from the ``GET /board/projects``
+rows matched by id (same int-or-str equality as
+``board._project_owner_orchestrator``). Private (or unknown-visibility)
+repos outside the entitled set are WITHHELD; print mode NAMES the withheld
+repo + why instead of leaking symbol details, while post-safe mode
+(``render(..., post_safe=True)``) prints counts only, never names, so the
+withheld line cannot become an existence oracle in a posted artifact.
 ``~/.swarph/codegraph/allowlist.json`` is NEVER read here (different
 meaning: per-cell read authority). Fail closed (#111), never open.
 Withheld-name filtering scans path components too, and no rels of any kind
 are printed.
+
+Known limit, STATED not solved (cards #20/#1369 own it): cells on one box
+share a uid and can open ``index.db`` directly or claim another name
+(``--as``), so this gate binds the CLI's composed extract view — print vs
+post-safe — not the underlying file. A cell that bypasses the CLI was
+never gated by it.
 
 Bounded queries: EVERY row-returning SQL statement in this module carries an
 explicit ``LIMIT`` (see ``test_1396_dev_extract.py::test_every_row_query_is_bounded``,
@@ -329,18 +348,22 @@ def card_named_missing_repos(card: dict | None, registry: dict) -> list:
 
 
 def split_visible(registry: dict, project_slug: str | None = None,
-                  card_allowlist: dict | None = None) -> tuple:
+                  card_allowlist: dict | None = None,
+                  entitled: bool = False) -> tuple:
     """Public repos + the card project's allowlisted repos are visible.
 
     Composition mirrors codegraph._visible_repos (public always; private needs
     an allowlist entry) with the card's board project slug in the caller's
     seat: ``card_allowlist[project_slug]`` plays the role of
-    ``allowlist[repo]`` membership. Anything else — including
+    ``allowlist[repo]`` membership — but ONLY when ``entitled`` is True (the
+    runner holds its own direct execute grant on the project; commander
+    ruling card #1410 msg 87862). Default ``entitled=False`` ignores the
+    allowlist entirely (public only). Anything else — including
     unknown-visibility repos — is WITHHELD (fail closed). Malformed/absent
     file (``{}``), or a project with no entry, means public only.
     """
     allowed = set()
-    if isinstance(card_allowlist, dict) and project_slug:
+    if entitled and isinstance(card_allowlist, dict) and project_slug:
         for repo in card_allowlist.get(project_slug) or []:
             if isinstance(repo, str) and repo:
                 allowed.add(repo)
@@ -707,7 +730,10 @@ WITHHOLD_REASON = ("not public and not listed for this card's project in "
                    "plus the card project allowlist only")
 
 
-def redact_for_json(ex: dict) -> dict:
+POST_SAFE_WITHHOLD_TAIL = "names not shown in posted extracts"
+
+
+def redact_for_json(ex: dict, post_safe: bool = False) -> dict:
     """A `--json`-safe copy of the extract: WITHHELD registry entries keep
     only `{name, visibility, reason}` — `path` and `indexed_at` are dropped.
 
@@ -716,9 +742,25 @@ def redact_for_json(ex: dict) -> dict:
     machine-readable `--json` re-opens exactly that leak on the local box.
     Visible repos keep everything. The input dict is never mutated, so the
     text renderer keeps using the full extract.
+
+    Post-safe mode (commander ruling card #1410 msg 87862: posts carry
+    public rows only, and the withheld set must not become an existence
+    oracle in a posted artifact): withheld repo NAMES are stripped
+    everywhere — ``withheld`` becomes ``[]`` with the size kept in
+    ``withheld_count``, ``withheld_hits`` becomes ``{}``, and withheld
+    repos are dropped from ``registry`` (visible entries keep everything).
     """
     out = dict(ex)
     withheld = set(ex.get("withheld") or [])
+    if post_safe:
+        out["registry"] = {
+            name: meta for name, meta in (ex.get("registry") or {}).items()
+            if name not in withheld
+        }
+        out["withheld"] = []
+        out["withheld_count"] = len(withheld)
+        out["withheld_hits"] = {}
+        return out
     out["registry"] = {
         name: ({"name": name,
                 "visibility": (meta or {}).get("visibility"),
@@ -750,13 +792,17 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
                   merged_lookup=None,
                   project_slug: str | None = None,
                   card_allowlist: dict | None = None,
-                  card_allowlist_path: str | None = DEFAULT_CARD_ALLOWLIST) -> dict:
+                  card_allowlist_path: str | None = DEFAULT_CARD_ALLOWLIST,
+                  entitled: bool = False) -> dict:
     """Assemble the extract dict. Never raises on bad sources (unavailable).
 
     Visibility: the card's board project slug (explicit `project_slug`, else
     derived from `card` via `card_project_slug`) is looked up in the card
     allowlist (explicit `card_allowlist`, else loaded from
-    `card_allowlist_path`, fail closed); those repos join the public set.
+    `card_allowlist_path`, fail closed); those repos join the public set —
+    but ONLY when `entitled` is True (the runner's own direct execute grant
+    on the project; commander ruling card #1410 msg 87862). Default
+    `entitled=False` is public only even when an allowlist is passed in.
     """
     merged_lookup = merged_lookup or last_merged_at
     tokens = [_normalize_token(t) for t in (tokens or [])]
@@ -777,13 +823,18 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
             return {"index": {"status": f"unavailable: {bad}"},
                     "tokens": tokens, "fed_docs": fed_docs}
         registry = repo_registry(con)
-        visible, withheld = split_visible(registry, project_slug, card_allowlist)
+        visible, withheld = split_visible(
+            registry, project_slug, card_allowlist, entitled=entitled)
         # Allowlist-driven (a card-project repo with no indexed copy) PLUS
         # card-named (a fleet-shaped `swarph-...` name the card's own text
         # names that the registry lacks — card #1393's swarph-codegraph-index
-        # has no repos row). Only names the card actually contains.
+        # has no repos row). Only names the card actually contains. The
+        # allowlist half is entitlement-gated like visibility: an unentitled
+        # run must not even name allowlisted repos (no existence oracle).
+        _allow_entries = (((card_allowlist or {}).get(project_slug) or [])
+                          if entitled else [])
         missing_repos = sorted(
-            {r for r in ((card_allowlist or {}).get(project_slug) or [])
+            {r for r in _allow_entries
              if isinstance(r, str) and r and r not in registry}
             | set(card_named_missing_repos(card, registry)))
         syms, routes = [], []
@@ -836,6 +887,7 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
         "repos_hit": repos_hit, "withheld_hits": withheld_hits,
         "visible": visible, "withheld": withheld, "registry": registry,
         "project_slug": project_slug, "missing_repos": missing_repos,
+        "entitled": bool(entitled),
         "federation_report": fed, "structurizr": struct,
         "fed_build": fed_build,
         # (d) absence is claimed ONLY when the file truly is absent; a
@@ -884,7 +936,8 @@ def is_stale_fed_build(fed_build, merged_at) -> bool | None:
     return fb < mg
 
 
-def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
+def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
+           post_safe: bool = False) -> str:
     """Render the extract text with floor/unavailable wording + size cap.
 
     The cap reserves the tail (WITHHELD line, fed-docs line, freshness
@@ -898,6 +951,14 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
     report header stamp (build line) and the `Layer N:` lines — or the
     report's own unavailable line. No covering-tests section and no rels,
     depends-on, blast-radius, arrow, or import lines of any kind.
+
+    Post-safe mode (commander ruling card #1410 msg 87862: posts carry
+    public rows only) prints NO withheld repo names anywhere: the coverage
+    line uses the generic wording, the per-token `also defined in withheld`
+    lines are dropped, and the WITHHELD tail is count-only
+    (`WITHHELD: N repos (names not shown in posted extracts)`), so the
+    posted artifact cannot become an existence oracle. Print mode
+    (`post_safe=False`) keeps names as today.
     """
     cut_notes: list = []
     head = ["# dev extract (card #1410, #559 phase 2) — pinned, small, dry-run-safe"]
@@ -919,8 +980,9 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
         # has 0 rows) — a visible match is the indexed copy, not proof the
         # deployed code is here. One line always (index ok); repo names and
         # the card number only, never withheld file paths or symbol names.
+        # Post-safe: the generic wording (no withheld names in posts).
         _cov_names = ", ".join(ex.get("withheld", []) or [])
-        if _cov_names:
+        if _cov_names and not post_safe:
             head.append(
                 f"index coverage is partial: withheld {_cov_names} can have "
                 "0 rows for a whole main module (card #1404); a visible match "
@@ -957,7 +1019,8 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
         if len(ex.get("symbols", [])) > ROW_LIMIT:
             cut_notes.append(f"symbols cut after {ROW_LIMIT}")
         for tok in ex.get("tokens", []):
-            _hits = (ex.get("withheld_hits") or {}).get(tok, {})
+            # Post-safe: dropped entirely (each names a withheld repo).
+            _hits = {} if post_safe else (ex.get("withheld_hits") or {}).get(tok, {})
             for repo, test_only in sorted(_hits.items()):
                 if test_only:
                     head.append(
@@ -1018,10 +1081,14 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
     tail = [""]
     withheld = ex.get("withheld", [])
     if withheld:
-        tail.append(f"WITHHELD: {', '.join(withheld)} ({WITHHOLD_REASON} — "
-                    "same public+allowlist composition as "
-                    "codegraph._visible_repos, caller replaced by the card's "
-                    "project slug; full list in --json)")
+        if post_safe:
+            tail.append(f"WITHHELD: {len(withheld)} repos "
+                        f"({POST_SAFE_WITHHOLD_TAIL})")
+        else:
+            tail.append(f"WITHHELD: {', '.join(withheld)} ({WITHHOLD_REASON} — "
+                        "same public+allowlist composition as "
+                        "codegraph._visible_repos, caller replaced by the card's "
+                        "project slug; full list in --json)")
     _fed_docs = ex.get("fed_docs") or \
         "unavailable: fed-docs state not recorded"
     if isinstance(_fed_docs, str) and _fed_docs.startswith("unavailable"):
