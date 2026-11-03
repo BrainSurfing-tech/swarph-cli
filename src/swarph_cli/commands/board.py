@@ -1768,11 +1768,18 @@ def run_board(argv: list[str]) -> int:
             mined = _de_mod.extract_card_tokens(card) if card else []
             tokens = explicit + [t for t in mined if t not in explicit]
             paths = list(args.path or [])
+            no_tokens_note = None
             if not tokens and not paths:
-                print("swarph board cards dev-extract: no --symbol/--path "
-                      "and no readable --card to mine tokens from",
-                      file=sys.stderr)
-                return 2
+                if card is None:
+                    print("swarph board cards dev-extract: no --symbol/--path "
+                          "and no readable --card to mine tokens from",
+                          file=sys.stderr)
+                    return 2
+                # card #1410: a READABLE card with no minable tokens is a
+                # normal (empty) extract, not an error — exit 0 with its own
+                # plain line. A truly UNREADABLE card keeps the error path
+                # above (exit 1, cannot read card).
+                no_tokens_note = f"card #{args.card}: no symbols to look up"
             # card #1410: the card's board project slug resolves the same
             # way as every other card-artifact project read (card row
             # carries project_id; the slug lives on GET /board/projects,
@@ -1794,12 +1801,17 @@ def run_board(argv: list[str]) -> int:
                 card=card, paths=paths, project_slug=proj_slug)
             if getattr(args, "json", False):
                 # card #1396: redact WITHHELD registry entries (no private
-                # paths/index times in machine-readable output).
+                # paths/index times in machine-readable output). The
+                # no-tokens notice goes to stderr so stdout stays parseable.
+                if no_tokens_note:
+                    print(no_tokens_note, file=sys.stderr)
                 print(json.dumps(_de_mod.redact_for_json(ex), indent=2,
                                  default=str))
                 return 0
             body = _de_mod.render(ex, max_lines=args.max_lines)
             if args.print_only or args.card is None:
+                if no_tokens_note:
+                    print(no_tokens_note)
                 print(body, end="")
                 return 0
             return _run_cards_say(

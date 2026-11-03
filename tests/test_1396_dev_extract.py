@@ -316,17 +316,25 @@ def test_withheld_same_name_named_without_detail(idx, fed):
     assert "m.py:1" not in text  # the unknown-visibility file:line
 
 
-# ── rework r2: no resolvable repo → honest federation line, no default repo ──
+# ── rework r2 (shape-only #1410): no resolvable repo → the outcomes' own
+# plain lines; the federation half prints the stamp + Layer lines ──
 
 def test_no_visible_target_repo_prints_honest_line(idx, fed):
     ex = _build(idx, fed, ["zz_no_such_symbol_anywhere"])
     assert ex["repos_hit"] == []
     text = de.render(ex)
-    assert "federation: no visible target repo" in text
-    assert "deploy units:" not in text
-    assert "lab-ovh" not in text
+    # The old synthetic line is gone; the outcome's own plain lines carry it.
+    assert "federation: no visible target repo" not in text
+    assert "no symbol resolved" in text
+    # Stamp + Layer lines still print (repo-independent, shape-only).
+    assert "build: 2026-11-02T04:45:01Z" in text
+    assert "Layer 2:" in text
+    assert "lab-ovh" not in text  # no deploy units without a hit repo
     assert "downstream" not in text
     assert "──depends on──▶" not in text
+    assert "→" not in text.split("## federation half")[1].split("WITHHELD:")[0]
+    assert "imports" not in text.split("## federation half")[1].split("WITHHELD:")[0]
+    assert "BLAST RADIUS" not in text
 
 
 # ── rework r3: mined card text ending in '/' must never traceback ──
@@ -357,7 +365,7 @@ def test_card_body_trailing_slash_print_only_exits_zero(idx, fed, monkeypatch,
     assert rc == 0
     assert "Traceback" not in out.out and "Traceback" not in out.err
     assert ("routes + params:" in out.out
-            or "no visible target repo" in out.out
+            or "Layer 2:" in out.out
             or "no symbol resolved" in out.out)
 
 
@@ -504,9 +512,11 @@ def test_schemaless_sqlite_index_prints_unavailable(tmp_path, fed):
     _assert_unavailable_index(_unavailable_ex(tmp_path, fed, p))
 
 
-# ── #3757(b): federation half never names a WITHHELD repo ──
+# ── shape-only #1410: federation half keeps stamp + Layer lines only ──
 
 def test_federation_half_drops_lines_naming_withheld_repo(idx, tmp_path):
+    # Even when the report names a WITHHELD repo on a depends-on line, the
+    # shape-only half prints neither that line nor any other non-Layer line.
     rep = tmp_path / "fed.txt"
     rep.write_text(
         "# swarph federation — cross-repo connection map\n"
@@ -536,28 +546,22 @@ def test_federation_half_drops_lines_naming_withheld_repo(idx, tmp_path):
                           fed_report=str(rep), structurizr_ws=str(wsp),
                           fed_docs_db=str(tmp_path / "no-fed.db"),
                           merged_lookup=lambda p: None)
-    # mixed fed-report line dropped fail-closed; pure-visible line kept.
+    # Shape-only: the stamp plus the Layer header, nothing else.
     assert ex["federation_report"]["status"] == "ok"
-    assert ex["federation_report"]["hits"] == \
-        ["• swarph-cli       → (nothing depends on it)"]
+    assert ex["federation_report"]["layers"] == ["Layer 2:"]
     # #1410: rels are never read nor printed — no downstream key at all —
     # while the deploy unit stays.
     assert "downstream" not in ex["structurizr"]
+    assert "containers" not in ex["structurizr"]
     assert ex["structurizr"]["deploy_units"] == ["lab-ovh"]
     text = de.render(ex)
-    # #3779 r4 old->new: WITHHELD moved from five per-repo lines ABOVE the
-    # federation header to ONE reserved names-list line in the tail (after
-    # the federation middle), so the leak check scopes to the fed lines
-    # themselves — the notice MUST name mesh-gateway (asserted elsewhere).
-    fed_lines = [ln for ln in text.splitlines()
-                 if ln.startswith("- •")
-                 or ln.startswith("deploy units:")]
-    assert any("nothing depends on it" in ln for ln in fed_lines)
-    assert any("swarph-cli" in ln for ln in fed_lines)  # visible kept
-    for ln in fed_lines:
-        assert "mesh-gateway" not in ln, ln  # no private name via fed lines
-        assert "mystery" not in ln, ln
-    assert "swarph-cli" in text.split("## federation half")[1]
+    fed_half = text.split("## federation half")[1].split("WITHHELD:")[0]
+    assert "Layer 2:" in fed_half  # the Layer header is kept
+    assert "build: 2026-11-02T04:45:01Z" in fed_half  # stamp, not mtime
+    for banned in ("mesh-gateway", "mystery", "──depends on──▶", "→",
+                   "imports", "downstream", "BLAST RADIUS", "nothing depends"):
+        assert banned not in fed_half, banned
+    assert "deploy units: lab-ovh" in fed_half
     assert "downstream" not in text.lower()
 
 
@@ -1090,31 +1094,28 @@ def _r5_sources(tmp_path):
 
 
 def test_federation_drops_dotted_slashed_and_unknown_names(tmp_path):
+    # Shape-only #1410: no per-repo line is kept at all — dotted private
+    # paths, slashed private paths, and unregistered names all vanish with
+    # the depends-on/arrow/import lines that carried them.
     p = _r5_db(tmp_path)
     rep, wsp = _r5_sources(tmp_path)
     ex = de.build_extract(tokens=["chat_sync"], index_path=str(p),
                           fed_report=str(rep), structurizr_ws=str(wsp),
                           fed_docs_db=str(tmp_path / "no-fed.db"),
                           merged_lookup=lambda p: None)
-    hits = ex["federation_report"]["hits"]
-    # pure-visible lines kept, including the known-container swarph-mesh
-    # line (registered as a structurizr container, fail-closed keeps known).
-    assert "• swarph-cli       → (nothing depends on it)" in hits
-    assert any("swarph-mesh" in h for h in hits)
-    for h in hits:
-        assert "proven" not in h, h  # dotted private path dropped
-        assert "mesh_gateway" not in h, h  # slashed private path dropped
-        assert "swarph-panel" not in h, h  # unregistered name dropped
+    assert ex["federation_report"]["layers"] == ["Layer 2:"]
     text = de.render(ex)
     fed_half = text.split("## federation half")[1].split("WITHHELD:")[0]
-    assert "secret_mod" not in fed_half
-    assert "private_helper" not in fed_half
-    assert "swarph-panel" not in fed_half
+    assert "Layer 2:" in fed_half
+    for banned in ("proven", "mesh_gateway", "swarph-panel", "swarph-mesh",
+                   "secret_mod", "private_helper", "──depends on──▶", "→",
+                   "imports", "nothing depends"):
+        assert banned not in fed_half, banned
 
 
 def test_structurizr_drops_withheld_and_unregistered_rels(tmp_path):
     # #1410: rels are never read nor printed — no downstream key, no rel
-    # text — while deploy units and the fed-report filtering stay.
+    # text — while deploy units stay (shape-only fed half needs no filtering).
     p = _r5_db(tmp_path)
     rep, wsp = _r5_sources(tmp_path)
     ex = de.build_extract(tokens=["chat_sync"], index_path=str(p),
@@ -1264,19 +1265,17 @@ def test_index_unavailable_line_distinct(tmp_path, fed):
 
 # ── #1410: path-component private-name filtering ──
 
-def test_path_component_withheld_name_dropped_from_fed_lines(tmp_path):
-    assert de._line_withholds(
-        "  ↳ imports mesh_gateway @ src/mesh_gateway/x.py:39",
-        ["mesh-gateway"], ["swarph-cli", "swarph-mesh"]) is True
-    assert de._line_withholds(
-        "    • swarph-cli       → (nothing depends on it)",
-        ["mesh-gateway"], ["swarph-cli", "swarph-mesh"]) is False
+def test_path_component_withheld_name_dropped_from_fed_lines(idx, fed):
+    # Shape-only #1410: the fed half keeps Layer headers regardless of which
+    # repos (withheld or not) the report lines name — even an imports line
+    # naming a withheld repo leaves no trace, because the line is not kept.
+    rep, wsp = fed
+    ex = _build(idx, fed, ["chat_sync"])
+    fed_half = de.render(ex).split("## federation half")[1].split("WITHHELD:")[0]
+    assert "mesh-gateway" not in fed_half
+    assert "mystery" not in fed_half
     # ordinary filenames are not registry names: no false drop from the
     # path-component rule (a visible repo's own path stays printable).
-    assert de._line_withholds(
-        "  ↳ uses swarph_mesh @ src/swarph_mesh/x.py:39",
-        ["mesh-gateway"],
-        ["swarph-cli", "swarph-mesh", "swarph-shared"]) is False
     assert de._path_withholds("src/mesh_gateway/x.py", ["mesh-gateway"]) is True
     assert de._path_withholds("src/swarph_cli/gateway/x.py",
                               ["mesh-gateway"]) is False
@@ -1379,3 +1378,94 @@ def test_board_dev_extract_uses_card_project_allowlist(idx, fed, monkeypatch,
     # board project -> mesh-gateway visible: the private copy resolves.
     assert "server.py:12" in out.out
     assert "SECRET-SIG" in out.out
+
+
+# ── shape-only #1410: a card-named repo with no index row gets its own line ──
+
+def test_card_named_missing_repo_prints_not_in_index(idx, fed):
+    # Card #1393 shape: the body names `swarph-codegraph-index`, which has
+    # no repos row here — the extract says so plainly instead of silence.
+    card = {"id": 1393,
+            "title": "codegraph index is silently stale across the fleet",
+            "body": "swarph-codegraph-index codegraph_index/fleet.py:89-91 "
+                    "sets dm_target for these private repos"}
+    rep, wsp = fed
+    ex = de.build_extract(tokens=["chat_sync"], index_path=str(idx),
+                          fed_report=str(rep), structurizr_ws=str(wsp),
+                          fed_docs_db=str(rep) + ".nodb",
+                          merged_lookup=lambda p: None, card=card)
+    assert ex["missing_repos"] == ["swarph-codegraph-index"]
+    text = de.render(ex)
+    assert "repo swarph-codegraph-index is not in the index" in text
+    assert "index unavailable" not in text
+
+
+def test_card_named_missing_repo_ignores_non_repo_words(idx, fed):
+    # Only fleet-shaped `swarph-...` names count: hyphenated prose
+    # (`supply-chain`), peer names (`lab-ovh`), and modules
+    # (`codegraph_index`) never print a repo line — nothing is invented.
+    card = {"id": 1, "title": "supply-chain cleanup",
+            "body": "ask lab-ovh about codegraph_index and first-time setup; "
+                    "fix chat_sync"}
+    ex = _build(idx, fed, ["chat_sync"], card=card)
+    assert ex["missing_repos"] == []
+    assert "is not in the index" not in de.render(ex)
+
+
+# ── shape-only #1410: LIKE metacharacters in --path match literally ──
+
+def test_path_like_metacharacters_match_literally(idx, fed):
+    import sqlite3 as _sqlite3
+    rep, wsp = fed
+    con = _sqlite3.connect(f"file:{idx}?mode=ro", uri=True)
+    try:
+        reg = de.repo_registry(con)
+        vis, _ = de.split_visible(reg)
+        assert de.find_symbols_by_path(con, "%", vis) == []
+        assert de.find_symbols_by_path(con, "_", vis) == []
+        assert de.find_symbols_by_path(con, "\\", vis) == []
+        assert de.find_symbols_by_path(
+            con, "src/swarph_cli/gateway/server.py", vis) != []
+    finally:
+        con.close()
+
+
+# ── #1410: readable card with no tokens exits 0; unreadable keeps exit 1 ──
+
+def test_board_readable_card_without_tokens_exits_zero(idx, fed, monkeypatch,
+                                                       capsys):
+    from swarph_cli.commands import board as board_mod
+    rep, wsp = fed
+    card = {"id": 99, "title": "rework cap",
+            "body": "run `pip install -U` and `import json, sys` only"}
+    monkeypatch.setattr(board_mod, "_resolve_self_name", lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_token", lambda *_a, **_k: "tok")
+    monkeypatch.setattr(board_mod, "_http_get_json",
+                        lambda url, tok, **k: (200, card))
+    rc = board_mod.run_board(
+        ["cards", "dev-extract", "--card", "99", "--print-only",
+         "--index", str(idx), "--fed-report", str(rep),
+         "--structurizr-ws", str(wsp)])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "card #99: no symbols to look up" in out.out
+    assert "no symbol resolved" in out.out
+    assert "Traceback" not in out.out and "Traceback" not in out.err
+
+
+def test_board_unreadable_card_without_tokens_keeps_exit_1(idx, fed,
+                                                           monkeypatch,
+                                                           capsys):
+    from swarph_cli.commands import board as board_mod
+    rep, wsp = fed
+    monkeypatch.setattr(board_mod, "_resolve_self_name", lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_token", lambda *_a, **_k: "tok")
+    monkeypatch.setattr(board_mod, "_http_get_json",
+                        lambda url, tok, **k: (404, {"detail": "no such card"}))
+    rc = board_mod.run_board(
+        ["cards", "dev-extract", "--card", "99", "--print-only",
+         "--index", str(idx), "--fed-report", str(rep),
+         "--structurizr-ws", str(wsp)])
+    out = capsys.readouterr()
+    assert rc == 1
+    assert "cannot read card #99" in out.err

@@ -9,10 +9,12 @@ The extract JOINS two halves, each with its own as-of pin:
   file (card #1393) plus the index time from ``repos.indexed_at``. No
   covering-tests section (name-match is not coverage — removed #1410).
 * Federation half (READ-ONLY ``~/.swarph/codegraph/federation-report.txt`` +
-  ``structurizr/workspace.json``): import-site hits for the visible target
-  repos, deploy units running them. NO rels of any kind are printed
-  (structurizr relationships removed #1410). Pinned with the federation
-  build time; labelled STALE when older than the last repo.merged for a repo.
+  ``structurizr/workspace.json``): the report's header stamp (build time)
+  and its ``Layer N:`` header lines only, plus the deploy units running the
+  visible target repos. NO rels, depends-on, blast-radius, arrow, or
+  import-site lines of any kind are printed (kept by LINE SHAPE, not words).
+  Pinned with the federation build time from the stamp (never the file
+  mtime); labelled STALE when older than the last repo.merged for a repo.
 
 Posting is via the existing board path: the built body is posted with the
 same ``/messages`` + ``_card_say_payload`` machinery as
@@ -299,6 +301,33 @@ def card_project_slug(card: dict | None, projects: list | None = None) -> str | 
     return None
 
 
+# Fleet-shaped repo names in card prose: every `swarph-...` whole token in a
+# card's title/body is a repo reference (the fleet names repos `swarph-*`),
+# never a concept. Non-`swarph-` hyphenated prose (`supply-chain`,
+# `first-time`) and peer names (`lab-ovh`, `gemini-researcher`) are never
+# repo claims and are ignored — only what the card actually names is
+# reported, nothing is invented.
+_SWARPH_REPO_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(swarph-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)"
+    r"(?![A-Za-z0-9_.-])", re.IGNORECASE)
+
+
+def card_named_missing_repos(card: dict | None, registry: dict) -> list:
+    """Fleet-shaped repo names the card names that the index lacks (pure).
+
+    Scans the card's title+body the way `extract_card_tokens` scans it for
+    targets — a pure function of the card dict — for whole `swarph-...`
+    tokens absent from `registry` (card #1393 names `swarph-codegraph-index`,
+    which has no repos row). Returns the sorted distinct missing names.
+    """
+    if not isinstance(card, dict) or not registry:
+        return []
+    text = f"{card.get('title') or ''}\n{card.get('body') or ''}"
+    lowered = {str(r).lower() for r in registry}
+    seen = {m.group(1) for m in _SWARPH_REPO_RE.finditer(text)}
+    return sorted(n for n in seen if n.lower() not in lowered)
+
+
 def split_visible(registry: dict, project_slug: str | None = None,
                   card_allowlist: dict | None = None) -> tuple:
     """Public repos + the card project's allowlisted repos are visible.
@@ -393,13 +422,27 @@ def withheld_symbol_repos(con, token: str, withheld: list,
             for repo, fps in sorted(by_repo.items())}
 
 
+def _escape_like(s: str) -> str:
+    """Escape LIKE metacharacters (`%`, `_`, the escape char) in a literal.
+
+    `--path "%"` must match a literal `%`, not every row: the LIKE pattern
+    below would otherwise read a caller-supplied `%`/`_` as a wildcard (and
+    a trailing backslash would eat the closing escape). Both queries declare
+    an ESCAPE clause, so prefixing those three characters keeps the lookup
+    literal.
+    """
+    return (s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_"))
+
+
 def find_symbols_by_path(con, path_arg: str, visible: list,
                          limit: int = ROW_LIMIT) -> list:
     """Symbols whose file_path matches `path` or `path:line` (bounded LIMIT).
 
     `--path` is a file selector, not a second spelling of `--symbol`: the
     lookup is against `file_path` (exact or `/`-suffixed), never the symbol
-    name. A trailing `:line` (digits) narrows to that start line.
+    name. A trailing `:line` (digits) narrows to that start line. LIKE
+    metacharacters in the argument are escaped, so `--path %` matches a
+    literal `%` (no arbitrary rows) while a real path still resolves.
     """
     if not visible or not path_arg:
         return []
@@ -407,7 +450,7 @@ def find_symbols_by_path(con, path_arg: str, visible: list,
     if not path or not line.isdigit():
         path, line = path_arg, None
     qmarks = ",".join("?" * len(visible))
-    like = "%/" + path.lstrip("/")
+    like = "%/" + _escape_like(path.lstrip("/"))
     try:
         if line is not None:
             rows = con.execute(
@@ -505,107 +548,38 @@ def caller_count(con, symbol_id: int, visible: list) -> int | None:
         return None
 
 
-def _names_whole_token(text: str, name: str) -> bool:
-    """True when `name` occurs in `text` as a whole token (fail-closed match).
-
-    Repo names contain hyphens, so a bare `in` (or `\\b`) over-matches:
-    withheld `mesh` would match visible `mesh-gateway`. The token is whole
-    only when no identifier-ish char (letters, digits, `_`, `.`, `-`)
-    touches either side.
-    """
-    return re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(name or "") +
-                     r"(?![A-Za-z0-9_.-])", text or "") is not None
-
-
 def _name_parts(s: str) -> list:
     """A repo/module/path name split on every separator layer.
 
     Repo, module, and dotted-path spellings of one name share parts:
     `mesh-gateway`, `mesh_gateway`, and the head of
     `mesh_gateway.private_helper` are all `[mesh, gateway]`.
+
+    Still feeds `_path_withholds` (the symbol path-component guard). The
+    fed-report word machinery that also used it (`_names_whole_token`,
+    `_line_withholds`, `_drop_withheld_lines`) is gone: the federation
+    half keeps lines by SHAPE now, so there is nothing left to filter.
     """
     return [p for p in re.split(r"[-_./]+", (s or "").lower()) if p]
 
 
-# Separator-containing spans that could be repo/container references. Must
-# carry a letter (pure versions/dates like 2026-11 are not names). Slash
-# spans are file paths, stripped by the caller before scanning.
-_CANDIDATE_RE = re.compile(
-    r"[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*(?:[-_./][A-Za-z0-9]+)+")
-_SLASH_SPAN_RE = re.compile(r"\S*/\S*")
+# Federation report lines are kept by LINE SHAPE, not by words (card #1410):
+# a line is kept iff it is a Layer header (`Layer N:`). Dependency arrows
+# (`──depends on──▶`), blast-radius lines, import-site lines (`↳ imports
+# ... e.g. ...`), and every other report line never reach any output — the
+# old word grep passed those through whenever they named a hit repo.
+_LAYER_RE = re.compile(r"^\s*Layer \d+:\s*$")
 
 
-def _line_withholds(line: str, withheld: list, known: list) -> bool:
-    """True when a federation line must be dropped, fail-closed.
+def read_fed_report(path: str,
+                    line_cap: int = FED_REPORT_LINE_CAP) -> dict:
+    """Shape-only read of the nightly federation report (capped).
 
-    Drops when the line (1) names a WITHHELD repo as a whole token
-    (legacy rule); (2) names one separator-flexibly — `proven` matches the
-    head of `proven.packs.secret_mod`, `mesh-gateway` matches
-    `mesh_gateway.private_helper`; or (3) carries a repo-like span missing
-    from the registry (`known` = index repos + structurizr containers) —
-    an unknown dependency reference is withheld, never shown. A span that
-    extends a KNOWN name (`swarph_shared.caller_convention`,
-    `swarph-mesh, swarph-shared`) is kept. File-path spans are stripped
-    first so `src/swarph_mesh/...py:51` never reads as unknown.
-    """
-    for w in withheld:
-        if _names_whole_token(line, w):
-            return True
-    # Path components (#1410): a withheld repo name as a path component
-    # (e.g. `src/mesh_gateway/x.py:39`) must not leak through file paths.
-    # Only the withheld-equality rule applies here — never the unknown-name
-    # rule below (ordinary filenames are not registry names).
-    for span in _SLASH_SPAN_RE.findall(line or ""):
-        for comp in re.split(r"/+", span):
-            comp = (comp or "").strip().rstrip(":")
-            if not comp:
-                continue
-            for w in withheld:
-                want = _name_parts(w)
-                if want and _name_parts(comp) == want:
-                    return True
-    withheld_parts = [_name_parts(w) for w in withheld]
-    known_parts = [_name_parts(k) for k in known]
-    scan = _SLASH_SPAN_RE.sub(" ", line or "")
-    for m in _CANDIDATE_RE.finditer(scan):
-        parts = _name_parts(m.group(0))
-        if not parts:
-            continue
-        if any(w and w == parts[:len(w)] for w in withheld_parts):
-            return True
-        if any(k and (k == parts[:len(k)] or parts == k[:len(parts)])
-               for k in known_parts):
-            continue
-        return True
-    return False
-
-
-def _drop_withheld_lines(lines: list, withheld, known=()) -> list:
-    """Drop lines naming a WITHHELD repo (fail-closed: a hit line that cannot
-    be kept without naming the private repo is dropped, never redacted in
-    place — partial-line surgery could leave a misleading half-fact).
-
-    Also drops lines carrying a repo-like name missing from `known`
-    (index repos + structurizr containers): an unregistered dependency
-    reference is withheld, never shown.
-    """
-    withheld = list(withheld or [])
-    known = list(known or [])
-    if not withheld and not known:
-        return list(lines)
-    return [ln for ln in lines
-            if not _line_withholds(ln, withheld, known)]
-
-
-def read_fed_report(path: str, repos: list, line_cap: int = FED_REPORT_LINE_CAP,
-                    withheld=(), known=()) -> dict:
-    """Grep the nightly federation report for lines citing `repos` (capped).
-
-    Lines that ALSO name a WITHHELD repo (dependency arrows/layers list the
-    private neighbour on the same line) are dropped via `_drop_withheld_lines`
-    — the federation half must never leak a private name through a visible
-    repo's line. `known` (index repos + structurizr containers) feeds the
-    fail-closed unknown-name rule: a repo-like span in neither is withheld.
+    Returns the header stamp (`# generated ...`, the build time freshness
+    compares — never the file mtime) plus the `Layer N:` header lines. A
+    missing/unreadable file, or a file with no header stamp (0-byte,
+    garbage), reads `unavailable`. No repo names are matched and none are
+    printed, so there is nothing to filter here.
     """
     lines: list = []
     try:
@@ -624,26 +598,42 @@ def read_fed_report(path: str, repos: list, line_cap: int = FED_REPORT_LINE_CAP,
     generated = next(
         (ln for ln in lines[:5] if ln.startswith("# generated")), ""
     ).strip("# \n")
-    hits = [
-        ln.strip()
-        for ln in lines
-        if any(r in ln for r in repos) and ln.strip() and not ln.startswith("#")
-    ][:ROW_LIMIT]
-    hits = _drop_withheld_lines(hits, withheld, known=known or repos)
+    if not generated:
+        return {"status": "unavailable: no header stamp"}
+    layers = [ln.strip() for ln in lines if _LAYER_RE.match(ln)]
     return {
-        "status": "ok", "generated": generated or "unavailable: no header stamp",
-        "hits": hits, "cut": cut, "scanned": min(len(lines), line_cap),
+        "status": "ok", "generated": generated,
+        "layers": layers, "cut": cut, "scanned": min(len(lines), line_cap),
     }
 
 
+def _stamp_time(generated: str) -> str | None:
+    """The build instant: first timestamp token of the header stamp.
+
+    `read_fed_report` strips `# ` off `# generated 2026-11-03T04:45:01Z by
+    ...`, so the stored stamp starts with the word `generated`; skip it and
+    take the first timestamp token. Unparseable stamps yield None
+    (freshness renders unavailable, never STALE-by-default). The file mtime
+    is never used (card #1410).
+    """
+    text = (generated or "").strip()
+    if text[:9].lower() == "generated":
+        text = text[9:].strip()
+    tok = (text.split() or [""])[0]
+    return tok if _parse_instant(tok) is not None else None
+
+
 def read_structurizr(path: str, repos: list) -> dict:
-    """Containers/deploy units citing `repos` (bounded JSON scan).
+    """Deploy units for `repos` (minimal bounded JSON scan).
 
     #1410: relationships ("rels") are never read and never printed — no rels
     of any kind appear in the output — so there is nothing to filter here.
+    What remains is the smallest part that still prints deploy units: the
+    one-system/many-containers scan matching `repos` by container name and
+    reading each match's `group` (the deploy host). The full-container-name
+    list is gone — it only fed the removed fed-report unknown-name rule.
     `matched`/`deploy_units` name only visible repos / host groups, so they
-    need no filtering. `containers` lists every container name (feeds the
-    fed-report known set; additive).
+    need no filtering.
     """
     try:
         with open(path, encoding="utf-8") as fh:
@@ -671,15 +661,10 @@ def read_structurizr(path: str, repos: list) -> dict:
         group = c.get("group")
         if group and str(group) not in deploy:
             deploy.append(str(group))
-    containers = sorted(
-        {str(c.get("name", "")) for s in systems if isinstance(s, dict)
-         for c in s.get("containers", []) or []
-         if isinstance(c, dict) and str(c.get("name", ""))})
     return {
         "status": "ok",
         "matched": matched[:ROW_LIMIT],
         "deploy_units": deploy[:ROW_LIMIT],
-        "containers": containers,
     }
 
 
@@ -793,9 +778,14 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
                     "tokens": tokens, "fed_docs": fed_docs}
         registry = repo_registry(con)
         visible, withheld = split_visible(registry, project_slug, card_allowlist)
+        # Allowlist-driven (a card-project repo with no indexed copy) PLUS
+        # card-named (a fleet-shaped `swarph-...` name the card's own text
+        # names that the registry lacks — card #1393's swarph-codegraph-index
+        # has no repos row). Only names the card actually contains.
         missing_repos = sorted(
-            r for r in ((card_allowlist or {}).get(project_slug) or [])
-            if isinstance(r, str) and r and r not in registry)
+            {r for r in ((card_allowlist or {}).get(project_slug) or [])
+             if isinstance(r, str) and r and r not in registry}
+            | set(card_named_missing_repos(card, registry)))
         syms, routes = [], []
         withheld_hits: dict = {}
 
@@ -824,14 +814,11 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
             con.close()
         except Exception:
             pass
-    # Structurizr first: its container names join the index registry as the
-    # `known` universe for the fed-report unknown-name rule (fail-closed).
+    # Shape-only federation half: the report contributes its header stamp
+    # (the build time) plus the `Layer N:` lines — never per-repo hit lines,
+    # so neither the hit repos nor the withheld set are inputs anymore.
     struct = read_structurizr(structurizr_ws, repos_hit)
-    known = list(dict.fromkeys(
-        [*registry, *((struct.get("containers") or [])
-                       if struct.get("status") == "ok" else [])]))
-    fed = read_fed_report(fed_report, repos_hit, withheld=withheld,
-                          known=known)
+    fed = read_fed_report(fed_report)
     pins = {}
     for repo in repos_hit:
         meta = registry.get(repo, {})
@@ -840,13 +827,8 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
             "indexed_at": meta.get("indexed_at"),
             "merged_at": merged_lookup(meta.get("path")),
         }
-    try:
-        fed_build_mtime = os.path.getmtime(fed_report)
-        import datetime as _dt
-        fed_build = _dt.datetime.fromtimestamp(
-            fed_build_mtime, tz=_dt.timezone.utc).isoformat()
-    except OSError:
-        fed_build = None
+    fed_build = (_stamp_time(fed.get("generated"))
+                 if fed.get("status") == "ok" else None)
     return {
         "index": {"status": "ok", "path": index_path},
         "tokens": tokens, "paths": list(paths or []),
@@ -910,9 +892,12 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
     the federation build/hits) is truncated, so the 60-line budget
     can never cut freshness away again (card #792 showed 0 STALE lines).
     Three plain outcome lines (#1410), each distinct: `index unavailable`
-    (the index cannot be read/probed), `repo X is not in the index` (a
-    card-project repo with no indexed copy), `no symbol resolved` (lookups
-    found nothing). No covering-tests section and no rels of any kind.
+    (the index cannot be read/probed), `repo X is not in the index` (an
+    allowlisted or card-named repo with no indexed copy), `no symbol
+    resolved` (lookups found nothing). The federation half prints only the
+    report header stamp (build line) and the `Layer N:` lines — or the
+    report's own unavailable line. No covering-tests section and no rels,
+    depends-on, blast-radius, arrow, or import lines of any kind.
     """
     cut_notes: list = []
     head = ["# dev extract (card #1410, #559 phase 2) — pinned, small, dry-run-safe"]
@@ -973,8 +958,6 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
             cut_notes.append(f"symbols cut after {ROW_LIMIT}")
         for tok in ex.get("tokens", []):
             _hits = (ex.get("withheld_hits") or {}).get(tok, {})
-            if isinstance(_hits, list):  # legacy shape: no test/code split
-                _hits = {r: False for r in _hits}
             for repo, test_only in sorted(_hits.items()):
                 if test_only:
                     head.append(
@@ -1004,30 +987,31 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
     head.append("## federation half (READ-ONLY)")
     fed = ex.get("federation_report", {})
     st = ex.get("structurizr", {})
-    if not ex.get("repos_hit"):
-        head.append("federation: no visible target repo")
+    # No synthetic per-outcome line here: the outcomes already have their
+    # own plain lines (`repo X is not in the index`, `no symbol resolved`,
+    # `index unavailable`). The federation half prints the report stamp
+    # plus the `Layer N:` lines, or the report's own unavailable line.
+    if fed.get("status") != "ok":
+        head.append(f"federation-report: {fed.get('status', 'unavailable')}")
     else:
-        if fed.get("status") != "ok":
-            head.append(f"federation-report: {fed.get('status', 'unavailable')}")
+        head.append(f"build: {ex.get('fed_build') or 'unavailable: no header stamp'} "
+                    "(federation-report.txt header stamp = nightly 04:45 build)")
+        for layer in fed.get("layers", []):
+            head.append(layer)
+        if not fed.get("layers"):
+            head.append("federation layers: unavailable "
+                        "(floor: report has no Layer lines)")
+        if fed.get("cut"):
+            cut_notes.append(f"fed-report scanned first {FED_REPORT_LINE_CAP} lines")
+    if st.get("status") != "ok":
+        head.append(f"structurizr: {st.get('status', 'unavailable')}")
+    else:
+        # #1410: no rels of any kind in output — downstream is never
+        # printed (neither entries nor floor). Deploy units stay.
+        if st.get("deploy_units"):
+            head.append(f"deploy units: {', '.join(st['deploy_units'])}")
         else:
-            head.append(f"build: {ex.get('fed_build') or 'unavailable: report mtime unreadable'} "
-                        "(federation-report.txt mtime = nightly 04:45 build)")
-            for h in fed.get("hits", []):
-                head.append(f"- {h[:140]}")
-            if not fed.get("hits"):
-                head.append("- federation: no hits for these targets "
-                            "(floor: report not linked for these repos)")
-            if fed.get("cut"):
-                cut_notes.append(f"fed-report scanned first {FED_REPORT_LINE_CAP} lines")
-        if st.get("status") != "ok":
-            head.append(f"structurizr: {st.get('status', 'unavailable')}")
-        else:
-            # #1410: no rels of any kind in output — downstream is never
-            # printed (neither entries nor floor). Deploy units stay.
-            if st.get("deploy_units"):
-                head.append(f"deploy units: {', '.join(st['deploy_units'])}")
-            else:
-                head.append("deploy units: unavailable (floor: no group-tagged container matched)")
+            head.append("deploy units: unavailable (floor: no group-tagged container matched)")
     # Reserved tail: WITHHELD (ONE names-list line), the fed-docs state,
     # and the freshness section. The cap truncates `head` only, so these
     # are never cut away.
