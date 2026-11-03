@@ -1,0 +1,240 @@
+# membrane-selftest.yml -- card #1427. Real runs of membrane.yml, and the input
+# validator under hostile text on all three operating systems.
+#
+# It runs when either membrane file changes (and on demand), so a change to the
+# membrane cannot land without one real macOS, Windows and Linux run at the head.
+# It does NOT change the behaviour of any existing workflow, and it adds no trigger
+# to membrane.yml. All repos used are public; no secret is referenced.
+name: membrane-selftest
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/membrane.yml"
+      - ".github/workflows/membrane-selftest.yml"
+      - "tools/membrane_validate.sh"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  real:
+    name: real run on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            repo: octocat/Hello-World
+            ref: master
+            readme: README
+          - os: windows
+            repo: octocat/Spoon-Knife
+            ref: main
+            readme: README.md
+          - os: ubuntu
+            repo: BrainSurfing-tech/swarph-cli
+            ref: main
+            readme: README.md
+    uses: ./.github/workflows/membrane.yml
+    permissions: {}
+    with:
+      os: ${{ matrix.os }}
+      repo: ${{ matrix.repo }}
+      ref: ${{ matrix.ref }}
+      artifact_name: selftest-${{ matrix.os }}
+      timeout_minutes: "10"
+      artifacts: |
+        ${{ matrix.readme }}
+        membrane-proof.txt
+      command: |
+        set -e
+        echo "kernel: $(uname -s) $(uname -m)"
+        echo "checkout HEAD: $(git rev-parse HEAD)"
+        # NAMES only, never values (compgen -e lists exported variable names; `env | cut`
+        # would also print the lines of this multi-line command, which sits in an env value).
+        # A secret-shaped name in the runner would be a finding.
+        compgen -e | sort | tr '\n' ' ' | fold -w 200; echo
+        # PGPASSWORD is the one name allowed: windows-latest sets it machine-wide for its
+        # preinstalled PostgreSQL (actions/runner-images, Install-PostgreSQL.ps1 line 15).
+        # It comes from the runner image, not from this repo or org, and the first selftest
+        # run printed it on windows-latest. Any other secret-shaped name fails the run.
+        if compgen -e | grep -E -i 'SECRET|PASSWORD|MESH|TAILSCALE|TOKEN|^INPUT_' | grep -v -x 'PGPASSWORD'; then
+          echo "SECRET-SHAPED ENVIRONMENT NAME PRESENT"; exit 3
+        fi
+        echo "no secret-shaped environment names"
+        # The text of this command reached bash as data: it is also in $MEMBRANE_COMMAND.
+        test -n "$MEMBRANE_COMMAND"
+        printf 'membrane proof from %s\n' "$(uname -s)" > membrane-proof.txt
+        cat membrane-proof.txt
+
+  validator-hostile:
+    name: hostile inputs rejected on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions: {}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      # Each case is a real hostile string handed to tools/membrane_validate.sh as an
+      # env variable, the way membrane.yml hands it over. The canary file is what an
+      # injection would create; none of these may reject for the wrong reason (the good
+      # case must be accepted) and none may leave the canary.
+      - name: Hostile cases (bash ${{ matrix.os }})
+        run: |
+          echo "bash $BASH_VERSION on $(uname -s)"
+          canary="$RUNNER_TEMP/CANARY"
+          rm -f "$canary"
+          fail=0
+          good() { env IN_OS=macos IN_REPO=octocat/Hello-World IN_REF=main IN_ARTIFACTS=README IN_NAME=membrane-out IN_TIMEOUT=20 "$@"; }
+          if good bash tools/membrane_validate.sh >/dev/null; then echo "ok   good case accepted"; else echo "FAIL good case rejected"; fail=1; fi
+          reject() {
+            label="$1"; shift
+            if good "$@" bash tools/membrane_validate.sh >/dev/null; then echo "FAIL not rejected: $label"; fail=1; else echo "ok   rejected: $label"; fi
+          }
+          reject "repo with ; and a command"   "IN_REPO=octocat/Hello-World; touch $canary #"
+          reject "repo with command substitution" "IN_REPO=\$(touch $canary)/x"
+          reject "repo with backticks"         "IN_REPO=a/b\`touch $canary\`"
+          reject "repo with newline"           "IN_REPO=$(printf 'a/b\nc/d')"
+          reject "repo without owner"          "IN_REPO=justaname"
+          reject "ref with quote and ;"        "IN_REF=main\"; touch $canary #"
+          reject "ref that is an option"       "IN_REF=--upload-pack=touch $canary"
+          reject "ref with double dot"         "IN_REF=../../x"
+          reject "ref with space"              "IN_REF=main extra"
+          reject "artifact path climbing"      "IN_ARTIFACTS=$(printf 'ok.txt\n../../etc/passwd')"
+          reject "artifact absolute path"      "IN_ARTIFACTS=/etc/passwd"
+          reject "artifact path with space"    "IN_ARTIFACTS=a b"
+          reject "artifact path with dollar"   "IN_ARTIFACTS=\$HOME/x"
+          reject "os self-hosted"              "IN_OS=self-hosted"
+          reject "os with trailing text"       "IN_OS=macos-latest"
+          reject "artifact_name with slash"    "IN_NAME=x/../y"
+          reject "timeout too big"             "IN_TIMEOUT=999"
+          reject "timeout zero"                "IN_TIMEOUT=0"
+          reject "timeout with command"        "IN_TIMEOUT=1; touch $canary"
+          if [ -e "$canary" ]; then echo "FAIL the canary exists: something executed an input"; fail=1; else echo "ok   no canary: no input was executed"; fi
+          exit $fail
+
+  # Full chain, hostile text. membrane.yml reports a rejection of a CALL through its
+  # `verdict` output (a rejected dispatch fails the run instead), so these stay green
+  # while proving that no job starts on the target. The private repo is a real private
+  # repo of this org: a run on it must be refused before any macOS or Windows minute.
+  # The returned files really come back, on every system: download what the three real
+  # runs uploaded and look inside. (windows-latest returned nothing in the first run.)
+  returned-files:
+    name: the named files and the exit code come back
+    needs: real
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: selftest-macos
+          path: got/macos
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: selftest-windows
+          path: got/windows
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: selftest-ubuntu
+          path: got/ubuntu
+      - name: Look inside
+        run: |
+          fail=0
+          want() { if [ -s "got/$1/$2" ]; then echo "ok   $1 returned $2"; else echo "FAIL $1 did not return $2"; fail=1; fi; }
+          for os in macos windows ubuntu; do
+            want $os membrane.log; want $os membrane.rc; want $os membrane-proof.txt
+            if [ "$(tr -d '\r\n ' < got/$os/membrane.rc)" = "0" ]; then echo "ok   $os exit code file says 0"; else echo "FAIL $os exit code file"; fail=1; fi
+          done
+          want macos README; want windows README.md; want ubuntu README.md
+          grep -q Darwin got/macos/membrane-proof.txt && grep -q Linux got/ubuntu/membrane-proof.txt && grep -q MINGW got/windows/membrane-proof.txt && echo "ok   each proof file names its own system" || { echo "FAIL proof files"; fail=1; }
+          exit $fail
+
+  chain-repo-injection:
+    uses: ./.github/workflows/membrane.yml
+    permissions: {}
+    with:
+      os: ubuntu
+      repo: "octocat/Hello-World; touch /tmp/CANARY #"
+      command: "echo should-never-run"
+
+  chain-ref-injection:
+    uses: ./.github/workflows/membrane.yml
+    permissions: {}
+    with:
+      os: macos
+      repo: octocat/Hello-World
+      ref: 'main"; touch /tmp/CANARY #'
+      command: "echo should-never-run"
+
+  chain-artifact-escape:
+    uses: ./.github/workflows/membrane.yml
+    permissions: {}
+    with:
+      os: windows
+      repo: octocat/Hello-World
+      ref: master
+      artifacts: "../../../etc/passwd"
+      command: "echo should-never-run"
+
+  chain-os-injection:
+    uses: ./.github/workflows/membrane.yml
+    permissions: {}
+    with:
+      os: self-hosted
+      repo: octocat/Hello-World
+      command: "echo should-never-run"
+
+  chain-private-repo:
+    uses: ./.github/workflows/membrane.yml
+    permissions: {}
+    with:
+      os: macos
+      repo: BrainSurfing-tech/lab-orchestrator
+      ref: main
+      command: "echo should-never-run"
+
+  assert-chain:
+    name: assert the full-chain verdicts
+    needs:
+      - real
+      - chain-repo-injection
+      - chain-ref-injection
+      - chain-artifact-escape
+      - chain-os-injection
+      - chain-private-repo
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: {}
+    steps:
+      - name: Each hostile call was rejected and started nothing; the real runs succeeded
+        env:
+          V_REPO: ${{ needs.chain-repo-injection.outputs.verdict }}
+          V_REF: ${{ needs.chain-ref-injection.outputs.verdict }}
+          V_ARTIFACT: ${{ needs.chain-artifact-escape.outputs.verdict }}
+          V_OS: ${{ needs.chain-os-injection.outputs.verdict }}
+          V_PRIVATE: ${{ needs.chain-private-repo.outputs.verdict }}
+          E_REPO: ${{ needs.chain-repo-injection.outputs.exit_code }}
+          E_PRIVATE: ${{ needs.chain-private-repo.outputs.exit_code }}
+          R_REAL: ${{ needs.real.result }}
+        run: |
+          fail=0
+          for pair in "repo-injection=$V_REPO" "ref-injection=$V_REF" "artifact-escape=$V_ARTIFACT" "os-injection=$V_OS" "private-repo=$V_PRIVATE"; do
+            if [ "${pair#*=}" = "rejected" ]; then echo "ok   ${pair%%=*} verdict rejected"; else echo "FAIL ${pair%%=*} verdict was '${pair#*=}'"; fail=1; fi
+          done
+          for pair in "repo-injection=$E_REPO" "private-repo=$E_PRIVATE"; do
+            if [ -z "${pair#*=}" ]; then echo "ok   ${pair%%=*} no command ran (no exit code)"; else echo "FAIL ${pair%%=*} a command ran, exit '${pair#*=}'"; fail=1; fi
+          done
+          if [ "$R_REAL" = "success" ]; then echo "ok   three real runs succeeded"; else echo "FAIL real runs: $R_REAL"; fail=1; fi
+          exit $fail
