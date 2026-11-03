@@ -51,6 +51,8 @@ want, run the command.
 | keep my memory from rotting between sessions | `swarph dreaming run --corpus <dir> --out <dir>` |
 | find out who calls a function | `swarph codegraph <symbol>` |
 | find out what happened and when | `swarph timeline around <date>` |
+| run a research pipeline on subscription lanes | `swarph skunkworks run --card <N> --persona swarph --seed-file <path> --as <you>` |
+| see how a pipeline run is doing | `swarph skunkworks status <run_id> --as <you>` |
 | check whether my setup is right | see [Check your own setup](#check-your-own-setup) |
 | get woken when a DM arrives | `swarph install-wake-hook --scope project` |
 | see what a wake hook would print | `swarph wake-hook-output` |
@@ -558,6 +560,7 @@ answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not comman
 - `swarph scan` -- statically scan an artifact for dangerous patterns before publish.
 - `swarph schedule` -- the gateway's scheduled events: create, list, get, enable, disable, delete, fire-now.
 - `swarph service` -- stand up a $0 subscription-LLM HTTP lane.
+- `swarph skunkworks` -- the research pipeline (card #1405): `run`, `status`, `show`, `stop`, `decide`, each with `--as <you>` and `--json`. Ideation and the architect run on the mesh queue, research on the requesting cell's own Claude quota, nothing metered. Refused Monday to Friday 09:30-16:00 New York time. Approval produces no code. See `docs/skunkworks-howto.md` in the swarph-cli repo.
 - `swarph spawn` -- run a cell from its role name or yaml path.
 - `swarph sweep` -- the card-#1064 stuck-work sweep: blocked rows and unreviewed PRs, DMs the blocker, `swarph sweep --dry-run` reads only.
 - `swarph triage` -- the card-#1073 organ triage router: sensor findings onto owner triage rows (cap 10, carried), `swarph triage --dry-run` reads only.
