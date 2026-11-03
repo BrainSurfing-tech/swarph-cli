@@ -1749,9 +1749,10 @@ def run_board(argv: list[str]) -> int:
                 gw, token, self_name, args.id, content, args.kind,
                 args.to_node, aj, opt_out=getattr(args, "no_redact", False))
         if args.command == "dev-extract":
-            # card #1396 (#559 phase 2). Token source: --symbol/--path, else
-            # the card's own title+body; post target: --card (via the shared
-            # `say` path) unless --print-only (dry-run: post nothing).
+            # card #1396 (#559 phase 2). Name-token source: --symbol, else
+            # the card's own title+body; --path selects by file path.
+            # Post target: --card (via the shared `say` path) unless
+            # --print-only (print nothing-posted) or no --card (print only).
             from swarph_cli.commands import dev_extract as _de_mod
             card = None
             if args.card is not None:
@@ -1763,10 +1764,11 @@ def run_board(argv: list[str]) -> int:
                               file=sys.stderr)
                         return 1
                     card = None
-            explicit = list(args.symbol or []) + list(args.path or [])
+            explicit = list(args.symbol or [])
             mined = _de_mod.extract_card_tokens(card) if card else []
             tokens = explicit + [t for t in mined if t not in explicit]
-            if not tokens:
+            paths = list(args.path or [])
+            if not tokens and not paths:
                 print("swarph board cards dev-extract: no --symbol/--path "
                       "and no readable --card to mine tokens from",
                       file=sys.stderr)
@@ -1774,7 +1776,7 @@ def run_board(argv: list[str]) -> int:
             ex = _de_mod.build_extract(
                 tokens=tokens, index_path=args.index,
                 fed_report=args.fed_report, structurizr_ws=args.structurizr_ws,
-                card=card)
+                card=card, paths=paths)
             if getattr(args, "json", False):
                 print(json.dumps(ex, indent=2, default=str))
                 return 0

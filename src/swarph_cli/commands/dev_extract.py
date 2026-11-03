@@ -15,8 +15,9 @@ The extract JOINS two halves, each with its own as-of pin:
 
 Posting is via the existing board path: the built body is posted with the
 same ``/messages`` + ``_card_say_payload`` machinery as
-``swarph board cards say`` (see ``board._run_cards_say``). ``--print-only``
-is the dry-run (nothing posted, nothing deployed).
+``swarph board cards say`` (see ``board._run_cards_say``) whenever ``--card``
+is given WITHOUT ``--print-only``. ``--print-only`` (or no ``--card``)
+prints the extract and posts nothing; nothing is ever deployed.
 
 Honesty rules (graded r4): every zero is printed as a FLOOR
 (``0 callers (floor: HTTP callers not linked yet)``), never as a fact; a
@@ -161,6 +162,86 @@ def find_symbols(con, token: str, visible: list, limit: int = ROW_LIMIT) -> list
         }
         for sid, repo, name, kind, fp, line, qual, sig in rows
     ]
+
+
+def withheld_symbol_repos(con, token: str, withheld: list,
+                          limit: int = ROW_LIMIT) -> list:
+    """Exact-name symbol match in WITHHELD repos — repo names only, no detail.
+
+    Fail-closed companion to `find_symbols`: when a target token matches a
+    symbol in a withheld (private/unknown-visibility) repo, the extract names
+    ONLY the repo (never file, line, signature, or count). Repo names are not
+    a new leak — the WITHHELD list already prints them with the reason.
+    """
+    if not withheld or not token:
+        return []
+    qmarks = ",".join("?" * len(withheld))
+    try:
+        rows = con.execute(
+            "SELECT DISTINCT repo FROM symbols WHERE name = ?"
+            f" AND repo IN ({qmarks}) LIMIT ?",
+            [token, *withheld, limit],
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return sorted(r[0] for r in rows)
+
+
+def find_symbols_by_path(con, path_arg: str, visible: list,
+                         limit: int = ROW_LIMIT) -> list:
+    """Symbols whose file_path matches `path` or `path:line` (bounded LIMIT).
+
+    `--path` is a file selector, not a second spelling of `--symbol`: the
+    lookup is against `file_path` (exact or `/`-suffixed), never the symbol
+    name. A trailing `:line` (digits) narrows to that start line.
+    """
+    if not visible or not path_arg:
+        return []
+    path, _, line = (path_arg or "").rpartition(":")
+    if not path or not line.isdigit():
+        path, line = path_arg, None
+    qmarks = ",".join("?" * len(visible))
+    like = "%/" + path.lstrip("/")
+    try:
+        if line is not None:
+            rows = con.execute(
+                "SELECT id, repo, name, kind, file_path, start_line, qualified_name,"
+                " signature FROM symbols WHERE (file_path = ? OR file_path LIKE ? ESCAPE '\\')"
+                f" AND repo IN ({qmarks}) AND start_line = ? LIMIT ?",
+                [path, like, *visible, int(line), limit],
+            ).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT id, repo, name, kind, file_path, start_line, qualified_name,"
+                " signature FROM symbols WHERE (file_path = ? OR file_path LIKE ? ESCAPE '\\')"
+                f" AND repo IN ({qmarks}) LIMIT ?",
+                [path, like, *visible, limit],
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [
+        {
+            "id": sid, "repo": repo, "name": name, "kind": kind,
+            "file_path": fp, "start_line": ln,
+            "qualified_name": qual or "", "signature": sig or "",
+        }
+        for sid, repo, name, kind, fp, ln, qual, sig in rows
+    ]
+
+
+def _target_stem(tok: str) -> str:
+    """Covering-test stem for a target token — never raises, never empty-loops.
+
+    Route-mined tokens can end in '/' (e.g. a card body citing
+    'POST /api/chat-sync/'), where the old `tok.split('/')[-1].split()[-1]`
+    raised IndexError on the empty tail. Strip trailing slashes and fall back
+    to the token itself; '' (unusable as a LIKE stem) stays ''.
+    """
+    base = (tok or "").rstrip("/") or (tok or "")
+    tail = base.split("/")[-1] if base else ""
+    parts = tail.split()
+    stem = (parts[-1] if parts else base)[:40]
+    return stem if any(c.isalnum() for c in stem) else ""
 
 
 def find_routes(con, token: str, visible: list, limit: int = ROW_LIMIT) -> list:
@@ -372,6 +453,7 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
                   structurizr_ws: str = DEFAULT_STRUCTURIZR_WS,
                   fed_docs_db: str = DEFAULT_FED_DOCS_DB,
                   card: dict | None = None,
+                  paths: list | None = None,
                   merged_lookup=None) -> dict:
     """Assemble the extract dict. Never raises on bad sources (unavailable)."""
     merged_lookup = merged_lookup or last_merged_at
@@ -383,34 +465,46 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
         registry = repo_registry(con)
         visible, withheld = split_visible(registry)
         syms, routes, tests = [], [], []
+        withheld_hits: dict = {}
+
+        def _add_sym(s: dict):
+            if s["id"] not in {x["id"] for x in syms}:
+                s["callers"] = caller_count(con, s["id"], visible)
+                syms.append(s)
+
         for tok in tokens[:MAX_AUTO_TOKENS]:
             for s in find_symbols(con, tok, visible):
-                if s["id"] not in {x["id"] for x in syms}:
-                    n = caller_count(con, s["id"], visible)
-                    s["callers"] = n
-                    syms.append(s)
+                _add_sym(s)
+            for repo in withheld_symbol_repos(con, tok, withheld):
+                withheld_hits.setdefault(tok, [])
+                if repo not in withheld_hits[tok]:
+                    withheld_hits[tok].append(repo)
             routes.extend(r for r in find_routes(con, tok, visible)
                           if r["name"] not in {x["name"] for x in routes})
-            stem = tok.split("/")[-1].split()[-1][:40]
-            tests.extend(t for t in covering_tests(con, stem, visible)
-                         if (t["name"], t["file_path"]) not in
-                         {(x["name"], x["file_path"]) for x in tests})
-            for s in syms:
-                file_stem = os.path.splitext(os.path.basename(
-                    s.get("file_path") or ""))[0]
-                if file_stem and file_stem not in ("__init__",):
-                    tests.extend(
-                        t for t in covering_test_files(con, file_stem, visible)
-                        if (t["name"], t["file_path"]) not in
-                        {(x["name"], x["file_path"]) for x in tests})
+            stem = _target_stem(tok)
+            if stem:
+                tests.extend(t for t in covering_tests(con, stem, visible)
+                             if (t["name"], t["file_path"]) not in
+                             {(x["name"], x["file_path"]) for x in tests})
+        for parg in (paths or [])[:MAX_AUTO_TOKENS]:
+            for s in find_symbols_by_path(con, parg, visible):
+                _add_sym(s)
+        for s in syms:
+            file_stem = os.path.splitext(os.path.basename(
+                s.get("file_path") or ""))[0]
+            if file_stem and file_stem not in ("__init__",):
+                tests.extend(
+                    t for t in covering_test_files(con, file_stem, visible)
+                    if (t["name"], t["file_path"]) not in
+                    {(x["name"], x["file_path"]) for x in tests})
         repos_hit = sorted({s["repo"] for s in syms})
     finally:
         try:
             con.close()
         except Exception:
             pass
-    fed = read_fed_report(fed_report, repos_hit or ["swarph-cli"])
-    struct = read_structurizr(structurizr_ws, repos_hit or ["swarph-cli"])
+    fed = read_fed_report(fed_report, repos_hit)
+    struct = read_structurizr(structurizr_ws, repos_hit)
     pins = {}
     for repo in repos_hit:
         meta = registry.get(repo, {})
@@ -428,7 +522,9 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
         fed_build = None
     return {
         "index": {"status": "ok", "path": index_path},
-        "tokens": tokens, "symbols": syms, "routes": routes, "tests": tests,
+        "tokens": tokens, "paths": list(paths or []),
+        "symbols": syms, "routes": routes, "tests": tests,
+        "repos_hit": repos_hit, "withheld_hits": withheld_hits,
         "visible": visible, "withheld": withheld, "registry": registry,
         "federation_report": fed, "structurizr": struct,
         "fed_build": fed_build,
@@ -440,6 +536,43 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
     }
 
 
+def _parse_instant(s) -> "datetime.datetime | None":
+    """Parse a timestamp to an aware UTC instant; None when unusable.
+
+    Federation build times are UTC (`...Z` / `+00:00`); repo.merged proxies
+    come from `git %cI` in the fleet checkout's local offset (e.g.
+    `...+01:00`). Comparing the raw strings mis-orders across offsets, so
+    both sides are parsed and compared as instants. Naive inputs are read as
+    UTC; garbage returns None (rendered unavailable, never STALE-by-default).
+    """
+    import datetime as _dt
+    if not s or not isinstance(s, str):
+        return None
+    t = s.strip()
+    if t[-1:] in ("Z", "z"):
+        t = t[:-1] + "+00:00"
+    try:
+        d = _dt.datetime.fromisoformat(t)
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=_dt.timezone.utc)
+    return d.astimezone(_dt.timezone.utc)
+
+
+def is_stale_fed_build(fed_build, merged_at) -> bool | None:
+    """True when the federation build predates the repo merge (instants).
+
+    None when either side is missing/unparseable — the caller renders
+    freshness unavailable rather than guessing.
+    """
+    fb = _parse_instant(fed_build)
+    mg = _parse_instant(merged_at)
+    if fb is None or mg is None:
+        return None
+    return fb < mg
+
+
 def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
     """Render the extract text with floor/unavailable wording + size cap."""
     cut_notes: list = []
@@ -447,7 +580,8 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
     if ex.get("card"):
         lines.append(f"subject: card #{ex['card'].get('id')}: "
                      f"{(ex['card'].get('title') or '')[:100]}")
-    lines.append(f"targets: {', '.join(ex.get('tokens', [])) or '(none resolved)'}")
+    _shown_targets = list(ex.get("tokens", [])) + list(ex.get("paths", []))
+    lines.append(f"targets: {', '.join(_shown_targets) or '(none resolved)'}")
     lines.append("")
     idx = ex.get("index", {})
     if idx.get("status") != "ok":
@@ -467,6 +601,10 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
             lines.append("- 0 symbols (floor: exact-name match only, FTS broader search not run)")
         if len(ex.get("symbols", [])) > ROW_LIMIT:
             cut_notes.append(f"symbols cut after {ROW_LIMIT}")
+        for tok in ex.get("tokens", []):
+            for repo in (ex.get("withheld_hits") or {}).get(tok, []):
+                lines.append(f"- {tok}: also defined in withheld {repo}; "
+                             "the deployed copy may differ")
         lines.append("")
         routes = ex.get("routes", [])
         if routes:
@@ -505,31 +643,34 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
     lines.append("")
     lines.append("## federation half (READ-ONLY)")
     fed = ex.get("federation_report", {})
-    if fed.get("status") != "ok":
-        lines.append(f"federation-report: {fed.get('status', 'unavailable')}")
-    else:
-        lines.append(f"build: {ex.get('fed_build') or 'unavailable: report mtime unreadable'} "
-                     "(federation-report.txt mtime = nightly 04:45 build)")
-        for h in fed.get("hits", []):
-            lines.append(f"- {h[:140]}")
-        if not fed.get("hits"):
-            lines.append(f"- {FLOOR_DOWNSTREAM}")
-        if fed.get("cut"):
-            cut_notes.append(f"fed-report scanned first {FED_REPORT_LINE_CAP} lines")
     st = ex.get("structurizr", {})
-    if st.get("status") != "ok":
-        lines.append(f"structurizr: {st.get('status', 'unavailable')}")
+    if not ex.get("repos_hit"):
+        lines.append("federation: no visible target repo")
     else:
-        if st.get("deploy_units"):
-            lines.append(f"deploy units: {', '.join(st['deploy_units'])}")
+        if fed.get("status") != "ok":
+            lines.append(f"federation-report: {fed.get('status', 'unavailable')}")
         else:
-            lines.append("deploy units: unavailable (floor: no group-tagged container matched)")
-        if st.get("downstream"):
-            lines.append(f"downstream rels: {', '.join(st['downstream'])}")
+            lines.append(f"build: {ex.get('fed_build') or 'unavailable: report mtime unreadable'} "
+                         "(federation-report.txt mtime = nightly 04:45 build)")
+            for h in fed.get("hits", []):
+                lines.append(f"- {h[:140]}")
+            if not fed.get("hits"):
+                lines.append(f"- {FLOOR_DOWNSTREAM}")
+            if fed.get("cut"):
+                cut_notes.append(f"fed-report scanned first {FED_REPORT_LINE_CAP} lines")
+        if st.get("status") != "ok":
+            lines.append(f"structurizr: {st.get('status', 'unavailable')}")
         else:
-            lines.append(f"downstream: {FLOOR_DOWNSTREAM}")
-        if st.get("cut"):
-            cut_notes.append(f"structurizr rels cut after {STRUCTURIZR_REL_CAP}")
+            if st.get("deploy_units"):
+                lines.append(f"deploy units: {', '.join(st['deploy_units'])}")
+            else:
+                lines.append("deploy units: unavailable (floor: no group-tagged container matched)")
+            if st.get("downstream"):
+                lines.append(f"downstream rels: {', '.join(st['downstream'])}")
+            else:
+                lines.append(f"downstream: {FLOOR_DOWNSTREAM}")
+            if st.get("cut"):
+                cut_notes.append(f"structurizr rels cut after {STRUCTURIZR_REL_CAP}")
     lines.append(f"fed-docs.db: {ex.get('fed_docs')} "
                 "(cards/docs/memories citation index — absent on this box, "
                 "so citations beyond the subject card are not linked yet)")
@@ -543,13 +684,18 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
         elif not merged:
             lines.append(f"- {repo}: freshness unavailable "
                          "(last repo.merged unknown for this repo)")
-        elif fb < merged:
-            lines.append(f"- {repo}: STALE (federation build {fb} older than "
-                         f"last repo.merged {merged}; merge-time is an "
-                         "origin/main-HEAD proxy, see module docstring)")
         else:
-            lines.append(f"- {repo}: fresh (federation build {fb} >= "
-                         f"last repo.merged {merged})")
+            stale = is_stale_fed_build(fb, merged)
+            if stale is None:
+                lines.append(f"- {repo}: freshness unavailable "
+                             "(unparseable federation-build or repo.merged time)")
+            elif stale:
+                lines.append(f"- {repo}: STALE (federation build {fb} older than "
+                             f"last repo.merged {merged}; merge-time is an "
+                             "origin/main-HEAD proxy, see module docstring)")
+            else:
+                lines.append(f"- {repo}: fresh (federation build {fb} >= "
+                             f"last repo.merged {merged})")
     if cut_notes:
         lines.append("")
         lines.append(f"cut: {'; '.join(cut_notes)}")
@@ -562,19 +708,22 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="swarph board cards dev-extract",
-        description="Build (+ optionally post) a pinned dev extract joining the "
-                    "codegraph and federation halves for a card. Dry-run by default "
-                    "with --print-only; otherwise posts via `cards say`.")
+        description="Build a pinned dev extract joining the codegraph and "
+                    "federation halves for a card. Prints only with "
+                    "--print-only (or when no --card is given); with --card "
+                    "and without --print-only it posts the extract onto the "
+                    "card via `cards say`. Nothing is ever deployed.")
     ap.add_argument("--card", type=int, default=None,
-                    help="card id: token source + post target")
+                    help="card id: token source + post target (without "
+                         "--print-only the extract is POSTED to this card)")
     ap.add_argument("--symbol", action="append", default=[],
-                    help="explicit target symbol (repeatable)")
+                    help="explicit target symbol name (repeatable)")
     ap.add_argument("--path", action="append", default=[],
-                    help="explicit target path[:line] (repeatable)")
+                    help="explicit target file path, optionally with :line "
+                         "(repeatable; matches symbol file_path, not names)")
     ap.add_argument("--index", default=DEFAULT_INDEX)
     ap.add_argument("--fed-report", default=DEFAULT_FED_REPORT)
     ap.add_argument("--structurizr-ws", default=DEFAULT_STRUCTURIZR_WS)
-    ap.add_argument("--caller-cell", default=None)
     ap.add_argument("--max-lines", type=int, default=DEFAULT_MAX_LINES)
     ap.add_argument("--print-only", action="store_true",
                     help="dry-run: print the extract, post nothing")

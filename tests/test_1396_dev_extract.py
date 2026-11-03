@@ -279,3 +279,176 @@ def test_extract_card_tokens_capped_and_ordered():
     assert len(toks) <= de.MAX_AUTO_TOKENS
     assert de.extract_card_tokens({"title": "t " + "x_y " * 50, "body": ""}) \
         == ["x_y"]
+
+
+# ── rework r1: same-named symbol in a WITHHELD repo is named, never detailed ──
+
+def test_withheld_same_name_named_without_detail(idx, fed):
+    # Fixture: `chat_sync` lives in public swarph-cli AND private
+    # mesh-gateway (SECRET-SIG) AND unknown-visibility mystery — the exact
+    # shape of the reviewer's drop-on-meta-edge complaint.
+    ex = _build(idx, fed, ["chat_sync"])
+    assert ex["withheld_hits"].get("chat_sync") == ["mesh-gateway", "mystery"]
+    text = de.render(ex)
+    # Visible copy printed in full ...
+    assert "src/swarph_cli/gateway/server.py:3950" in text
+    # ... withheld twin NAMED with the honest line ...
+    assert ("- chat_sync: also defined in withheld mesh-gateway; "
+            "the deployed copy may differ") in text
+    assert ("- chat_sync: also defined in withheld mystery; "
+            "the deployed copy may differ") in text
+    # ... and no private detail anywhere: every mesh-gateway/mystery line is
+    # either the WITHHELD notice or the also-defined line.
+    for line in text.splitlines():
+        if "mesh-gateway" in line or "mystery" in line:
+            assert ("WITHHELD" in line or "also defined in withheld" in line), line
+    assert "SECRET-SIG" not in text
+    assert "server.py:12" not in text  # the withheld file:line
+    assert "m.py:1" not in text  # the unknown-visibility file:line
+
+
+# ── rework r2: no resolvable repo → honest federation line, no default repo ──
+
+def test_no_visible_target_repo_prints_honest_line(idx, fed):
+    ex = _build(idx, fed, ["zz_no_such_symbol_anywhere"])
+    assert ex["repos_hit"] == []
+    text = de.render(ex)
+    assert "federation: no visible target repo" in text
+    assert "deploy units:" not in text
+    assert "lab-ovh" not in text
+    assert "downstream" not in text
+    assert "──depends on──▶" not in text
+
+
+# ── rework r3: mined card text ending in '/' must never traceback ──
+
+def test_trailing_slash_token_never_tracebacks(idx, fed):
+    for tok in ("POST /api/chat-sync/", "/api/chat-sync/", "/", ""):
+        ex = _build(idx, fed, [tok])  # raised IndexError before the fix
+        assert isinstance(ex, dict)
+        assert isinstance(de.render(ex), str)
+
+
+def test_card_body_trailing_slash_print_only_exits_zero(idx, fed, monkeypatch,
+                                                        capsys):
+    """Through the real board.py branch: mined 'POST /api/chat-sync/' token."""
+    from swarph_cli.commands import board as board_mod
+    rep, wsp = fed
+    card = {"id": 99, "title": "chat route",
+            "body": "fix POST /api/chat-sync/ before release"}
+    monkeypatch.setattr(board_mod, "_resolve_self_name", lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_token", lambda *_a, **_k: "tok")
+    monkeypatch.setattr(board_mod, "_http_get_json",
+                        lambda url, tok, **k: (200, card))
+    rc = board_mod.run_board(
+        ["cards", "dev-extract", "--card", "99", "--print-only",
+         "--index", str(idx), "--fed-report", str(rep),
+         "--structurizr-ws", str(wsp)])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "Traceback" not in out.out and "Traceback" not in out.err
+    assert ("routes + params:" in out.out
+            or "no visible target repo" in out.out
+            or "0 symbols" in out.out)
+
+
+# ── rework r4: STALE compares instants, not strings, across offsets ──
+
+def _build_at_fed_mtime(idx, fed, tokens, mtime, merged):
+    rep, wsp = fed
+    os.utime(str(rep), (mtime, mtime))
+    return de.build_extract(tokens=tokens, index_path=str(idx),
+                            fed_report=str(rep), structurizr_ws=str(wsp),
+                            fed_docs_db="x", merged_lookup=lambda p: merged)
+
+
+def test_stale_plus0200_merged_before_build_is_fresh(idx, fed):
+    # 05:30+02:00 == 03:30Z < 04:45Z build → fresh. String compare reads
+    # "04:45..." < "05:30..." and wrongly reports STALE.
+    ex = _build_at_fed_mtime(idx, fed, ["chat_sync"], 1793594701,
+                             "2026-11-02T05:30:00+02:00")
+    assert "fresh (federation build" in de.render(ex)
+    assert "STALE (federation build" not in de.render(ex)
+
+
+def test_stale_minus0500_merged_after_build_is_stale(idx, fed):
+    # 04:00-05:00 == 09:00Z > 04:45Z build → STALE. String compare reads
+    # "04:45..." > "04:00..." and wrongly reports fresh.
+    ex = _build_at_fed_mtime(idx, fed, ["chat_sync"], 1793594701,
+                             "2026-11-02T04:00:00-05:00")
+    text = de.render(ex)
+    assert "STALE (federation build" in text
+    assert "last repo.merged" in text
+
+
+def test_stale_unparseable_time_is_unavailable_not_stale(idx, fed):
+    ex = _build(idx, fed, ["chat_sync"], merged_lookup=lambda p: "not-a-time")
+    text = de.render(ex)
+    assert "freshness unavailable (unparseable" in text
+    assert "STALE (federation build" not in text
+
+
+# ── rework r5: --path matches file_path; --caller-cell gone; help is honest ──
+
+def test_path_matches_file_path_and_line(idx, fed):
+    ex = de.build_extract(tokens=[], paths=["src/swarph_cli/gateway/server.py"],
+                          index_path=str(idx),
+                          fed_report=str(fed[0]), structurizr_ws=str(fed[1]),
+                          fed_docs_db="x", merged_lookup=lambda p: None)
+    hit = [s for s in ex["symbols"] if s["name"] == "chat_sync"]
+    assert hit and hit[0]["file_path"] == "src/swarph_cli/gateway/server.py"
+    assert hit[0]["start_line"] == 3950
+    assert ex["repos_hit"] == ["swarph-cli"]
+    # path:line narrows; a wrong line resolves nothing from that file.
+    ex2 = de.build_extract(
+        tokens=[], paths=["src/swarph_cli/gateway/server.py:3950"],
+        index_path=str(idx), fed_report=str(fed[0]),
+        structurizr_ws=str(fed[1]), fed_docs_db="x",
+        merged_lookup=lambda p: None)
+    assert any(s["name"] == "chat_sync" for s in ex2["symbols"])
+    ex3 = de.build_extract(
+        tokens=[], paths=["src/swarph_cli/gateway/server.py:1"],
+        index_path=str(idx), fed_report=str(fed[0]),
+        structurizr_ws=str(fed[1]), fed_docs_db="x",
+        merged_lookup=lambda p: None)
+    assert not [s for s in ex3["symbols"]
+                if s["file_path"] == "src/swarph_cli/gateway/server.py"]
+
+
+def test_path_never_matches_symbol_names_and_withholds_private(idx, fed,
+                                                               tmp_path):
+    # "server.py" as a NAME matches nothing (lookup is file_path only), while
+    # as a path it resolves the visible copy and still withholds mesh-gateway.
+    con_idx = tmp_path / "names.db"
+    con = sqlite3.connect(str(con_idx))
+    con.execute(REPOS_DDL)
+    con.execute(SYMBOLS_DDL)
+    con.execute(EDGES_DDL)
+    con.execute("INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                ("swarph-cli", "s", str(tmp_path), "public", "t", "full"))
+    con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (1, "swarph-cli", "server.py", "file", "x.py", 1, "", "", "", ""))
+    con.commit()
+    con.close()
+    rep, wsp = fed
+    ex = de.build_extract(tokens=["x.py"], paths=[], index_path=str(con_idx),
+                          fed_report=str(rep), structurizr_ws=str(wsp),
+                          fed_docs_db="x", merged_lookup=lambda p: None)
+    assert ex["symbols"] == []  # name lookup is exact-name, not file stem
+    # ... while as a PATH it resolves the visible copy and still withholds
+    # the private repo's same-named file.
+    ex2 = de.build_extract(tokens=[], paths=["server.py"], index_path=str(idx),
+                           fed_report=str(rep), structurizr_ws=str(wsp),
+                           fed_docs_db="x", merged_lookup=lambda p: None)
+    assert any(s["repo"] == "swarph-cli"
+               and s["file_path"].endswith("gateway/server.py")
+               for s in ex2["symbols"])
+    assert [s for s in ex2["symbols"] if s["repo"] == "mesh-gateway"] == []
+
+
+def test_caller_cell_removed_and_help_states_posting():
+    args = de.build_parser().parse_args(["--print-only"])
+    assert not hasattr(args, "caller_cell")
+    desc = de.build_parser().description
+    assert "with --card and without --print-only it posts the extract" in desc
+    assert "Dry-run by default" not in desc
