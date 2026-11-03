@@ -3,75 +3,32 @@ cards (card #1410, #559 phase 2; re-spec of #1396).
 
 The extract JOINS two halves, each with its own as-of pin:
 
-* Codegraph half (READ-ONLY ``~/.swarph/codegraph/index.db``): target symbols
-  with file:line, caller counts, matching routes + params. Per repo: commit
-  sha from that repo's ``.codegraph/indexed_origin_main``
-  file (card #1393) plus the index time from ``repos.indexed_at``. No
-  covering-tests section (name-match is not coverage — removed #1410).
-* Federation half (READ-ONLY ``~/.swarph/codegraph/federation-report.txt`` +
-  ``structurizr/workspace.json``): the report's header stamp (build time)
-  and its ``Layer N:`` header lines only, plus the deploy units running the
-  visible target repos. NO rels, depends-on, blast-radius, arrow, or
-  import-site lines of any kind are printed (kept by LINE SHAPE, not words).
-  Pinned with the federation build time from the stamp (never the file
-  mtime); labelled STALE when older than the last repo.merged for a repo.
+* Codegraph half (READ-ONLY index.db): symbols with file:line, caller
+  counts, routes + params; per repo the ``indexed_origin_main`` sha
+  (#1393) plus ``repos.indexed_at``. No covering-tests section.
+* Federation half (READ-ONLY federation-report.txt + structurizr workspace):
+  the report header stamp plus ``Layer N:`` lines only, and deploy units
+  for visible repos — no rels/depends-on/blast-radius/arrow/import lines.
+  STALE when older than the last repo.merged for a repo.
 
-Posting is via the existing board path: the built body is posted with the
-same ``/messages`` + ``_card_say_payload`` machinery as
-``swarph board cards say`` (see ``board._run_cards_say``) whenever ``--card``
-is given WITHOUT ``--print-only``. ``--print-only`` (or no ``--card``)
-prints the extract and posts nothing; nothing is ever deployed.
+Posting uses the board path when ``--card`` is given WITHOUT
+``--print-only``; otherwise prints and posts nothing. Nothing is deployed.
 
-Honesty rules (graded r4): every zero is printed as a FLOOR
-(``0 callers (floor: HTTP callers not linked yet)``), never as a fact; a
-missing or unreadable source prints ``unavailable: <reason>``, never a zero.
+Zeros print as FLOORs, unreadable sources as ``unavailable: <reason>``.
 
-Privacy rule (#1410): a card's readers must not receive symbols from a
-repo they cannot read today. The composition mirrors
-``swarph_cli/commands/codegraph.py:145`` (``_visible_repos``: public repos
-are always visible; a private repo is visible when the caller is in
-``allowlist[repo]``) with the caller replaced by the card's board project:
-public repos are always visible, and the repos listed for the card's project
-slug in ``~/.swarph/codegraph/card-allowlist.json`` (commander-approved,
-``{project_slug: [repo, ...]}``) are visible too — BUT only when the
-running cell is itself entitled to them. Commander ruling (card #1410 msg
-87862): private rows print only if BOTH the running cell has its OWN direct
-``execute`` grant on the card's project (``POST /authz/check`` reporting
-``allow`` + ``level == "execute"`` + ``via_group is None`` — group:ALL or
-propose-level grants do NOT count) AND the repo is on that project's
-card-allowlist map. Anything POSTED to a card carries public rows only,
-whoever runs it. In code this is the explicit ``entitled`` flag on
-``split_visible``/``build_extract`` (default False = public only): the
-allowlist contributes private repos only when the caller passes
-``entitled=True``. Anything else — ``entitled=False``, malformed/absent
-file, or a project with no entry — means public only (fail closed).
-The card's project is resolved the way the board resolves it for a card
-artifact — the card row carries ``project_id`` (``GET /board/cards/{id}``
-has no slug field) and the slug comes from the ``GET /board/projects``
-rows matched by id (same int-or-str equality as
-``board._project_owner_orchestrator``). Private (or unknown-visibility)
-repos outside the entitled set are WITHHELD; print mode NAMES the withheld
-repo + why instead of leaking symbol details, while post-safe mode
-(``render(..., post_safe=True)``) prints counts only, never names, so the
-withheld line cannot become an existence oracle in a posted artifact.
-``~/.swarph/codegraph/allowlist.json`` is NEVER read here (different
-meaning: per-cell read authority). Fail closed (#111), never open.
-Withheld-name filtering scans path components too, and no rels of any kind
-are printed.
+Privacy (#1410): public repos are always visible; the card project's
+``card-allowlist.json`` repos join them ONLY when ``entitled`` is True —
+the runner's OWN direct ``execute`` grant (``GET /peers/{peer}/grants``,
+exact-grantee direct row). Default False is public only (fail closed);
+print mode names withheld repos, post-safe mode is count-only — posted
+bodies carry public rows only and name no withheld or missing repo.
 
-Known limit, STATED not solved (cards #20/#1369 own it): cells on one box
-share a uid and can open ``index.db`` directly or claim another name
-(``--as``), so this gate binds the CLI's composed extract view — print vs
-post-safe — not the underlying file. A cell that bypasses the CLI was
-never gated by it.
-
-Bounded queries: EVERY row-returning SQL statement in this module carries an
-explicit ``LIMIT`` (see ``test_1396_dev_extract.py::test_every_row_query_is_bounded``,
-which fails if a new unbounded row query is added). Caller counts are
-``COUNT(*)`` aggregates — no row materialization — over the ~162k-row edge
-table (measured <0.5s on the live index). Federation file reads are capped
-by line/relationship caps; the renderer enforces ``--max-lines`` and states
-what was cut.
+Known limit, STATED not solved (#20/#1369): same-box cells share a uid
+and can open index.db directly, so this gate binds the CLI's composed view
+(print vs post-safe), not the file. Every row-returning SQL statement
+carries an explicit LIMIT (pinned by ``test_every_row_query_is_bounded``);
+caller counts are ``COUNT(*)`` aggregates; the renderer enforces
+``--max-lines`` and states what was cut.
 """
 
 from __future__ import annotations
@@ -105,25 +62,14 @@ _TOKEN_RE = re.compile(r"`([^`]+)`")
 _SNAKE_RE = re.compile(r"(?<![A-Za-z0-9_])_?[a-z][a-z0-9]*(?:_[a-z0-9]+){1,}")
 _ROUTE_RE = re.compile(r"(?:POST|GET|PUT|PATCH|DELETE)\s+/\S+|/\S*chat\S*|/\S*sync\S*")
 
-# Junk-target stoplist (card #788 mines backticked `?` and `none`; neither
-# can ever be a symbol, and `none` even resolves to a same-named `variable`
-# row in a private repo, printing a bogus also-defined line).
+# Junk-target stoplist (#788: `?`/`none` can never be symbols).
 _JUNK_WORDS = frozenset({"none", "null", "nil", "n/a", "na", "undefined"})
 _ROUTE_TOKEN_RE = re.compile(r"(?:POST|GET|PUT|PATCH|DELETE)\s+/\S+")
 _SHELL_META_RE = re.compile(r"[=|><;$&*`(){}\[\]\"']")
 
 
 def is_lookup_token(tok: str) -> bool:
-    """True when `tok` is worth an index lookup (card #792/#788 junk filter).
-
-    Drops, before any lookup: single-char spans (`?`); bare junk words
-    (`none`, ...); multi-word spans that are NOT a route (`pip install -U`,
-    `swarph version`, `import json, sys`, `cards graph`, backticked shell
-    commands); spans carrying shell/code metacharacters (`delivery =
-    sd.get("delivery`, `json.loads(row["menu_json`). A `METHOD /path` span
-    is a route target and is kept. Anything kept either exact-matches a
-    symbol or resolves to nothing — never to 76 unrelated routes.
-    """
+    """True when `tok` is worth an index lookup; else junk (#792/#788)."""
     t = (tok or "").strip()
     if len(t) < 2:
         return False
@@ -139,14 +85,7 @@ def is_lookup_token(tok: str) -> bool:
 
 
 def _normalize_token(tok: str) -> str:
-    """Call-site / def-site spelling → bare symbol name (pure).
-
-    `_format_graph(rows)` (call with args) and `def _format_graph` (def-site)
-    must both resolve `_format_graph` (#1410). Only a bare identifier with a
-    trailing ``(...)`` arg list is stripped — a dotted or spaced span is never
-    a call, so junk like ``json.loads(row["menu_json`` keeps its brackets and
-    still fails the lookup filter.
-    """
+    """Call-site / def-site spelling → bare symbol name (pure, #1410)."""
     t = (tok or "").strip()
     m = re.match(r"(?i)^\s*def\s+(.+?)\s*$", t)
     if m:
@@ -158,14 +97,7 @@ def _normalize_token(tok: str) -> str:
 
 
 def extract_card_tokens(card: dict, cap: int = MAX_AUTO_TOKENS) -> list:
-    """Candidate symbol tokens from a card's title+body (bounded to `cap`).
-
-    Backtick spans first (explicit author intent), then bare snake_case
-    identifiers (leading underscore allowed: `_format_graph`), then
-    route-like paths. Tokens are normalized (call/def spellings → bare name)
-    before the lookup filter. Pure; the caller still resolves each
-    token against the index (unknown tokens resolve to nothing, not to text).
-    """
+    """Candidate symbol tokens from a card's title+body (bounded, pure)."""
     text = f"{(card or {}).get('title') or ''}\n{(card or {}).get('body') or ''}"
     seen: list = []
 
@@ -194,16 +126,7 @@ REQUIRED_INDEX_TABLES = ("repos", "symbols")
 
 
 def probe_index(con) -> str | None:
-    """One-shot health probe: None when the index is usable, else a reason.
-
-    `open_ro_index` succeeds on garbage (connect itself never reads), and
-    every row query swallows `sqlite3.Error` into `[]` while `repo_registry`
-    swallows it into `{}` — so without this probe a 0-byte file, garbage
-    bytes, or a schema-less db all render as status ok with '0 symbols'.
-    The floor rule forbids that: a zero must never be a fact about a broken
-    source. Callers treat any non-None return as
-    `index.status = 'unavailable: <reason>'`.
-    """
+    """Health probe: None when the index is usable, else a reason."""
     try:
         have = {r[0] for r in con.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' LIMIT 50"
@@ -213,26 +136,16 @@ def probe_index(con) -> str | None:
     missing = [t for t in REQUIRED_INDEX_TABLES if t not in have]
     if missing:
         return f"index missing required tables: {', '.join(missing)}"
-    # Every column the row queries actually use (not only repos(name) /
-    # symbols(name)): a dropped column (e.g. symbols.signature) makes that
-    # query swallow sqlite3.Error into [] and the extract would print an
-    # honest-looking floor for a broken source. edges feeds caller_count the
-    # same way, so its columns are probed too.
+    # Every column the row queries use (a dropped one would swallow into []
+    # and print an honest-looking floor for a broken source).
     try:
-        con.execute(
-            "SELECT name, visibility, indexed_at, path FROM repos LIMIT 1"
-        ).fetchall()
-        con.execute(
-            "SELECT id, repo, name, kind, file_path, start_line,"
-            " qualified_name, signature FROM symbols LIMIT 1"
-        ).fetchall()
-        con.execute(
-            "SELECT src_symbol, dst_symbol, edge_type FROM edges LIMIT 1"
-        ).fetchall()
+        con.execute("SELECT name, visibility, indexed_at, path FROM repos LIMIT 1").fetchall()
+        con.execute("SELECT id, repo, name, kind, file_path, start_line,"
+                    " qualified_name, signature FROM symbols LIMIT 1").fetchall()
+        con.execute("SELECT src_symbol, dst_symbol, edge_type FROM edges LIMIT 1").fetchall()
     except sqlite3.Error as exc:
         return f"unreadable index ({exc})"
-    # Tables present but zero rows is not a pinnable index: without this,
-    # an empty index renders status ok with '0 symbols' as if measured.
+    # Tables present but zero rows is not a pinnable index.
     try:
         n_repos = con.execute("SELECT COUNT(*) FROM repos").fetchone()[0]
         n_syms = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
@@ -256,10 +169,7 @@ def repo_registry(con) -> dict:
     for name, vis, indexed_at in rows:
         out[name] = {"visibility": vis, "indexed_at": indexed_at}
     try:
-        paths = {
-            n: p
-            for n, p in con.execute("SELECT name, path FROM repos LIMIT 100").fetchall()
-        }
+        paths = dict(con.execute("SELECT name, path FROM repos LIMIT 100").fetchall())
     except sqlite3.Error:
         paths = {}
     for name, p in paths.items():
@@ -269,11 +179,7 @@ def repo_registry(con) -> dict:
 
 
 def load_card_allowlist(path: str | None = DEFAULT_CARD_ALLOWLIST) -> dict:
-    """Load the commander-approved card allowlist (`{project_slug: [repo]}`).
-
-    Fail closed: an absent file, unreadable bytes, non-JSON, a non-dict, or
-    non-list values all yield `{}` (public only) — never raise, never open.
-    """
+    """Card allowlist (`{project_slug: [repo]}`); fail closed to `{}`."""
     if not path:
         return {}
     try:
@@ -283,24 +189,15 @@ def load_card_allowlist(path: str | None = DEFAULT_CARD_ALLOWLIST) -> dict:
         return {}
     if not isinstance(data, dict):
         return {}
-    out = {}
-    for key, val in data.items():
-        if isinstance(key, str) and key.strip() and isinstance(val, list):
-            out[key.strip()] = sorted(
-                {str(r).strip() for r in val if isinstance(r, str) and str(r).strip()})
-    return out
+    return {key.strip(): sorted(
+                {str(r).strip() for r in val
+                 if isinstance(r, str) and str(r).strip()})
+            for key, val in data.items()
+            if isinstance(key, str) and key.strip() and isinstance(val, list)}
 
 
 def card_project_slug(card: dict | None, projects: list | None = None) -> str | None:
-    """The card's board project slug (pure; None when unresolvable).
-
-    Mirrors the board's real rule for a card artifact: a card row carries
-    ``project_id`` (``GET /board/cards/{id}`` has no slug field) and the slug
-    is read off the ``GET /board/projects`` rows matched by id — same
-    int-or-str equality as ``board._project_owner_orchestrator``. A card dict
-    that already carries a ``project``/``project_slug`` string (tests, offline
-    use) returns it directly. None means the caller runs public-only.
-    """
+    """The card's board project slug via ``project_id`` → projects rows."""
     if not isinstance(card, dict):
         return None
     for key in ("project", "project_slug", "slug"):
@@ -311,34 +208,23 @@ def card_project_slug(card: dict | None, projects: list | None = None) -> str | 
     if pid is None or not projects:
         return None
     for proj in projects:
-        if not isinstance(proj, dict):
-            continue
-        if proj.get("id") == pid or str(proj.get("id")) == str(pid):
+        if (isinstance(proj, dict)
+                and (proj.get("id") == pid or str(proj.get("id")) == str(pid))):
             slug = proj.get("slug")
             if isinstance(slug, str) and slug.strip():
                 return slug.strip()
     return None
 
 
-# Fleet-shaped repo names in card prose: every `swarph-...` whole token in a
-# card's title/body is a repo reference (the fleet names repos `swarph-*`),
-# never a concept. Non-`swarph-` hyphenated prose (`supply-chain`,
-# `first-time`) and peer names (`lab-ovh`, `gemini-researcher`) are never
-# repo claims and are ignored — only what the card actually names is
-# reported, nothing is invented.
+# Whole `swarph-...` tokens in card prose are repo references; anything
+# else hyphenated (prose, peer names) is never a repo claim.
 _SWARPH_REPO_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])(swarph-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)"
     r"(?![A-Za-z0-9_.-])", re.IGNORECASE)
 
 
 def card_named_missing_repos(card: dict | None, registry: dict) -> list:
-    """Fleet-shaped repo names the card names that the index lacks (pure).
-
-    Scans the card's title+body the way `extract_card_tokens` scans it for
-    targets — a pure function of the card dict — for whole `swarph-...`
-    tokens absent from `registry` (card #1393 names `swarph-codegraph-index`,
-    which has no repos row). Returns the sorted distinct missing names.
-    """
+    """Card-named `swarph-...` repos absent from the registry (pure)."""
     if not isinstance(card, dict) or not registry:
         return []
     text = f"{card.get('title') or ''}\n{card.get('body') or ''}"
@@ -350,23 +236,12 @@ def card_named_missing_repos(card: dict | None, registry: dict) -> list:
 def split_visible(registry: dict, project_slug: str | None = None,
                   card_allowlist: dict | None = None,
                   entitled: bool = False) -> tuple:
-    """Public repos + the card project's allowlisted repos are visible.
-
-    Composition mirrors codegraph._visible_repos (public always; private needs
-    an allowlist entry) with the card's board project slug in the caller's
-    seat: ``card_allowlist[project_slug]`` plays the role of
-    ``allowlist[repo]`` membership — but ONLY when ``entitled`` is True (the
-    runner holds its own direct execute grant on the project; commander
-    ruling card #1410 msg 87862). Default ``entitled=False`` ignores the
-    allowlist entirely (public only). Anything else — including
-    unknown-visibility repos — is WITHHELD (fail closed). Malformed/absent
-    file (``{}``), or a project with no entry, means public only.
-    """
-    allowed = set()
+    """Public repos + the card project's allowlisted repos are visible."""
     if entitled and isinstance(card_allowlist, dict) and project_slug:
-        for repo in card_allowlist.get(project_slug) or []:
-            if isinstance(repo, str) and repo:
-                allowed.add(repo)
+        allowed = {r for r in card_allowlist.get(project_slug) or ()
+                   if isinstance(r, str) and r}
+    else:
+        allowed = set()
     visible = sorted(n for n, m in registry.items()
                      if m.get("visibility") == "public" or n in allowed)
     withheld = sorted(n for n in registry if n not in visible)
@@ -374,12 +249,7 @@ def split_visible(registry: dict, project_slug: str | None = None,
 
 
 def find_symbols(con, token: str, visible: list, limit: int = ROW_LIMIT) -> list:
-    """Exact-name symbol rows in visible repos (bounded LIMIT).
-
-    `kind = 'import'` rows are never definitions: a token like `swarph_cli`
-    otherwise resolves to dozens of `from swarph_cli import ...` sites
-    instead of the symbol itself.
-    """
+    """Exact-name symbol rows in visible repos (`import` rows excluded)."""
     if not visible:
         return []
     qmarks = ",".join("?" * len(visible))
@@ -392,40 +262,20 @@ def find_symbols(con, token: str, visible: list, limit: int = ROW_LIMIT) -> list
         ).fetchall()
     except sqlite3.Error:
         return []
-    return [
-        {
-            "id": sid, "repo": repo, "name": name, "kind": kind,
-            "file_path": fp, "start_line": line,
-            "qualified_name": qual or "", "signature": sig or "",
-        }
-        for sid, repo, name, kind, fp, line, qual, sig in rows
-    ]
+    return [{"id": sid, "repo": repo, "name": name, "kind": kind, "file_path": fp,
+             "start_line": ln, "qualified_name": qual or "", "signature": sig or ""}
+            for sid, repo, name, kind, fp, ln, qual, sig in rows]
 
 
 def _is_test_path(file_path: str) -> bool:
-    """True when `file_path` lives under a tests/ dir (test code, not deployed).
-
-    A same-named row under tests/ is a test helper: the renderer must word
-    that line as test code instead of implying a deployed copy that differs.
-    """
+    """True when `file_path` lives under a tests/ dir."""
     fp = (file_path or "").replace("\\", "/")
     return fp == "tests" or fp.startswith("tests/") or "/tests/" in fp
 
 
 def withheld_symbol_repos(con, token: str, withheld: list,
                           limit: int = ROW_LIMIT) -> dict:
-    """Exact-name symbol match in WITHHELD repos — repo names only, no detail.
-
-    Fail-closed companion to `find_symbols`: when a target token matches a
-    symbol in a withheld (private/unknown-visibility) repo, the extract names
-    ONLY the repo (never file, line, signature, or count). Repo names are not
-    a new leak — the WITHHELD list already prints them with the reason.
-
-    Returns {repo: test_only}: `test_only` is True when EVERY matched row
-    for that repo lives under tests/ (a test helper, not deployed code), so
-    the renderer words the line as test code. The query reads file_path only
-    to make that distinction — it is never printed.
-    """
+    """Exact-name symbol match in WITHHELD repos — repo names only."""
     if not withheld or not token:
         return {}
     qmarks = ",".join("?" * len(withheld))
@@ -446,27 +296,13 @@ def withheld_symbol_repos(con, token: str, withheld: list,
 
 
 def _escape_like(s: str) -> str:
-    """Escape LIKE metacharacters (`%`, `_`, the escape char) in a literal.
-
-    `--path "%"` must match a literal `%`, not every row: the LIKE pattern
-    below would otherwise read a caller-supplied `%`/`_` as a wildcard (and
-    a trailing backslash would eat the closing escape). Both queries declare
-    an ESCAPE clause, so prefixing those three characters keeps the lookup
-    literal.
-    """
+    """Escape LIKE metacharacters so `--path %` matches a literal `%`."""
     return (s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_"))
 
 
 def find_symbols_by_path(con, path_arg: str, visible: list,
                          limit: int = ROW_LIMIT) -> list:
-    """Symbols whose file_path matches `path` or `path:line` (bounded LIMIT).
-
-    `--path` is a file selector, not a second spelling of `--symbol`: the
-    lookup is against `file_path` (exact or `/`-suffixed), never the symbol
-    name. A trailing `:line` (digits) narrows to that start line. LIKE
-    metacharacters in the argument are escaped, so `--path %` matches a
-    literal `%` (no arbitrary rows) while a real path still resolves.
-    """
+    """Symbols whose file_path matches `path` or `path:line`."""
     if not visible or not path_arg:
         return []
     path, _, line = (path_arg or "").rpartition(":")
@@ -474,42 +310,26 @@ def find_symbols_by_path(con, path_arg: str, visible: list,
         path, line = path_arg, None
     qmarks = ",".join("?" * len(visible))
     like = "%/" + _escape_like(path.lstrip("/"))
+    extra = " AND start_line = ?" if line is not None else ""
+    args = ([path, like, *visible]
+            + ([int(line)] if line is not None else []) + [limit])
     try:
-        if line is not None:
-            rows = con.execute(
-                "SELECT id, repo, name, kind, file_path, start_line, qualified_name,"
-                " signature FROM symbols WHERE (file_path = ? OR file_path LIKE ? ESCAPE '\\')"
-                " AND kind != 'import'"
-                f" AND repo IN ({qmarks}) AND start_line = ? LIMIT ?",
-                [path, like, *visible, int(line), limit],
-            ).fetchall()
-        else:
-            rows = con.execute(
-                "SELECT id, repo, name, kind, file_path, start_line, qualified_name,"
-                " signature FROM symbols WHERE (file_path = ? OR file_path LIKE ? ESCAPE '\\')"
-                " AND kind != 'import'"
-                f" AND repo IN ({qmarks}) LIMIT ?",
-                [path, like, *visible, limit],
-            ).fetchall()
+        rows = con.execute(
+            "SELECT id, repo, name, kind, file_path, start_line, qualified_name,"
+            " signature FROM symbols WHERE (file_path = ? OR file_path LIKE ? ESCAPE '\\')"
+            " AND kind != 'import'"
+            f" AND repo IN ({qmarks}){extra} LIMIT ?",
+            args,
+        ).fetchall()
     except sqlite3.Error:
         return []
-    return [
-        {
-            "id": sid, "repo": repo, "name": name, "kind": kind,
-            "file_path": fp, "start_line": ln,
-            "qualified_name": qual or "", "signature": sig or "",
-        }
-        for sid, repo, name, kind, fp, ln, qual, sig in rows
-    ]
+    return [{"id": sid, "repo": repo, "name": name, "kind": kind, "file_path": fp,
+             "start_line": ln, "qualified_name": qual or "", "signature": sig or ""}
+            for sid, repo, name, kind, fp, ln, qual, sig in rows]
 
 
 def _path_withholds(file_path: str | None, withheld) -> bool:
-    """True when a WITHHELD repo name appears as a PATH COMPONENT (#1410).
-
-    Separator-insensitive equality: `mesh-gateway`, `mesh_gateway`, and
-    `mesh.gateway` are the same component. Prefixes do not count — a
-    component `gateway` is not `mesh-gateway`.
-    """
+    """True when a WITHHELD repo name appears as a path component."""
     if not file_path or not withheld:
         return False
     comps = [p for p in re.split(r"[\\/]+", file_path) if p]
@@ -524,15 +344,7 @@ def _path_withholds(file_path: str | None, withheld) -> bool:
 
 
 def find_routes(con, token: str, visible: list, limit: int = ROW_LIMIT) -> list:
-    """Route-kind rows matching the ROUTE itself (bounded LIMIT).
-
-    Matches `token` against the route's own `name` (e.g. `POST
-    /api/chat-sync`) — never `qualified_name`, which embeds the file path
-    (`src/swarph_cli/gateway/server.py::POST:...`), so a token like
-    `swarph_cli` matched all 76 route rows on card #792. A trailing `/`
-    from mined card text (`POST /api/chat-sync/`) is stripped; a token
-    that is then too short to be a route (`/`) matches nothing.
-    """
+    """Route-kind rows matching the route's own `name` (never qualified)."""
     if not visible:
         return []
     tok = (token or "").rstrip("/")
@@ -572,42 +384,20 @@ def caller_count(con, symbol_id: int, visible: list) -> int | None:
 
 
 def _name_parts(s: str) -> list:
-    """A repo/module/path name split on every separator layer.
-
-    Repo, module, and dotted-path spellings of one name share parts:
-    `mesh-gateway`, `mesh_gateway`, and the head of
-    `mesh_gateway.private_helper` are all `[mesh, gateway]`.
-
-    Still feeds `_path_withholds` (the symbol path-component guard). The
-    fed-report word machinery that also used it (`_names_whole_token`,
-    `_line_withholds`, `_drop_withheld_lines`) is gone: the federation
-    half keeps lines by SHAPE now, so there is nothing left to filter.
-    """
+    """A name split on every separator layer (feeds `_path_withholds`)."""
     return [p for p in re.split(r"[-_./]+", (s or "").lower()) if p]
 
 
-# Federation report lines are kept by LINE SHAPE, not by words (card #1410):
-# a line is kept iff it is a Layer header (`Layer N:`). Dependency arrows
-# (`──depends on──▶`), blast-radius lines, import-site lines (`↳ imports
-# ... e.g. ...`), and every other report line never reach any output — the
-# old word grep passed those through whenever they named a hit repo.
+# Federation report lines are kept by LINE SHAPE: only `Layer N:` headers.
 _LAYER_RE = re.compile(r"^\s*Layer \d+:\s*$")
 
 
 def read_fed_report(path: str,
                     line_cap: int = FED_REPORT_LINE_CAP) -> dict:
-    """Shape-only read of the nightly federation report (capped).
-
-    Returns the header stamp (`# generated ...`, the build time freshness
-    compares — never the file mtime) plus the `Layer N:` header lines. A
-    missing/unreadable file, or a file with no header stamp (0-byte,
-    garbage), reads `unavailable`. No repo names are matched and none are
-    printed, so there is nothing to filter here.
-    """
+    """Header stamp + `Layer N:` lines of the federation report (capped)."""
     lines: list = []
     try:
-        # encoding pinned: the report carries box-drawing/arrow glyphs and the
-        # Windows runner's locale codec (cp1252) cannot round-trip them.
+        # encoding pinned: the report carries glyphs cp1252 cannot round-trip.
         with open(path, encoding="utf-8", errors="replace") as fh:
             for _ in range(line_cap + 1):
                 try:
@@ -631,14 +421,7 @@ def read_fed_report(path: str,
 
 
 def _stamp_time(generated: str) -> str | None:
-    """The build instant: first timestamp token of the header stamp.
-
-    `read_fed_report` strips `# ` off `# generated 2026-11-03T04:45:01Z by
-    ...`, so the stored stamp starts with the word `generated`; skip it and
-    take the first timestamp token. Unparseable stamps yield None
-    (freshness renders unavailable, never STALE-by-default). The file mtime
-    is never used (card #1410).
-    """
+    """First timestamp token of the header stamp (None when unparseable)."""
     text = (generated or "").strip()
     if text[:9].lower() == "generated":
         text = text[9:].strip()
@@ -647,34 +430,18 @@ def _stamp_time(generated: str) -> str | None:
 
 
 def read_structurizr(path: str, repos: list) -> dict:
-    """Deploy units for `repos` (minimal bounded JSON scan).
-
-    #1410: relationships ("rels") are never read and never printed — no rels
-    of any kind appear in the output — so there is nothing to filter here.
-    What remains is the smallest part that still prints deploy units: the
-    one-system/many-containers scan matching `repos` by container name and
-    reading each match's `group` (the deploy host). The full-container-name
-    list is gone — it only fed the removed fed-report unknown-name rule.
-    `matched`/`deploy_units` name only visible repos / host groups, so they
-    need no filtering.
-    """
+    """Deploy units for `repos` (container `group` per matched repo)."""
     try:
         with open(path, encoding="utf-8") as fh:
             ws = json.load(fh)
     except (OSError, ValueError) as exc:
         return {"status": f"unavailable: {exc}"}
     model = ws.get("model", {}) if isinstance(ws, dict) else {}
-    systems = model.get("softwareSystems", []) or []
-    # Repos live at CONTAINER level (one system, e.g. "Swarph Federation",
-    # holding a container per repo with `group` = deploy host).
     by_name = {}
-    for s in systems:
-        if not isinstance(s, dict):
-            continue
-        for c in s.get("containers", []) or []:
-            if not isinstance(c, dict):
-                continue
-            by_name[str(c.get("name", "")).lower()] = c
+    for s in model.get("softwareSystems", []) or []:
+        for c in (s.get("containers", []) or []) if isinstance(s, dict) else []:
+            if isinstance(c, dict):
+                by_name[str(c.get("name", "")).lower()] = c
     matched, deploy = [], []
     for repo in repos:
         c = by_name.get(repo.lower())
@@ -692,28 +459,21 @@ def read_structurizr(path: str, repos: list) -> dict:
 
 
 def last_merged_at(repo_path: str | None) -> str | None:
-    """Last repo.merged proxy: origin/main HEAD commit time (bounded git call).
-
-    The true repo.merged event log is not readable from here, so the merge
-    time is proxied by the merge commit itself and LABELLED as a proxy in the
-    rendered extract. Any git failure -> None (rendered as unavailable).
-    """
+    """origin/main HEAD commit time as the repo.merged proxy (None on failure)."""
     if not repo_path:
         return None
     try:
         out = subprocess.run(
             ["git", "log", "-1", "--format=%cI", "origin/main"],
             cwd=repo_path, capture_output=True, text=True, timeout=5,
-            encoding="utf-8", errors="replace",
-        )
-        ts = (out.stdout or "").strip()
-        return ts or None
+            encoding="utf-8", errors="replace")
+        return (out.stdout or "").strip() or None
     except Exception:
         return None
 
 
 def indexed_sha(repo_path: str | None) -> str | None:
-    """Pinned sha from the repo's .codegraph/indexed_origin_main (card #1393)."""
+    """Pinned sha from the repo's .codegraph/indexed_origin_main (#1393)."""
     if not repo_path:
         return None
     try:
@@ -725,59 +485,37 @@ def indexed_sha(repo_path: str | None) -> str | None:
         return None
 
 
-WITHHOLD_REASON = ("not public and not listed for this card's project in "
-                   "card-allowlist.json; card artifacts show public repos "
-                   "plus the card project allowlist only")
+WITHHOLD_REASON = ("not public and not listed for this card's project in card-allowlist.json; "
+                   "card artifacts show public repos plus the card project allowlist only")
 
 
 POST_SAFE_WITHHOLD_TAIL = "names not shown in posted extracts"
 
 
 def redact_for_json(ex: dict, post_safe: bool = False) -> dict:
-    """A `--json`-safe copy of the extract: WITHHELD registry entries keep
-    only `{name, visibility, reason}` — `path` and `indexed_at` are dropped.
-
-    The withholding rule exists to keep private-repo facts off card
-    artifacts; dumping the raw registry (absolute paths + index times) into
-    machine-readable `--json` re-opens exactly that leak on the local box.
-    Visible repos keep everything. The input dict is never mutated, so the
-    text renderer keeps using the full extract.
-
-    Post-safe mode (commander ruling card #1410 msg 87862: posts carry
-    public rows only, and the withheld set must not become an existence
-    oracle in a posted artifact): withheld repo NAMES are stripped
-    everywhere — ``withheld`` becomes ``[]`` with the size kept in
-    ``withheld_count``, ``withheld_hits`` becomes ``{}``, and withheld
-    repos are dropped from ``registry`` (visible entries keep everything).
-    """
+    """A `--json`-safe copy of the extract (never mutates the input)."""
     out = dict(ex)
     withheld = set(ex.get("withheld") or [])
     if post_safe:
-        out["registry"] = {
-            name: meta for name, meta in (ex.get("registry") or {}).items()
-            if name not in withheld
-        }
+        # Post-safe strips every withheld/missing name; missing cannot even
+        # keep a count (card-text dependent), unlike the withheld set.
+        out["registry"] = {n: m for n, m in (ex.get("registry") or {}).items()
+                           if n not in withheld}
         out["withheld"] = []
         out["withheld_count"] = len(withheld)
         out["withheld_hits"] = {}
+        out["missing_repos"] = []
         return out
     out["registry"] = {
-        name: ({"name": name,
-                "visibility": (meta or {}).get("visibility"),
-                "reason": WITHHOLD_REASON}
-               if name in withheld else meta)
-        for name, meta in (ex.get("registry") or {}).items()
+        n: ({"name": n, "visibility": (m or {}).get("visibility"),
+             "reason": WITHHOLD_REASON} if n in withheld else m)
+        for n, m in (ex.get("registry") or {}).items()
     }
     return out
 
 
 def fed_docs_state(fed_docs_db: str) -> str:
-    """The TRUE fed-docs.db state, independent of every other source.
-
-    The text renderer prints this verbatim, so an unavailable index must
-    still carry it: the old early returns dropped the key and the renderer
-    printed an empty value with the 'present on this box' wording.
-    """
+    """fed-docs.db presence wording, independent of every other source."""
     if not os.path.exists(fed_docs_db or ""):
         return "unavailable: fed-docs.db not present on this box"
     return (f"present ({fed_docs_db}) — citation lookup not linked yet")
@@ -794,16 +532,7 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
                   card_allowlist: dict | None = None,
                   card_allowlist_path: str | None = DEFAULT_CARD_ALLOWLIST,
                   entitled: bool = False) -> dict:
-    """Assemble the extract dict. Never raises on bad sources (unavailable).
-
-    Visibility: the card's board project slug (explicit `project_slug`, else
-    derived from `card` via `card_project_slug`) is looked up in the card
-    allowlist (explicit `card_allowlist`, else loaded from
-    `card_allowlist_path`, fail closed); those repos join the public set —
-    but ONLY when `entitled` is True (the runner's own direct execute grant
-    on the project; commander ruling card #1410 msg 87862). Default
-    `entitled=False` is public only even when an allowlist is passed in.
-    """
+    """Assemble the extract dict. Never raises on bad sources (unavailable)."""
     merged_lookup = merged_lookup or last_merged_at
     tokens = [_normalize_token(t) for t in (tokens or [])]
     tokens = [t for t in tokens if t and is_lookup_token(t)]
@@ -825,12 +554,8 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
         registry = repo_registry(con)
         visible, withheld = split_visible(
             registry, project_slug, card_allowlist, entitled=entitled)
-        # Allowlist-driven (a card-project repo with no indexed copy) PLUS
-        # card-named (a fleet-shaped `swarph-...` name the card's own text
-        # names that the registry lacks — card #1393's swarph-codegraph-index
-        # has no repos row). Only names the card actually contains. The
-        # allowlist half is entitlement-gated like visibility: an unentitled
-        # run must not even name allowlisted repos (no existence oracle).
+        # Allowlist entries (entitlement-gated: no oracle) plus card-named
+        # `swarph-...` names the registry lacks.
         _allow_entries = (((card_allowlist or {}).get(project_slug) or [])
                           if entitled else [])
         missing_repos = sorted(
@@ -865,19 +590,13 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
             con.close()
         except Exception:
             pass
-    # Shape-only federation half: the report contributes its header stamp
-    # (the build time) plus the `Layer N:` lines — never per-repo hit lines,
-    # so neither the hit repos nor the withheld set are inputs anymore.
+    # Shape-only federation half: header stamp + `Layer N:` lines only.
     struct = read_structurizr(structurizr_ws, repos_hit)
     fed = read_fed_report(fed_report)
-    pins = {}
-    for repo in repos_hit:
-        meta = registry.get(repo, {})
-        pins[repo] = {
-            "sha": indexed_sha(meta.get("path")),
-            "indexed_at": meta.get("indexed_at"),
-            "merged_at": merged_lookup(meta.get("path")),
-        }
+    pins = {repo: {"sha": indexed_sha((registry.get(repo) or {}).get("path")),
+                  "indexed_at": (registry.get(repo) or {}).get("indexed_at"),
+                  "merged_at": merged_lookup((registry.get(repo) or {}).get("path"))}
+            for repo in repos_hit}
     fed_build = (_stamp_time(fed.get("generated"))
                  if fed.get("status") == "ok" else None)
     return {
@@ -890,8 +609,6 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
         "entitled": bool(entitled),
         "federation_report": fed, "structurizr": struct,
         "fed_build": fed_build,
-        # (d) absence is claimed ONLY when the file truly is absent; a
-        # present-but-empty (or otherwise unreadable) db says so explicitly.
         "fed_docs": fed_docs,
         "pins": pins,
         "card": ({"id": card.get("id"), "title": card.get("title")}
@@ -900,14 +617,7 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
 
 
 def _parse_instant(s) -> "datetime.datetime | None":
-    """Parse a timestamp to an aware UTC instant; None when unusable.
-
-    Federation build times are UTC (`...Z` / `+00:00`); repo.merged proxies
-    come from `git %cI` in the fleet checkout's local offset (e.g.
-    `...+01:00`). Comparing the raw strings mis-orders across offsets, so
-    both sides are parsed and compared as instants. Naive inputs are read as
-    UTC; garbage returns None (rendered unavailable, never STALE-by-default).
-    """
+    """A timestamp as an aware UTC instant; None when unusable."""
     import datetime as _dt
     if not s or not isinstance(s, str):
         return None
@@ -924,42 +634,14 @@ def _parse_instant(s) -> "datetime.datetime | None":
 
 
 def is_stale_fed_build(fed_build, merged_at) -> bool | None:
-    """True when the federation build predates the repo merge (instants).
-
-    None when either side is missing/unparseable — the caller renders
-    freshness unavailable rather than guessing.
-    """
-    fb = _parse_instant(fed_build)
-    mg = _parse_instant(merged_at)
-    if fb is None or mg is None:
-        return None
-    return fb < mg
+    """True when the federation build predates the repo merge (None if unknown)."""
+    fb, mg = _parse_instant(fed_build), _parse_instant(merged_at)
+    return None if fb is None or mg is None else fb < mg
 
 
 def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
            post_safe: bool = False) -> str:
-    """Render the extract text with floor/unavailable wording + size cap.
-
-    The cap reserves the tail (WITHHELD line, fed-docs line, freshness
-    section, cut line): only the middle (symbols/routes/pins plus
-    the federation build/hits) is truncated, so the 60-line budget
-    can never cut freshness away again (card #792 showed 0 STALE lines).
-    Three plain outcome lines (#1410), each distinct: `index unavailable`
-    (the index cannot be read/probed), `repo X is not in the index` (an
-    allowlisted or card-named repo with no indexed copy), `no symbol
-    resolved` (lookups found nothing). The federation half prints only the
-    report header stamp (build line) and the `Layer N:` lines — or the
-    report's own unavailable line. No covering-tests section and no rels,
-    depends-on, blast-radius, arrow, or import lines of any kind.
-
-    Post-safe mode (commander ruling card #1410 msg 87862: posts carry
-    public rows only) prints NO withheld repo names anywhere: the coverage
-    line uses the generic wording, the per-token `also defined in withheld`
-    lines are dropped, and the WITHHELD tail is count-only
-    (`WITHHELD: N repos (names not shown in posted extracts)`), so the
-    posted artifact cannot become an existence oracle. Print mode
-    (`post_safe=False`) keeps names as today.
-    """
+    """Render the extract text; post-safe mode names no withheld/missing repo."""
     cut_notes: list = []
     head = ["# dev extract (card #1410, #559 phase 2) — pinned, small, dry-run-safe"]
     if ex.get("card"):
@@ -975,14 +657,11 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
         head.append(f"index unavailable: {_detail}")
     else:
         head.append("## codegraph half (index.db, READ-ONLY)")
-        # Card #1404: the index can miss WHOLE files (mesh-gateway server.py,
-        # 1.12 MiB, exceeds the 1 MiB file limit, so the deployed chat_sync
-        # has 0 rows) — a visible match is the indexed copy, not proof the
-        # deployed code is here. One line always (index ok); repo names and
-        # the card number only, never withheld file paths or symbol names.
-        # Post-safe: the generic wording (no withheld names in posts).
-        _cov_names = ", ".join(ex.get("withheld", []) or [])
-        if _cov_names and not post_safe:
+        # One coverage line always (index ok); post-safe uses the generic
+        # wording (no withheld names in posts).
+        _cov_names = (", ".join(ex.get("withheld", []) or [])
+                      if not post_safe else "")
+        if _cov_names:
             head.append(
                 f"index coverage is partial: withheld {_cov_names} can have "
                 "0 rows for a whole main module (card #1404); a visible match "
@@ -992,7 +671,10 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
                 "index coverage is partial: a withheld repo's main module can "
                 "have 0 rows (card #1404); a visible match is the indexed "
                 "copy, not evidence the deployed code is here")
-        for repo in ex.get("missing_repos", []):
+        # Post-safe: no missing-repo lines at all — a posted body naming a
+        # nonexistent repo must read the same as one naming a real private
+        # repo (no existence oracle).
+        for repo in ([] if post_safe else ex.get("missing_repos", [])):
             head.append(f"repo {repo} is not in the index")
         for s in ex.get("symbols", [])[:ROW_LIMIT]:
             loc = f"{s['file_path']}:{s['start_line']}"
@@ -1003,12 +685,8 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
             head.append(f"- {s['name']} [{s['kind']}] {s['repo']} {loc} — {callers}")
             if s.get("signature"):
                 head.append(f"  sig: {s['signature'][:120]}")
-            # Card #1404: swarph-cli also carries a gateway copy — say so with
-            # the hit, since the deployed gateway is a withheld repo. Only
-            # for this path shape (swarph-cli rows under swarph_cli/gateway/),
-            # and only while mesh-gateway is actually withheld: on a card
-            # whose project allowlists it, the deployed copy prints in full
-            # beside it and the warning would be false (#1410).
+            # Gateway-copy note (#1404/#1410): only for this path shape and
+            # only while mesh-gateway is withheld (else the warning is false).
             if (s.get("repo") == "swarph-cli"
                     and "swarph_cli/gateway/" in (s.get("file_path") or "")
                     and "mesh-gateway" in (ex.get("withheld") or [])):
@@ -1040,8 +718,6 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
         else:
             head.append(f"routes: {FLOOR_ROUTES}")
         head.append("")
-        # #1410: no covering-tests section — name-match is not coverage, and
-        # no real data backs it. Nothing is printed here at all.
         head.append("pins (per repo: indexed sha + index time):")
         for repo, p in ex.get("pins", {}).items():
             sha = p.get("sha") or "sha unavailable: .codegraph/indexed_origin_main missing"
@@ -1050,10 +726,8 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
     head.append("## federation half (READ-ONLY)")
     fed = ex.get("federation_report", {})
     st = ex.get("structurizr", {})
-    # No synthetic per-outcome line here: the outcomes already have their
-    # own plain lines (`repo X is not in the index`, `no symbol resolved`,
-    # `index unavailable`). The federation half prints the report stamp
-    # plus the `Layer N:` lines, or the report's own unavailable line.
+    # The federation half prints the report stamp + `Layer N:` lines, or
+    # the report's own unavailable line.
     if fed.get("status") != "ok":
         head.append(f"federation-report: {fed.get('status', 'unavailable')}")
     else:
@@ -1069,36 +743,32 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
     if st.get("status") != "ok":
         head.append(f"structurizr: {st.get('status', 'unavailable')}")
     else:
-        # #1410: no rels of any kind in output — downstream is never
-        # printed (neither entries nor floor). Deploy units stay.
         if st.get("deploy_units"):
             head.append(f"deploy units: {', '.join(st['deploy_units'])}")
         else:
             head.append("deploy units: unavailable (floor: no group-tagged container matched)")
-    # Reserved tail: WITHHELD (ONE names-list line), the fed-docs state,
-    # and the freshness section. The cap truncates `head` only, so these
-    # are never cut away.
+    # Reserved tail (never cut away by the cap): WITHHELD, fed-docs, freshness.
     tail = [""]
     withheld = ex.get("withheld", [])
     if withheld:
-        if post_safe:
-            tail.append(f"WITHHELD: {len(withheld)} repos "
-                        f"({POST_SAFE_WITHHOLD_TAIL})")
-        else:
-            tail.append(f"WITHHELD: {', '.join(withheld)} ({WITHHOLD_REASON} — "
-                        "same public+allowlist composition as "
-                        "codegraph._visible_repos, caller replaced by the card's "
-                        "project slug; full list in --json)")
+        _tail_detail = (
+            f"{len(withheld)} repos ({POST_SAFE_WITHHOLD_TAIL})"
+            if post_safe else
+            f"{', '.join(withheld)} ({WITHHOLD_REASON} — "
+            "same public+allowlist composition as "
+            "codegraph._visible_repos, caller replaced by the card's "
+            "project slug; full list in --json)")
+        tail.append(f"WITHHELD: {_tail_detail}")
     _fed_docs = ex.get("fed_docs") or \
         "unavailable: fed-docs state not recorded"
     if isinstance(_fed_docs, str) and _fed_docs.startswith("unavailable"):
-        tail.append(f"fed-docs.db: {_fed_docs} "
-                    "(cards/docs/memories citation index — absent on this box, "
-                    "so citations beyond the subject card are not linked yet)")
+        _link = ("absent on this box, "
+                 "so citations beyond the subject card are not linked yet")
     else:
-        tail.append(f"fed-docs.db: {_fed_docs} "
-                    "(cards/docs/memories citation index — present on this box, "
-                    "but citations beyond the subject card are not linked yet)")
+        _link = ("present on this box, "
+                 "but citations beyond the subject card are not linked yet")
+    tail.append(f"fed-docs.db: {_fed_docs} "
+                f"(cards/docs/memories citation index — {_link})")
     tail.append("")
     tail.append("freshness (STALE when fed build < last repo.merged):")
     for repo, p in ex.get("pins", {}).items():
@@ -1117,7 +787,7 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
             elif stale:
                 tail.append(f"- {repo}: STALE (federation build {fb} older than "
                             f"last repo.merged {merged}; merge-time is an "
-                            "origin/main-HEAD proxy, see module docstring)")
+                            "origin/main-HEAD proxy)")
             else:
                 tail.append(f"- {repo}: fresh (federation build {fb} >= "
                             f"last repo.merged {merged})")

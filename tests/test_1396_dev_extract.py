@@ -354,6 +354,8 @@ def test_card_body_trailing_slash_print_only_exits_zero(idx, fed, monkeypatch,
     card = {"id": 99, "title": "chat route",
             "body": "fix POST /api/chat-sync/ before release"}
     monkeypatch.setattr(board_mod, "_resolve_self_name", lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_self_with_source",
+                        lambda *_a, **_k: ("lab-ovh", "--as"))
     monkeypatch.setattr(board_mod, "_resolve_token", lambda *_a, **_k: "tok")
     monkeypatch.setattr(board_mod, "_http_get_json",
                         lambda url, tok, **k: (200, card))
@@ -571,6 +573,8 @@ def test_json_redacts_withheld_registry_paths(idx, fed, monkeypatch, capsys):
     from swarph_cli.commands import board as board_mod
     rep, wsp = fed
     monkeypatch.setattr(board_mod, "_resolve_self_name", lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_self_with_source",
+                        lambda *_a, **_k: ("lab-ovh", "--as"))
     monkeypatch.setattr(board_mod, "_resolve_token", lambda *_a, **_k: "tok")
     rc = board_mod.run_board(
         ["cards", "dev-extract", "--symbol", "chat_sync", "--json",
@@ -1369,21 +1373,20 @@ def test_board_dev_extract_uses_card_project_allowlist(idx, fed, monkeypatch,
             return 200, card
         if url.endswith("/board/projects"):
             return 200, projs
+        if url.endswith("/peers/lab-ovh/grants"):
+            return 200, {"peer": "lab-ovh", "groups": [],
+                         "grants": [{"grant_type": "board", "target": "board",
+                                     "level": "execute", "via_group": None,
+                                     "direct": True}]}
         raise AssertionError(url)
 
     monkeypatch.setattr(board_mod, "_resolve_self_name",
                         lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_self_with_source",
+                        lambda *_a, **_k: ("lab-ovh", "--as"))
     monkeypatch.setattr(board_mod, "_resolve_token",
                         lambda *_a, **_k: "tok")
     monkeypatch.setattr(board_mod, "_http_get_json", _fake_get)
-
-    def _fake_post(url, body, tok, **k):
-        assert url.endswith("/authz/check")
-        assert body == {"peer": "lab-ovh", "grant_type": "board",
-                        "target": "board"}
-        return 200, {"allow": True, "via_group": None, "level": "execute"}
-
-    monkeypatch.setattr(board_mod, "_post_json", _fake_post)
     monkeypatch.setattr(de, "load_card_allowlist",
                         lambda path=None: {"board": ["mesh-gateway"]})
     rc = board_mod.run_board(
@@ -1395,7 +1398,8 @@ def test_board_dev_extract_uses_card_project_allowlist(idx, fed, monkeypatch,
     # board project + direct execute grant -> mesh-gateway visible.
     assert "server.py:12" in out.out
     assert "SECRET-SIG" in out.out
-    assert ("private rows: shown for project board (runner execute grant; "
+    assert ("private rows: shown for project board "
+            "(runner lab-ovh via --as: direct execute grant; "
             "repos from card-allowlist)") in out.out
 
 
@@ -1458,6 +1462,8 @@ def test_board_readable_card_without_tokens_exits_zero(idx, fed, monkeypatch,
     card = {"id": 99, "title": "rework cap",
             "body": "run `pip install -U` and `import json, sys` only"}
     monkeypatch.setattr(board_mod, "_resolve_self_name", lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_self_with_source",
+                        lambda *_a, **_k: ("lab-ovh", "--as"))
     monkeypatch.setattr(board_mod, "_resolve_token", lambda *_a, **_k: "tok")
     monkeypatch.setattr(board_mod, "_http_get_json",
                         lambda url, tok, **k: (200, card))
@@ -1478,6 +1484,8 @@ def test_board_unreadable_card_without_tokens_keeps_exit_1(idx, fed,
     from swarph_cli.commands import board as board_mod
     rep, wsp = fed
     monkeypatch.setattr(board_mod, "_resolve_self_name", lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_self_with_source",
+                        lambda *_a, **_k: ("lab-ovh", "--as"))
     monkeypatch.setattr(board_mod, "_resolve_token", lambda *_a, **_k: "tok")
     monkeypatch.setattr(board_mod, "_http_get_json",
                         lambda url, tok, **k: (404, {"detail": "no such card"}))
@@ -1490,14 +1498,34 @@ def test_board_unreadable_card_without_tokens_keeps_exit_1(idx, fed,
     assert "cannot read card #99" in out.err
 
 
-# ── #1410 msg 87862: entitlement gating (direct execute only) + post-safe ──
+# ── #1410 rework (#3903): entitlement reads the runner's OWN direct row ──
 
-def _fake_board_env(monkeypatch, *, authz, card=None, projects=None,
-                    thread_uuid=None):
-    """Fake the gateway seam for a dev-extract run; return authz call log.
+def _direct_row(level="execute", target="board"):
+    """An exact-grantee board grant row, as GET /peers/{peer}/grants reports it."""
+    return {"grant_type": "board", "target": target, "level": level,
+            "via_group": None, "direct": True}
 
-    `authz` is the `(status, body)` of POST /authz/check, or an exception
-    instance the POST raises. POST /messages is captured, never sent.
+
+def _group_row(level, group, target="board"):
+    """A group-inherited board grant row (direct is never the runner's own)."""
+    return {"grant_type": "board", "target": target, "level": level,
+            "via_group": group, "direct": False}
+
+
+def _wide_row(level, target="board"):
+    """A '*' grantee board grant row: via_group None, direct False."""
+    return {"grant_type": "board", "target": target, "level": level,
+            "via_group": None, "direct": False}
+
+
+def _fake_board_env(monkeypatch, *, grants, grants_status=200,
+                    grants_exc=None, card=None, projects=None,
+                    card_status=200, thread_uuid=None):
+    """Fake the gateway seam for a dev-extract run; return posted payloads.
+
+    `grants` is the `grants` list of GET /peers/lab-ovh/grants (or an
+    exception via `grants_exc`, a status via `grants_status`, a card fetch
+    status via `card_status`). POST /messages is captured, never sent.
     """
     from swarph_cli.commands import board as board_mod
     _card = {"id": 7, "project_id": 6, "title": "t",
@@ -1510,16 +1538,19 @@ def _fake_board_env(monkeypatch, *, authz, card=None, projects=None,
 
     def _fake_get(url, tok, **k):
         if url.endswith("/board/cards/7"):
+            if card_status != 200:
+                return card_status, {"detail": "down"}
             return 200, _card
         if url.endswith("/board/projects"):
             return 200, _projs
+        if url.endswith("/peers/lab-ovh/grants"):
+            if grants_exc is not None:
+                raise grants_exc
+            return grants_status, {"peer": "lab-ovh", "groups": [],
+                                   "grants": grants}
         raise AssertionError(url)
 
     def _fake_post(url, body, tok, **k):
-        if url.endswith("/authz/check"):
-            if isinstance(authz, Exception):
-                raise authz
-            return authz
         if url.endswith("/messages"):
             posted["body"] = body
             return 200, {"id": 4242}
@@ -1527,6 +1558,8 @@ def _fake_board_env(monkeypatch, *, authz, card=None, projects=None,
 
     monkeypatch.setattr(board_mod, "_resolve_self_name",
                         lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_self_with_source",
+                        lambda *_a, **_k: ("lab-ovh", "--as"))
     monkeypatch.setattr(board_mod, "_resolve_token",
                         lambda *_a, **_k: "tok")
     monkeypatch.setattr(board_mod, "_http_get_json", _fake_get)
@@ -1543,85 +1576,96 @@ def _print_only_argv(idx, fed):
              "--structurizr-ws", str(wsp)])
 
 
+SHOWN_LINE = ("private rows: shown for project board "
+                "(runner lab-ovh via --as: direct execute grant; "
+                "repos from card-allowlist)")
+
+
 def test_execute_grant_sees_private_row(idx, fed, monkeypatch, capsys):
     from swarph_cli.commands import board as board_mod
-    posted = _fake_board_env(
-        monkeypatch,
-        authz=(200, {"allow": True, "via_group": None, "level": "execute"}))
+    posted = _fake_board_env(monkeypatch, grants=[_direct_row()])
     rc = board_mod.run_board(_print_only_argv(idx, fed))
     out = capsys.readouterr()
     assert rc == 0
     assert "server.py:12" in out.out  # the private file:line prints
     assert "SECRET-SIG" in out.out
-    assert ("private rows: shown for project board (runner execute grant; "
-            "repos from card-allowlist)") in out.out
+    assert SHOWN_LINE in out.out
     assert posted == {}  # print-only posts nothing
 
 
 def test_propose_via_all_grant_shows_public_only(idx, fed, monkeypatch,
                                                  capsys):
     from swarph_cli.commands import board as board_mod
-    _fake_board_env(
-        monkeypatch,
-        authz=(200, {"allow": True, "via_group": "ALL",
-                     "level": "propose"}))
+    _fake_board_env(monkeypatch, grants=[_group_row("propose", "ALL")])
     rc = board_mod.run_board(_print_only_argv(idx, fed))
     out = capsys.readouterr()
     assert rc == 0
     assert "server.py:12" not in out.out
     assert "SECRET-SIG" not in out.out
     assert ("private rows: withheld for project board "
-            "(no execute grant: level=propose, via=ALL)") in out.out
+            "(runner lab-ovh via --as: no direct execute grant; "
+            "best board grant: level=propose, via=ALL)") in out.out
 
 
 def test_direct_propose_grant_shows_public_only(idx, fed, monkeypatch,
                                                capsys):
     from swarph_cli.commands import board as board_mod
-    _fake_board_env(
-        monkeypatch,
-        authz=(200, {"allow": True, "via_group": None, "level": "propose"}))
+    _fake_board_env(monkeypatch, grants=[_direct_row("propose")])
     rc = board_mod.run_board(_print_only_argv(idx, fed))
     out = capsys.readouterr()
     assert rc == 0
     assert "server.py:12" not in out.out
     assert "SECRET-SIG" not in out.out
     assert ("private rows: withheld for project board "
-            "(no execute grant: level=propose, via=direct)") in out.out
+            "(runner lab-ovh via --as: no direct execute grant; "
+            "best board grant: level=propose, via=direct)") in out.out
 
 
-def test_deny_names_level_none(idx, fed, monkeypatch, capsys):
+def test_no_board_grant_names_no_grant(idx, fed, monkeypatch, capsys):
     from swarph_cli.commands import board as board_mod
-    _fake_board_env(
-        monkeypatch,
-        authz=(200, {"allow": False, "via_group": None, "level": None}))
+    _fake_board_env(monkeypatch, grants=[])
     rc = board_mod.run_board(_print_only_argv(idx, fed))
     out = capsys.readouterr()
     assert rc == 0
     assert "server.py:12" not in out.out
     assert ("private rows: withheld for project board "
-            "(no execute grant: level=none, via=direct)") in out.out
+            "(runner lab-ovh via --as: no direct execute grant; "
+            "no board grant at all)") in out.out
 
 
 def test_grant_endpoint_error_is_public_only(idx, fed, monkeypatch, capsys):
     from swarph_cli.commands import board as board_mod
-    for authz in (RuntimeError("boom"), (500, {"detail": "down"}),
-                  (200, "not-a-dict")):
-        _fake_board_env(monkeypatch, authz=authz)
+    for grants, status in ([], 500), ("not-a-dict", 200), (None, 200):
+        _fake_board_env(monkeypatch, grants=grants, grants_status=status)
         rc = board_mod.run_board(_print_only_argv(idx, fed))
         out = capsys.readouterr()
-        assert rc == 0, authz
-        assert "server.py:12" not in out.out, authz
-        assert "SECRET-SIG" not in out.out, authz
+        assert rc == 0, (grants, status)
+        assert "server.py:12" not in out.out, (grants, status)
+        assert "SECRET-SIG" not in out.out, (grants, status)
         assert ("private rows: withheld for project board "
-                "(grant check unavailable)") in out.out, authz
+                "(runner lab-ovh via --as: grant check unavailable)") in out.out
+
+
+def test_grant_endpoint_unreachable_says_unreachable(idx, fed, monkeypatch,
+                                                    capsys):
+    from swarph_cli.commands import board as board_mod
+    for grants_exc, status in ((RuntimeError("boom"), 200), (None, 0)):
+        _fake_board_env(monkeypatch, grants=[], grants_status=status,
+                        grants_exc=grants_exc)
+        rc = board_mod.run_board(_print_only_argv(idx, fed))
+        out = capsys.readouterr()
+        assert rc == 0, (grants_exc, status)
+        assert "server.py:12" not in out.out, (grants_exc, status)
+        assert ("private rows: withheld for project board "
+                "(runner lab-ovh via --as: gateway unreachable, "
+                "so no grant to check)") in out.out, (grants_exc, status)
 
 
 def test_post_path_with_execute_grant_posts_public_only(idx, fed, monkeypatch,
                                                         capsys):
     from swarph_cli.commands import board as board_mod
-    posted = _fake_board_env(
-        monkeypatch, thread_uuid="thr-1",
-        authz=(200, {"allow": True, "via_group": None, "level": "execute"}))
+    posted = _fake_board_env(monkeypatch, thread_uuid="thr-1",
+                             grants=[_direct_row()])
     rep, wsp = fed
     rc = board_mod.run_board(
         ["cards", "dev-extract", "--card", "7",
@@ -1638,16 +1682,13 @@ def test_post_path_with_execute_grant_posts_public_only(idx, fed, monkeypatch,
     assert ("WITHHELD: 2 repos "
             "(names not shown in posted extracts)") in content
     # The terminal still states the runner's own entitlement basis.
-    assert ("private rows: shown for project board (runner execute grant; "
-            "repos from card-allowlist)") in out.out
+    assert SHOWN_LINE in out.out
 
 
 def test_print_path_same_execute_runner_shows_row(idx, fed, monkeypatch,
                                                   capsys):
     from swarph_cli.commands import board as board_mod
-    _fake_board_env(
-        monkeypatch,
-        authz=(200, {"allow": True, "via_group": None, "level": "execute"}))
+    _fake_board_env(monkeypatch, grants=[_direct_row()])
     rc = board_mod.run_board(_print_only_argv(idx, fed))
     out = capsys.readouterr()
     assert rc == 0
@@ -1658,9 +1699,8 @@ def test_print_path_same_execute_runner_shows_row(idx, fed, monkeypatch,
 def test_post_safe_json_stdout_carries_no_withheld_names(idx, fed,
                                                          monkeypatch, capsys):
     from swarph_cli.commands import board as board_mod
-    _fake_board_env(
-        monkeypatch, thread_uuid="thr-1",
-        authz=(200, {"allow": True, "via_group": None, "level": "execute"}))
+    _fake_board_env(monkeypatch, thread_uuid="thr-1",
+                    grants=[_direct_row()])
     rep, wsp = fed
     rc = board_mod.run_board(
         ["cards", "dev-extract", "--card", "7", "--json",
@@ -1675,14 +1715,15 @@ def test_post_safe_json_stdout_carries_no_withheld_names(idx, fed,
     assert "mystery" not in dumped
     assert payload["withheld"] == []
     assert payload["withheld_count"] == 2
-    assert ("private rows: shown for project board (runner execute grant; "
-            "repos from card-allowlist)") in out.err
+    assert SHOWN_LINE in out.err
 
 
 def test_no_card_prints_no_card_line(idx, fed, monkeypatch, capsys):
     from swarph_cli.commands import board as board_mod
     monkeypatch.setattr(board_mod, "_resolve_self_name",
                         lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_self_with_source",
+                        lambda *_a, **_k: ("lab-ovh", "--as"))
     monkeypatch.setattr(board_mod, "_resolve_token",
                         lambda *_a, **_k: "tok")
     rep, wsp = fed
@@ -1703,6 +1744,8 @@ def test_unreadable_card_with_explicit_symbol_is_no_card(idx, fed, monkeypatch,
     from swarph_cli.commands import board as board_mod
     monkeypatch.setattr(board_mod, "_resolve_self_name",
                         lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_self_with_source",
+                        lambda *_a, **_k: ("lab-ovh", "--as"))
     monkeypatch.setattr(board_mod, "_resolve_token",
                         lambda *_a, **_k: "tok")
     monkeypatch.setattr(board_mod, "_http_get_json",
@@ -1765,17 +1808,368 @@ def test_redact_post_safe_strips_withheld_names(idx, fed):
 
 def test_privacy_line_texts():
     from swarph_cli.commands.board import _dev_extract_privacy_line as line
-    assert line(None, None, False, None, None, False) == \
+    kw = {"runner": "lab-ovh", "source": "--as"}
+    assert line(None, None, False, None, None, "ok", **kw) == \
         "private rows: withheld (no card, so no project grant to check)"
-    assert line({"id": 1}, None, False, None, None, False) == \
+    assert line(None, None, False, None, None, "ok", **kw,
+                gw_unreachable=True) == \
+        ("private rows: withheld "
+         "(gateway unreachable, so no project grant to check)")
+    assert line({"id": 1}, None, False, None, None, "ok", **kw) == \
         ("private rows: withheld (project unresolvable, "
          "so no project grant to check)")
-    assert line({"id": 1}, "board", True, "execute", None, True) == \
-        ("private rows: shown for project board (runner execute grant; "
+    assert line({"id": 1}, "board", True, "execute", None, "ok", **kw) == \
+        ("private rows: shown for project board "
+         "(runner lab-ovh via --as: direct execute grant; "
          "repos from card-allowlist)")
-    assert line({"id": 1}, "board", False, "propose", "ALL", True) == \
+    # F2: a best level=execute that is not the runner's own direct grant
+    # never prints under a "no execute grant" claim.
+    assert line({"id": 1}, "board", False, "execute", "ALL", "ok", **kw) == \
         ("private rows: withheld for project board "
-         "(no execute grant: level=propose, via=ALL)")
-    assert line({"id": 1}, "board", False, None, None, False) == \
+         "(runner lab-ovh via --as: no direct execute grant; "
+         "best board grant: level=execute, via=ALL)")
+    assert line({"id": 1}, "board", False, "propose", "ALL", "ok", **kw) == \
         ("private rows: withheld for project board "
-         "(grant check unavailable)")
+         "(runner lab-ovh via --as: no direct execute grant; "
+         "best board grant: level=propose, via=ALL)")
+    assert line({"id": 1}, "board", False, None, None, "ok", **kw) == \
+        ("private rows: withheld for project board "
+         "(runner lab-ovh via --as: no direct execute grant; "
+         "no board grant at all)")
+    assert line({"id": 1}, "board", False, None, None, "unavailable",
+                **kw) == \
+        ("private rows: withheld for project board "
+         "(runner lab-ovh via --as: grant check unavailable)")
+    assert line({"id": 1}, "board", False, None, None, "unreachable",
+                **kw) == \
+        ("private rows: withheld for project board "
+         "(runner lab-ovh via --as: gateway unreachable, "
+         "so no grant to check)")
+
+
+# ── #1410 rework (#3903 F1/F2): the direct-row rule vs live gateway logic ──
+
+def _live_gateway_harness(tmp_path):
+    """Live board-grant union over a temp db (msg 88033 §F1/F2).
+
+    Harness method: the GROUP half lifts the REAL shipped gateway functions
+    (``server._peer_groups`` / ``server._group_grants_for`` /
+    ``server._GRANT_LEVEL_RANK``) over tables built from the REAL
+    ``gateway/schema.sql`` — this fork states that surface is behaviourally
+    identical to the deployed gateway. The BOARD-direct half does not exist
+    in this fork (it denies grant_type=board by design), so it models the
+    live semantics exactly as #3903 documents them: the verdict is the MAX
+    over the exact-grantee direct row, the '*' row (when it applies), and
+    the group rows, with ``via_group`` named only for a matching group row.
+    Returns ``(live_verdict, peer_grants_payload)`` builders.
+    """
+    import pathlib as _pathlib
+    import sqlite3 as _sqlite3
+
+    # Same gate as the repo's other gateway-lifting tests: the harness
+    # imports the real server module, which needs fastapi (absent on the
+    # windows CI image — those 4 tests skip there, run everywhere else).
+    pytest.importorskip("fastapi")
+    from swarph_cli.gateway import server
+    schema_path = _pathlib.Path(server.__file__).with_name("schema.sql")
+    db_path = str(tmp_path / "live.db")
+    con = _sqlite3.connect(db_path)
+    con.row_factory = _sqlite3.Row
+    con.executescript(schema_path.read_text(encoding="utf-8"))
+    return con, server
+
+
+def _seed_live(con, peer, *, ratified=True, groups=(), group_grants=()):
+    """Seed peers/groups/memberships/grants; group_grants bypasses the local
+    400 guard by direct SQL (the deployed gateway accepts board group
+    grants — F2's group:ALL execute exists there)."""
+    con.execute(
+        "INSERT INTO claude_peers (name, url, capabilities, registered_at,"
+        " last_health, last_seen, enabled, ratified) VALUES (?,?,?,?,?,?,?,?)",
+        (peer, "http://x/", "{}", "2026-01-01T00:00:00+00:00", None, None,
+         1, 1 if ratified else 0))
+    for g in dict.fromkeys(["ALL", *groups]):
+        if g == "ALL":
+            continue
+        con.execute(
+            "INSERT OR IGNORE INTO groups (name, kind, created_by, created_at)"
+            " VALUES (?,?,?,?)", (g, "custom", "t", "t"))
+    for g in groups:
+        con.execute(
+            'INSERT OR IGNORE INTO group_members ("group", peer, added_by,'
+            " added_at) VALUES (?,?,?,?)", (g, peer, "t", "t"))
+    for g, gtype, target, level in group_grants:
+        con.execute(
+            'INSERT OR IGNORE INTO group_grants ("group", grant_type, target,'
+            " level, added_by, added_at) VALUES (?,?,?,?,?,?)",
+            (g, gtype, target, level, "t", "t"))
+    con.commit()
+
+
+def _live_verdict(con, server, peer, slug, direct_rows, star_rows):
+    """The live gateway's effective verdict for (peer, board, slug).
+
+    Direct rows: ``[(grantee, target, level)]`` with exact-grantee and '*'
+    entries; group half: the REAL ``server._group_grants_for`` rows. Best
+    by the REAL ``server._GRANT_LEVEL_RANK``; on a direct/group tie at the
+    same level the group row wins the ``via_group`` (the observed F2), and
+    a '*' match reports ``via_group None`` (the observed F1).
+    """
+    cands = []  # (level, via_group); group rows sort before direct on ties
+    for r in server._group_grants_for(con, peer, "board", slug):
+        cands.append((r["level"], r["grp"], 0))
+    for grantee, target, level in star_rows:
+        if target == slug:
+            cands.append((level, None, 1))
+    for grantee, target, level in direct_rows:
+        if target == slug and grantee == peer:
+            cands.append((level, None, 2))
+    if not cands:
+        return {"allow": False, "via_group": None, "level": None}
+    # Best rank wins; on a rank tie the group row wins the via_group (the
+    # observed live F2 order), then '*' rows, then the exact direct row.
+    top = max(server._GRANT_LEVEL_RANK.get(t[0], 0) for t in cands)
+    best = min((t for t in cands
+                if server._GRANT_LEVEL_RANK.get(t[0], 0) == top),
+               key=lambda t: t[2])
+    return {"allow": True, "via_group": best[1], "level": best[0]}
+
+
+def _peer_payload(con, server, peer, slug, direct_rows, star_rows):
+    """The deployed GET /peers/{peer}/grants board rows for this state."""
+    rows = []
+    for r in server._group_grants_for(con, peer, "board", slug):
+        rows.append({"grant_type": "board", "target": slug,
+                     "level": r["level"], "via_group": r["grp"],
+                     "direct": False})
+    for grantee, target, level in star_rows:
+        if target == slug:
+            rows.append({"grant_type": "board", "target": target,
+                         "level": level, "via_group": None, "direct": False})
+    for grantee, target, level in direct_rows:
+        if target == slug and grantee == peer:
+            rows.append({"grant_type": "board", "target": target,
+                         "level": level, "via_group": None, "direct": True})
+    return {"peer": peer, "groups": server._peer_groups(con, peer),
+            "grants": rows}
+
+
+def _old_via_group_rule(live):
+    """The removed check: allow + execute + via_group None reads as direct."""
+    return (live.get("allow") is True and live.get("level") == "execute"
+            and live.get("via_group") is None)
+
+
+def test_live_star_execute_reports_via_none(tmp_path):
+    """F1 live shape: '*' at execute resolves allow + via_group None."""
+    con, server = _live_gateway_harness(tmp_path)
+    _seed_live(con, "lab-ovh", groups=["ALL"],
+               group_grants=[("ALL", "board", "board", "propose")])
+    star = [("*", "board", "execute")]
+    live = _live_verdict(con, server, "lab-ovh", "board", [], star)
+    assert live == {"allow": True, "via_group": None, "level": "execute"}
+    # A name with no peer row at all reads the same from the '*' row.
+    live_unknown = _live_verdict(con, server, "ghost-peer", "board", [], star)
+    assert live_unknown == {"allow": True, "via_group": None,
+                            "level": "execute"}
+
+
+def test_live_direct_plus_all_reports_via_all(tmp_path):
+    """F2 live shape: direct execute + group ALL execute reads via=ALL."""
+    con, server = _live_gateway_harness(tmp_path)
+    _seed_live(con, "lab-ovh", groups=["ALL"],
+               group_grants=[("ALL", "board", "board", "execute")])
+    live = _live_verdict(con, server, "lab-ovh", "board",
+                         [("lab-ovh", "board", "execute")], [])
+    assert live == {"allow": True, "via_group": "ALL", "level": "execute"}
+
+
+def test_star_execute_is_not_entitlement(idx, fed, monkeypatch, capsys,
+                                         tmp_path):
+    """F1: a '*' execute grant never entitles, whoever the runner is."""
+    from swarph_cli.commands import board as board_mod
+    con, server = _live_gateway_harness(tmp_path)
+    _seed_live(con, "lab-ovh", groups=["ALL"],
+               group_grants=[("ALL", "board", "board", "propose")])
+    star = [("*", "board", "execute")]
+    live = _live_verdict(con, server, "lab-ovh", "board", [], star)
+    assert _old_via_group_rule(live) is True  # the removed check opens here
+    payload = _peer_payload(con, server, "lab-ovh", "board", [], star)
+    assert [g for g in payload["grants"] if g.get("direct") is True] == []
+    _fake_board_env(monkeypatch, grants=payload["grants"])
+    rc = board_mod.run_board(_print_only_argv(idx, fed))
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "server.py:12" not in out.out  # still public only
+    assert "SECRET-SIG" not in out.out
+    assert "shown for project board" not in out.out
+    assert ("best board grant: level=execute, via=wide") in out.out
+
+
+def test_direct_execute_with_group_all_stays_entitled(idx, fed, monkeypatch,
+                                                      capsys, tmp_path):
+    """F2: direct execute entitles whatever else matches; no false line."""
+    from swarph_cli.commands import board as board_mod
+    con, server = _live_gateway_harness(tmp_path)
+    _seed_live(con, "lab-ovh", groups=["ALL"],
+               group_grants=[("ALL", "board", "board", "execute")])
+    direct = [("lab-ovh", "board", "execute")]
+    live = _live_verdict(con, server, "lab-ovh", "board", direct, [])
+    assert _old_via_group_rule(live) is False  # the removed check closes here
+    payload = _peer_payload(con, server, "lab-ovh", "board", direct, [])
+    _fake_board_env(monkeypatch, grants=payload["grants"])
+    rc = board_mod.run_board(_print_only_argv(idx, fed))
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "server.py:12" in out.out  # entitled: the private row prints
+    assert SHOWN_LINE in out.out
+    assert "no execute grant" not in out.out
+    assert "no direct execute grant" not in out.out
+
+
+def test_no_false_no_execute_grant_line_anywhere(idx, fed, monkeypatch,
+                                                 capsys):
+    """Acceptance 2, second clause: the false line is gone in every shape."""
+    from swarph_cli.commands import board as board_mod
+    shapes = [
+        [_direct_row()],
+        [_direct_row(), _group_row("execute", "ALL")],
+        [_direct_row(), _wide_row("execute")],
+        [_wide_row("execute")],
+        [_group_row("execute", "ALL")],
+        [_group_row("execute", "peer:x")],
+        [_direct_row("propose")],
+        [],
+    ]
+    for grants in shapes:
+        _fake_board_env(monkeypatch, grants=grants)
+        rc = board_mod.run_board(_print_only_argv(idx, fed))
+        out = capsys.readouterr()
+        assert rc == 0, grants
+        assert "no execute grant" not in out.out, grants
+
+
+def test_entitlement_reads_direct_row_not_best_level(monkeypatch):
+    """The predicate keys on exact-grantee direct rows, never the best row."""
+    from swarph_cli.commands import board as board_mod
+
+    def _run(grants):
+        monkeypatch.setattr(board_mod, "_http_get_json",
+                            lambda url, tok, **k: (200, {"grants": grants}))
+        return board_mod._dev_extract_entitlement(
+            "http://gw", "tok", "lab-ovh", "board")
+
+    assert _run([_direct_row()])[0] is True
+    assert _run([_direct_row(), _group_row("execute", "ALL")])[0] is True
+    assert _run([_group_row("execute", "ALL")])[0] is False
+    assert _run([_wide_row("execute")])[0] is False
+    assert _run([_direct_row("propose")])[0] is False
+    # Other targets and other grant types never count.
+    assert _run([_direct_row("execute", target="other")])[0] is False
+    assert _run([{"grant_type": "channel", "target": "board",
+                  "level": "execute", "via_group": None,
+                  "direct": True}])[0] is False
+
+
+def test_gateway_unreachable_card_says_unreachable(idx, fed, monkeypatch,
+                                                   capsys):
+    """Acceptance 3: an unreachable gateway never reads as 'no card'."""
+    from swarph_cli.commands import board as board_mod
+    # Status-0 card fetch with explicit symbols: public-only, rc 0.
+    _fake_board_env(monkeypatch, grants=[], card_status=0)
+    rep, wsp = fed
+    rc = board_mod.run_board(
+        ["cards", "dev-extract", "--card", "7", "--symbol", "chat_sync",
+         "--print-only", "--index", str(idx), "--fed-report", str(rep),
+         "--structurizr-ws", str(wsp)])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert ("private rows: withheld "
+            "(gateway unreachable, so no project grant to check)") in out.out
+    assert "no card, so no project grant to check" not in out.out
+    # A raising card fetch reads the same, and a tokenless run exits 1
+    # naming the gateway, not the card.
+    monkeypatch.setattr(board_mod, "_http_get_json",
+                        lambda url, tok, **k: (_ for _ in ()).throw(
+                            ConnectionError("down")) if "cards/7" in url
+                        else (200, {"projects": [{"id": 6, "slug": "board"}]}))
+    monkeypatch.setattr(board_mod, "_resolve_self_name",
+                        lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_self_with_source",
+                        lambda *_a, **_k: ("lab-ovh", "--as"))
+    monkeypatch.setattr(board_mod, "_resolve_token",
+                        lambda *_a, **_k: "tok")
+    monkeypatch.setattr(de, "load_card_allowlist", lambda path=None: {})
+    rc = board_mod.run_board(
+        ["cards", "dev-extract", "--card", "7", "--symbol", "chat_sync",
+         "--print-only", "--index", str(idx), "--fed-report", str(rep),
+         "--structurizr-ws", str(wsp)])
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "gateway unreachable" in out.out
+    rc = board_mod.run_board(
+        ["cards", "dev-extract", "--card", "7", "--print-only",
+         "--index", str(idx), "--fed-report", str(rep),
+         "--structurizr-ws", str(wsp)])
+    out = capsys.readouterr()
+    assert rc == 1
+    assert "gateway unreachable" in out.err
+
+
+def test_unentitled_posts_hide_missing_repos(fed, tmp_path):
+    """Acceptance 4: ghost-named vs private-named posts read the same."""
+    import sqlite3 as _sqlite3
+    p = tmp_path / "priv.db"
+    con = _sqlite3.connect(str(p))
+    con.execute(REPOS_DDL)
+    con.execute(SYMBOLS_DDL)
+    con.execute(EDGES_DDL)
+    con.execute("INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                ("swarph-cli", "s", str(tmp_path), "public", "t", "full"))
+    con.execute("INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                ("swarph-zz-priv", "o/p", str(tmp_path), "private",
+                 "t", "full"))
+    con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (1, "swarph-cli", "chat_sync", "function", "x.py", 3,
+                 "", "", "", ""))
+    con.commit()
+    con.close()
+    ghost = {"id": 7, "title": "t", "body": "fix chat_sync in swarph-zz-ghost"}
+    real = {"id": 7, "title": "t", "body": "fix chat_sync in swarph-zz-priv"}
+    rep, wsp = fed
+    kw = {"index_path": str(p), "fed_report": str(rep),
+          "structurizr_ws": str(wsp), "fed_docs_db": str(rep) + ".nodb",
+          "merged_lookup": lambda p: None, "project_slug": "board",
+          "card_allowlist": {"board": ["swarph-zz-priv"]}, "entitled": False}
+    ex_ghost = de.build_extract(tokens=["chat_sync"], card=ghost, **kw)
+    ex_real = de.build_extract(tokens=["chat_sync"], card=real, **kw)
+    assert ex_ghost["missing_repos"] == ["swarph-zz-ghost"]
+    assert ex_real["missing_repos"] == []
+    assert (de.render(ex_ghost, post_safe=True)
+            == de.render(ex_real, post_safe=True))
+    import json as _json
+    assert (_json.dumps(de.redact_for_json(ex_ghost, post_safe=True),
+                        sort_keys=True, default=str)
+            == _json.dumps(de.redact_for_json(ex_real, post_safe=True),
+                           sort_keys=True, default=str))
+
+
+def test_unentitled_post_bodies_match_live(idx, fed, monkeypatch, capsys):
+    """Acceptance 4 end to end: the two posted bodies are identical."""
+    from swarph_cli.commands import board as board_mod
+    rep, wsp = fed
+    bodies = []
+    for body in ("fix chat_sync in swarph-ghost-zzz",
+                 "fix chat_sync in swarph-mesh-gateway"):
+        posted = _fake_board_env(
+            monkeypatch, thread_uuid="thr-1", grants=[],
+            card={"id": 7, "project_id": 6, "title": "t", "body": body})
+        rc = board_mod.run_board(
+            ["cards", "dev-extract", "--card", "7",
+             "--index", str(idx), "--fed-report", str(rep),
+             "--structurizr-ws", str(wsp)])
+        out = capsys.readouterr()
+        assert rc == 0
+        assert "is not in the index" not in posted["body"]["content"]
+        bodies.append(posted["body"]["content"])
+    assert bodies[0] == bodies[1]

@@ -41,6 +41,7 @@ from swarph_cli.commands.mesh import (
     _http_get_json,
     _post_json,
     _resolve_self_name,
+    _resolve_self_with_source,
     _resolve_token,
 )
 from swarph_cli.redact import redact_text, redact_value, encode_outbound_json
@@ -509,58 +510,103 @@ def _thread_recipient(
     )
 
 
+def _peer_grants_url(gw: str, peer: str) -> str:
+    return (f"{gw.rstrip('/')}/peers/"
+            f"{urllib.parse.quote(peer, safe='')}/grants")
+
+
+# Level rank shared with the gateway's RBAC union (server._GRANT_LEVEL_RANK):
+# only used to pick the best matching grant for the why-line, never for
+# the entitlement decision itself.
+_DEV_EXTRACT_GRANT_RANK = {"member": 1, "read": 1, "propose": 2, "write": 2,
+                           "execute": 3, "admin": 4}
+
+
 def _dev_extract_entitlement(gw: str, token: str, self_name: str,
                              project_slug: str) -> tuple:
-    """Runner entitlement for dev-extract private rows (card #1410, msg 87862).
+    """Runner entitlement for dev-extract private rows (card #1410 rework).
 
-    Exactly ONE ``POST /authz/check`` ``{peer, grant_type: "board",
-    target: slug}`` per run. Entitled only on ``allow`` + ``level ==
-    "execute"`` + ``via_group is None`` — a DIRECT execute grant. A
-    group:ALL grant (``via_group`` set) or a propose-level grant does NOT
-    count. Returns ``(entitled, level, via_group, check_ok)``; any transport
-    failure, non-2xx status, or non-dict body yields ``(False, None, None,
-    False)`` (grant check unavailable — fail closed, never open).
+    Exactly ONE ``GET /peers/{peer}/grants`` per run. Entitled only when a
+    row with ``grant_type == "board"``, ``target == project_slug``,
+    ``level == "execute"`` AND ``direct is True`` is present — the runner's
+    OWN direct execute grant (exact grantee match). A ``'*'`` grantee row or
+    a group-inherited execute grant never counts, even though the live
+    gateway's ``POST /authz/check`` effective verdict reports both with
+    ``via_group None`` (``'*'`` row) or ``via_group ALL`` over direct
+    (best-level tie) — reading that verdict was the F1/F2 defect.
+    Returns ``(entitled, best_level, best_via, state)`` with ``state`` one of
+    ``"ok"`` / ``"unavailable"`` (bad status/body) / ``"unreachable"``
+    (transport failure); anything but ``"ok"`` fails closed, never open.
     """
     try:
-        st, data = _post_json(
-            f"{gw.rstrip('/')}/authz/check",
-            {"peer": self_name, "grant_type": "board",
-             "target": project_slug},
-            token)
+        st, data = _http_get_json(_peer_grants_url(gw, self_name), token)
     except Exception:
-        return False, None, None, False
+        return False, None, None, "unreachable"
+    if st == 0:
+        return False, None, None, "unreachable"
     if not (st and 200 <= st < 300) or not isinstance(data, dict):
-        return False, None, None, False
-    entitled = (data.get("allow") is True
-                and data.get("level") == "execute"
-                and data.get("via_group") is None)
-    return entitled, data.get("level"), data.get("via_group"), True
+        return False, None, None, "unavailable"
+    grants = data.get("grants")
+    if not isinstance(grants, list):
+        return False, None, None, "unavailable"
+    rows = [g for g in grants
+            if isinstance(g, dict)
+            and g.get("grant_type") == "board"
+            and g.get("target") == project_slug]
+    entitled = any(g.get("level") == "execute" and g.get("direct") is True
+                   for g in rows)
+    best = None
+    for g in rows:
+        if (best is None or _DEV_EXTRACT_GRANT_RANK.get(g.get("level"), 0)
+                > _DEV_EXTRACT_GRANT_RANK.get(best.get("level"), 0)):
+            best = g
+    if best is None:
+        return entitled, None, None, "ok"
+    via = best.get("via_group")
+    if not (isinstance(via, str) and via):
+        via = "direct" if best.get("direct") is True else "wide"
+    return entitled, best.get("level"), via, "ok"
 
 
 def _dev_extract_privacy_line(card, project_slug, entitled: bool,
-                              level, via_group, check_ok: bool) -> str:
+                              level, via, state: str,
+                              runner: str = "?", source: str = "?",
+                              gw_unreachable: bool = False) -> str:
     """The one plain private-rows line for a dev-extract run (card #1410).
 
-    Names the actual reason: the entitlement basis, the missing execute
-    grant with its level+via, an unavailable grant check, an unresolvable
-    project, or no card at all. Carries no repo names, so it is safe on
-    every path (print, post, --json stderr).
+    Names the runner (name + where the identity came from) and the actual
+    reason: shown on the runner's own direct execute grant, else the
+    missing direct grant with the best matching board grant beside it (a
+    best ``level=execute`` there is group/wide, never the runner's own —
+    the line never claims otherwise), an unreachable or unavailable grant
+    check, an unresolvable project, or no card at all. Carries no repo
+    names, so it is safe on every path (print, post, --json stderr).
     """
+    who = f"runner {runner} via {source}"
     if card is None:
+        if gw_unreachable:
+            return ("private rows: withheld "
+                    "(gateway unreachable, so no project grant to check)")
         return "private rows: withheld (no card, so no project grant to check)"
     if not project_slug:
         return ("private rows: withheld (project unresolvable, "
                 "so no project grant to check)")
     if entitled:
         return (f"private rows: shown for project {project_slug} "
-                "(runner execute grant; repos from card-allowlist)")
-    if not check_ok:
+                f"({who}: direct execute grant; repos from card-allowlist)")
+    if state == "unreachable":
         return (f"private rows: withheld for project {project_slug} "
-                "(grant check unavailable)")
+                f"({who}: gateway unreachable, so no grant to check)")
+    if state != "ok":
+        return (f"private rows: withheld for project {project_slug} "
+                f"({who}: grant check unavailable)")
+    if level is None:
+        return (f"private rows: withheld for project {project_slug} "
+                f"({who}: no direct execute grant; no board grant at all)")
     lvl = level if isinstance(level, str) and level else "none"
-    via = via_group if isinstance(via_group, str) and via_group else "direct"
     return (f"private rows: withheld for project {project_slug} "
-            f"(no execute grant: level={lvl}, via={via})")
+            f"({who}: no direct execute grant; "
+            f"best board grant: level={lvl}, via={via})")
 
 
 def _say_line(resp: dict, card_id, to_node: str, *, reason: Optional[str] = None) -> str:
@@ -1809,12 +1855,22 @@ def run_board(argv: list[str]) -> int:
             # --print-only (print nothing-posted) or no --card (print only).
             from swarph_cli.commands import dev_extract as _de_mod
             card = None
+            gw_unreachable = False
             if args.card is not None:
-                st, card = _http_get_json(f"{gw}/board/cards/{args.card}", token)
+                try:
+                    st, card = _http_get_json(
+                        f"{gw}/board/cards/{args.card}", token)
+                except Exception as exc:
+                    st, card = 0, {"detail": str(exc)}
+                if st == 0:
+                    gw_unreachable = True
                 if st != 200:
                     if not args.symbol and not args.path:
-                        print(f"swarph board cards dev-extract: cannot read "
-                              f"card #{args.card}: {card.get('detail', card)}",
+                        _why = ("gateway unreachable"
+                                if gw_unreachable else
+                                f"cannot read card #{args.card}: "
+                                f"{card.get('detail', card)}")
+                        print(f"swarph board cards dev-extract: {_why}",
                               file=sys.stderr)
                         return 1
                     card = None
@@ -1849,15 +1905,20 @@ def run_board(argv: list[str]) -> int:
                         proj_slug = _de_mod.card_project_slug(card, _rows)
                 except Exception:
                     proj_slug = None
-            # card #1410 (msg 87862): entitlement resolves ONCE per run — a
-            # direct execute grant on the card's project, or public only.
+            # card #1410 rework: entitlement resolves ONCE per run — the
+            # runner's OWN direct execute grant on the card's project
+            # (GET /peers/{peer}/grants, direct row only), or public only.
             # Anything POSTED carries public rows only, whoever runs it.
-            entitled, _lvl, _via, _ok = (False, None, None, False)
+            runner_name, runner_source = _resolve_self_with_source(
+                args.self_name)
+            entitled, _lvl, _via, _state = (False, None, None, "unavailable")
             if card is not None and proj_slug:
-                entitled, _lvl, _via, _ok = _dev_extract_entitlement(
-                    gw, token, self_name, proj_slug)
+                entitled, _lvl, _via, _state = _dev_extract_entitlement(
+                    gw, token, runner_name, proj_slug)
             privacy_line = _dev_extract_privacy_line(
-                card, proj_slug, entitled, _lvl, _via, _ok)
+                card, proj_slug, entitled, _lvl, _via, _state,
+                runner=runner_name, source=runner_source,
+                gw_unreachable=gw_unreachable)
             posting = args.card is not None and not args.print_only
             post_safe = posting
             ex = _de_mod.build_extract(
