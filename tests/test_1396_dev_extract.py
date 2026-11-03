@@ -288,7 +288,8 @@ def test_withheld_same_name_named_without_detail(idx, fed):
     # mesh-gateway (SECRET-SIG) AND unknown-visibility mystery — the exact
     # shape of the reviewer's drop-on-meta-edge complaint.
     ex = _build(idx, fed, ["chat_sync"])
-    assert ex["withheld_hits"].get("chat_sync") == ["mesh-gateway", "mystery"]
+    assert ex["withheld_hits"].get("chat_sync") == {"mesh-gateway": False,
+                                                        "mystery": False}
     text = de.render(ex)
     # Visible copy printed in full ...
     assert "src/swarph_cli/gateway/server.py:3950" in text
@@ -298,10 +299,12 @@ def test_withheld_same_name_named_without_detail(idx, fed):
     assert ("- chat_sync: also defined in withheld mystery; "
             "the deployed copy may differ") in text
     # ... and no private detail anywhere: every mesh-gateway/mystery line is
-    # either the WITHHELD notice or the also-defined line.
+    # the WITHHELD notice, the also-defined line, or the r1 coverage line
+    # (which names repo names + card #1404 only — no paths, no symbols).
     for line in text.splitlines():
         if "mesh-gateway" in line or "mystery" in line:
-            assert ("WITHHELD" in line or "also defined in withheld" in line), line
+            assert ("WITHHELD" in line or "also defined in withheld" in line
+                    or line.startswith("index coverage is partial:")), line
     assert "SECRET-SIG" not in text
     assert "server.py:12" not in text  # the withheld file:line
     assert "m.py:1" not in text  # the unknown-visibility file:line
@@ -592,3 +595,119 @@ def test_fed_docs_present_but_empty_says_present_not_absent(idx, fed, tmp_path):
     assert "not linked yet" in text
     assert "not present on this box" not in text
     assert "absent on this box" not in text
+
+
+# ── #3776 r1: coverage line in every index-ok extract (one line) ──
+
+def _coverage_lines(text):
+    return [ln for ln in text.splitlines()
+            if ln.startswith("index coverage is partial:")]
+
+
+def test_coverage_line_prints_with_symbols_found(idx, fed):
+    ex = _build(idx, fed, ["chat_sync"])
+    cov = _coverage_lines(de.render(ex))
+    assert len(cov) == 1  # ONE line — the render cap counts lines
+    line = cov[0]
+    assert "0 rows for a whole main module" in line  # index can miss files
+    assert "card #1404" in line
+    assert "mesh-gateway" in line and "mystery" in line  # repo names only
+    assert ("a visible match is the indexed copy, "
+            "not evidence the deployed code is here") in line
+    # no withheld detail: no file paths, no symbol names of withheld repos.
+    assert "server.py" not in line
+    assert "SECRET-SIG" not in line
+    assert "chat_sync" not in line
+
+
+def test_coverage_line_prints_with_no_symbols_found(idx, fed):
+    ex = _build(idx, fed, ["zz_no_such_symbol_anywhere"])
+    cov = _coverage_lines(de.render(ex))
+    assert len(cov) == 1
+    assert "card #1404" in cov[0]
+    assert "indexed copy" in cov[0]
+
+
+def test_coverage_line_absent_when_index_unavailable(tmp_path, fed):
+    rep, wsp = fed
+    ex = de.build_extract(tokens=["chat_sync"], index_path=str(tmp_path / "no.db"),
+                          fed_report=str(rep), structurizr_ws=str(wsp))
+    text = de.render(ex)
+    assert "codegraph half: unavailable" in text
+    assert "index coverage is partial:" not in text
+
+
+# ── #3776 r2: swarph-cli gateway-copy note (that path shape only) ──
+
+_GW_LINE = ("swarph-cli gateway copy; "
+            "the deployed gateway is a withheld repo")
+
+
+def test_gateway_copy_note_prints_for_gateway_path(idx, fed):
+    ex = _build(idx, fed, ["chat_sync"])  # src/swarph_cli/gateway/server.py
+    assert _GW_LINE in de.render(ex)
+
+
+def test_gateway_copy_note_absent_for_other_paths(idx, fed):
+    ex = _build(idx, fed, ["board_cards"])  # .../commands/board.py, not gateway
+    text = de.render(ex)
+    assert "index coverage is partial:" in text  # r1 still prints
+    assert "gateway copy" not in text
+
+
+# ── #3776 r3: withheld test-helper rows worded as test code ──
+
+def _test_shape_db(tmp_path, withheld_rows):
+    p = tmp_path / "t.db"
+    con = sqlite3.connect(str(p))
+    con.execute(REPOS_DDL)
+    con.execute(SYMBOLS_DDL)
+    con.execute(EDGES_DDL)
+    con.execute("INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                ("swarph-cli", "s", str(tmp_path / "cli"),
+                 "public", "t", "full"))
+    con.execute("INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                ("mesh-gateway", "o/gw", str(tmp_path / "gw"),
+                 "private", "t", "full"))
+    con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (1, "swarph-cli", "chat_sync", "function",
+                 "src/swarph_cli/gateway/server.py", 3950, "", "", "", ""))
+    for i, fp in enumerate(withheld_rows, start=2):
+        con.execute("INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (i, "mesh-gateway", "chat_sync", "function",
+                     fp, 7, "", "", "", ""))
+    con.commit()
+    con.close()
+    return p
+
+
+def _test_shape_extract(tmp_path, fed, withheld_rows):
+    p = _test_shape_db(tmp_path, withheld_rows)
+    rep, wsp = fed
+    return de.build_extract(tokens=["chat_sync"], index_path=str(p),
+                            fed_report=str(rep), structurizr_ws=str(wsp),
+                            fed_docs_db=str(tmp_path / "no-fed.db"),
+                            merged_lookup=lambda path: None)
+
+
+def test_withheld_test_helper_worded_as_test_code(tmp_path, fed):
+    # The withheld twin exists ONLY under tests/ (a test helper): the line
+    # must say test code, not imply a deployed copy that differs.
+    ex = _test_shape_extract(tmp_path, fed, ["tests/test_server.py"])
+    assert ex["withheld_hits"].get("chat_sync") == {"mesh-gateway": True}
+    text = de.render(ex)
+    assert ("- chat_sync: also defined in withheld mesh-gateway (test code); "
+            "the deployed copy may differ") in text
+    assert "- chat_sync: also defined in withheld mesh-gateway;" not in text
+
+
+def test_withheld_mixed_test_and_real_rows_uses_plain_wording(tmp_path, fed):
+    # A real (deployed-shape) row exists alongside the tests/ twin, so the
+    # plain line holds — the (test code) qualifier is for test-only repos.
+    ex = _test_shape_extract(tmp_path, fed,
+                             ["tests/test_server.py", "server.py"])
+    assert ex["withheld_hits"].get("chat_sync") == {"mesh-gateway": False}
+    text = de.render(ex)
+    assert ("- chat_sync: also defined in withheld mesh-gateway; "
+            "the deployed copy may differ") in text
+    assert "(test code)" not in text

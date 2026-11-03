@@ -195,27 +195,46 @@ def find_symbols(con, token: str, visible: list, limit: int = ROW_LIMIT) -> list
     ]
 
 
+def _is_test_path(file_path: str) -> bool:
+    """True when `file_path` lives under a tests/ dir (test code, not deployed).
+
+    A same-named row under tests/ is a test helper: the renderer must word
+    that line as test code instead of implying a deployed copy that differs.
+    """
+    fp = (file_path or "").replace("\\", "/")
+    return fp == "tests" or fp.startswith("tests/") or "/tests/" in fp
+
+
 def withheld_symbol_repos(con, token: str, withheld: list,
-                          limit: int = ROW_LIMIT) -> list:
+                          limit: int = ROW_LIMIT) -> dict:
     """Exact-name symbol match in WITHHELD repos — repo names only, no detail.
 
     Fail-closed companion to `find_symbols`: when a target token matches a
     symbol in a withheld (private/unknown-visibility) repo, the extract names
     ONLY the repo (never file, line, signature, or count). Repo names are not
     a new leak — the WITHHELD list already prints them with the reason.
+
+    Returns {repo: test_only}: `test_only` is True when EVERY matched row
+    for that repo lives under tests/ (a test helper, not deployed code), so
+    the renderer words the line as test code. The query reads file_path only
+    to make that distinction — it is never printed.
     """
     if not withheld or not token:
-        return []
+        return {}
     qmarks = ",".join("?" * len(withheld))
     try:
         rows = con.execute(
-            "SELECT DISTINCT repo FROM symbols WHERE name = ?"
+            "SELECT DISTINCT repo, file_path FROM symbols WHERE name = ?"
             f" AND repo IN ({qmarks}) LIMIT ?",
             [token, *withheld, limit],
         ).fetchall()
     except sqlite3.Error:
-        return []
-    return sorted(r[0] for r in rows)
+        return {}
+    by_repo: dict = {}
+    for repo, fp in rows:
+        by_repo.setdefault(repo, []).append(fp or "")
+    return {repo: (bool(fps) and all(_is_test_path(f) for f in fps))
+            for repo, fps in sorted(by_repo.items())}
 
 
 def find_symbols_by_path(con, path_arg: str, visible: list,
@@ -574,10 +593,9 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
         for tok in tokens[:MAX_AUTO_TOKENS]:
             for s in find_symbols(con, tok, visible):
                 _add_sym(s)
-            for repo in withheld_symbol_repos(con, tok, withheld):
-                withheld_hits.setdefault(tok, [])
-                if repo not in withheld_hits[tok]:
-                    withheld_hits[tok].append(repo)
+            for repo, test_only in withheld_symbol_repos(
+                    con, tok, withheld).items():
+                withheld_hits.setdefault(tok, {})[repo] = test_only
             routes.extend(r for r in find_routes(con, tok, visible)
                           if r["name"] not in {x["name"] for x in routes})
             stem = _target_stem(tok)
@@ -690,6 +708,22 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
         lines.append(f"codegraph half: {idx.get('status', 'unavailable')}")
     else:
         lines.append("## codegraph half (index.db, READ-ONLY)")
+        # Card #1404: the index can miss WHOLE files (mesh-gateway server.py,
+        # 1.12 MiB, exceeds the 1 MiB file limit, so the deployed chat_sync
+        # has 0 rows) — a visible match is the indexed copy, not proof the
+        # deployed code is here. One line always (index ok); repo names and
+        # the card number only, never withheld file paths or symbol names.
+        _cov_names = ", ".join(ex.get("withheld", []) or [])
+        if _cov_names:
+            lines.append(
+                f"index coverage is partial: withheld {_cov_names} can have "
+                "0 rows for a whole main module (card #1404); a visible match "
+                "is the indexed copy, not evidence the deployed code is here")
+        else:
+            lines.append(
+                "index coverage is partial: a withheld repo's main module can "
+                "have 0 rows (card #1404); a visible match is the indexed "
+                "copy, not evidence the deployed code is here")
         for s in ex.get("symbols", [])[:ROW_LIMIT]:
             loc = f"{s['file_path']}:{s['start_line']}"
             n = s.get("callers")
@@ -699,14 +733,29 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
             lines.append(f"- {s['name']} [{s['kind']}] {s['repo']} {loc} — {callers}")
             if s.get("signature"):
                 lines.append(f"  sig: {s['signature'][:120]}")
+            # Card #1404: swarph-cli also carries a gateway copy — say so with
+            # the hit, since the deployed gateway is a withheld repo. Only
+            # for this path shape (swarph-cli rows under swarph_cli/gateway/).
+            if (s.get("repo") == "swarph-cli"
+                    and "swarph_cli/gateway/" in (s.get("file_path") or "")):
+                lines.append("  swarph-cli gateway copy; "
+                             "the deployed gateway is a withheld repo")
         if not ex.get("symbols"):
             lines.append("- 0 symbols (floor: exact-name match only, FTS broader search not run)")
         if len(ex.get("symbols", [])) > ROW_LIMIT:
             cut_notes.append(f"symbols cut after {ROW_LIMIT}")
         for tok in ex.get("tokens", []):
-            for repo in (ex.get("withheld_hits") or {}).get(tok, []):
-                lines.append(f"- {tok}: also defined in withheld {repo}; "
-                             "the deployed copy may differ")
+            _hits = (ex.get("withheld_hits") or {}).get(tok, {})
+            if isinstance(_hits, list):  # legacy shape: no test/code split
+                _hits = {r: False for r in _hits}
+            for repo, test_only in sorted(_hits.items()):
+                if test_only:
+                    lines.append(
+                        f"- {tok}: also defined in withheld {repo} "
+                        "(test code); the deployed copy may differ")
+                else:
+                    lines.append(f"- {tok}: also defined in withheld {repo}; "
+                                 "the deployed copy may differ")
         lines.append("")
         routes = ex.get("routes", [])
         if routes:
