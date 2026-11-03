@@ -51,8 +51,11 @@ jobs:
         set -e
         echo "kernel: $(uname -s) $(uname -m)"
         echo "checkout HEAD: $(git rev-parse HEAD)"
-        # NAMES only, never values: a secret-shaped name in the runner would be a finding.
-        if env | cut -d= -f1 | grep -E -i 'SECRET|PASSWORD|MESH|TAILSCALE|^GH_TOKEN$|^GITHUB_TOKEN$|^INPUT_'; then
+        # NAMES only, never values (compgen -e lists exported variable names; `env | cut`
+        # would also print the lines of this multi-line command, which sits in an env value).
+        # A secret-shaped name in the runner would be a finding.
+        compgen -e | sort | tr '\n' ' ' | fold -w 200; echo
+        if compgen -e | grep -E -i 'SECRET|PASSWORD|MESH|TAILSCALE|^GH_TOKEN$|^GITHUB_TOKEN$|^INPUT_'; then
           echo "SECRET-SHAPED ENVIRONMENT NAME PRESENT"; exit 3
         fi
         echo "no secret-shaped environment names"
