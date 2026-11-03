@@ -1778,7 +1778,10 @@ def run_board(argv: list[str]) -> int:
                 fed_report=args.fed_report, structurizr_ws=args.structurizr_ws,
                 card=card, paths=paths)
             if getattr(args, "json", False):
-                print(json.dumps(ex, indent=2, default=str))
+                # card #1396: redact WITHHELD registry entries (no private
+                # paths/index times in machine-readable output).
+                print(json.dumps(_de_mod.redact_for_json(ex), indent=2,
+                                 default=str))
                 return 0
             body = _de_mod.render(ex, max_lines=args.max_lines)
             if args.print_only or args.card is None:

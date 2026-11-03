@@ -104,6 +104,37 @@ def open_ro_index(index_path: str, timeout_ms: int = 2000):
     return con
 
 
+REQUIRED_INDEX_TABLES = ("repos", "symbols")
+
+
+def probe_index(con) -> str | None:
+    """One-shot health probe: None when the index is usable, else a reason.
+
+    `open_ro_index` succeeds on garbage (connect itself never reads), and
+    every row query swallows `sqlite3.Error` into `[]` while `repo_registry`
+    swallows it into `{}` — so without this probe a 0-byte file, garbage
+    bytes, or a schema-less db all render as status ok with '0 symbols'.
+    The floor rule forbids that: a zero must never be a fact about a broken
+    source. Callers treat any non-None return as
+    `index.status = 'unavailable: <reason>'`.
+    """
+    try:
+        have = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' LIMIT 50"
+        ).fetchall()}
+    except sqlite3.Error as exc:
+        return f"unreadable index ({exc})"
+    missing = [t for t in REQUIRED_INDEX_TABLES if t not in have]
+    if missing:
+        return f"index missing required tables: {', '.join(missing)}"
+    try:
+        con.execute("SELECT name FROM repos LIMIT 1").fetchall()
+        con.execute("SELECT name FROM symbols LIMIT 1").fetchall()
+    except sqlite3.Error as exc:
+        return f"unreadable index ({exc})"
+    return None
+
+
 def repo_registry(con) -> dict:
     """{repo: {visibility, indexed_at, path}} — one bounded row query."""
     out = {}
@@ -330,8 +361,38 @@ def covering_tests(con, stem: str, visible: list, limit: int = ROW_LIMIT) -> lis
     ]
 
 
-def read_fed_report(path: str, repos: list, line_cap: int = FED_REPORT_LINE_CAP) -> dict:
-    """Grep the nightly federation report for lines citing `repos` (capped)."""
+def _names_whole_token(text: str, name: str) -> bool:
+    """True when `name` occurs in `text` as a whole token (fail-closed match).
+
+    Repo names contain hyphens, so a bare `in` (or `\\b`) over-matches:
+    withheld `mesh` would match visible `mesh-gateway`. The token is whole
+    only when no identifier-ish char (letters, digits, `_`, `.`, `-`)
+    touches either side.
+    """
+    return re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(name or "") +
+                     r"(?![A-Za-z0-9_.-])", text or "") is not None
+
+
+def _drop_withheld_lines(lines: list, withheld) -> list:
+    """Drop lines naming a WITHHELD repo (fail-closed: a hit line that cannot
+    be kept without naming the private repo is dropped, never redacted in
+    place — partial-line surgery could leave a misleading half-fact)."""
+    withheld = list(withheld or [])
+    if not withheld:
+        return list(lines)
+    return [ln for ln in lines
+            if not any(_names_whole_token(ln, w) for w in withheld)]
+
+
+def read_fed_report(path: str, repos: list, line_cap: int = FED_REPORT_LINE_CAP,
+                    withheld=()) -> dict:
+    """Grep the nightly federation report for lines citing `repos` (capped).
+
+    Lines that ALSO name a WITHHELD repo (dependency arrows/layers list the
+    private neighbour on the same line) are dropped via `_drop_withheld_lines`
+    — the federation half must never leak a private name through a visible
+    repo's line.
+    """
     lines: list = []
     try:
         # encoding pinned: the report carries box-drawing/arrow glyphs and the
@@ -354,14 +415,22 @@ def read_fed_report(path: str, repos: list, line_cap: int = FED_REPORT_LINE_CAP)
         for ln in lines
         if any(r in ln for r in repos) and ln.strip() and not ln.startswith("#")
     ][:ROW_LIMIT]
+    hits = _drop_withheld_lines(hits, withheld)
     return {
         "status": "ok", "generated": generated or "unavailable: no header stamp",
         "hits": hits, "cut": cut, "scanned": min(len(lines), line_cap),
     }
 
 
-def read_structurizr(path: str, repos: list, rel_cap: int = STRUCTURIZR_REL_CAP) -> dict:
-    """Containers/relationships citing `repos` (bounded JSON scan)."""
+def read_structurizr(path: str, repos: list, rel_cap: int = STRUCTURIZR_REL_CAP,
+                     withheld=()) -> dict:
+    """Containers/relationships citing `repos` (bounded JSON scan).
+
+    Relationship entries whose label names a WITHHELD repo (a private
+    container) are dropped — same fail-closed rule as `read_fed_report`.
+    `matched`/`deploy_units` name only visible repos / host groups, so they
+    need no filtering.
+    """
     try:
         with open(path, encoding="utf-8") as fh:
             ws = json.load(fh)
@@ -405,6 +474,7 @@ def read_structurizr(path: str, repos: list, rel_cap: int = STRUCTURIZR_REL_CAP)
             entry = f"{label} ({rel.get('description', 'depends')})"
             if entry not in downstream:
                 downstream.append(entry)
+    downstream = _drop_withheld_lines(downstream, withheld)
     return {
         "status": "ok",
         "matched": matched[:ROW_LIMIT],
@@ -448,6 +518,32 @@ def indexed_sha(repo_path: str | None) -> str | None:
         return None
 
 
+WITHHOLD_REASON = ("not public: card artifacts have no per-reader "
+                   "allowlist, so only public repos are shown")
+
+
+def redact_for_json(ex: dict) -> dict:
+    """A `--json`-safe copy of the extract: WITHHELD registry entries keep
+    only `{name, visibility, reason}` — `path` and `indexed_at` are dropped.
+
+    The withholding rule exists to keep private-repo facts off card
+    artifacts; dumping the raw registry (absolute paths + index times) into
+    machine-readable `--json` re-opens exactly that leak on the local box.
+    Visible repos keep everything. The input dict is never mutated, so the
+    text renderer keeps using the full extract.
+    """
+    out = dict(ex)
+    withheld = set(ex.get("withheld") or [])
+    out["registry"] = {
+        name: ({"name": name,
+                "visibility": (meta or {}).get("visibility"),
+                "reason": WITHHOLD_REASON}
+               if name in withheld else meta)
+        for name, meta in (ex.get("registry") or {}).items()
+    }
+    return out
+
+
 def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
                   fed_report: str = DEFAULT_FED_REPORT,
                   structurizr_ws: str = DEFAULT_STRUCTURIZR_WS,
@@ -462,6 +558,9 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
     except sqlite3.Error as exc:
         return {"index": {"status": f"unavailable: {exc}"}, "tokens": tokens}
     try:
+        bad = probe_index(con)
+        if bad is not None:
+            return {"index": {"status": f"unavailable: {bad}"}, "tokens": tokens}
         registry = repo_registry(con)
         visible, withheld = split_visible(registry)
         syms, routes, tests = [], [], []
@@ -503,8 +602,8 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
             con.close()
         except Exception:
             pass
-    fed = read_fed_report(fed_report, repos_hit)
-    struct = read_structurizr(structurizr_ws, repos_hit)
+    fed = read_fed_report(fed_report, repos_hit, withheld=withheld)
+    struct = read_structurizr(structurizr_ws, repos_hit, withheld=withheld)
     pins = {}
     for repo in repos_hit:
         meta = registry.get(repo, {})
@@ -528,8 +627,11 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
         "visible": visible, "withheld": withheld, "registry": registry,
         "federation_report": fed, "structurizr": struct,
         "fed_build": fed_build,
+        # (d) absence is claimed ONLY when the file truly is absent; a
+        # present-but-empty (or otherwise unreadable) db says so explicitly.
         "fed_docs": ("unavailable: fed-docs.db not present on this box"
-                     if not os.path.exists(fed_docs_db) else fed_docs_db),
+                     if not os.path.exists(fed_docs_db)
+                     else f"present ({fed_docs_db}) — citation lookup not linked yet"),
         "pins": pins,
         "card": ({"id": card.get("id"), "title": card.get("title")}
                  if card else None),
@@ -671,9 +773,15 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES) -> str:
                 lines.append(f"downstream: {FLOOR_DOWNSTREAM}")
             if st.get("cut"):
                 cut_notes.append(f"structurizr rels cut after {STRUCTURIZR_REL_CAP}")
-    lines.append(f"fed-docs.db: {ex.get('fed_docs')} "
-                "(cards/docs/memories citation index — absent on this box, "
-                "so citations beyond the subject card are not linked yet)")
+    _fed_docs = ex.get("fed_docs") or ""
+    if isinstance(_fed_docs, str) and _fed_docs.startswith("unavailable"):
+        lines.append(f"fed-docs.db: {_fed_docs} "
+                     "(cards/docs/memories citation index — absent on this box, "
+                     "so citations beyond the subject card are not linked yet)")
+    else:
+        lines.append(f"fed-docs.db: {_fed_docs} "
+                     "(cards/docs/memories citation index — present on this box, "
+                     "but citations beyond the subject card are not linked yet)")
     lines.append("")
     lines.append("freshness (STALE when fed build < last repo.merged):")
     for repo, p in ex.get("pins", {}).items():

@@ -452,3 +452,143 @@ def test_caller_cell_removed_and_help_states_posting():
     desc = de.build_parser().description
     assert "with --card and without --print-only it posts the extract" in desc
     assert "Dry-run by default" not in desc
+
+
+# ── #3757(a): unreadable index prints unavailable, never ok-with-zeros ──
+
+def _unavailable_ex(tmp_path, fed, index_path):
+    rep, wsp = fed
+    return de.build_extract(tokens=["chat_sync"], index_path=str(index_path),
+                            fed_report=str(rep), structurizr_ws=str(wsp),
+                            fed_docs_db=str(tmp_path / "no-fed.db"),
+                            merged_lookup=lambda p: None)
+
+
+def _assert_unavailable_index(ex):
+    assert "unavailable" in ex["index"]["status"]
+    text = de.render(ex)
+    assert "codegraph half: unavailable" in text
+    assert "## codegraph half (index.db" not in text
+    as_json = json.loads(json.dumps(ex, default=str))
+    assert "unavailable" in as_json["index"]["status"]
+
+
+def test_zero_byte_index_prints_unavailable(tmp_path, fed):
+    p = tmp_path / "empty.db"
+    p.write_bytes(b"")
+    _assert_unavailable_index(_unavailable_ex(tmp_path, fed, p))
+
+
+def test_garbage_bytes_index_prints_unavailable(tmp_path, fed):
+    p = tmp_path / "garbage.db"
+    p.write_bytes(b"\x00\x01definitely not a sqlite db\xff" * 16)
+    _assert_unavailable_index(_unavailable_ex(tmp_path, fed, p))
+
+
+def test_schemaless_sqlite_index_prints_unavailable(tmp_path, fed):
+    p = tmp_path / "other.db"
+    con = sqlite3.connect(str(p))
+    con.execute("CREATE TABLE other(x TEXT)")
+    con.commit()
+    con.close()
+    _assert_unavailable_index(_unavailable_ex(tmp_path, fed, p))
+
+
+# ── #3757(b): federation half never names a WITHHELD repo ──
+
+def test_federation_half_drops_lines_naming_withheld_repo(idx, tmp_path):
+    rep = tmp_path / "fed.txt"
+    rep.write_text(
+        "# swarph federation — cross-repo connection map\n"
+        "# generated 2026-11-02T04:45:01Z by fed_refresh.sh (card #44 part 4)\n"
+        "\n"
+        "  Layer 2:\n"
+        "    • swarph-cli   [10720 nodes/26662 edges]  ──depends on──▶ mesh-gateway\n"
+        "    • swarph-cli       → (nothing depends on it)\n",
+        encoding="utf-8",
+    )
+    ws = {"model": {"softwareSystems": [
+        {"name": "Swarph Federation", "containers": [
+            {"id": "8", "name": "swarph-cli", "group": "lab-ovh",
+             "relationships": [{"destinationId": "7",
+                                "description": "imports"},
+                               {"destinationId": "9",
+                                "description": "calls"}]},
+            {"id": "7", "name": "mesh-gateway", "group": "lab-ovh",
+             "relationships": []},
+            {"id": "9", "name": "swarph-mesh", "group": "lab-ovh",
+             "relationships": []},
+        ]},
+    ]}}
+    wsp = tmp_path / "ws.json"
+    wsp.write_text(json.dumps(ws))
+    ex = de.build_extract(tokens=["chat_sync"], index_path=str(idx),
+                          fed_report=str(rep), structurizr_ws=str(wsp),
+                          fed_docs_db=str(tmp_path / "no-fed.db"),
+                          merged_lookup=lambda p: None)
+    # mixed fed-report line dropped fail-closed; pure-visible line kept.
+    assert ex["federation_report"]["status"] == "ok"
+    assert ex["federation_report"]["hits"] == \
+        ["• swarph-cli       → (nothing depends on it)"]
+    # private container rel dropped; public rel + deploy unit kept.
+    assert ex["structurizr"]["downstream"] == ["swarph-mesh (calls)"]
+    assert ex["structurizr"]["deploy_units"] == ["lab-ovh"]
+    text = de.render(ex)
+    fed_half = text.split("## federation half")[1]
+    assert "mesh-gateway" not in fed_half  # no private name via fed lines
+    assert "swarph-cli" in fed_half  # visible subject still shown
+    assert "nothing depends on it" in fed_half
+
+
+# ── #3757(c): --json redacts WITHHELD registry entries ──
+
+def test_json_redacts_withheld_registry_paths(idx, fed, monkeypatch, capsys):
+    from swarph_cli.commands import board as board_mod
+    rep, wsp = fed
+    monkeypatch.setattr(board_mod, "_resolve_self_name", lambda *_a, **_k: "lab-ovh")
+    monkeypatch.setattr(board_mod, "_resolve_token", lambda *_a, **_k: "tok")
+    rc = board_mod.run_board(
+        ["cards", "dev-extract", "--symbol", "chat_sync", "--json",
+         "--index", str(idx), "--fed-report", str(rep),
+         "--structurizr-ws", str(wsp)])
+    out = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(out.out)
+    priv = payload["registry"]["mesh-gateway"]
+    assert set(priv) == {"name", "visibility", "reason"}
+    assert "path" not in json.dumps(payload["registry"]["mesh-gateway"])
+    assert payload["registry"]["mesh-gateway"]["visibility"] == "private"
+    assert set(payload["registry"]["mystery"]) == {"name", "visibility", "reason"}
+    assert str(idx.parent / "gw") not in out.out  # no withheld path leaks
+    assert "2026-11-03T00:31:37" not in out.out  # no withheld indexed_at leaks
+    # visible pins survive redaction.
+    assert payload["registry"]["swarph-cli"]["path"] == str(idx.parent / "cli")
+    assert payload["pins"]["swarph-cli"]["sha"] == \
+        "5e4283274c3638a78dd4736bcd0a8894616b43b1"
+
+
+def test_redact_for_json_does_not_mutate_input(idx, fed):
+    ex = _build(idx, fed, ["chat_sync"])
+    before = json.dumps(ex, default=str)
+    red = de.redact_for_json(ex)
+    assert json.dumps(ex, default=str) == before  # input untouched
+    assert red["registry"]["mesh-gateway"].get("path") is None
+    assert red["registry"]["swarph-cli"]["path"] is not None
+    assert de.render(ex).find("WITHHELD: mesh-gateway") != -1  # text intact
+
+
+# ── #3757(d): fed-docs.db wording claims absence only when absent ──
+
+def test_fed_docs_present_but_empty_says_present_not_absent(idx, fed, tmp_path):
+    present = tmp_path / "fed-docs.db"
+    present.write_bytes(b"")  # present but empty
+    rep, wsp = fed
+    ex = de.build_extract(tokens=["chat_sync"], index_path=str(idx),
+                          fed_report=str(rep), structurizr_ws=str(wsp),
+                          fed_docs_db=str(present),
+                          merged_lookup=lambda p: None)
+    text = de.render(ex)
+    assert f"present ({present})" in text
+    assert "not linked yet" in text
+    assert "not present on this box" not in text
+    assert "absent on this box" not in text
