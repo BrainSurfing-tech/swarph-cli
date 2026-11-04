@@ -110,25 +110,29 @@ class _Rig:
 # fresh wake, a DM 60s later — no second wake inside N (600s).
 def test_item1_tmux_fresh_wake_no_double_wake(monkeypatch, tmp_path):
     rig = _Rig(monkeypatch, tmp_path, "tmux")
-    unread_by_t = {T0: 3, T0 + 30: 2, T0 + 60: 1}
-
-    def first_episode(t):
-        if t == T0:
-            rig.arrive(1)
-        rig.unread["n"] = unread_by_t[t]
-
-    rig.drive(T0, T0 + 60, on_poll=first_episode)
+    # Episode with drain progress, recorded on owed polls: unread 3 -> 2 -> 1
+    # while DMs 1, 2, 3 arrive. The progress stamps land in the ledger.
+    rig.unread["n"] = 3
+    rig.arrive(1)
+    rig.poll(T0)                              # fresh wake
+    rig.unread["n"] = 2
+    rig.arrive(2)
+    rig.poll(T0 + 30)                         # drain progress, no send
+    rig.unread["n"] = 1
+    rig.arrive(3)
+    rig.poll(T0 + 60)                         # drain progress, no send
     assert rig.send_times() == [0]
+    assert rig.led["wake_progress_at"] == T0 + 60
     rig.unread["n"] = 0                       # drain
     rig.poll(T0 + 90)
     assert not rig.led.get("wake_outstanding")
     rig.drive(T0 + 120, T0 + 10860)           # 3h idle, nothing owed
     fresh_at = T0 + 10890
     rig.unread["n"] = 2
-    rig.arrive(2)
+    rig.arrive(4)
     rig.poll(fresh_at)                        # fresh wake
     assert rig.send_times() == [0, 10890]
-    rig.arrive(3)                             # a DM 60s later
+    rig.arrive(5)                             # a DM 60s later
     rig.drive(fresh_at + 60, fresh_at + 570)
     assert rig.send_times() == [0, 10890], (
         "a DM 60s after a fresh Tmux wake must not wake again inside N")
