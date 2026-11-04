@@ -3824,8 +3824,20 @@ def _monitor_deliver(state: MonitorState) -> None:
                 # on EVERY poll, also when nothing is newly owed — the
                 # lost-wake case (one unread DM, no later DM) otherwise
                 # never refreshed, and its drain progress was discarded.
+                # The engine runs the shared verdict itself (recording any
+                # nonzero drain progress in the ledger) and calls deliver()
+                # only when a refresh send is actually due, so a hold poll
+                # costs no sink read (e.g. no tmux pane capture).
                 if not led.get("wake_outstanding"):
                     continue      # this sink owes nothing, no wake stands
+                if unread is None:
+                    continue      # unreadable: the flag stands, no send
+                verdict = _standing_wake_verdict(led, unread)
+                if verdict == "progress":
+                    changed = True  # persist the re-anchored progress clock
+                    continue
+                if verdict != "expired":
+                    continue      # hold: nothing material changed
                 refresh_for = int(led.get("standing_refresh_for_id", -1))
                 refresh_count = (int(led.get("standing_refresh_count", 0))
                                  if refresh_for == delivered else 0)

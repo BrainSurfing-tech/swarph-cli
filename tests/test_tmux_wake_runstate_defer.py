@@ -262,6 +262,10 @@ class _MonitorStubState(_StubState):
         led["last_delivered_id"] = delivered_id
         led["last_delivery_at"] = time.time() - 3600
         led["wake_outstanding"] = True
+        # Card #1452 rework 1: every wake sent since #616 stamps its
+        # injection time; the stub models a wake injected a minute ago
+        # (inside the trust limit), so a caught-up poll is a hold.
+        led["last_wake_injected_at"] = time.time() - 60
 
 
 def _poll(monkeypatch, state, unread):
