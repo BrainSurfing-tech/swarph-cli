@@ -75,8 +75,9 @@ def test_no_second_send_while_outstanding(monkeypatch, fake_state):
     sink = mesh.MuseSink("sac-961-ingress-2")
     assert sink.deliver(fake_state, [_dm(101)], 101) is True
     assert len(calls) == 1
-    # Standing wake: second delivery reports delivered with no new send.
-    assert sink.deliver(fake_state, [_dm(102)], 102) is True
+    # Card #1452: standing wake, no send this poll -> held OWED (None),
+    # never reported delivered.
+    assert sink.deliver(fake_state, [_dm(102)], 102) is None
     assert len(calls) == 1
 
 
