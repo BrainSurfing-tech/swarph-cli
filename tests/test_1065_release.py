@@ -147,10 +147,11 @@ esac
     env["RELEASE_VERIFY_CMD"] = "true"
     env["RELEASE_PYPI_SLEEP"] = "0"
     env["RELEASE_INSTALL_EPOCH"] = "1"
-    proc = _run(["bash", str(RELEASE), "--resume", "9.9.9"], env)
+    proc = _run(["bash", str(RELEASE), "--resume", "--expected-head", head, "9.9.9"], env)
     assert proc.returncode == 0, proc.stderr + proc.stdout
     text = log.read_text()
     assert "MERGE" in text
+    assert f"--match-head-commit {head}" in text
     assert "pip install --no-cache-dir --user --break-system-packages swarph-cli==9.9.9" in text
     assert "pip show" not in text
     sudo_lines = [ln for ln in sudo_log.read_text().splitlines() if ln]
@@ -163,6 +164,178 @@ esac
     assert f"tag -a v9.9.9 {merge}" in text
     assert f"tag -a v9.9.9 {head}" not in text
     assert f"tag v9.9.9 {head}" not in text
+
+
+@needs_bash
+def test_old_argument_parser_refuses_new_flag_before_commands(tmp_path):
+    called = tmp_path / "called"
+    old_parser = '''set -eu
+VERSION=""
+usage() { exit 2; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run|--resume|--restart-only) ;;
+    -h|--help) usage ;;
+    *) if [ -n "$VERSION" ]; then usage; fi; VERSION="$1" ;;
+  esac
+  shift
+done
+gh
+git
+'''
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("gh", "git"):
+        command = bin_dir / name
+        command.write_text(f"#!/bin/sh\ntouch '{called}'\n")
+        command.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    proc = subprocess.run(["bash", "-s", "--", "--resume", "--expected-head", "a" * 40, "9.9.9"],
+                          input=old_parser, env=env, text=True, capture_output=True)
+    assert proc.returncode == 2
+    assert not called.exists()
+
+
+@needs_bash
+@pytest.mark.parametrize("scenario", ["moved", "expected_mismatch", "old_approval", "normal", "invalid_expected"])
+def test_resume_pins_approved_head(tmp_path, scenario):
+    head = "a" * 40
+    log = tmp_path / "gh.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(f'''#!/bin/bash
+printf '%s\\n' "$*" >> "{log}"
+case "$*" in
+  *"pr list"*) echo 7 ;;
+  *"pr view"*) echo {head} ;;
+  *"/reviews"*) echo '[{{"state":"APPROVED","commit_id":"{("b" * 40) if scenario == "old_approval" else head}","user":{{"login":"reviewers-pixel"}},"id":1}}]' ;;
+  *"auth token"*) echo fake-token ;;
+  *"pr merge"*)
+    case "$*" in *"--match-head-commit {head}"*) ;; *) exit 90 ;; esac
+    {"exit 91" if scenario == "moved" else "exit 92"} ;;
+  *) exit 99 ;;
+esac
+''')
+    gh.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    if scenario == "expected_mismatch":
+        expected = "b" * 40
+    elif scenario == "invalid_expected":
+        expected = "invalid"
+    else:
+        expected = head
+    proc = _run(["bash", str(RELEASE), "--resume", "--expected-head", expected, "9.9.9"], env)
+    assert proc.returncode == {"moved": 91, "normal": 92, "expected_mismatch": 2,
+                               "old_approval": 2, "invalid_expected": 2}[scenario]
+    calls = log.read_text() if log.exists() else ""
+    assert ("pr merge" in calls) == (scenario in {"moved", "normal"})
+
+
+@needs_bash
+@pytest.mark.parametrize("with_expected", [False, True], ids=["manual", "expected"])
+def test_merge_pins_original_read_not_later_head(tmp_path, with_expected):
+    first, later = "a" * 40, "b" * 40
+    log, seen = tmp_path / "gh.log", tmp_path / "seen"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(f'''#!/bin/bash
+printf '%s\\n' "$*" >> "{log}"
+case "$*" in
+  *"pr list"*) echo 7 ;;
+  *"pr view"*) if [ -e "{seen}" ]; then echo {later}; else touch "{seen}"; echo {first}; fi ;;
+  *"/reviews"*) echo '[{{"state":"APPROVED","commit_id":"{first}","user":{{"login":"reviewers-pixel"}},"id":1}}]' ;;
+  *"auth token"*) echo fake-token ;;
+  *"pr merge"*)
+    if [ "$*" = "pr merge 7 --repo BrainSurfing-tech/swarph-cli --merge --match-head-commit {first}" ]; then exit 91; fi
+    exit 92 ;;
+  *) exit 99 ;;
+esac
+''')
+    gh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    args = ["bash", str(RELEASE), "--resume"]
+    if with_expected:
+        args += ["--expected-head", first]
+    proc = _run(args + ["9.9.9"], env)
+    calls = log.read_text().splitlines()
+    merges = [line for line in calls if line.startswith("pr merge ")]
+    assert merges == [f"pr merge 7 --repo BrainSurfing-tech/swarph-cli --merge --match-head-commit {first}"]
+    assert proc.returncode == 91
+
+
+@needs_bash
+def test_expected_head_cannot_replace_observed_head(tmp_path):
+    observed, expected = "a" * 40, "b" * 40
+    log = tmp_path / "gh.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(f'''#!/bin/bash
+printf '%s\\n' "$*" >> "{log}"
+case "$*" in
+  *"pr list"*) echo 7 ;;
+  *"pr view"*) echo {observed} ;;
+  *"/reviews"*) echo '[{{"state":"APPROVED","commit_id":"{expected}","user":{{"login":"reviewers-pixel"}},"id":1}}]' ;;
+  *"auth token"*) echo fake-token ;;
+  *"pr merge"*) exit 91 ;;
+  *) exit 99 ;;
+esac
+''')
+    gh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    proc = _run(["bash", str(RELEASE), "--resume", "--expected-head", expected, "9.9.9"], env)
+    calls = log.read_text().splitlines()
+    assert not any(line.startswith("pr merge ") for line in calls)
+    assert any(line.startswith("pr view ") for line in calls)
+    assert proc.returncode == 2
+    assert "differs from --expected-head" in proc.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize("options", [[], ["--dry-run"], ["--restart-only"],
+                                     ["--resume", "--dry-run"], ["--resume", "--restart-only"]])
+def test_expected_head_requires_actual_resume(tmp_path, options):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    called = tmp_path / "called"
+    for name in ("gh", "git", "sudo", "pip", "curl", "systemctl"):
+        stub = bin_dir / name
+        stub.write_text(f"#!/bin/sh\nprintf '%s\\n' {name} >> '{called}'\nexit 99\n")
+        stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    proc = _run(["bash", str(RELEASE), *options, "--expected-head", "a" * 40, "9.9.9"], env)
+    assert not called.exists()
+    assert proc.returncode == 2
+    assert "usage:" in proc.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize("expected", ["", "invalid", "A" * 40, "a" * 39, "a" * 41],
+                         ids=["empty", "invalid", "uppercase", "short", "long"])
+def test_invalid_expected_head_refuses_before_gh(tmp_path, expected):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    called = tmp_path / "called"
+    gh = bin_dir / "gh"
+    gh.write_text(f'''#!/bin/bash
+touch "{called}"
+case "$*" in
+  *"pr list"*) echo 7 ;;
+  *"pr view"*) echo {"a" * 40} ;;
+  *"/reviews"*) echo '[{{"state":"APPROVED","commit_id":"{"a" * 40}","user":{{"login":"reviewers-pixel"}},"id":1}}]' ;;
+  *"auth token"*) echo fake-token ;;
+  *"pr merge"*) exit 91 ;;
+  *) exit 99 ;;
+esac
+''')
+    gh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    proc = _run(["bash", str(RELEASE), "--resume", "--expected-head", expected, "9.9.9"], env)
+    assert not called.exists()
+    assert proc.returncode == 2
 
 
 def _tag_resume(tmp_path, git_body: str, pip_text: str | None = None, extra_env: dict | None = None):

@@ -10,6 +10,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 LIB="$HERE/scripts/release_check.py"
 REPO="${RELEASE_REPO:-BrainSurfing-tech/swarph-cli}"
 REMOTE="${RELEASE_REMOTE:-https://github.com/BrainSurfing-tech/swarph-cli.git}"
+EXPECTED_HEAD=""
 
 DRY=0
 RESUME=0
@@ -17,7 +18,7 @@ RESTART_ONLY=0
 VERSION=""
 
 usage() {
-  echo "usage: release.sh [--dry-run] [--resume] [--restart-only] X.Y.Z" >&2
+  echo "usage: release.sh [--dry-run] [--resume] [--restart-only] [--expected-head SHA] X.Y.Z" >&2
   exit 2
 }
 
@@ -25,6 +26,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1 ;;
     --resume) RESUME=1 ;;
+    --expected-head)
+      [ $# -ge 2 ] && [[ "$2" =~ ^[0-9a-f]{40}$ ]] || usage
+      EXPECTED_HEAD="$2"; shift ;;
     --restart-only) RESTART_ONLY=1 ;;
     -h|--help) usage ;;
     *)
@@ -34,6 +38,10 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+if [ -n "$EXPECTED_HEAD" ] && { [ "$RESUME" -ne 1 ] || [ "$DRY" -eq 1 ] || [ "$RESTART_ONLY" -eq 1 ]; }; then
+  usage
+fi
 
 if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
   echo "release: version must look like X.Y.Z, got '${VERSION}'" >&2
@@ -71,6 +79,10 @@ refuse_without_approval() {
     exit 2
   fi
   head=$(gh pr view "$number" --repo "$REPO" --json headRefOid --jq .headRefOid)
+  if [ -n "$EXPECTED_HEAD" ] && [ "$head" != "$EXPECTED_HEAD" ]; then
+    echo "refusing to merge ${VERSION}: PR head differs from --expected-head" >&2
+    exit 2
+  fi
   reviews=$(gh api "repos/${REPO}/pulls/${number}/reviews")
   if ! printf '%s' "$reviews" | python3 "$LIB" approval-at-head --head "$head"; then
     echo "refusing to merge ${VERSION}: no APPROVED review at head ${head}" >&2
@@ -81,9 +93,10 @@ refuse_without_approval() {
 
 merge_as_orchestrators_hue() {
   local number="$1"
+  local head="$2"
   local token
   token=$(gh auth token --user orchestrators-hue)
-  GH_TOKEN="$token" gh pr merge "$number" --repo "$REPO" --merge
+  GH_TOKEN="$token" gh pr merge "$number" --repo "$REPO" --merge --match-head-commit "$head"
 }
 
 # A squash or merge commit is a new object. Tag that, never the PR head.
@@ -207,7 +220,7 @@ if [ "$RESUME" -eq 1 ]; then
   meta=$(refuse_without_approval)
   read -r number head <<< "$meta"
   echo "approval present at head ${head}; merging as orchestrators-hue"
-  merge_as_orchestrators_hue "$number"
+  merge_as_orchestrators_hue "$number" "$head"
   tag_merged_release "$number"
   wait_for_pypi
   install_release
