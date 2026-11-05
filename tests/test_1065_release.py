@@ -191,12 +191,12 @@ esac
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
     if scenario == "expected_mismatch":
-        env["RELEASE_EXPECTED_HEAD"] = "b" * 40
+        expected = "b" * 40
     elif scenario == "invalid_expected":
-        env["RELEASE_EXPECTED_HEAD"] = "invalid"
+        expected = "invalid"
     else:
-        env["RELEASE_EXPECTED_HEAD"] = head
-    proc = _run(["bash", str(RELEASE), "--resume", "9.9.9"], env)
+        expected = head
+    proc = _run(["bash", str(RELEASE), "--resume", "--expected-head", expected, "9.9.9"], env)
     assert proc.returncode == {"moved": 91, "normal": 92, "expected_mismatch": 2,
                                "old_approval": 2, "invalid_expected": 2}[scenario]
     calls = log.read_text() if log.exists() else ""
