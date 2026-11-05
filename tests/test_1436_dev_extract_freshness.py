@@ -202,7 +202,7 @@ def test_fetch_fails_after_remote_merge_is_not_fresh(tmp_path):
     db, report, ws = _layout(tmp_path, work, local)
     # Point origin at a missing bare with the same owner/repo tail so fetch
     # fails on every OS (chmod on the real bare is not reliable on Windows).
-    missing = tmp_path / "remotes" / "BrainSurfing-tech" / "swarph-cli.git"
+    missing = tmp_path / "gone" / "BrainSurfing-tech" / "swarph-cli.git"
     assert not missing.exists()
     _git(work, "remote", "set-url", "origin", str(missing), tmp=tmp_path)
     proc = _verb(tmp_path, db, report, ws)
