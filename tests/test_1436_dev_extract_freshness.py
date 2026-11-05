@@ -740,6 +740,11 @@ def test_report_without_repo_stamp_is_not_fresh(tmp_path):
     assert f"compared refs/remotes/origin/main@{local}" in tail
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="gitlink commit setup for submodule fetch failure is posix/macos "
+           "verified; Windows git rejects the test repo layout",
+)
 def test_failed_fetch_reread_names_new_commit(tmp_path):
     """A fetch that fails after moving origin/main names that new commit.
 
