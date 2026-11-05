@@ -161,12 +161,15 @@ def _token(path: Path) -> None:
 
 def _verb(tmp: Path, index: Path, report: Path, ws: Path, *,
           print_only: bool = True, extra: list | None = None,
+          env_extra: dict | None = None,
           timeout: int = 60) -> subprocess.CompletedProcess:
     token = tmp / "token"
     _token(token)
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
     env["GIT_TERMINAL_PROMPT"] = "0"
+    if env_extra:
+        env.update(env_extra)
     cmd = [
         sys.executable, "-m", "swarph_cli",
         "board", "cards", "dev-extract",
@@ -889,3 +892,212 @@ def test_refspec_that_skips_main_is_not_fresh(tmp_path):
         assert _git(work, "rev-parse", "refs/remotes/origin/main", tmp=sub) == local
         fetch_head = _git_path(work, "FETCH_HEAD", sub)
         assert remote in fetch_head.read_text(encoding="utf-8")
+
+
+def _ssh_deny_stub(path: Path, stderr: str) -> dict:
+    """``GIT_SSH_COMMAND`` that prints ``stderr`` and exits the way ssh does.
+
+    A Python stub, so the same denial is what git records on Windows and posix.
+    """
+    script = path.with_suffix(".py")
+    script.write_text(
+        "import sys\n"
+        f"sys.stderr.write({(stderr + chr(10))!r})\n"
+        "raise SystemExit(255)\n",
+        encoding="utf-8",
+    )
+    return {"GIT_SSH_COMMAND": f'"{sys.executable}" "{script}"'}
+
+
+_QUERY_FRAGMENT_TEMPLATES = (
+    "https://github.com/someuser/swarph-cli.git?private_token={secret}",
+    "https://github.com/someuser/swarph-cli.git?oauth_token={secret}",
+    "https://github.com/someuser/swarph-cli.git?api_key={secret}",
+    "https://github.com/someuser/swarph-cli.git?key={secret}",
+    "https://github.com/someuser/swarph-cli.git?{secret}",
+    "https://github.com/someuser/swarph-cli.git#token={secret}",
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "template"),
+    list(zip(
+        ("private_token", "oauth_token", "api_key", "key",
+         "bare_query", "fragment"),
+        _QUERY_FRAGMENT_TEMPLATES,
+    )),
+    ids=("private_token", "oauth_token", "api_key", "key",
+         "bare_query", "fragment"),
+)
+def test_printed_origin_drops_whole_query_and_fragment(tmp_path, label, template):
+    """A printed origin keeps no query and no fragment, on the line and in --json.
+
+    Dropping only ``access_token``, ``token``, ``password``, ``secret``, and
+    ``auth`` still prints ``private_token``, ``oauth_token``, ``api_key``,
+    ``key``, a bare query, and a fragment.
+    """
+    bare = _bare_at(tmp_path, "someuser")
+    work, _local = _seed_and_clone(tmp_path, bare)
+    db, report, ws = _layout(tmp_path, work, _local)
+    secret = f"ghp_QUERY1436_{label}"
+    shown = "https://github.com/someuser/swarph-cli.git"
+    _git(work, "remote", "set-url", "origin",
+         template.format(secret=secret), tmp=tmp_path)
+    text = _verb(tmp_path, db, report, ws)
+    _assert_url_secret_absent(text, secret, shown)
+    tail = _freshness(text.stdout)
+    assert "not fresh" in tail
+    assert "?" not in tail
+    assert "#" not in tail
+    payload = _verb(tmp_path, db, report, ws, extra=["--json"])
+    _assert_url_secret_absent(payload, secret, shown)
+    data = json.loads(payload.stdout)
+    reason = data["pins"]["swarph-cli"]["ref_trust"]["reason"]
+    assert secret not in reason
+    assert shown in reason
+    assert "?" not in reason
+    assert "#" not in reason
+
+
+def test_scp_fetch_error_redacts_user_on_line_and_json(tmp_path):
+    """An scp user's ssh denial is redacted on the line and in --json.
+
+    Redaction that only knows ``scheme://`` URLs prints
+    ``user@host: Permission denied`` from the fetch error.
+    """
+    user = "scpuser1436"
+    bare = _bare_at(tmp_path, "BrainSurfing-tech")
+    work, local = _seed_and_clone(tmp_path, bare)
+    _git(work, "remote", "set-url", "origin",
+         f"{user}@host:BrainSurfing-tech/swarph-cli.git", tmp=tmp_path)
+    env = _ssh_deny_stub(
+        tmp_path / "ssh-stub",
+        f"{user}@host: Permission denied (publickey).",
+    )
+    db, report, ws = _layout(tmp_path, work, local)
+    proc = _verb(tmp_path, db, report, ws, env_extra=env)
+    assert proc.returncode == 0, proc.stderr
+    blob = proc.stdout + proc.stderr
+    assert user not in blob
+    tail = _freshness(proc.stdout)
+    assert "not fresh" in tail
+    assert "fetch failed" in tail
+    assert "Permission denied" in tail
+    assert "fresh (federation build" not in tail
+    payload = _verb(tmp_path, db, report, ws, extra=["--json"], env_extra=env)
+    assert user not in (payload.stdout + payload.stderr)
+    data = json.loads(payload.stdout)
+    reason = data["pins"]["swarph-cli"]["ref_trust"]["reason"]
+    assert user not in reason
+    assert "fetch failed" in reason
+    assert "Permission denied" in reason
+    assert f"{user}@" not in reason
+
+
+def test_fetch_error_redacts_userinfo_before_cut(tmp_path):
+    """Userinfo is redacted before the 180-character cut.
+
+    The token sits entirely inside that window and its closing ``@`` sits
+    just past it. Cutting first leaves the token; the redaction regex
+    never sees the ``@``.
+    """
+    secret = "T" * 172
+    bare = _bare_at(tmp_path, "BrainSurfing-tech")
+    work, local = _seed_and_clone(tmp_path, bare)
+    _git(work, "remote", "set-url", "origin",
+         "git@github.com:BrainSurfing-tech/swarph-cli.git", tmp=tmp_path)
+    env = _ssh_deny_stub(
+        tmp_path / "ssh-cut",
+        "https://" + secret + "@github.com/BrainSurfing-tech/swarph-cli.git: "
+        "Permission denied",
+    )
+    db, report, ws = _layout(tmp_path, work, local)
+    proc = _verb(tmp_path, db, report, ws, env_extra=env)
+    assert proc.returncode == 0, proc.stderr
+    blob = proc.stdout + proc.stderr
+    assert secret not in blob
+    tail = _freshness(proc.stdout)
+    assert "not fresh" in tail
+    assert "fetch failed" in tail
+    assert "Permission denied" in tail
+    payload = _verb(tmp_path, db, report, ws, extra=["--json"], env_extra=env)
+    assert secret not in (payload.stdout + payload.stderr)
+    data = json.loads(payload.stdout)
+    reason = data["pins"]["swarph-cli"]["ref_trust"]["reason"]
+    assert secret not in reason
+    assert "https://github.com/" in reason
+
+
+def _git_rev_parse_fetch_head_fails(bin_dir: Path) -> dict:
+    """Real git, except ``rev-parse FETCH_HEAD`` exits 128.
+
+    A successful fetch always writes a readable FETCH_HEAD, so the
+    fail-closed branch cannot be reached without this one refusal.
+    ``rev-parse --git-path FETCH_HEAD`` still runs real git.
+    """
+    real = subprocess.check_output(["which", "git"], text=True).strip()
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    shim = bin_dir / "git"
+    shim.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        f"real = {real!r}\n"
+        "args = sys.argv[1:]\n"
+        "cmd = None\n"
+        "prev = None\n"
+        "saw_fetch_head = False\n"
+        "saw_git_path = False\n"
+        "for arg in args:\n"
+        "    if prev in ('-C', '-c'):\n"
+        "        prev = None\n"
+        "        continue\n"
+        "    if arg in ('-C', '-c'):\n"
+        "        prev = arg\n"
+        "        continue\n"
+        "    if arg == '--git-path':\n"
+        "        saw_git_path = True\n"
+        "    if arg.startswith('-'):\n"
+        "        continue\n"
+        "    if cmd is None:\n"
+        "        cmd = arg\n"
+        "        continue\n"
+        "    if arg == 'FETCH_HEAD':\n"
+        "        saw_fetch_head = True\n"
+        "if cmd == 'rev-parse' and saw_fetch_head and not saw_git_path:\n"
+        "    sys.stderr.write('fatal: FETCH_HEAD: rev-parse failed\\n')\n"
+        "    raise SystemExit(128)\n"
+        "os.execv(real, [real, *args])\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    return {"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")}
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the FETCH_HEAD rev-parse refusal is a posix git wrapper; "
+           "Windows CI still exercises the real rev-parse path",
+)
+def test_fetch_head_rev_parse_failure_is_not_fresh(tmp_path):
+    """A fetch that exits 0 whose ``git rev-parse FETCH_HEAD`` fails is not fresh.
+
+    Skipping that compare would read fresh: the report still matches
+    origin/main.
+    """
+    bare = _bare_at(tmp_path, "BrainSurfing-tech")
+    work, local = _seed_and_clone(tmp_path, bare)
+    db, report, ws = _layout(tmp_path, work, local)
+    env = _git_rev_parse_fetch_head_fails(tmp_path / "git-bin")
+    proc = _verb(tmp_path, db, report, ws, env_extra=env)
+    assert proc.returncode == 0, proc.stderr
+    tail = _freshness(proc.stdout)
+    assert "not fresh" in tail
+    assert "FETCH_HEAD unreadable after fetch" in tail
+    assert "fetch failed" not in tail
+    assert "fresh (federation build" not in tail
+    assert f"report described {local}" in tail
+    assert f"compared refs/remotes/origin/main@{local}" in tail
+    payload = _verb(tmp_path, db, report, ws, extra=["--json"], env_extra=env)
+    data = json.loads(payload.stdout)
+    reason = data["pins"]["swarph-cli"]["ref_trust"]["reason"]
+    assert reason == "FETCH_HEAD unreadable after fetch"

@@ -17,14 +17,16 @@ The extract JOINS two halves, each with its own as-of pin:
   runs, including under ``--print-only``, and writes FETCH_HEAD and
   ``refs/remotes/origin/main`` only (15s, one repo at a time). Other
   ``refs/remotes/origin/*`` refs do not move. A recorded fetch older than
-  ``FETCH_TRUST_BOUND_HOURS`` is not evidence. A good fetch whose
-  FETCH_HEAD commit is not the ref commit is not evidence. ``fresh``
-  requires that same commit on the compared ref, and a report stamp for
-  it. The line names the commit the report described and the ref
-  compared. Printed origin URLs drop every userinfo form (user-only,
-  ``user:password``, scp ``user@host:path``, and a query token); a
-  malformed origin URL reads not fresh and does not abort the other
-  repos. swarph-cli defines no canonical-remote map; the codegraph index
+  ``FETCH_TRUST_BOUND_HOURS`` is not evidence. FETCH_HEAD is
+  ``git rev-parse FETCH_HEAD``; unreadable FETCH_HEAD, or a commit that
+  is not the ref commit, is not evidence. ``fresh`` requires that same
+  commit on the compared ref, and a report stamp for it. The line names
+  the commit the report described and the ref compared. Printed origin
+  URLs drop every userinfo form (user-only, ``user:password``, scp
+  ``user@host:path``) and carry no query or fragment. Fetch errors are
+  redacted before the 180-character cut. A malformed origin URL reads
+  not fresh and does not abort the other repos. swarph-cli defines no
+  canonical-remote map; the codegraph index
   ``repos.slug`` is the identity already stored, and an empty slug says
   the canonical remote is not defined.
 
@@ -537,25 +539,10 @@ _URL_USERINFO_RE = re.compile(
     r"(?P<scheme>[a-z][a-z0-9+.-]*://)(?:[^/\s@]+)(?::[^/\s@]*)?@",
     re.IGNORECASE,
 )
-_QUERY_SECRET_RE = re.compile(
-    r"([?&])(?:access_token|token|password|secret|auth)=[^&#\s]*",
-    re.IGNORECASE,
-)
-_SECRET_QUERY_KEYS = frozenset(
-    {"access_token", "token", "password", "secret", "auth"})
-
-
-def _drop_secret_query(query: str) -> str:
-    if not query:
-        return ""
-    kept = []
-    for part in query.split("&"):
-        name = part.split("=", 1)[0]
-        if name.lower() in _SECRET_QUERY_KEYS:
-            continue
-        if part:
-            kept.append(part)
-    return "&".join(kept)
+# Query or fragment on a scheme URL inside a git error line.
+_PRINTED_QUERY_RE = re.compile("(://[^\\s'\"]*?)[?#][^\\s'\"]*")
+# ``user@host:`` as ssh prints it (``user@host: Permission denied``).
+_SCP_USER_RE = re.compile("(?<![\\w./-])[^\\s/:@'\"]+@(?=[^\\s/:@'\"]+:)")
 
 
 def _strip_scp_user(url: str) -> str:
@@ -571,45 +558,46 @@ def _strip_scp_user(url: str) -> str:
 
 
 def _strip_userinfo_parsed(url: str) -> str:
-    """Strip userinfo and query tokens. Raises ValueError on a bad URL."""
+    """Strip userinfo, query, and fragment. Raises ValueError on a bad URL."""
     from urllib.parse import urlsplit, urlunsplit
     if "://" not in url:
-        return _strip_scp_user(url)
+        return re.split(r"[?#]", _strip_scp_user(url))[0]
     parts = urlsplit(url)
     # ``.port`` / ``.hostname`` raise ValueError for ``:notaport`` and ``[bad``.
-    query = _drop_secret_query(parts.query)
     if parts.username is None and parts.password is None:
-        if query == parts.query:
-            return url
-        return urlunsplit((parts.scheme, parts.netloc, parts.path,
-                           query, parts.fragment))
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
     host = parts.hostname or ""
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     netloc = f"{host}:{parts.port}" if parts.port else host
-    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def _strip_userinfo(url: str) -> str:
     """Drop userinfo before an origin URL is printed.
 
     Covers user-only (``https://TOKEN@host``, ``ssh://TOKEN@host``),
-    ``user:password``, scp-style ``TOKEN@host:path``, and a token in the
-    query. A malformed URL (``ValueError`` from urllib) is redacted and
-    does not propagate.
+    ``user:password``, and scp-style ``TOKEN@host:path``. A printed origin
+    keeps neither a query nor a fragment. A malformed URL (``ValueError``
+    from urllib) is redacted and does not propagate.
     """
     try:
         return _strip_userinfo_parsed(url)
     except ValueError:
-        cleaned = _URL_USERINFO_RE.sub(r"\g<scheme>", url or "")
-        return _QUERY_SECRET_RE.sub("", cleaned)
+        return re.split(
+            r"[?#]", _URL_USERINFO_RE.sub(r"\g<scheme>", url or ""))[0]
 
 
 def _redact_printed(text: str) -> str:
-    """Drop userinfo and query tokens embedded in a git error line."""
+    """Drop userinfo and any query or fragment embedded in a git error line.
+
+    Scheme URLs lose userinfo, then query and fragment. An scp denial
+    (``user@host: Permission denied``) loses the user too.
+    """
     if not text:
         return text
-    return _QUERY_SECRET_RE.sub("", _URL_USERINFO_RE.sub(r"\g<scheme>", text))
+    text = _PRINTED_QUERY_RE.sub(r"\1", _URL_USERINFO_RE.sub(r"\g<scheme>", text))
+    return _SCP_USER_RE.sub("", text)
 
 
 def _same_commit(report_sha, ref_sha) -> bool:
@@ -723,37 +711,17 @@ def _fetch_untrusted(repo_path: str) -> str | None:
     if proc is None:
         detail = "git fetch origin main failed"
     else:
-        detail = (_redact_printed(_one_line(proc.stderr or proc.stdout or ""))
-                  or "git fetch origin main failed")
+        raw = proc.stderr or proc.stdout or ""
+        detail = _one_line(_redact_printed(raw)) or "git fetch origin main failed"
     return f"fetch failed: {detail}"
 
 
 def _fetch_head_sha(repo_path: str) -> str | None:
-    """Sha ``git fetch origin main`` just wrote, if FETCH_HEAD names one."""
-    rel = _git_out(repo_path, ["rev-parse", "--git-path", "FETCH_HEAD"])
-    if not rel:
+    """Sha from ``git rev-parse FETCH_HEAD``, or None when that fails."""
+    sha = (_git_out(repo_path, ["rev-parse", "FETCH_HEAD"]) or "").lower()
+    if not _SHA_RE.fullmatch(sha):
         return None
-    path = rel if os.path.isabs(rel) else os.path.join(repo_path, rel)
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
-    except OSError:
-        return None
-    fallback = None
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        fields = line.split("\t")
-        sha = fields[0].strip().lower()
-        if not _SHA_RE.fullmatch(sha):
-            continue
-        flag = fields[1].strip() if len(fields) > 1 else ""
-        desc = fields[2] if len(fields) > 2 else ""
-        if "branch 'main'" in desc and flag != "not-for-merge":
-            return sha
-        if fallback is None and flag != "not-for-merge":
-            fallback = sha
-    return fallback
+    return sha
 
 
 def read_ref_trust(repo_path: str | None,
@@ -800,10 +768,13 @@ def read_ref_trust(repo_path: str | None,
         return base
     # A good fetch can still leave origin/main behind: no refspec, or a
     # narrow one, writes FETCH_HEAD and does not move the ref. Those
-    # commits differ, so the ref is not fresh.
+    # commits differ, so the ref is not fresh. Unreadable FETCH_HEAD is
+    # not fresh either — do not skip the compare.
     fetched = _fetch_head_sha(repo_path)
-    if (fetched and snap["sha"]
-            and not _same_commit(fetched, snap["sha"])):
+    if not fetched:
+        base["reason"] = "FETCH_HEAD unreadable after fetch"
+        return base
+    if snap["sha"] and not _same_commit(fetched, snap["sha"]):
         base["reason"] = "fetched commit differs from the ref commit"
         return base
     if not snap["merged_at"]:
