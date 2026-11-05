@@ -514,14 +514,19 @@ def owner_repo(url: str) -> str | None:
     raw = (url or "").strip().rstrip("/")
     if raw.endswith(".git"):
         raw = raw[:-4]
-    if "://" not in raw and ":" in raw:
-        raw = raw.split(":", 1)[1]
+    if raw.startswith("file://"):
+        from urllib.parse import unquote
+        raw = unquote(raw[7:])
     elif "://" in raw:
         raw = raw.split("://", 1)[1]
         host = raw.split("/", 1)[0]
         if "@" in host:
             raw = raw.split("@", 1)[1]
-    parts = [p for p in raw.split("/") if p]
+    elif re.match(r"^[A-Za-z]:", raw):
+        pass  # Windows path — drive letter is not scp-style host:path
+    elif ":" in raw:
+        raw = raw.split(":", 1)[1]
+    parts = [p for p in re.split(r"[/\\]+", raw) if p]
     if len(parts) < 2:
         return None
     return f"{parts[-2]}/{parts[-1]}"
