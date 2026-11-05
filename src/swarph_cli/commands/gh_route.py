@@ -51,17 +51,19 @@ def _allow_unchanged() -> int:
 
 
 def run_hook(stdin_text: Optional[str] = None) -> int:
+    try:
+        return _run_hook(stdin_text)
+    except Exception as exc:
+        # A hook crash otherwise leaves gh on the ambient shared identity.
+        return _deny(f"identity routing failed ({type(exc).__name__}); "
+                     "correct the command or hook payload and retry")
+
+
+def _run_hook(stdin_text: Optional[str] = None) -> int:
     raw = stdin_text if stdin_text is not None else sys.stdin.read()
     # PS 5.1 native pipes prefix a (double) UTF-8 BOM; strip before parse.
     raw = (raw or "").lstrip("\ufeff")
-    try:
-        payload = json.loads(raw or "{}")
-    except Exception:
-        # >>> FAIL OPEN ON A MALFORMED PAYLOAD, NOT CLOSED. <<< A router that cannot
-        # parse its input has learned nothing about the command, so denying would
-        # brick every Bash call on a harness change. It is the UNMAPPED CELL that
-        # must fail closed, not the unreadable envelope.
-        return _allow_unchanged()
+    payload = json.loads(raw or "{}")
 
     command = (payload.get("tool_input") or {}).get("command") or ""
     if not ghid.targets_gh(command):

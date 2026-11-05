@@ -364,8 +364,8 @@ def _mask_quoted(command: str) -> str:
         if c == "'":
             j = command.find("'", i + 1)
             if j < 0:
-                out.append(c)
-                out.append(blanks(command[i + 1:]))
+                # An unmatched quote may be comment text; keep later commands visible.
+                out.append(command[i:])
                 break
             out.append(c)
             out.append(blanks(command[i + 1:j]))
@@ -373,6 +373,7 @@ def _mask_quoted(command: str) -> str:
             i = j + 1
             continue
         if c == '"':
+            quote_start, output_start = i, len(out)
             out.append(c)
             i += 1
             while i < n and command[i] != '"':
@@ -401,6 +402,8 @@ def _mask_quoted(command: str) -> str:
             if i < n and command[i] == '"':
                 out.append('"')
                 i += 1
+            else:
+                out[output_start:] = [command[quote_start:]]
             continue
         out.append(c)
         i += 1
@@ -640,7 +643,7 @@ def already_explicit(command: str) -> bool:
     """True when the caller already set GH_TOKEN — an explicit decision (#332: an
     explicit argument is a decision, not a hint). The router must not override it,
     and must not stack a second assignment in front of it."""
-    return bool(_HAS_GH_TOKEN.search(command or ""))
+    return bool(_HAS_GH_TOKEN.search(_mask_quoted(command or "")))
 
 
 def inject(command: str, login: str) -> str:
