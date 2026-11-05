@@ -34,3 +34,67 @@ def test_event_emit_real_envelope_is_sentinel_wrapped(monkeypatch):
     assert "swarph_event" in content
     assert content["swarph_event"] == {"event": "stage-done", "payload": "out", "chain_token": "TOK"}
     assert captured["body"]["kind"] == "fyi"  # VALID_KINDS-safe; P1 promotes to first-class
+
+
+def test_chain_token_reaches_the_wire_and_the_payload_is_still_scrubbed(monkeypatch):
+    """PR 648: --chain-token sits in the body mesh._post_json redacts.
+
+    A producer-signed token (payload.sig) already survived, because of the
+    dot. A dotless credential-shaped opaque token did not. Both must pass
+    through. A classic key in the payload must not.
+    """
+    import json
+    import secrets
+
+    from swarph_cli.chain_token import sign_chain_token
+    from swarph_cli.commands import event as evmod
+    from swarph_cli.redact import redact_text
+
+    signed = sign_chain_token("producer-secret-xyz", "chain-1", 1, "jti-abc")
+    opaque = None
+    for _ in range(40):
+        candidate = secrets.token_urlsafe(32)
+        if redact_text(candidate, caller="t") != candidate:
+            opaque = candidate
+            break
+    assert opaque is not None
+    classic = "sk-" + ("cd" * 12)
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"id": 7}'
+
+    def emit(chain):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["raw"] = req.data
+            return _Resp()
+
+        monkeypatch.setattr(
+            "swarph_cli.commands.mesh.urllib.request.urlopen", fake_urlopen
+        )
+        monkeypatch.setattr(evmod, "resolve_self_name", lambda *a, **k: "friendly-coder")
+        monkeypatch.setattr(evmod, "resolve_token", lambda *a, **k: "tok")
+        rc = evmod.run_event([
+            "emit", "stage-done", "note " + classic,
+            "--chain-token", chain,
+            "--gateway", "http://127.0.0.1:9",
+        ])
+        assert rc == 0, rc
+        body = json.loads(captured["raw"].decode("utf-8"))
+        return json.loads(body["content"])["swarph_event"]
+
+    for chain in (signed, opaque):
+        ev = emit(chain)
+        assert ev["chain_token"] == chain
+        assert classic not in ev["payload"]
+        assert "REDACTED" in ev["payload"]

@@ -15,12 +15,21 @@ from __future__ import annotations
 import re
 
 _SECRET_PATTERNS = [
-    # Anthropic + OpenAI-style API keys.
+    # Anthropic keys. Kept above the OpenAI rule so sk-ant- is not also
+    # eaten as a generic sk- key.
     (re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{8,}\b"), "[REDACTED-API-KEY]"),
-    (re.compile(r"\bsk-[A-Za-z0-9]{16,}\b"), "[REDACTED-API-KEY]"),
+    # OpenAI: classic sk-, plus hyphenated project and service-account
+    # keys. The old class was [A-Za-z0-9] and stopped at the first hyphen,
+    # so sk-proj- and sk-svcacct- reached the model (card #1472).
+    # swarph_cli.redact._OPENAI_RE already allowed those shapes; this is
+    # the shared model-input scrubber. triage.router imports scrub_text
+    # and does not keep a copy.
+    (re.compile(r"\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9\-_]{16,}\b"),
+     "[REDACTED-API-KEY]"),
     # xAI keys (msg 65982).
     (re.compile(r"\bxai-[A-Za-z0-9\-_]{16,}\b"), "[REDACTED-API-KEY]"),
-    # Google AI Studio keys: AIza + 35 chars (msg 65982).
+    # Google AI Studio keys: AIza + 35 chars (msg 65982). Exact length:
+    # a shorter made-up tail is not this shape.
     (re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b"), "[REDACTED-API-KEY]"),
     # GitHub + Slack tokens.
     (re.compile(r"\bgh[opusr]_[A-Za-z0-9_]{20,}\b"), "[REDACTED-TOKEN]"),
