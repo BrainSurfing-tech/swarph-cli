@@ -10,6 +10,12 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 LIB="$HERE/scripts/release_check.py"
 REPO="${RELEASE_REPO:-BrainSurfing-tech/swarph-cli}"
 REMOTE="${RELEASE_REMOTE:-https://github.com/BrainSurfing-tech/swarph-cli.git}"
+EXPECTED_HEAD="${RELEASE_EXPECTED_HEAD:-}"
+
+if [ -n "$EXPECTED_HEAD" ] && ! [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "release: RELEASE_EXPECTED_HEAD must be a 40-character lowercase commit SHA" >&2
+  exit 2
+fi
 
 DRY=0
 RESUME=0
@@ -71,6 +77,10 @@ refuse_without_approval() {
     exit 2
   fi
   head=$(gh pr view "$number" --repo "$REPO" --json headRefOid --jq .headRefOid)
+  if [ -n "$EXPECTED_HEAD" ] && [ "$head" != "$EXPECTED_HEAD" ]; then
+    echo "refusing to merge ${VERSION}: PR head differs from RELEASE_EXPECTED_HEAD" >&2
+    exit 2
+  fi
   reviews=$(gh api "repos/${REPO}/pulls/${number}/reviews")
   if ! printf '%s' "$reviews" | python3 "$LIB" approval-at-head --head "$head"; then
     echo "refusing to merge ${VERSION}: no APPROVED review at head ${head}" >&2
@@ -81,9 +91,10 @@ refuse_without_approval() {
 
 merge_as_orchestrators_hue() {
   local number="$1"
+  local head="$2"
   local token
   token=$(gh auth token --user orchestrators-hue)
-  GH_TOKEN="$token" gh pr merge "$number" --repo "$REPO" --merge
+  GH_TOKEN="$token" gh pr merge "$number" --repo "$REPO" --merge --match-head-commit "$head"
 }
 
 # A squash or merge commit is a new object. Tag that, never the PR head.
@@ -207,7 +218,7 @@ if [ "$RESUME" -eq 1 ]; then
   meta=$(refuse_without_approval)
   read -r number head <<< "$meta"
   echo "approval present at head ${head}; merging as orchestrators-hue"
-  merge_as_orchestrators_hue "$number"
+  merge_as_orchestrators_hue "$number" "$head"
   tag_merged_release "$number"
   wait_for_pypi
   install_release

@@ -151,6 +151,7 @@ esac
     assert proc.returncode == 0, proc.stderr + proc.stdout
     text = log.read_text()
     assert "MERGE" in text
+    assert f"--match-head-commit {head}" in text
     assert "pip install --no-cache-dir --user --break-system-packages swarph-cli==9.9.9" in text
     assert "pip show" not in text
     sudo_lines = [ln for ln in sudo_log.read_text().splitlines() if ln]
@@ -163,6 +164,43 @@ esac
     assert f"tag -a v9.9.9 {merge}" in text
     assert f"tag -a v9.9.9 {head}" not in text
     assert f"tag v9.9.9 {head}" not in text
+
+
+@needs_bash
+@pytest.mark.parametrize("scenario", ["moved", "expected_mismatch", "old_approval", "normal", "invalid_expected"])
+def test_resume_pins_approved_head(tmp_path, scenario):
+    head = "a" * 40
+    log = tmp_path / "gh.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(f'''#!/bin/bash
+printf '%s\\n' "$*" >> "{log}"
+case "$*" in
+  *"pr list"*) echo 7 ;;
+  *"pr view"*) echo {head} ;;
+  *"/reviews"*) echo '[{{"state":"APPROVED","commit_id":"{("b" * 40) if scenario == "old_approval" else head}","user":{{"login":"reviewers-pixel"}},"id":1}}]' ;;
+  *"auth token"*) echo fake-token ;;
+  *"pr merge"*)
+    case "$*" in *"--match-head-commit {head}"*) ;; *) exit 90 ;; esac
+    {"exit 91" if scenario == "moved" else "exit 92"} ;;
+  *) exit 99 ;;
+esac
+''')
+    gh.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    if scenario == "expected_mismatch":
+        env["RELEASE_EXPECTED_HEAD"] = "b" * 40
+    elif scenario == "invalid_expected":
+        env["RELEASE_EXPECTED_HEAD"] = "invalid"
+    else:
+        env["RELEASE_EXPECTED_HEAD"] = head
+    proc = _run(["bash", str(RELEASE), "--resume", "9.9.9"], env)
+    assert proc.returncode == {"moved": 91, "normal": 92, "expected_mismatch": 2,
+                               "old_approval": 2, "invalid_expected": 2}[scenario]
+    calls = log.read_text() if log.exists() else ""
+    assert ("pr merge" in calls) == (scenario in {"moved", "normal"})
 
 
 def _tag_resume(tmp_path, git_body: str, pip_text: str | None = None, extra_env: dict | None = None):
