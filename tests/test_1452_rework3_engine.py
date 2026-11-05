@@ -219,3 +219,46 @@ def test_item3_mutant_failed_refresh_not_keeping_flag_run_alone_on_temp_copy():
     assert proc.returncode != 0, (
         "mutant survived: failed refresh not keeping the wake flag\n" + out)
     assert "failed refresh did not keep the wake flag" in out, out
+
+
+# ── Re-spec (note 89934): a second bound on a new delivered id must alert
+# again without a drain. Kills mutant A4 (one-shot keyed on alerted id == 0
+# instead of != delivered).
+@pytest.mark.parametrize("kind", SINKS)
+def test_second_bound_without_a_drain_alerts_again(monkeypatch, tmp_path, kind):
+    rig = _Rig(monkeypatch, tmp_path, kind)
+    rig.unread["n"] = 1
+    rig.arrive(1)
+    rig.drive(T0, T0 + 7800)
+    assert len(rig.alert_calls) == 1
+    rig.arrive(2)
+    rig.drive(T0 + 8100, T0 + 30000)
+    assert rig.clear_calls == []
+    assert len(rig.alert_calls) == 2, (
+        "a new delivered id must alert again without a drain")
+
+
+def test_mutant_a4_one_shot_on_zero_run_alone_on_temp_copy():
+    """A4 on a temporary copy: bound alert fires only when alerted id is 0,
+    not when it differs from the delivered id. All three sinks must fail."""
+    needle = (
+        "                    if int(led.get(\"standing_refresh_alerted_id\", 0)) != delivered:\n"
+    )
+    replacement = (
+        "                    if int(led.get(\"standing_refresh_alerted_id\", 0)) == 0:\n"
+    )
+
+    def mutator(src: str) -> str:
+        assert src.count(needle) == 1, "A4 target line is not unique"
+        return src.replace(needle, replacement, 1)
+
+    for kind in SINKS:
+        nodeid = (
+            "tests/test_1452_rework3_engine.py::"
+            f"test_second_bound_without_a_drain_alerts_again[{kind}]"
+        )
+        proc = _rework2._run_mutant_alone_on_temp_copy(mutator, nodeid)
+        out = proc.stdout + proc.stderr
+        assert proc.returncode != 0, (
+            f"A4 mutant survived on {kind}\n" + out)
+        assert "a new delivered id must alert again without a drain" in out, out
