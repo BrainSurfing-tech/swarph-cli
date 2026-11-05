@@ -14,13 +14,19 @@ The extract JOINS two halves, each with its own as-of pin:
   ``git fetch origin main`` fails, origin is not the index slug, or the
   branch tracks a remote other than that slug. Slug compare is
   case-insensitive. A missing FETCH_HEAD is not itself stale — the fetch
-  runs, including under ``--print-only``, and writes FETCH_HEAD and the
-  origin main ref (15s, one repo at a time). A recorded fetch older than
-  ``FETCH_TRUST_BOUND_HOURS`` is not evidence. ``fresh`` requires that
-  same commit on the compared ref. The line names the commit the report
-  described and the ref compared. swarph-cli defines no canonical-remote
-  map; the codegraph index ``repos.slug`` is the identity already stored,
-  and an empty slug says the canonical remote is not defined.
+  runs, including under ``--print-only``, and writes FETCH_HEAD and
+  ``refs/remotes/origin/main`` only (15s, one repo at a time). Other
+  ``refs/remotes/origin/*`` refs do not move. A recorded fetch older than
+  ``FETCH_TRUST_BOUND_HOURS`` is not evidence. A good fetch whose
+  FETCH_HEAD commit is not the ref commit is not evidence. ``fresh``
+  requires that same commit on the compared ref, and a report stamp for
+  it. The line names the commit the report described and the ref
+  compared. Printed origin URLs drop every userinfo form (user-only,
+  ``user:password``, scp ``user@host:path``, and a query token); a
+  malformed origin URL reads not fresh and does not abort the other
+  repos. swarph-cli defines no canonical-remote map; the codegraph index
+  ``repos.slug`` is the identity already stored, and an empty slug says
+  the canonical remote is not defined.
 
 Posting uses the board path when ``--card`` is given WITHOUT
 ``--print-only``; otherwise prints and posts nothing. Nothing is deployed.
@@ -527,17 +533,83 @@ def _same_slug(owner: str | None, slug: str) -> bool:
     return owner is not None and owner.casefold() == slug.casefold()
 
 
-def _strip_userinfo(url: str) -> str:
-    """Drop ``user:password@`` before an origin URL is printed."""
-    from urllib.parse import urlsplit, urlunsplit
-    parts = urlsplit(url)
-    if not parts.scheme or (parts.username is None and parts.password is None):
+_URL_USERINFO_RE = re.compile(
+    r"(?P<scheme>[a-z][a-z0-9+.-]*://)(?:[^/\s@]+)(?::[^/\s@]*)?@",
+    re.IGNORECASE,
+)
+_QUERY_SECRET_RE = re.compile(
+    r"([?&])(?:access_token|token|password|secret|auth)=[^&#\s]*",
+    re.IGNORECASE,
+)
+_SECRET_QUERY_KEYS = frozenset(
+    {"access_token", "token", "password", "secret", "auth"})
+
+
+def _drop_secret_query(query: str) -> str:
+    if not query:
+        return ""
+    kept = []
+    for part in query.split("&"):
+        name = part.split("=", 1)[0]
+        if name.lower() in _SECRET_QUERY_KEYS:
+            continue
+        if part:
+            kept.append(part)
+    return "&".join(kept)
+
+
+def _strip_scp_user(url: str) -> str:
+    """``user@host:path`` → ``host:path``. A Windows drive is not scp."""
+    if re.match(r"^[A-Za-z]:", url):
         return url
+    if "@" not in url:
+        return url
+    _user, rest = url.split("@", 1)
+    if ":" not in rest or not rest.split(":", 1)[0]:
+        return url
+    return rest
+
+
+def _strip_userinfo_parsed(url: str) -> str:
+    """Strip userinfo and query tokens. Raises ValueError on a bad URL."""
+    from urllib.parse import urlsplit, urlunsplit
+    if "://" not in url:
+        return _strip_scp_user(url)
+    parts = urlsplit(url)
+    # ``.port`` / ``.hostname`` raise ValueError for ``:notaport`` and ``[bad``.
+    query = _drop_secret_query(parts.query)
+    if parts.username is None and parts.password is None:
+        if query == parts.query:
+            return url
+        return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                           query, parts.fragment))
     host = parts.hostname or ""
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     netloc = f"{host}:{parts.port}" if parts.port else host
-    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+
+
+def _strip_userinfo(url: str) -> str:
+    """Drop userinfo before an origin URL is printed.
+
+    Covers user-only (``https://TOKEN@host``, ``ssh://TOKEN@host``),
+    ``user:password``, scp-style ``TOKEN@host:path``, and a token in the
+    query. A malformed URL (``ValueError`` from urllib) is redacted and
+    does not propagate.
+    """
+    try:
+        return _strip_userinfo_parsed(url)
+    except ValueError:
+        cleaned = _URL_USERINFO_RE.sub(r"\g<scheme>", url or "")
+        return _QUERY_SECRET_RE.sub("", cleaned)
+
+
+def _redact_printed(text: str) -> str:
+    """Drop userinfo and query tokens embedded in a git error line."""
+    if not text:
+        return text
+    return _QUERY_SECRET_RE.sub("", _URL_USERINFO_RE.sub(r"\g<scheme>", text))
 
 
 def _same_commit(report_sha, ref_sha) -> bool:
@@ -651,9 +723,37 @@ def _fetch_untrusted(repo_path: str) -> str | None:
     if proc is None:
         detail = "git fetch origin main failed"
     else:
-        detail = (_one_line(proc.stderr or proc.stdout or "")
+        detail = (_redact_printed(_one_line(proc.stderr or proc.stdout or ""))
                   or "git fetch origin main failed")
     return f"fetch failed: {detail}"
+
+
+def _fetch_head_sha(repo_path: str) -> str | None:
+    """Sha ``git fetch origin main`` just wrote, if FETCH_HEAD names one."""
+    rel = _git_out(repo_path, ["rev-parse", "--git-path", "FETCH_HEAD"])
+    if not rel:
+        return None
+    path = rel if os.path.isabs(rel) else os.path.join(repo_path, rel)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    fallback = None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        sha = fields[0].strip().lower()
+        if not _SHA_RE.fullmatch(sha):
+            continue
+        flag = fields[1].strip() if len(fields) > 1 else ""
+        desc = fields[2] if len(fields) > 2 else ""
+        if "branch 'main'" in desc and flag != "not-for-merge":
+            return sha
+        if fallback is None and flag != "not-for-merge":
+            fallback = sha
+    return fallback
 
 
 def read_ref_trust(repo_path: str | None,
@@ -664,8 +764,8 @@ def read_ref_trust(repo_path: str | None,
     Untrusted results still name the local ref. A trusted result is a
     canonical origin whose upstream remote is that same owner/repo,
     fetched inside the bound, whose ``git fetch origin main`` succeeded
-    just now. The ref is read again after the fetch, including when the
-    fetch fails.
+    just now and whose FETCH_HEAD names that same ref. The ref is read
+    again after the fetch, including when the fetch fails.
     """
     moment = time.time() if now is None else now
     base = {
@@ -697,6 +797,14 @@ def read_ref_trust(repo_path: str | None,
     base["merged_at"] = snap["merged_at"]
     if fetch_reason:
         base["reason"] = fetch_reason
+        return base
+    # A good fetch can still leave origin/main behind: no refspec, or a
+    # narrow one, writes FETCH_HEAD and does not move the ref. Those
+    # commits differ, so the ref is not fresh.
+    fetched = _fetch_head_sha(repo_path)
+    if (fetched and snap["sha"]
+            and not _same_commit(fetched, snap["sha"])):
+        base["reason"] = "fetched commit differs from the ref commit"
         return base
     if not snap["merged_at"]:
         base["reason"] = "origin/main has no commit time after fetch"

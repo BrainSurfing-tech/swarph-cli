@@ -671,3 +671,216 @@ def test_fetch_head_at_24_1h_is_not_fresh(tmp_path):
     assert "fresh (federation build" not in tail
     assert f"report described {local}" in tail
     assert f"compared refs/remotes/origin/main@{local}" in tail
+
+
+def _assert_url_secret_absent(proc, secret: str, shown: str) -> None:
+    assert proc.returncode == 0, proc.stderr
+    blob = proc.stdout + proc.stderr
+    assert secret not in blob
+    assert shown in blob
+
+
+def test_user_only_url_strips_token_on_line_and_json(tmp_path):
+    """User-only, ssh, scp, and query tokens are absent on the line and in --json.
+
+    Stripping only ``user:password`` would still print ``https://TOKEN@host``.
+    """
+    bare = _bare_at(tmp_path, "someuser")
+    work, local = _seed_and_clone(tmp_path, bare)
+    db, report, ws = _layout(tmp_path, work, local)
+    cases = (
+        ("https", "https://{secret}@github.com/someuser/swarph-cli.git",
+         "https://github.com/someuser/swarph-cli.git"),
+        ("ssh", "ssh://{secret}@github.com/someuser/swarph-cli.git",
+         "ssh://github.com/someuser/swarph-cli.git"),
+        ("scp", "{secret}@github.com:someuser/swarph-cli.git",
+         "github.com:someuser/swarph-cli.git"),
+        ("query", "https://github.com/someuser/swarph-cli.git?token={secret}",
+         "https://github.com/someuser/swarph-cli.git"),
+    )
+    for name, template, shown in cases:
+        secret = f"ghp_USERONLY1436{name}"
+        _git(work, "remote", "set-url", "origin",
+             template.format(secret=secret), tmp=tmp_path)
+        text = _verb(tmp_path, db, report, ws)
+        _assert_url_secret_absent(text, secret, shown)
+        tail = _freshness(text.stdout)
+        assert "not fresh" in tail
+        assert "not the canonical remote" in tail
+        payload = _verb(tmp_path, db, report, ws, extra=["--json"])
+        _assert_url_secret_absent(payload, secret, shown)
+        data = json.loads(payload.stdout)
+        reason = data["pins"]["swarph-cli"]["ref_trust"]["reason"]
+        assert secret not in reason
+        assert shown in reason
+
+
+def test_report_without_repo_stamp_is_not_fresh(tmp_path):
+    """A report with no ``# repo`` line for this repo is not fresh.
+
+    Treating a missing stamp as the same commit would read fresh.
+    """
+    bare = _bare_at(tmp_path, "BrainSurfing-tech")
+    work, local = _seed_and_clone(tmp_path, bare)
+    db, report, ws = _layout(tmp_path, work, local)
+    report.write_text(
+        "# swarph federation — cross-repo connection map\n"
+        f"# generated {FED_STAMP} by fed_refresh.sh (card #44 part 4)\n"
+        "\n"
+        "  Layer 2:\n",
+        encoding="utf-8",
+    )
+    proc = _verb(tmp_path, db, report, ws)
+    assert proc.returncode == 0, proc.stderr
+    tail = _freshness(proc.stdout)
+    assert "not fresh" in tail
+    assert "report commit differs from the ref commit" in tail
+    assert "fresh (federation build" not in tail
+    assert "report described no commit" in tail
+    assert f"compared refs/remotes/origin/main@{local}" in tail
+
+
+def test_failed_fetch_reread_names_new_commit(tmp_path):
+    """A fetch that fails after moving origin/main names that new commit.
+
+    Re-reading only when the fetch succeeds would still name the pre-fetch commit.
+    """
+    bare = _bare_at(tmp_path, "BrainSurfing-tech")
+    _work, old = _seed_and_clone(tmp_path, bare)
+    seed = tmp_path / "seed-BrainSurfing-tech"
+    fake = "b" * 40
+    _git(seed, "update-index", "--add", "--cacheinfo", f"160000,{fake},sub",
+         tmp=tmp_path)
+    missing = tmp_path / "missing-sub.git"
+    (seed / ".gitmodules").write_text(
+        '[submodule "sub"]\n'
+        "\tpath = sub\n"
+        f"\turl = {missing}\n",
+        encoding="utf-8",
+    )
+    _git(seed, "add", ".gitmodules", tmp=tmp_path)
+    dated = {"GIT_AUTHOR_DATE": "2026-11-03T12:00:00Z",
+             "GIT_COMMITTER_DATE": "2026-11-03T12:00:00Z"}
+    _git(seed, "commit", "-m", "gitlink", env_extra=dated, tmp=tmp_path)
+    new = _git(seed, "rev-parse", "HEAD", tmp=tmp_path)
+    assert new != old
+    assert "160000" in _git(seed, "ls-tree", "HEAD", tmp=tmp_path)
+    _git(seed, "push", "origin", "main", tmp=tmp_path)
+    work = tmp_path / "work-reread"
+    subprocess.run(
+        ["git", *_GIT, "clone", str(bare), str(work)],
+        check=True, capture_output=True, text=True, env=_env(tmp_path),
+    )
+    sub = work / "sub"
+    if sub.exists():
+        subprocess.run(["rm", "-rf", str(sub)], check=True)
+    subprocess.run(
+        ["git", *_GIT, "init", "-b", "main", str(sub)],
+        check=True, capture_output=True, text=True, env=_env(tmp_path),
+    )
+    (sub / "x").write_text("x\n", encoding="utf-8")
+    _commit(sub, tmp_path, OLD, "sub")
+    _git(work, "submodule", "init", tmp=tmp_path)
+    _git(sub, "remote", "add", "origin", str(missing), tmp=tmp_path)
+    _git(work, "config", "fetch.recurseSubmodules", "true", tmp=tmp_path)
+    _git(work, "update-ref", "refs/remotes/origin/main", old, tmp=tmp_path)
+    assert _git(work, "rev-parse", "refs/remotes/origin/main", tmp=tmp_path) == old
+    db, report, ws = _layout(tmp_path, work, old)
+    proc = _verb(tmp_path, db, report, ws)
+    assert proc.returncode == 0, proc.stderr
+    tail = _freshness(proc.stdout)
+    assert "not fresh" in tail
+    assert "fetch failed" in tail
+    assert "fresh (federation build" not in tail
+    assert f"report described {old}" in tail
+    assert f"compared refs/remotes/origin/main@{new}" in tail
+    assert f"compared refs/remotes/origin/main@{old}" not in tail
+
+
+def _add_public_repo(db: Path, name: str, slug: str, repo_path: Path,
+                     symbol_id: int) -> None:
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO repos VALUES (?,?,?,?,?,?)",
+        (name, slug, str(repo_path), "public", "2026-11-01T00:00:00Z", "full"))
+    con.execute(
+        "INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?)",
+        (symbol_id, name, "chat_sync", "function", "src/chat.py", 1,
+         "chat_sync", ""))
+    con.commit()
+    con.close()
+
+
+def test_malformed_origin_url_is_not_fresh_and_healthy_repo_prints(tmp_path):
+    """A malformed origin URL does not crash. That repo is not fresh.
+
+    ``ValueError`` from ``_strip_userinfo`` used to abort the verb, so a
+    healthy repo in the same extract printed nothing.
+    """
+    ok_bare = _bare_at(tmp_path, "BrainSurfing-tech")
+    ok_work, ok_sha = _seed_and_clone(tmp_path, ok_bare)
+    bad_bare = _bare_at(tmp_path, "swarph-mesh-owner")
+    bad_work, bad_sha = _seed_and_clone(tmp_path, bad_bare)
+    db = tmp_path / "index.db"
+    report = tmp_path / "federation-report.txt"
+    ws = tmp_path / "workspace.json"
+    _index(db, ok_work, SLUG)
+    _add_public_repo(db, "swarph-mesh", "BrainSurfing-tech/swarph-mesh",
+                     bad_work, 2)
+    report.write_text(
+        "# swarph federation — cross-repo connection map\n"
+        f"# generated {FED_STAMP} by fed_refresh.sh (card #44 part 4)\n"
+        f"# repo swarph-cli {ok_sha} {FED_STAMP}\n"
+        f"# repo swarph-mesh {bad_sha} {FED_STAMP}\n"
+        "\n"
+        "  Layer 2:\n",
+        encoding="utf-8",
+    )
+    _ws(ws)
+    secret = "ghp_MALFORMED1436"
+    urls = (
+        f"https://u:{secret}@host:notaport/someuser/swarph-mesh.git",
+        f"https://u:{secret}@[bad/someuser/swarph-mesh.git",
+    )
+    for url in urls:
+        _git(bad_work, "remote", "set-url", "origin", url, tmp=tmp_path)
+        proc = _verb(tmp_path, db, report, ws)
+        assert proc.returncode == 0, proc.stderr
+        blob = proc.stdout + proc.stderr
+        assert secret not in blob
+        assert "Traceback" not in blob
+        tail = _freshness(proc.stdout)
+        assert "swarph-mesh: not fresh" in tail
+        assert "swarph-cli: fresh (federation build" in tail
+
+
+def test_refspec_that_skips_main_is_not_fresh(tmp_path):
+    """No refspec, and a narrow refspec, leave origin/main behind FETCH_HEAD.
+
+    Skipping the FETCH_HEAD compare would read fresh: the fetch exits 0
+    and the report still matches the old ref.
+    """
+    for mode in ("none", "narrow"):
+        sub = tmp_path / mode
+        sub.mkdir()
+        bare = _bare_at(sub, "BrainSurfing-tech")
+        work, local = _seed_and_clone(sub, bare)
+        remote = _push_newer(sub, bare, "seed-BrainSurfing-tech")
+        assert remote != local
+        if mode == "none":
+            _git(work, "config", "--unset-all", "remote.origin.fetch", tmp=sub)
+        else:
+            _git(work, "remote", "set-branches", "origin", "dev", tmp=sub)
+        db, report, ws = _layout(sub, work, local)
+        proc = _verb(sub, db, report, ws)
+        assert proc.returncode == 0, proc.stderr
+        tail = _freshness(proc.stdout)
+        assert "not fresh" in tail, mode
+        assert "fetched commit differs from the ref commit" in tail, mode
+        assert "fetch failed" not in tail, mode
+        assert "fresh (federation build" not in tail, mode
+        assert f"report described {local}" in tail
+        assert f"compared refs/remotes/origin/main@{local}" in tail
+        assert _git(work, "rev-parse", "refs/remotes/origin/main", tmp=sub) == local
+        fetch_head = _git_path(work, "FETCH_HEAD", sub)
+        assert remote in fetch_head.read_text(encoding="utf-8")
