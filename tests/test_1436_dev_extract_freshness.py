@@ -200,11 +200,12 @@ def test_fetch_fails_after_remote_merge_is_not_fresh(tmp_path):
     assert remote != local
     assert _git(work, "rev-parse", "refs/remotes/origin/main", tmp=tmp_path) == local
     db, report, ws = _layout(tmp_path, work, local)
-    try:
-        os.chmod(bare, 0)
-        proc = _verb(tmp_path, db, report, ws)
-    finally:
-        os.chmod(bare, 0o755)
+    # Point origin at a missing bare with the same owner/repo tail so fetch
+    # fails on every OS (chmod on the real bare is not reliable on Windows).
+    missing = tmp_path / "remotes" / "BrainSurfing-tech" / "swarph-cli.git"
+    assert not missing.exists()
+    _git(work, "remote", "set-url", "origin", str(missing), tmp=tmp_path)
+    proc = _verb(tmp_path, db, report, ws)
     assert proc.returncode == 0, proc.stderr
     tail = _freshness(proc.stdout)
     assert "not fresh" in tail
