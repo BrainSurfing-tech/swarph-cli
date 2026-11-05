@@ -39,6 +39,10 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+if [ -n "$EXPECTED_HEAD" ] && { [ "$RESUME" -ne 1 ] || [ "$DRY" -eq 1 ] || [ "$RESTART_ONLY" -eq 1 ]; }; then
+  usage
+fi
+
 if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
   echo "release: version must look like X.Y.Z, got '${VERSION}'" >&2
   usage
