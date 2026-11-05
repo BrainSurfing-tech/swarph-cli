@@ -3802,8 +3802,21 @@ def _monitor_deliver(state: MonitorState) -> None:
             # Per-poll, the drain is caught within one interval and the next
             # DM earns a wake of its own. unread == None (gateway error)
             # reads as NOT-drained — never re-arm on an unreadable signal.
+            # Card #1452 rework 3 (note 89855 route B): this branch used to
+            # read the count only while wake_outstanding stood. A running
+            # plain-tmux turn clears that flag (#620), so a drain inside the
+            # turn was invisible and the stall row stayed open until the
+            # turn ended — and the turn's end then woke on mail already
+            # read. Read while a wake stands OR while an alert stands
+            # (caught-up marker set, or deferred ticks at or above
+            # _STALL_FIRST). No read otherwise.
             unread = None
-            if led.get("wake_outstanding"):
+            from swarph_cli import stall_alert
+            ticks = int(led.get("deferred_ticks", 0) or 0)
+            alert_stands = (
+                int(led.get("standing_refresh_alerted_id", 0) or 0) != 0
+                or ticks >= stall_alert._STALL_FIRST)
+            if led.get("wake_outstanding") or alert_stands:
                 from swarph_cli.commands.watchdog import _gateway_unread_count
                 unread = _gateway_unread_count(state.gateway, state.self_name,
                                                state.token)
@@ -3821,11 +3834,6 @@ def _monitor_deliver(state: MonitorState) -> None:
                     # 0, and the tick alert leaves them high, so neither the
                     # next delivery nor this branch used to close it. When
                     # either alert stands, zero the ticks and close the row.
-                    from swarph_cli import stall_alert
-                    ticks = int(led.get("deferred_ticks", 0) or 0)
-                    alert_stands = (
-                        int(led.get("standing_refresh_alerted_id", 0) or 0) != 0
-                        or ticks >= stall_alert._STALL_FIRST)
                     led["wake_backoff_k"] = 0
                     led["standing_refresh_count"] = 0
                     led["standing_refresh_alerted_id"] = 0
@@ -3900,6 +3908,11 @@ def _monitor_deliver(state: MonitorState) -> None:
                     _note_fresh_wake(
                         led, unread if isinstance(unread, int) else None,
                         expired=True)
+                    # Note 89855 item 3: plain tmux clears the flag on the
+                    # running read (#620) and the idle read can then refuse
+                    # the send, so the flag is down unless this puts it
+                    # back. Without it the refused refresh is the last
+                    # attempt and the stall alert never comes.
                     if isinstance(unread, int) and unread > 0:
                         led["wake_outstanding"] = True
                 led["standing_refresh_count"] = refresh_count + 1
@@ -3925,10 +3938,14 @@ def _monitor_deliver(state: MonitorState) -> None:
                 changed = True
                 continue
             # Something is newly owed: a new DM resets the caught-up
-            # refresh count and its one-shot stall alert (item 3).
-            if led.get("standing_refresh_count") or led.get("standing_refresh_alerted_id"):
+            # refresh count (item 3) so the new id can refresh. Card #1452
+            # rework 3 (note 89855 route A): do NOT zero
+            # standing_refresh_alerted_id here. Zeroing it dropped the
+            # stall row's identity, the drain then found nothing to close,
+            # and that open row absorbed the next stall. The drain branch
+            # still zeroes the marker when it closes the row.
+            if int(led.get("standing_refresh_count", 0) or 0):
                 led["standing_refresh_count"] = 0
-                led["standing_refresh_alerted_id"] = 0
                 changed = True
             if now - float(led["last_delivery_at"]) < state.min_interval_s:
                 print(f"{state.log_prefix} wake suppressed by idle guard for "

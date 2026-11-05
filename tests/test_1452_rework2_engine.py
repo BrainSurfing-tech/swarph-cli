@@ -5,14 +5,19 @@ Real `_monitor_deliver`, real `MonitorState`, real sink classes. Sends and
 pane reads are patched; the clock is `mesh.time`. The engine and the sinks
 are not faked. Item 5 is the PR body, not a test.
 
-The two mutant tests each apply one mutation to the real `mesh.py` (not a
-copy), run one killing test alone in a subprocess, then restore the file.
+The two mutant tests each apply one mutation to a temporary copy of
+`mesh.py` (never the checkout), run one killing test alone in a
+subprocess against that copy, then delete the copy. A kill must not
+leave the mutant in the tree.
 
 Run: python -m pytest tests/test_1452_rework2_engine.py -v
 """
 import importlib.util
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -188,39 +193,47 @@ def test_item4_refresh_text_names_unread_count(monkeypatch, tmp_path):
         "refresh text dropped the unread count")
 
 
-def _run_one_test_alone(nodeid: str) -> subprocess.CompletedProcess:
-    """One pytest node, in its own process, against the tree as it is on disk."""
-    env = dict(**__import__("os").environ)
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
-         "-q", "--tb=short", nodeid],
-        cwd=str(_REPO),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
+def _run_mutant_alone_on_temp_copy(mutator, nodeid: str) -> subprocess.CompletedProcess:
+    """Apply `mutator` to a temporary copy of the tree and run one pytest node.
 
-
-def _mutate_real_source(mutator):
-    """Apply `mutator` to the real mesh.py, yield, always restore.
-
-    Not a copy: the bytes under src/ are what the subprocess imports.
+    The checkout's mesh.py is never written. The subprocess's root is the
+    copy, so `pythonpath = src` and the conftest both import the mutant.
     """
     assert _MESH_PY == _REPO / "src" / "swarph_cli" / "commands" / "mesh.py"
-    original = _MESH_PY.read_text(encoding="utf-8")
-    mutated = mutator(original)
-    assert mutated != original
-    _MESH_PY.write_text(mutated, encoding="utf-8")
+    real_bytes = _MESH_PY.read_bytes()
+    tmp = Path(tempfile.mkdtemp(prefix="card1452-mut-"))
     try:
-        yield
+        ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache")
+        shutil.copytree(_REPO / "src", tmp / "src", ignore=ignore)
+        shutil.copytree(_REPO / "tests", tmp / "tests", ignore=ignore)
+        shutil.copy(_REPO / "pyproject.toml", tmp / "pyproject.toml")
+        mesh_copy = tmp / "src" / "swarph_cli" / "commands" / "mesh.py"
+        original = mesh_copy.read_text(encoding="utf-8")
+        mutated = mutator(original)
+        assert mutated != original, "mutant did not change the copy"
+        mesh_copy.write_text(mutated, encoding="utf-8")
+        assert _MESH_PY.read_bytes() == real_bytes, "mutant wrote the real mesh.py"
+        env = dict(os.environ)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTHONPATH"] = str(tmp / "src")
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
+             "-q", "--tb=short", "--override-ini", "pythonpath=src", nodeid],
+            cwd=str(tmp),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        assert _MESH_PY.read_bytes() == real_bytes, "mutant wrote the real mesh.py"
+        return proc
     finally:
-        _MESH_PY.write_text(original, encoding="utf-8")
+        assert _MESH_PY.read_bytes() == real_bytes, "mutant wrote the real mesh.py"
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_item4_mutant_refresh_text_dropping_unread_count_run_alone_on_real_source():
-    """Mutant (a), run alone on the real source: drop the unread count from
+def test_item4_mutant_refresh_text_dropping_unread_count_run_alone_on_temp_copy():
+    """Mutant (a), run alone on a temporary copy: drop the unread count from
     the caught-up refresh text. The count assertion must fail."""
     needle = 'f"You have {unread} unread mesh DM(s). "'
     replacement = '"You have unread mesh DM(s). "'
@@ -229,25 +242,18 @@ def test_item4_mutant_refresh_text_dropping_unread_count_run_alone_on_real_sourc
         assert src.count(needle) == 1, "refresh-count line is not where the mutant aims"
         return src.replace(needle, replacement, 1)
 
-    gen = _mutate_real_source(mutator)
-    next(gen)
-    try:
-        proc = _run_one_test_alone(
-            "tests/test_1452_rework2_engine.py::"
-            "test_item4_refresh_text_names_unread_count")
-    finally:
-        try:
-            next(gen)
-        except StopIteration:
-            pass
+    proc = _run_mutant_alone_on_temp_copy(
+        mutator,
+        "tests/test_1452_rework2_engine.py::"
+        "test_item4_refresh_text_names_unread_count")
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0, (
         "mutant survived: refresh text dropping the unread count\n" + out)
     assert "refresh text dropped the unread count" in out, out
 
 
-def test_item4_mutant_tmux_fresh_path_reset_and_later_of_anchor_together_run_alone_on_real_source():
-    """Mutant (b), run alone on the real source: remove BOTH the tmux
+def test_item4_mutant_tmux_fresh_path_reset_and_later_of_anchor_together_run_alone_on_temp_copy():
+    """Mutant (b), run alone on a temporary copy: remove BOTH the tmux
     fresh-path `_note_fresh_wake` and the later-of anchor (prefer the old
     progress stamp). Each change alone is covered by the other; together
     they restore the 60s double wake, and item 1's test must fail."""
@@ -266,17 +272,10 @@ def test_item4_mutant_tmux_fresh_path_reset_and_later_of_anchor_together_run_alo
         assert src.count(anchor) == 1, "later-of anchor is not a single expression"
         return src.replace(fresh, "", 1).replace(anchor, anchor_mutant, 1)
 
-    gen = _mutate_real_source(mutator)
-    next(gen)
-    try:
-        proc = _run_one_test_alone(
-            "tests/test_1452_rework1_engine.py::"
-            "test_item1_tmux_fresh_wake_no_double_wake")
-    finally:
-        try:
-            next(gen)
-        except StopIteration:
-            pass
+    proc = _run_mutant_alone_on_temp_copy(
+        mutator,
+        "tests/test_1452_rework1_engine.py::"
+        "test_item1_tmux_fresh_wake_no_double_wake")
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0, (
         "mutant survived: tmux fresh-path reset and later-of anchor "
