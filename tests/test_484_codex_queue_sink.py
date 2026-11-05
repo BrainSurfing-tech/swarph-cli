@@ -75,7 +75,7 @@ def test_no_second_send_while_outstanding(monkeypatch, fake_state):
     sink = mesh.CodexSink("0197abcd")
     assert sink.deliver(fake_state, [_dm(101)], 101) is True
     assert len(calls) == 1
-    assert sink.deliver(fake_state, [_dm(102)], 102) is True
+    assert sink.deliver(fake_state, [_dm(102)], 102) is None
     assert len(calls) == 1
 
 

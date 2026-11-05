@@ -1370,6 +1370,12 @@ class Sink:
 
     def __init__(self, name: str):
         self.name = name
+        # Card #1452 rework 1 (item 6): True when the send a deliver() call
+        # just made was a standing-wake expiry REFRESH, not a first delivery
+        # of newly owed DMs. The engine reads it after a True outcome: a
+        # refresh must not reset the deferred-tick stall count or clear a
+        # stall alert — no send may hide a cell that never drains.
+        self.refresh_send = False
 
     def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
         """Push `dms` (may be a bounded/empty replay). Three outcomes:
@@ -1473,6 +1479,98 @@ def _stamp_wake(led: dict) -> None:
     led["last_wake_injected_at"] = now
 
 
+# Card #1452: standing-wake expiry — ONE implementation shared by every sink
+# that holds a standing wake (TmuxSink, MuseSink, CodexSink). A standing
+# wake is trusted for at most STANDING_WAKE_EXPIRY_S without DRAIN PROGRESS
+# (unread decreasing); past that it is expired and the sink owes one fresh
+# wake. A poll that sends nothing reports the DM owed (None), never
+# delivered. The clock restarts only on a real send or on observed drain
+# progress — never on a bare poll, so a stuck cell still expires.
+STANDING_WAKE_EXPIRY_S = 600.0
+# Card #1452 rework 1 (note 89766 item 4): the trust limit BACKS OFF per
+# consecutive expiry refresh — STANDING_WAKE_EXPIRY_S x 2^k, capped at
+# STANDING_WAKE_EXPIRY_CAP_S. k (`wake_backoff_k` in the ledger) resets on
+# drain progress or on a drain to 0, so a cell that is actually reading
+# never pays the backed-off limit.
+STANDING_WAKE_EXPIRY_CAP_S = 3600.0
+# Card #1452 rework 1 (note 89766 item 3): with NOTHING newly owed (the
+# delivery ledger already covers the observed cursor — the lost-wake case),
+# a standing wake earns at most this many refreshes for the same delivered
+# id; then refreshes stop and the stall alert is raised once. A new DM
+# resets the count.
+STANDING_WAKE_MAX_CAUGHTUP_REFRESHES = 3
+
+
+def _standing_wake_limit(led: dict) -> float:
+    """Current trust limit for a standing wake: 600s x 2^k, cap 3600s."""
+    k = int(led.get("wake_backoff_k", 0) or 0)
+    if k < 0:
+        k = 0
+    return min(STANDING_WAKE_EXPIRY_S * float(2 ** min(k, 16)),
+               STANDING_WAKE_EXPIRY_CAP_S)
+
+
+def _standing_wake_verdict(led: dict, unread, *, now=None) -> str:
+    """Classify a standing wake: drained/unreadable/progress/hold/expired.
+
+    Mutates only the progress bookkeeping (`wake_last_unread`,
+    `wake_progress_at`, `wake_backoff_k`). `hold` mutates neither clock
+    field. The expiry anchor is the LATER of `wake_progress_at` and
+    `last_wake_injected_at` (rework 1 item 1: preferring an old progress
+    stamp over a newer injection read a fresh wake as instantly expired).
+    """
+    if unread is None:
+        return "unreadable"
+    if unread == 0:
+        led["wake_backoff_k"] = 0  # a drain to 0 resets the backoff
+        return "drained"
+    if now is None:
+        now = time.time()
+    prev = led.get("wake_last_unread")
+    led["wake_last_unread"] = int(unread)
+    if prev is not None and int(unread) < int(prev):
+        led["wake_progress_at"] = now
+        led["wake_backoff_k"] = 0  # drain progress resets the backoff
+        return "progress"
+    anchor = max(float(led.get("wake_progress_at") or 0.0),
+                 float(led.get("last_wake_injected_at") or 0.0))
+    if anchor <= 0 or now - anchor >= _standing_wake_limit(led):
+        return "expired"
+    return "hold"
+
+
+def _note_fresh_wake(led: dict, unread=None, *, expired=False) -> None:
+    """Restart the standing-wake clock after a real send.
+
+    An expiry refresh (`expired=True`) raises the backoff step k for the
+    NEXT interval; a first/fresh send leaves k where the last progress or
+    drain reset put it. A failed caught-up refresh counts like a sent one
+    (rework 2, note 89818 item 3): the engine calls this with
+    `expired=True` because the sink only reaches it on success.
+    """
+    if expired:
+        led["wake_backoff_k"] = int(led.get("wake_backoff_k", 0) or 0) + 1
+    led["wake_progress_at"] = time.time()
+    if unread is None:
+        led.pop("wake_last_unread", None)
+    else:
+        led["wake_last_unread"] = int(unread)
+
+
+def _standing_refresh_prompt(unread, up_to_id: int) -> str:
+    """Wake text for a caught-up standing-wake refresh (item 5).
+
+    The original DM body is no longer owed (the ledger already covers it),
+    so the text names what is unread instead of replaying a body.
+    """
+    return (
+        f"You have {unread} unread mesh DM(s). "
+        f"(Standing-wake refresh: the last delivered DM id is {up_to_id}, "
+        "and the inbox still shows unread mail.) "
+        "Read each and act per your standing instructions."
+    )
+
+
 class TmuxSink(Sink):
     """Poke a tmux pane — the behaviour `mesh sidecar` has always had.
 
@@ -1504,6 +1602,7 @@ class TmuxSink(Sink):
     def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
         led = state.ledger(self.name)
         self.failure_reason = None
+        self.refresh_send = False
         # #1010: the deferral cause, named for the monitor's DEFERRED log —
         # a hardcoded cause is a lie on every path that defers for another
         # reason (the standing-wake hold defers with a CLEAR composer).
@@ -1580,7 +1679,27 @@ class TmuxSink(Sink):
             from swarph_cli.commands.watchdog import _gateway_unread_count
             unread = _gateway_unread_count(state.gateway, state.self_name,
                                            state.token)
-            if unread == 0:
+            # Card #1452: shared standing-wake verdict (see
+            # _standing_wake_verdict). Unreadable and drain-progress polls
+            # send nothing and hold the DM owed; expiry is honoured by the
+            # stale bound in the clear-composer arm below.
+            swake = _standing_wake_verdict(led, unread)
+            if swake == "unreadable":
+                print(f"[monitor] {self.name}: standing wake, unread "
+                      f"unreadable (None) — DM held owed, no send this poll",
+                      flush=True)
+                self.deferred_reason = (
+                    "standing wake, unread unreadable — DM held owed, "
+                    "no send")
+                return None
+            if swake == "progress":
+                print(f"[monitor] {self.name}: standing wake, drain "
+                      f"progress (unread now {unread}) — DM held owed, "
+                      f"no send this poll", flush=True)
+                self.deferred_reason = (
+                    "standing wake, drain progress — DM held owed, no send")
+                return None
+            if swake == "drained":
                 led["wake_outstanding"] = False  # drained since — re-arm
             else:
                 composer = _composer_state(self.target)
@@ -1592,6 +1711,8 @@ class TmuxSink(Sink):
                     if _agent_running(self.target):
                         return None
                     _tmux_enter(self.target)  # one verified nudge, no new text
+                    _note_fresh_wake(led, unread, expired=(swake == "expired"))
+                    self.refresh_send = (swake == "expired")
                     return True
                 if composer == "clear":
                     # A finished opencode turn leaves a ▣ header with a
@@ -1602,6 +1723,8 @@ class TmuxSink(Sink):
                         ok = _tmux_wake(self.target)
                         if ok:
                             _stamp_wake(led)
+                            _note_fresh_wake(led, unread, expired=(swake == "expired"))
+                            self.refresh_send = (swake == "expired")
                             return True
                         if ok is None:
                             return None
@@ -1627,6 +1750,8 @@ class TmuxSink(Sink):
                         ok = _tmux_wake(self.target)
                         if ok:
                             _stamp_wake(led)
+                            _note_fresh_wake(led, unread, expired=(swake == "expired"))
+                            self.refresh_send = (swake == "expired")
                             return True
                         if ok is None:
                             return None  # human adopted mid-settle: defer
@@ -1647,7 +1772,7 @@ class TmuxSink(Sink):
                     # (lab-ovh's rebase ruling): a line that says "no
                     # keystroke this poll" immediately followed by a keystroke
                     # is the lie both PRs exist to stop.
-                    if time.time() - injected_at > _WAKE_STALE_S:
+                    if swake == "expired":
                         # #619: a stale re-inject into a RUNNING TUI lands in
                         # the input-gated queue — lost again, just later.
                         # Defer; the first idle poll re-injects for real.
@@ -1656,6 +1781,8 @@ class TmuxSink(Sink):
                         ok = _tmux_wake(self.target)
                         if ok:
                             _stamp_wake(led)
+                            _note_fresh_wake(led, unread, expired=True)
+                            self.refresh_send = True
                             return True
                         if ok is None:
                             return None  # human adopted mid-settle: defer
@@ -1753,6 +1880,12 @@ class TmuxSink(Sink):
         if ok:
             led["wake_outstanding"] = True
             _stamp_wake(led)
+            # Card #1452 rework 1 (item 1): a fresh Tmux wake resets the
+            # progress clock, as Codex and Muse already do — otherwise a
+            # progress stamp from a drained episode hours ago reads the
+            # fresh wake as instantly expired and a DM a minute later
+            # double-wakes inside the trust limit.
+            _note_fresh_wake(led)
             return True
         # False splits by what the pane actually holds: text observably STUCK
         # in the composer -> mark outstanding so the next poll nudges instead
@@ -1940,9 +2073,11 @@ def _muse_send(session: str, text: str, *,
 class MuseSink(Sink):
     """Wake a live muse session with `session-message send` instead of typing.
 
-    Edge-triggered on the drain like TmuxSink: while `wake_outstanding`
-    stands (gateway unread > 0), further deliveries report delivered with NO
-    new send; the next delivery after the drain sends again. There is no
+    Edge-triggered on the drain like TmuxSink, with the card #1452 expiry:
+    while `wake_outstanding` stands and drain progress continues, further
+    deliveries hold the DM owed (None) with NO new send; after
+    STANDING_WAKE_EXPIRY_S without progress exactly one fresh wake is sent;
+    the next delivery after the drain sends again. There is no
     composer to read — a muse session has no TUI pane — so there is no
     politeness gate, only the outstanding flag plus the gateway drain check.
     A refused or failed send returns False with a NAMED reason printed loud;
@@ -1974,17 +2109,57 @@ class MuseSink(Sink):
 
     def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
         led = state.ledger(self.name)
+        self.deferred_reason = None
+        self.refresh_send = False
+        unread = None
         if led.get("wake_outstanding"):
             # Lazy: watchdog imports mesh module-level, so the reverse must
-            # not. None (gateway error) reads as NOT-drained — re-arming on
-            # an unreadable drain signal would re-open the stack.
+            # not. Card #1452: shared standing-wake verdict — a poll that
+            # sends nothing holds the DM owed (None), never delivered.
             from swarph_cli.commands.watchdog import _gateway_unread_count
-            if _gateway_unread_count(state.gateway, state.self_name,
-                                     state.token) != 0:
-                print(f"[monitor] {self.name}: delivery reported on a STANDING wake "
-                      f"(no send this poll)", flush=True)
-                return True
-            led["wake_outstanding"] = False  # drained since — re-arm
+            unread = _gateway_unread_count(state.gateway, state.self_name,
+                                           state.token)
+            swake = _standing_wake_verdict(led, unread)
+            if swake == "drained":
+                led["wake_outstanding"] = False  # drained since — re-arm
+                if not dms and up_to_id <= int(led.get("last_delivered_id", 0)):
+                    # Caught-up evaluation (item 2): the engine has already
+                    # advanced the ledger on this drain (item 5) — no send.
+                    return None
+            elif swake == "expired":
+                if not dms and up_to_id > int(led.get("last_delivered_id", 0)):
+                    print(f"[monitor] {self.name}: {up_to_id} observed but no body "
+                          f"recoverable from inbox.log for the owed range", flush=True)
+                    return False
+                # Item 5: with nothing newly owed the original body is gone
+                # from the owed range; the refresh names what is unread.
+                text = (self._prompt(dms) if dms
+                        else _standing_refresh_prompt(unread, up_to_id))
+                ok, reason = _muse_send(self.session, text)
+                if ok:
+                    limit = _standing_wake_limit(led)
+                    led["wake_outstanding"] = True
+                    led["last_wake_injected_at"] = time.time()
+                    _note_fresh_wake(led, unread, expired=True)
+                    self.refresh_send = True
+                    print(f"[monitor] {self.name}: standing wake expired after "
+                          f"{limit:.0f}s without drain progress "
+                          f"— sent one fresh wake", flush=True)
+                    return True
+                print(f"[monitor] {self.name}: muse send FAILED: {reason}", flush=True)
+                return False
+            elif swake == "unreadable":
+                print(f"[monitor] {self.name}: standing wake, unread unreadable "
+                      f"(None) — DM held owed, no send this poll", flush=True)
+                self.deferred_reason = (
+                    "standing wake, unread unreadable — DM held owed, no send")
+                return None
+            else:
+                print(f"[monitor] {self.name}: standing wake ({swake}) — DM held "
+                      f"owed, no send this poll", flush=True)
+                self.deferred_reason = (
+                    f"standing wake ({swake}) — DM held owed, no send")
+                return None
         if not dms:
             # Nothing recoverable to hand over (log rotated) — do NOT claim
             # a delivery; the ledger stays and the gap stays visible.
@@ -1997,6 +2172,7 @@ class MuseSink(Sink):
         if ok:
             led["wake_outstanding"] = True
             led["last_wake_injected_at"] = time.time()
+            _note_fresh_wake(led, unread)
             return True
         print(f"[monitor] {self.name}: muse send FAILED: {reason}", flush=True)
         return False
@@ -2051,9 +2227,11 @@ def _codex_send(thread: str, text: str, *,
 class CodexSink(Sink):
     """Wake the live gpt-ops session with `codex queue` instead of typing.
 
-    Edge-triggered on the drain like MuseSink: while `wake_outstanding`
-    stands (gateway unread > 0), further deliveries report delivered with NO
-    new send; the next delivery after the drain sends again. There is no
+    Edge-triggered on the drain like MuseSink, with the card #1452 expiry:
+    while `wake_outstanding` stands and drain progress continues, further
+    deliveries hold the DM owed (None) with NO new send; after
+    STANDING_WAKE_EXPIRY_S without progress exactly one fresh wake is sent;
+    the next delivery after the drain sends again. There is no
     composer to read — codex queues into the session, it does not type —
     so there is no politeness gate, only the outstanding flag plus the
     gateway drain check. A refused or failed send returns False with a NAMED
@@ -2085,17 +2263,57 @@ class CodexSink(Sink):
 
     def deliver(self, state: "MonitorState", dms: list, up_to_id: int) -> Optional[bool]:
         led = state.ledger(self.name)
+        self.deferred_reason = None
+        self.refresh_send = False
+        unread = None
         if led.get("wake_outstanding"):
             # Lazy: watchdog imports mesh module-level, so the reverse must
-            # not. None (gateway error) reads as NOT-drained — re-arming on
-            # an unreadable drain signal would re-open the stack.
+            # not. Card #1452: shared standing-wake verdict — a poll that
+            # sends nothing holds the DM owed (None), never delivered.
             from swarph_cli.commands.watchdog import _gateway_unread_count
-            if _gateway_unread_count(state.gateway, state.self_name,
-                                     state.token) != 0:
-                print(f"[monitor] {self.name}: delivery reported on a STANDING wake "
-                      f"(no send this poll)", flush=True)
-                return True
-            led["wake_outstanding"] = False  # drained since — re-arm
+            unread = _gateway_unread_count(state.gateway, state.self_name,
+                                           state.token)
+            swake = _standing_wake_verdict(led, unread)
+            if swake == "drained":
+                led["wake_outstanding"] = False  # drained since — re-arm
+                if not dms and up_to_id <= int(led.get("last_delivered_id", 0)):
+                    # Caught-up evaluation (item 2): the engine has already
+                    # advanced the ledger on this drain (item 5) — no send.
+                    return None
+            elif swake == "expired":
+                if not dms and up_to_id > int(led.get("last_delivered_id", 0)):
+                    print(f"[monitor] {self.name}: {up_to_id} observed but no body "
+                          f"recoverable from inbox.log for the owed range", flush=True)
+                    return False
+                # Item 5: with nothing newly owed the original body is gone
+                # from the owed range; the refresh names what is unread.
+                text = (self._prompt(dms) if dms
+                        else _standing_refresh_prompt(unread, up_to_id))
+                ok, reason = _codex_send(self.thread, text)
+                if ok:
+                    limit = _standing_wake_limit(led)
+                    led["wake_outstanding"] = True
+                    led["last_wake_injected_at"] = time.time()
+                    _note_fresh_wake(led, unread, expired=True)
+                    self.refresh_send = True
+                    print(f"[monitor] {self.name}: standing wake expired after "
+                          f"{limit:.0f}s without drain progress "
+                          f"— sent one fresh wake", flush=True)
+                    return True
+                print(f"[monitor] {self.name}: codex send FAILED: {reason}", flush=True)
+                return False
+            elif swake == "unreadable":
+                print(f"[monitor] {self.name}: standing wake, unread unreadable "
+                      f"(None) — DM held owed, no send this poll", flush=True)
+                self.deferred_reason = (
+                    "standing wake, unread unreadable — DM held owed, no send")
+                return None
+            else:
+                print(f"[monitor] {self.name}: standing wake ({swake}) — DM held "
+                      f"owed, no send this poll", flush=True)
+                self.deferred_reason = (
+                    f"standing wake ({swake}) — DM held owed, no send")
+                return None
         if not dms:
             # Nothing recoverable to hand over (log rotated) — do NOT claim
             # a delivery; the ledger stays and the gap stays visible.
@@ -2108,6 +2326,7 @@ class CodexSink(Sink):
         if ok:
             led["wake_outstanding"] = True
             led["last_wake_injected_at"] = time.time()
+            _note_fresh_wake(led, unread)
             return True
         print(f"[monitor] {self.name}: codex send FAILED: {reason}", flush=True)
         return False
@@ -2403,7 +2622,7 @@ _WAKE_SUBMIT_ATTEMPTS = 4
 # enough that a legitimately queued follow-up survives a marathon agent turn;
 # short enough that a lost wake costs minutes of silence, not hours. The
 # retry self-rate-limits: a successful re-injection re-anchors the clock.
-_WAKE_STALE_S = 600.0
+_WAKE_STALE_S = STANDING_WAKE_EXPIRY_S
 
 
 def _capture_pane_lines(target: str) -> Optional[list[str]]:
@@ -3583,15 +3802,151 @@ def _monitor_deliver(state: MonitorState) -> None:
             # Per-poll, the drain is caught within one interval and the next
             # DM earns a wake of its own. unread == None (gateway error)
             # reads as NOT-drained — never re-arm on an unreadable signal.
-            if led.get("wake_outstanding"):
+            # Card #1452 rework 3 (note 89855 route B): this branch used to
+            # read the count only while wake_outstanding stood. A running
+            # plain-tmux turn clears that flag (#620), so a drain inside the
+            # turn was invisible and the stall row stayed open until the
+            # turn ended — and the turn's end then woke on mail already
+            # read. Read while a wake stands OR while an alert stands
+            # (caught-up marker set, or deferred ticks at or above
+            # _STALL_FIRST). No read otherwise.
+            unread = None
+            from swarph_cli import stall_alert
+            ticks = int(led.get("deferred_ticks", 0) or 0)
+            alert_stands = (
+                int(led.get("standing_refresh_alerted_id", 0) or 0) != 0
+                or ticks >= stall_alert._STALL_FIRST)
+            if led.get("wake_outstanding") or alert_stands:
                 from swarph_cli.commands.watchdog import _gateway_unread_count
-                if _gateway_unread_count(state.gateway, state.self_name,
-                                         state.token) == 0:
+                unread = _gateway_unread_count(state.gateway, state.self_name,
+                                               state.token)
+                if unread == 0:
                     led["wake_outstanding"] = False
+                    # Card #1452 rework 1 (item 5): an observed drain to 0
+                    # ADVANCES the ledger to the observed cursor with NO
+                    # send — a healthy drain costs no spurious wake. Only a
+                    # real send moves delivery evidence otherwise. The
+                    # backoff and the caught-up refresh count reset here.
+                    if int(led["last_delivered_id"]) != observed:
+                        led["last_delivered_id"] = observed
+                    # Card #1452 rework 2 (note 89818 item 2): a drain closes
+                    # the stall row. The bound alert leaves deferred_ticks at
+                    # 0, and the tick alert leaves them high, so neither the
+                    # next delivery nor this branch used to close it. When
+                    # either alert stands, zero the ticks and close the row.
+                    led["wake_backoff_k"] = 0
+                    led["standing_refresh_count"] = 0
+                    led["standing_refresh_alerted_id"] = 0
+                    if alert_stands:
+                        led["deferred_ticks"] = 0
+                        stall_alert.clear_stall_alert(
+                            state.gateway, state.token, state.self_name)
                     changed = True
             delivered = int(led["last_delivered_id"])
             if delivered >= observed:
-                continue          # this sink owes nothing
+                # Card #1452 rework 1 (item 2): a standing wake is evaluated
+                # on EVERY poll, also when nothing is newly owed — the
+                # lost-wake case (one unread DM, no later DM) otherwise
+                # never refreshed, and its drain progress was discarded.
+                # The engine runs the shared verdict itself (recording any
+                # nonzero drain progress in the ledger) and calls deliver()
+                # only when a refresh send is actually due, so a hold poll
+                # costs no sink read (e.g. no tmux pane capture).
+                if not led.get("wake_outstanding"):
+                    continue      # this sink owes nothing, no wake stands
+                if unread is None:
+                    continue      # unreadable: the flag stands, no send
+                verdict = _standing_wake_verdict(led, unread)
+                if verdict == "progress":
+                    changed = True  # persist the re-anchored progress clock
+                    continue
+                if verdict != "expired":
+                    continue      # hold: nothing material changed
+                refresh_for = int(led.get("standing_refresh_for_id", -1))
+                refresh_count = (int(led.get("standing_refresh_count", 0))
+                                 if refresh_for == delivered else 0)
+                if refresh_count >= STANDING_WAKE_MAX_CAUGHTUP_REFRESHES:
+                    # Item 3: at most STANDING_WAKE_MAX_CAUGHTUP_REFRESHES
+                    # refreshes for the same delivered id, then stop and
+                    # raise the existing stall alert ONCE. A new DM (the
+                    # owed path below) resets the count.
+                    if int(led.get("standing_refresh_alerted_id", 0)) != delivered:
+                        led["standing_refresh_alerted_id"] = delivered
+                        from swarph_cli import stall_alert
+                        stall_alert.send_stall_alert(
+                            state.gateway, state.token, state.self_name,
+                            refresh_count,
+                            unread if isinstance(unread, int) and unread > 0 else 1)
+                        print(f"{state.log_prefix} standing wake for {sink.name} "
+                              f"hit the caught-up refresh bound "
+                              f"({STANDING_WAKE_MAX_CAUGHTUP_REFRESHES} for id "
+                              f"{delivered}) — no further refresh; stall alert raised",
+                              flush=True)
+                        changed = True
+                    continue
+                outcome = sink.deliver(state, [], observed)
+                if outcome is None:
+                    # Card #1452 rework 2 (note 89818 item 1): plain tmux
+                    # clears wake_outstanding when a turn is running (#620)
+                    # and returns None. Nothing is newly owed, so a cleared
+                    # flag would never re-enter this sink and the lost wake
+                    # would stay lost. Keep the flag while unread remains.
+                    # A deferral is not a refresh: the clock and the count
+                    # stay, so the refresh still happens once the turn ends.
+                    if isinstance(unread, int) and unread > 0:
+                        led["wake_outstanding"] = True
+                    changed = True
+                    continue
+                # True and False both consume one caught-up refresh (note
+                # 89818 item 3). A refused send used to leave the clock and
+                # the count unmoved, so a dead sink retried every poll and
+                # never reached the stall alert. Count it like a sent one.
+                # The sink restarts the clock only on success; do it here on
+                # failure. The owed path below is unchanged: a failed send
+                # there raises no new alert (carded separately).
+                if not outcome:
+                    _note_fresh_wake(
+                        led, unread if isinstance(unread, int) else None,
+                        expired=True)
+                    # Note 89855 item 3: plain tmux clears the flag on the
+                    # running read (#620) and the idle read can then refuse
+                    # the send, so the flag is down unless this puts it
+                    # back. Without it the refused refresh is the last
+                    # attempt and the stall alert never comes.
+                    if isinstance(unread, int) and unread > 0:
+                        led["wake_outstanding"] = True
+                led["standing_refresh_count"] = refresh_count + 1
+                led["standing_refresh_for_id"] = delivered
+                if outcome:
+                    led["last_delivery_at"] = now
+                    led["consecutive_failures"] = 0
+                    state.deliveries[sink.name] = state.deliveries.get(sink.name, 0) + 1
+                    print(f"{state.log_prefix} standing wake refreshed for "
+                          f"{sink.name} (refresh "
+                          f"{refresh_count + 1}/{STANDING_WAKE_MAX_CAUGHTUP_REFRESHES} "
+                          f"for id {delivered}; nothing newly owed)",
+                          flush=True)
+                else:
+                    led["consecutive_failures"] = int(led["consecutive_failures"]) + 1
+                    detail = getattr(sink, "failure_reason", None) or (
+                        "the sink is probably gone (session restart / renamed target)"
+                    )
+                    print(f"{state.log_prefix} DELIVERY FAILED to {sink.name} "
+                          f"({led['consecutive_failures']} consecutive) -- DMs up to "
+                          f"id {observed} were still observed and archived; {detail}",
+                          file=sys.stderr, flush=True)
+                changed = True
+                continue
+            # Something is newly owed: a new DM resets the caught-up
+            # refresh count (item 3) so the new id can refresh. Card #1452
+            # rework 3 (note 89855 route A): do NOT zero
+            # standing_refresh_alerted_id here. Zeroing it dropped the
+            # stall row's identity, the drain then found nothing to close,
+            # and that open row absorbed the next stall. The drain branch
+            # still zeroes the marker when it closes the row.
+            if int(led.get("standing_refresh_count", 0) or 0):
+                led["standing_refresh_count"] = 0
+                changed = True
             if now - float(led["last_delivery_at"]) < state.min_interval_s:
                 print(f"{state.log_prefix} wake suppressed by idle guard for "
                       f"{sink.name} (cursor advanced; delivery still pending)",
@@ -3634,7 +3989,12 @@ def _monitor_deliver(state: MonitorState) -> None:
                       flush=True)
                 continue
             was_stalled = bool(led.get("deferred_ticks"))
-            if was_stalled:
+            # Card #1452 rework 1 (item 6): a standing-wake REFRESH send must
+            # not hide a cell that never drains — it neither resets the
+            # deferred-tick count nor clears the stall alert. Only a
+            # non-refresh delivery (or a drain) resolves a stall.
+            is_refresh = bool(getattr(sink, "refresh_send", False))
+            if was_stalled and not is_refresh:
                 led["deferred_ticks"] = 0
             if outcome:
                 led["last_delivered_id"] = observed
@@ -3643,7 +4003,7 @@ def _monitor_deliver(state: MonitorState) -> None:
                 state.deliveries[sink.name] = state.deliveries.get(sink.name, 0) + 1
                 print(f"{state.log_prefix} delivered to {sink.name} up to id {observed}",
                       flush=True)
-                if was_stalled:
+                if was_stalled and not is_refresh:
                     from swarph_cli import stall_alert
                     stall_alert.clear_stall_alert(
                         state.gateway, state.token, state.self_name)
