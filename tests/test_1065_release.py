@@ -147,7 +147,7 @@ esac
     env["RELEASE_VERIFY_CMD"] = "true"
     env["RELEASE_PYPI_SLEEP"] = "0"
     env["RELEASE_INSTALL_EPOCH"] = "1"
-    proc = _run(["bash", str(RELEASE), "--resume", "9.9.9"], env)
+    proc = _run(["bash", str(RELEASE), "--resume", "--expected-head", head, "9.9.9"], env)
     assert proc.returncode == 0, proc.stderr + proc.stdout
     text = log.read_text()
     assert "MERGE" in text
@@ -164,6 +164,36 @@ esac
     assert f"tag -a v9.9.9 {merge}" in text
     assert f"tag -a v9.9.9 {head}" not in text
     assert f"tag v9.9.9 {head}" not in text
+
+
+@needs_bash
+def test_old_argument_parser_refuses_new_flag_before_commands(tmp_path):
+    called = tmp_path / "called"
+    old_parser = '''set -eu
+VERSION=""
+usage() { exit 2; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run|--resume|--restart-only) ;;
+    -h|--help) usage ;;
+    *) if [ -n "$VERSION" ]; then usage; fi; VERSION="$1" ;;
+  esac
+  shift
+done
+gh
+git
+'''
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("gh", "git"):
+        command = bin_dir / name
+        command.write_text(f"#!/bin/sh\ntouch '{called}'\n")
+        command.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    proc = subprocess.run(["bash", "-s", "--", "--resume", "--expected-head", "a" * 40, "9.9.9"],
+                          input=old_parser, env=env, text=True, capture_output=True)
+    assert proc.returncode == 2
+    assert not called.exists()
 
 
 @needs_bash
