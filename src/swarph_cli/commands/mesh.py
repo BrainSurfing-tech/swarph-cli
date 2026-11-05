@@ -1540,11 +1540,13 @@ def _standing_wake_verdict(led: dict, unread, *, now=None) -> str:
 
 
 def _note_fresh_wake(led: dict, unread=None, *, expired=False) -> None:
-    """Restart the standing-wake clock after a REAL send.
+    """Restart the standing-wake clock after a real send.
 
     An expiry refresh (`expired=True`) raises the backoff step k for the
     NEXT interval; a first/fresh send leaves k where the last progress or
-    drain reset put it.
+    drain reset put it. A failed caught-up refresh counts like a sent one
+    (rework 2, note 89818 item 3): the engine calls this with
+    `expired=True` because the sink only reaches it on success.
     """
     if expired:
         led["wake_backoff_k"] = int(led.get("wake_backoff_k", 0) or 0) + 1
@@ -3814,9 +3816,23 @@ def _monitor_deliver(state: MonitorState) -> None:
                     # backoff and the caught-up refresh count reset here.
                     if int(led["last_delivered_id"]) != observed:
                         led["last_delivered_id"] = observed
+                    # Card #1452 rework 2 (note 89818 item 2): a drain closes
+                    # the stall row. The bound alert leaves deferred_ticks at
+                    # 0, and the tick alert leaves them high, so neither the
+                    # next delivery nor this branch used to close it. When
+                    # either alert stands, zero the ticks and close the row.
+                    from swarph_cli import stall_alert
+                    ticks = int(led.get("deferred_ticks", 0) or 0)
+                    alert_stands = (
+                        int(led.get("standing_refresh_alerted_id", 0) or 0) != 0
+                        or ticks >= stall_alert._STALL_FIRST)
                     led["wake_backoff_k"] = 0
                     led["standing_refresh_count"] = 0
                     led["standing_refresh_alerted_id"] = 0
+                    if alert_stands:
+                        led["deferred_ticks"] = 0
+                        stall_alert.clear_stall_alert(
+                            state.gateway, state.token, state.self_name)
                     changed = True
             delivered = int(led["last_delivered_id"])
             if delivered >= observed:
@@ -3862,14 +3878,33 @@ def _monitor_deliver(state: MonitorState) -> None:
                     continue
                 outcome = sink.deliver(state, [], observed)
                 if outcome is None:
-                    # Hold / progress / unreadable: no send, no delivery
-                    # evidence moves. The verdict already recorded any
-                    # nonzero drain progress in the ledger.
+                    # Card #1452 rework 2 (note 89818 item 1): plain tmux
+                    # clears wake_outstanding when a turn is running (#620)
+                    # and returns None. Nothing is newly owed, so a cleared
+                    # flag would never re-enter this sink and the lost wake
+                    # would stay lost. Keep the flag while unread remains.
+                    # A deferral is not a refresh: the clock and the count
+                    # stay, so the refresh still happens once the turn ends.
+                    if isinstance(unread, int) and unread > 0:
+                        led["wake_outstanding"] = True
                     changed = True
                     continue
+                # True and False both consume one caught-up refresh (note
+                # 89818 item 3). A refused send used to leave the clock and
+                # the count unmoved, so a dead sink retried every poll and
+                # never reached the stall alert. Count it like a sent one.
+                # The sink restarts the clock only on success; do it here on
+                # failure. The owed path below is unchanged: a failed send
+                # there raises no new alert (carded separately).
+                if not outcome:
+                    _note_fresh_wake(
+                        led, unread if isinstance(unread, int) else None,
+                        expired=True)
+                    if isinstance(unread, int) and unread > 0:
+                        led["wake_outstanding"] = True
+                led["standing_refresh_count"] = refresh_count + 1
+                led["standing_refresh_for_id"] = delivered
                 if outcome:
-                    led["standing_refresh_count"] = refresh_count + 1
-                    led["standing_refresh_for_id"] = delivered
                     led["last_delivery_at"] = now
                     led["consecutive_failures"] = 0
                     state.deliveries[sink.name] = state.deliveries.get(sink.name, 0) + 1
