@@ -357,6 +357,12 @@ def _mask_quoted(command: str) -> str:
 
     while i < n:
         c = command[i]
+        if c == "#" and (i == 0 or command[i - 1].isspace() or command[i - 1] in ";|&()"):
+            end = command.find("\n", i)
+            end = n if end < 0 else end
+            out.append(blanks(command[i:end]))
+            i = end
+            continue
         if c == "\\" and i + 1 < n:
             out.append(command[i:i + 2])
             i += 2

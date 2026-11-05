@@ -10,6 +10,8 @@ from swarph_cli.commands import gh_route
 @pytest.mark.parametrize("command", [
     "# Check what's open\ngh pr list",
     '# Check what"s open\ngh pr list',
+    "echo 'unterminated\ngh pr list",
+    "# what's open; export GH_TOKEN=x\ngh pr list",
     'echo "; export GH_TOKEN=x"; gh pr list',
 ])
 def test_quoted_text_cannot_hide_an_unrouted_gh(tmp_path, monkeypatch, capsys, command):
