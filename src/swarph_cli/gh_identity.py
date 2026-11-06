@@ -340,13 +340,15 @@ def _subst_end(command: str, open_paren: int) -> int:
     return n
 
 
-def _mask_quoted(command: str) -> str:
+def _mask_quoted(command: str, *, mask_comments: bool = False) -> str:
     """Blank the insides of quotes. A quoted ``gh`` is not a command (card #1340).
 
     ``$(...)`` and backticks stay, including inside double quotes, because those
     are command substitutions. Their contents are masked the same way, so a
     quote inside a substitution does not hide a real ``gh`` and a quoted
     substitution does not invent one.
+    Comments are masked only for explicit-token detection: a hash in a heredoc
+    or expansion is not a reliable comment boundary for command detection.
     """
     out: list[str] = []
     i = 0
@@ -357,6 +359,12 @@ def _mask_quoted(command: str) -> str:
 
     while i < n:
         c = command[i]
+        if mask_comments and c == "#" and (i == 0 or command[i - 1].isspace() or command[i - 1] in ";|&()"):
+            end = command.find("\n", i)
+            end = n if end < 0 else end
+            out.append(blanks(command[i:end]))
+            i = end
+            continue
         if c == "\\" and i + 1 < n:
             out.append(command[i:i + 2])
             i += 2
@@ -364,8 +372,8 @@ def _mask_quoted(command: str) -> str:
         if c == "'":
             j = command.find("'", i + 1)
             if j < 0:
-                out.append(c)
-                out.append(blanks(command[i + 1:]))
+                # An unmatched quote may be comment text; keep later commands visible.
+                out.append(command[i:])
                 break
             out.append(c)
             out.append(blanks(command[i + 1:j]))
@@ -373,6 +381,7 @@ def _mask_quoted(command: str) -> str:
             i = j + 1
             continue
         if c == '"':
+            quote_start, output_start = i, len(out)
             out.append(c)
             i += 1
             while i < n and command[i] != '"':
@@ -382,7 +391,7 @@ def _mask_quoted(command: str) -> str:
                     continue
                 if command[i] == "$" and i + 1 < n and command[i + 1] == "(":
                     end = _subst_end(command, i + 1)
-                    inner = _mask_quoted(command[i + 2:end])
+                    inner = _mask_quoted(command[i + 2:end], mask_comments=mask_comments)
                     out.append("$(" + inner + (")" if end < n else ""))
                     i = end + 1 if end < n else n
                     continue
@@ -390,10 +399,10 @@ def _mask_quoted(command: str) -> str:
                     j = command.find("`", i + 1)
                     if j < 0:
                         out.append("`")
-                        out.append(_mask_quoted(command[i + 1:]))
+                        out.append(_mask_quoted(command[i + 1:], mask_comments=mask_comments))
                         i = n
                         break
-                    out.append("`" + _mask_quoted(command[i + 1:j]) + "`")
+                    out.append("`" + _mask_quoted(command[i + 1:j], mask_comments=mask_comments) + "`")
                     i = j + 1
                     continue
                 out.append("\n" if command[i] == "\n" else " ")
@@ -401,6 +410,8 @@ def _mask_quoted(command: str) -> str:
             if i < n and command[i] == '"':
                 out.append('"')
                 i += 1
+            else:
+                out[output_start:] = [command[quote_start:]]
             continue
         out.append(c)
         i += 1
@@ -623,7 +634,7 @@ def targets_gh(command: str) -> bool:
 
 
 def _targets_gh(command: str, depth: int) -> bool:
-    visible = _mask_quoted(command)
+    visible = _mask_quoted(command, mask_comments=False)
     if _GH_INVOCATION.search(visible):
         return True
     if depth >= _MAX_SHELL_DEPTH:
@@ -640,7 +651,7 @@ def already_explicit(command: str) -> bool:
     """True when the caller already set GH_TOKEN — an explicit decision (#332: an
     explicit argument is a decision, not a hint). The router must not override it,
     and must not stack a second assignment in front of it."""
-    return bool(_HAS_GH_TOKEN.search(command or ""))
+    return bool(_HAS_GH_TOKEN.search(_mask_quoted(command or "", mask_comments=True)))
 
 
 def inject(command: str, login: str) -> str:

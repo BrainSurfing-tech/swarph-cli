@@ -227,18 +227,16 @@ def test_hook_is_SILENT_on_non_gh_commands(mapping, monkeypatch):
     assert rc == 0 and out is None
 
 
-def test_hook_FAILS_OPEN_on_a_malformed_payload(mapping, monkeypatch):
-    """>>> DELIBERATE ASYMMETRY, AND THE ONE PLACE THIS ROUTER DOES NOT REFUSE. <<<
-    A router that cannot parse its envelope has learned NOTHING about the command,
-    so denying would brick every Bash call on a harness change. It is the UNMAPPED
-    CELL that must fail closed — a known cell with no identity — not an unreadable
-    envelope that might not even be a `gh` call."""
+def test_hook_denies_a_malformed_payload(mapping, monkeypatch):
+    """Card #1470: an unreadable envelope cannot establish a safe gh identity."""
     import io, contextlib
     monkeypatch.setenv("SWARPH_SELF", "lab-ovh")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = gh_route.run_hook("{not json")
-    assert rc == 0 and buf.getvalue().strip() == ""
+    assert rc == 0
+    output = json.loads(buf.getvalue())
+    assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_hook_does_not_double_inject(mapping, monkeypatch):
