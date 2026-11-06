@@ -903,18 +903,115 @@ def _mask_explicit(command: str) -> str:
     return "".join(out)
 
 
+_PLAIN_WORD = r"[A-Za-z0-9._-]+"
 _GH_AUTH_TOKEN_INNER = re.compile(
-    r"^(?:(?:/[\w.-]+)*/)?gh[ \t]+auth[ \t]+token(?:[ \t].*)?$", re.DOTALL)
+    rf"^(?:(?:/[\w.-]+)*/)?gh[ \t]+auth[ \t]+token"
+    rf"(?:[ \t]+--user[ \t]+{_PLAIN_WORD}"
+    rf"|[ \t]+--hostname[ \t]+{_PLAIN_WORD})*$")
 
 
 def _subst_inner_ok(inner: str) -> bool:
     """A value substitution holds no gh call, except ``gh auth token``."""
     if "$(" in inner or "`" in inner:
         return False
+    if ";" in inner or "|" in inner or "&" in inner or "\n" in inner:
+        return False
     if not re.search(r"\bgh\b", inner):
-        return ";" not in inner and "|" not in inner and "&" not in inner \
-            and "\n" not in inner
+        return True
     return bool(_GH_AUTH_TOKEN_INNER.match(inner.strip()))
+
+
+def _has_unterminated_quote(text: str) -> bool:
+    """True when any quote in ``text`` is unterminated.
+
+    Heredoc bodies and comments are not live quote text. Double-quoted
+    interiors are live for ``$(...)``, whose inner text is checked too.
+    """
+    pending: list[tuple[str, bool]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "\n":
+            i += 1
+            while pending:
+                delim, strip_tabs = pending.pop(0)
+                while i < n:
+                    nl = text.find("\n", i)
+                    lend = n if nl < 0 else nl
+                    if _is_terminator(text[i:lend], delim, strip_tabs):
+                        i = lend + 1 if nl >= 0 else n
+                        break
+                    i = n if nl < 0 else nl + 1
+            continue
+        if c == "#" and (i == 0 or text[i - 1].isspace()
+                         or text[i - 1] in ";|&()"):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+            continue
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if c == "<":
+            if text.startswith("<<<", i):
+                i += 3
+                continue
+            m = None if (i > 0 and text[i - 1] == "<") \
+                else _HEREDOC_OP.match(text, i)
+            if m is not None:
+                pending.append((m.group(2), bool(m.group(1))))
+                i = m.end()
+                continue
+            i += 1
+            continue
+        if c == "$" and i + 1 < n and text[i + 1] == "'":
+            j = i + 2
+            while j < n:
+                if text[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if text[j] == "'":
+                    break
+                j += 1
+            if j >= n:
+                return True
+            i = j + 1
+            continue
+        if c == "'":
+            j = text.find("'", i + 1)
+            if j < 0:
+                return True
+            i = j + 1
+            continue
+        if c == '"':
+            i += 1
+            closed = False
+            while i < n:
+                if text[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                if text[i] == '"':
+                    closed = True
+                    i += 1
+                    break
+                if text.startswith("$(", i):
+                    end = _subst_end_hd(text, i + 1)
+                    if _has_unterminated_quote(text[i + 2:end]):
+                        return True
+                    i = end + 1 if end < n else n
+                    continue
+                i += 1
+            if not closed:
+                return True
+            continue
+        if text.startswith("$(", i):
+            end = _subst_end_hd(text, i + 1)
+            if _has_unterminated_quote(text[i + 2:end]):
+                return True
+            i = end + 1 if end < n else n
+            continue
+        i += 1
+    return False
 
 
 def _scan_constructs(text: str, base: int = 0):
@@ -1044,11 +1141,15 @@ def _value_end(text: str, i: int) -> Optional[int]:
         end = _subst_end(text, i + 1)
         if end >= n:
             return None
+        if not text[i + 2:end].strip():
+            return None
         if not _subst_inner_ok(text[i + 2:end]):
             return None
         return end + 1
     if text[i] in "'\"":
         body, end = _quoted_body(text, i)
+        if not body:
+            return None
         if "$(" in body or "`" in body:
             return None
         return end
@@ -1178,6 +1279,8 @@ def already_explicit(command: str) -> bool:
     only route.
     """
     raw = command or ""
+    if _has_unterminated_quote(raw):
+        return False
     visible = _mask_explicit(raw)
     if not visible.strip():
         return False

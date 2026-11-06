@@ -96,6 +96,45 @@ CASES = [
     pytest.param(
         'export GH_TOKEN="x" && gh pr create --body b',
         True, id="k3-export-quoted-and-join"),
+    # #4447: inner $() allowlist, unterminated quote, empty value.
+    pytest.param(
+        "GH_TOKEN=$(gh auth token --user u; gh pr merge 1) gh pr view 1",
+        False, id="n1-inner-semicolon-merge"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token --user u && gh pr merge 1) gh pr view 1",
+        False, id="n2-inner-and-merge"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token --user u || gh pr merge 1) gh pr view 1",
+        False, id="n3-inner-or-merge"),
+    pytest.param(
+        "export GH_TOKEN=$(gh auth token | gh api -X DELETE repos/o/r); gh pr view",
+        False, id="n4-inner-pipe-api-delete"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token --user u \n gh pr merge 1) gh pr view 1",
+        False, id="n5-inner-space-newline-tail"),
+    pytest.param(
+        "GH_TOKEN=x gh pr view 'abc",
+        False, id="n6-unterminated-single-quote"),
+    pytest.param(
+        'GH_TOKEN=x gh pr view "abc',
+        False, id="n7-unterminated-double-quote"),
+    pytest.param(
+        'GH_TOKEN="" gh pr view', False, id="n8-prefix-empty-double"),
+    pytest.param(
+        "GH_TOKEN='' gh pr view", False, id="n9-prefix-empty-single"),
+    pytest.param(
+        'export GH_TOKEN=""; gh pr view', False, id="n10-export-empty-double"),
+    pytest.param(
+        "export GH_TOKEN=''; gh pr view", False, id="n11-export-empty-single"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token --user lab-ovh) gh pr view 1",
+        True, id="k4-prefix-auth-token-user"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token) gh api user",
+        True, id="k5-prefix-auth-token-bare"),
+    pytest.param(
+        "export GH_TOKEN=$(gh auth token --hostname github.com --user u); gh pr view",
+        True, id="k6-export-auth-token-hostname-user"),
 ]
 
 
