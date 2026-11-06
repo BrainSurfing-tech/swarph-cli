@@ -332,6 +332,66 @@ def _subst_end(command: str, open_paren: int) -> int:
     return n
 
 
+def _subst_end_hd(command: str, open_paren: int) -> int:
+    """Heredoc-aware ``_subst_end``: body lines are raw text.
+
+    A ``)`` or quote char inside a heredoc body neither closes the
+    substitution nor opens a quote. ``<<<`` is a here-string, not a
+    heredoc: a ``<<`` whose previous char is ``<`` never registers.
+    """
+    depth = 1
+    i = open_paren + 1
+    n = len(command)
+    pending: list[tuple[str, bool]] = []
+    while i < n and depth:
+        c = command[i]
+        if c == "\n":
+            i += 1
+            while pending:
+                delim, strip_tabs = pending.pop(0)
+                while i < n:
+                    nl = command.find("\n", i)
+                    lend = n if nl < 0 else nl
+                    if _is_terminator(command[i:lend], delim, strip_tabs):
+                        i = lend + 1 if nl >= 0 else n
+                        break
+                    if nl < 0:
+                        i = n
+                        break
+                    i = nl + 1
+            continue
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if c == "'":
+            j = command.find("'", i + 1)
+            i = n if j < 0 else j + 1
+            continue
+        if c == '"':
+            i += 1
+            while i < n and command[i] != '"':
+                if command[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                i += 1
+            i = i + 1 if i < n else n
+            continue
+        if c == "<" and not (i > 0 and command[i - 1] == "<"):
+            m = _HEREDOC_OP.match(command, i)
+            if m is not None:
+                pending.append((m.group(2), bool(m.group(1))))
+                i = m.end()
+                continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return n
+
+
 def _mask_quoted(command: str, *, mask_comments: bool = False) -> str:
     """Blank the insides of quotes. A quoted ``gh`` is not a command (card #1340).
 
@@ -374,6 +434,7 @@ def _mask_quoted(command: str, *, mask_comments: bool = False) -> str:
             continue
         if c == '"':
             quote_start, output_start = i, len(out)
+            subst_seen = False
             out.append(c)
             i += 1
             while i < n and command[i] != '"':
@@ -382,7 +443,8 @@ def _mask_quoted(command: str, *, mask_comments: bool = False) -> str:
                     i += 2
                     continue
                 if command[i] == "$" and i + 1 < n and command[i + 1] == "(":
-                    end = _subst_end(command, i + 1)
+                    subst_seen = True
+                    end = _subst_end_hd(command, i + 1)
                     inner = _mask_quoted(command[i + 2:end], mask_comments=mask_comments)
                     out.append("$(" + inner + (")" if end < n else ""))
                     i = end + 1 if end < n else n
@@ -402,6 +464,12 @@ def _mask_quoted(command: str, *, mask_comments: bool = False) -> str:
             if i < n and command[i] == '"':
                 out.append('"')
                 i += 1
+            elif subst_seen:
+                # Fail closed (see _mask_explicit): a substitution was
+                # seen, so this region held command text; never restore
+                # it raw. A bare unmatched quote may be comment text,
+                # so without a substitution later commands stay visible.
+                out[output_start:] = [blanks(command[quote_start:])]
             else:
                 out[output_start:] = [command[quote_start:]]
             continue
@@ -710,6 +778,14 @@ def _mask_explicit(command: str) -> str:
     pair across the body end and hide later real syntax. Here body lines are
     consumed raw at each newline, so their quotes never enter quote state.
     ``$'...'`` honours backslash escapes; plain ``'...'`` does not.
+
+    >>> INVARIANT: hiding text can only route (fail closed). <<< Any
+    region the masker cannot close — an unmatched single quote, ``$''``
+    quote or double quote, or an unclosed ``$(`` or backtick — blanks
+    the rest of the text and is NEVER restored raw: restored raw text
+    could expose a hidden ``export GH_TOKEN=`` as real syntax, while
+    blanked text can only make the call route (or deny), never falsely
+    explicit.
     """
     out: list[str] = []
     i = 0
@@ -756,7 +832,10 @@ def _mask_explicit(command: str) -> str:
             i += 2
             continue
         if c == "<":
-            m = _HEREDOC_OP.match(command, i)
+            # `<<<` is a here-string, not a heredoc: a `<<` whose
+            # previous char is `<` never registers a body.
+            m = None if (i > 0 and command[i - 1] == "<") \
+                else _HEREDOC_OP.match(command, i)
             if m is not None:
                 pending.append((m.group(2), bool(m.group(1))))
                 out.append(command[i:m.end()])
@@ -775,7 +854,7 @@ def _mask_explicit(command: str) -> str:
                     break
                 j += 1
             if j >= n:
-                out.append(command[i:])
+                out.append(blanks(command[i:]))
                 i = n
                 continue
             out.append("$'")
@@ -786,7 +865,7 @@ def _mask_explicit(command: str) -> str:
         if c == "'":
             j = command.find("'", i + 1)
             if j < 0:
-                out.append(command[i:])
+                out.append(blanks(command[i:]))
                 i = n
                 continue
             out.append(c)
@@ -812,8 +891,7 @@ def _mask_explicit(command: str) -> str:
                 if command[i] == "`":
                     j = command.find("`", i + 1)
                     if j < 0:
-                        out.append("`")
-                        out.append(_mask_explicit(command[i + 1:]))
+                        out.append(blanks(command[i:]))
                         i = n
                         break
                     out.append("`" + _mask_explicit(command[i + 1:j]) + "`")
@@ -825,7 +903,7 @@ def _mask_explicit(command: str) -> str:
                 out.append('"')
                 i += 1
             else:
-                out[output_start:] = [command[quote_start:]]
+                out[output_start:] = [blanks(command[quote_start:])]
             continue
         out.append(c)
         i += 1

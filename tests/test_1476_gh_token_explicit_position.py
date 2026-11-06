@@ -44,6 +44,33 @@ CASES = [
         "export GH_TOKEN=x | gh pr view", False, id="s6a-export-piped"),
     pytest.param(
         "export GH_TOKEN=x & gh pr view", False, id="s6b-export-backgrounded"),
+    # #4426 shapes: heredoc inside $( inside double quotes. The heredoc
+    # body is raw text: its apostrophes and ) never close the quote or
+    # the substitution, and an export in the body is not explicit.
+    pytest.param(
+        "BODY=\"$(cat <<'EOF'\nIt's\n1) item\nexport GH_TOKEN=x\nEOF\n)\""
+        "; gh pr create --body \"$BODY\"",
+        False, id="s7-body-heredoc-paren-apostrophe"),
+    pytest.param(
+        "BODY=\"$(cat <<'EOF'\nIt's\nexport GH_TOKEN=x\nEOF\n)\""
+        "; gh pr create --body \"$BODY\"",
+        False, id="s7b-body-heredoc-apostrophe"),
+    pytest.param(
+        "BODY=\"$(cat <<'EOF'\nIts\n1) item\nexport GH_TOKEN=x\nEOF\n)\""
+        "; gh pr create --body \"$BODY\"",
+        False, id="s7c-body-heredoc-paren"),
+    pytest.param(
+        "x=\"$(cat <<EOF\nit's\nEOF\n)\""
+        "; echo 'a; export GH_TOKEN=y; '; gh pr view",
+        False, id="s8-heredoc-then-quoted-export"),
+    pytest.param(
+        "( export GH_TOKEN=x; cat <<< y\n)\ny\ngh pr view",
+        False, id="s9-here-string-not-heredoc"),
+    # Keep-explicit: a PR-body heredoc AFTER a real export stays explicit.
+    pytest.param(
+        "export GH_TOKEN=x; gh pr create --body "
+        "\"$(cat <<'EOF'\nIt's\nEOF)\"",
+        True, id="s10-export-then-body-heredoc"),
 ]
 
 
