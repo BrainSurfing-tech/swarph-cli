@@ -100,7 +100,7 @@ _START = (r"(?:^|[;&|]|\$\(|`|\(|\{"
           r"|\bthen\b|\bdo\b|\belse\b|\bif\b|\bwhile\b|\buntil\b|\belif\b"
           r"|&&|\|\|)")
 _LEAD = r"[ \t]*"                       # leading whitespace/tab — also missed before
-_ENVPFX = r"(?:[A-Za-z_][A-Za-z0-9_]*=(?:\$\([^)]*\)|\S*)[ \t]+)*"
+_ENVPFX = r"(?:[A-Za-z_][A-Za-z0-9_]*=(?:\$\([^)]*\)|(?!\$\()\S*)[ \t]+)*"
 _WRAPPFX = rf"(?:(?:{_WRAPPERS})[ \t]+)*"
 #: `gh`, `./gh`, or any absolute path ending in /gh.
 _GH_WORD = r"(?:\.{0,2}/|(?:/[\w.-]+)*/)?gh"
@@ -1214,6 +1214,8 @@ def _parse_gh_simple(text: str, i: int, *, prefix: bool,
             if spans is not None and text.startswith("$(", i + am.end()):
                 spans.append((i + am.end(), vend))
             if am.group(1) == "GH_TOKEN":
+                if not _is_allowlisted_value(text, i + am.end(), vend):
+                    return None
                 saw_gh_token = True
             i = vend
         if not saw_gh_token:
@@ -1262,6 +1264,14 @@ def _skip_join(text: str, i: int) -> Optional[int]:
     return i
 
 
+def _is_allowlisted_value(text: str, start: int, end: int) -> bool:
+    """True when text[start:end] is exactly $(gh auth token [--user W] [--hostname W])."""
+    raw = text[start:end]
+    if not raw.startswith("$(") or not raw.endswith(")"):
+        return False
+    return bool(_GH_AUTH_TOKEN_INNER.match(raw[2:-1].strip()))
+
+
 def already_explicit(command: str) -> bool:
     """True ONLY for the card #1476 allowlist (build #4433).
 
@@ -1277,8 +1287,13 @@ def already_explicit(command: str) -> bool:
     ``$(`` outside the prefix value -- is False. Masking stays a
     fail-closed pre-pass (:func:`_mask_explicit`), so hidden text can
     only route.
+
+    #4467: <value> must be exactly the allowlisted
+    ``$(gh auth token [--user W] [--hostname W])`` form; any other
+    GH_TOKEN value is not explicit (and is denied by
+    :func:`has_disallowed_gh_token_assignment`).
     """
-    raw = command or ""
+    raw = (command or "").replace("\\\r\n", "").replace("\\\n", "")
     if _has_unterminated_quote(raw):
         return False
     visible = _mask_explicit(raw)
@@ -1322,6 +1337,8 @@ def already_explicit(command: str) -> bool:
     vstart = i + len("GH_TOKEN=")
     vend = _value_end(text, vstart)
     if vend is None:
+        return False
+    if not _is_allowlisted_value(text, vstart, vend):
         return False
     spans = []
     if text.startswith("$(", vstart):
@@ -1427,6 +1444,162 @@ def has_empty_gh_token(command: str) -> bool:
         word = _read_word(visible, i)
         if word is not None and _GH_EXACT.match(word[0]):
             return True
+    return False
+
+
+_DECL_FORM_WORDS = frozenset({"export", "declare", "typeset", "readonly", "local"})
+
+
+def _value_word_end(text: str, i: int) -> int:
+    """End of the whole value word at ``i`` (quote removal is the caller's job).
+
+    Concatenated quoted, ``$'...'``/``$"..."``, ``$(...)`` and backtick
+    segments belong to the one word; whitespace and separators end it.
+    """
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c in " \t;\n&|(){}":
+            break
+        if text.startswith("$(", i):
+            end = _subst_end(text, i + 1)
+            i = end + 1 if end < n else n
+            continue
+        if c == "`":
+            j = text.find("`", i + 1)
+            i = n if j < 0 else j + 1
+            continue
+        if text.startswith("$'", i) or text.startswith('$"', i):
+            _, end = _quoted_body(text, i + 1)
+            i = end
+            continue
+        if c in "'\"":
+            _, end = _quoted_body(text, i)
+            i = end
+            continue
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        i += 1
+    return i
+
+
+def _consume_visible_value(text: str, i: int) -> int:
+    n = len(text)
+    if i >= n:
+        return i
+    if text.startswith("$(", i):
+        end = _subst_end(text, i + 1)
+        return end + 1 if end < n else n
+    if text[i] == "`":
+        j = text.find("`", i + 1)
+        return n if j < 0 else j + 1
+    if text.startswith("$'", i) or text.startswith('$"', i):
+        _, end = _quoted_body(text, i + 1)
+        return end
+    if text[i] in "'\"":
+        _, end = _quoted_body(text, i)
+        return end
+    while i < n and text[i] not in " \t":
+        if text.startswith("$(", i):
+            end = _subst_end(text, i + 1)
+            i = end + 1 if end < n else n
+            continue
+        if text[i] in "'\"":
+            _, i = _quoted_body(text, i)
+            continue
+        i += 1
+    return i
+
+
+def _is_executable_assignment_before(before: str) -> bool:
+    """True when ``before`` (one segment, masked) is only assignment context."""
+    i = 0
+    n = len(before)
+    while i < n and before[i] in " \t":
+        i += 1
+    while True:
+        m = re.match(r"([A-Za-z]+)(?=[ \t]|$)", before[i:])
+        if m and m.group(1) in _LEAD_KEYWORDS:
+            i += m.end()
+            while i < n and before[i] in " \t":
+                i += 1
+            continue
+        break
+    if i >= n:
+        return True
+    m = re.match(r"([A-Za-z]+)(?=[ \t]|$)", before[i:])
+    if m and m.group(1) in _DECL_FORM_WORDS:
+        i += m.end()
+        while True:
+            while i < n and before[i] in " \t":
+                i += 1
+            if i >= n:
+                return True
+            am = re.match(r"[A-Za-z_][A-Za-z0-9_]*=", before[i:])
+            if am:
+                i = _consume_visible_value(before, i + am.end())
+                continue
+            tok = _read_word(before, i)
+            if tok is None:
+                return False
+            if tok[0].startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tok[0]):
+                i = tok[1]
+                continue
+            return False
+    while True:
+        while i < n and before[i] in " \t":
+            i += 1
+        if i >= n:
+            return True
+        am = re.match(r"[A-Za-z_][A-Za-z0-9_]*=", before[i:])
+        if am:
+            i = _consume_visible_value(before, i + am.end())
+            continue
+        wm = re.match(r"([A-Za-z]+)(?=[ \t]|$)", before[i:])
+        if wm and wm.group(1) in _WRAPPER_WORDS:
+            i += wm.end()
+            while True:
+                while i < n and before[i] in " \t":
+                    i += 1
+                tok = _read_word(before, i)
+                if tok is not None and (tok[0].startswith("-")
+                                        or re.fullmatch(r"-?\d+", tok[0])):
+                    i = tok[1]
+                    continue
+                break
+            continue
+        return False
+
+
+def has_disallowed_gh_token_assignment(command: str) -> bool:
+    """True when an executable GH_TOKEN assignment is not allowlisted (#4467).
+
+    Fail-closed allowlist: in an executable position (not quoted text,
+    not a heredoc body, not a comment), a GH_TOKEN assignment in any
+    statement form -- prefix, ``export``, ``declare``, ``typeset``,
+    ``readonly``, ``local``, or a bare statement -- is explicit only when
+    its whole value word is exactly
+    ``$(gh auth token [--user W] [--hostname W])``. Any other value
+    (empty, quoted, bare, ``$()``, backtick, or any other substitution)
+    is disallowed and must be denied, never rewritten. Backslash-newline
+    is folded before scanning and backtick is a segment joiner.
+    """
+    folded = (command or "").replace("\\\r\n", "").replace("\\\n", "")
+    if "GH_TOKEN" not in folded:
+        return False
+    visible = _mask_explicit(folded)
+    for m in re.finditer(r"(?<![A-Za-z0-9_])GH_TOKEN=", visible):
+        if m.start() > 0 and visible[m.start() - 1] not in " \t\n;&|({`":
+            continue
+        seg_start = max(visible.rfind(ch, 0, m.start())
+                        for ch in ";\n&|({`") + 1
+        if not _is_executable_assignment_before(visible[seg_start:m.start()]):
+            continue
+        vend = _value_word_end(folded, m.end())
+        if _is_allowlisted_value(folded, m.end(), vend):
+            continue
+        return True
     return False
 
 
