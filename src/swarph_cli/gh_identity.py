@@ -649,6 +649,13 @@ _EXPORT_CMD = re.compile(
 _GH_TOKEN_ASSIGN = re.compile(r"(?:^|[ \t])GH_TOKEN[ \t]*=")
 
 
+def _is_terminator(line: str, delim: str, strip_tabs: bool) -> bool:
+    """Exact heredoc terminator: only leading tabs count, and only for ``<<-``."""
+    if strip_tabs:
+        return line.lstrip("\t") == delim
+    return line == delim
+
+
 def _mask_heredoc_bodies(command: str, visible: str) -> str:
     """Blank heredoc bodies in ``visible`` (positions align with ``command``)."""
     if "<<" not in visible:
@@ -666,9 +673,10 @@ def _mask_heredoc_bodies(command: str, visible: str) -> str:
         line_end = command.find("\n", m.start())
         if line_end < 0:
             break
-        delims = [mm.group(2) for mm in _HEREDOC_OP.finditer(command[m.start():line_end])]
+        delims = [(mm.group(2), bool(mm.group(1)))
+                  for mm in _HEREDOC_OP.finditer(command[m.start():line_end])]
         cursor = line_end + 1
-        for delim in delims:
+        for delim, strip_tabs in delims:
             body_start = cursor
             scan = cursor
             body_end = n
@@ -676,7 +684,7 @@ def _mask_heredoc_bodies(command: str, visible: str) -> str:
             while scan <= n:
                 nl = command.find("\n", scan)
                 lend = n if nl < 0 else nl
-                if command[scan:lend].strip(" \t") == delim:
+                if _is_terminator(command[scan:lend], delim, strip_tabs):
                     body_end = scan
                     after = lend + 1 if nl >= 0 else n
                     break
@@ -695,13 +703,144 @@ def _mask_heredoc_bodies(command: str, visible: str) -> str:
     return "".join(chars)
 
 
+def _mask_explicit(command: str) -> str:
+    """Mask ``command`` for explicit-token detection, heredocs FIRST.
+
+    #4423: masking quotes before heredoc bodies lets a quote inside a body
+    pair across the body end and hide later real syntax. Here body lines are
+    consumed raw at each newline, so their quotes never enter quote state.
+    ``$'...'`` honours backslash escapes; plain ``'...'`` does not.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(command)
+    pending: list[tuple[str, bool]] = []
+
+    def blanks(text: str) -> str:
+        return "".join("\n" if ch == "\n" else " " for ch in text)
+
+    while i < n:
+        c = command[i]
+        if c == "\n":
+            out.append("\n")
+            i += 1
+            while pending:
+                delim, strip_tabs = pending.pop(0)
+                while i < n:
+                    nl = command.find("\n", i)
+                    lend = n if nl < 0 else nl
+                    line = command[i:lend]
+                    if _is_terminator(line, delim, strip_tabs):
+                        out.append(line)
+                        if nl >= 0:
+                            out.append("\n")
+                            i = lend + 1
+                        else:
+                            i = n
+                        break
+                    out.append(blanks(line))
+                    if nl < 0:
+                        i = n
+                        break
+                    out.append("\n")
+                    i = nl + 1
+            continue
+        if c == "#" and (i == 0 or command[i - 1].isspace() or command[i - 1] in ";|&()"):
+            end = command.find("\n", i)
+            end = n if end < 0 else end
+            out.append(blanks(command[i:end]))
+            i = end
+            continue
+        if c == "\\" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if c == "<":
+            m = _HEREDOC_OP.match(command, i)
+            if m is not None:
+                pending.append((m.group(2), bool(m.group(1))))
+                out.append(command[i:m.end()])
+                i = m.end()
+                continue
+            out.append(c)
+            i += 1
+            continue
+        if c == "$" and i + 1 < n and command[i + 1] == "'":
+            j = i + 2
+            while j < n:
+                if command[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if command[j] == "'":
+                    break
+                j += 1
+            if j >= n:
+                out.append(command[i:])
+                i = n
+                continue
+            out.append("$'")
+            out.append(blanks(command[i + 2:j]))
+            out.append("'")
+            i = j + 1
+            continue
+        if c == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                out.append(command[i:])
+                i = n
+                continue
+            out.append(c)
+            out.append(blanks(command[i + 1:j]))
+            out.append("'")
+            i = j + 1
+            continue
+        if c == '"':
+            quote_start, output_start = i, len(out)
+            out.append(c)
+            i += 1
+            while i < n and command[i] != '"':
+                if command[i] == "\\" and i + 1 < n:
+                    out.append("  ")
+                    i += 2
+                    continue
+                if command[i] == "$" and i + 1 < n and command[i + 1] == "(":
+                    end = _subst_end(command, i + 1)
+                    inner = _mask_explicit(command[i + 2:end])
+                    out.append("$(" + inner + (")" if end < n else ""))
+                    i = end + 1 if end < n else n
+                    continue
+                if command[i] == "`":
+                    j = command.find("`", i + 1)
+                    if j < 0:
+                        out.append("`")
+                        out.append(_mask_explicit(command[i + 1:]))
+                        i = n
+                        break
+                    out.append("`" + _mask_explicit(command[i + 1:j]) + "`")
+                    i = j + 1
+                    continue
+                out.append("\n" if command[i] == "\n" else " ")
+                i += 1
+            if i < n and command[i] == '"':
+                out.append('"')
+                i += 1
+            else:
+                out[output_start:] = [command[quote_start:]]
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _is_export_gh_token(segment: str) -> bool:
     m = _EXPORT_CMD.match(segment)
     if not m:
         return False
     for tok in m.group("rest").split():
-        if tok.startswith("-"):
+        if tok == "--":
             continue
+        if tok.startswith("-"):
+            return False
         if tok.startswith("GH_TOKEN=") or tok == "GH_TOKEN":
             return tok.startswith("GH_TOKEN=")
         if "=" not in tok:
@@ -729,7 +868,7 @@ def already_explicit(command: str) -> bool:
     the gh call does not count (#332: an explicit argument is a decision).
     """
     raw = command or ""
-    visible = _mask_heredoc_bodies(raw, _mask_quoted(raw, mask_comments=True))
+    visible = _mask_explicit(raw)
     frames: list[_Frame] = [_Frame("root", False)]
     found = False
 
@@ -788,11 +927,19 @@ def already_explicit(command: str) -> bool:
             continue
         if c == "&":
             finalize(frame)
-            i += 2 if i + 1 < n and visible[i + 1] == "&" else 1
+            if i + 1 < n and visible[i + 1] == "&":
+                i += 2
+            else:
+                frame.export_seen = False
+                i += 1
             continue
         if c == "|":
             finalize(frame)
-            i += 2 if i + 1 < n and visible[i + 1] == "|" else 1
+            if i + 1 < n and visible[i + 1] == "|":
+                i += 2
+            else:
+                frame.export_seen = False
+                i += 1
             continue
         frame.buf.append(c)
         i += 1

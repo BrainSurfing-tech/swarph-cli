@@ -22,6 +22,28 @@ CASES = [
     pytest.param("export GH_TOKEN=x; gh pr view", True, id="c-export-before"),
     pytest.param("echo GH_TOKEN=x; gh pr view", False, id="d-echo-arg"),
     pytest.param("gh api x; export GH_TOKEN=y", False, id="e-export-after"),
+    # #4423 shapes: each must stay ROUTED (explicit False) on both cells.
+    pytest.param(
+        "cat <<'EOF'\nit's\nEOF\ncat <<'B'\nexport GH_TOKEN=x\nB\ngh pr view",
+        False, id="s1-heredoc-quote-then-heredoc-export"),
+    pytest.param(
+        "cat <<'EOF'\nit's\nEOF\necho 'x; export GH_TOKEN=y; '; gh pr view",
+        False, id="s2-heredoc-quote-then-quoted-export"),
+    pytest.param(
+        "cat <<'EOF'\nEOF \nexport GH_TOKEN=x\nEOF\ngh pr view",
+        False, id="s3a-terminator-trailing-space"),
+    pytest.param(
+        "cat <<'EOF'\n EOF\nexport GH_TOKEN=x\nEOF\ngh pr view",
+        False, id="s3b-terminator-leading-space"),
+    pytest.param(
+        "echo $'a\\'; export GH_TOKEN=x; \\''; gh pr view",
+        False, id="s4-ansi-c-escaped-quote"),
+    pytest.param(
+        "export -n GH_TOKEN=x; gh pr view", False, id="s5-export-option"),
+    pytest.param(
+        "export GH_TOKEN=x | gh pr view", False, id="s6a-export-piped"),
+    pytest.param(
+        "export GH_TOKEN=x & gh pr view", False, id="s6b-export-backgrounded"),
 ]
 
 
