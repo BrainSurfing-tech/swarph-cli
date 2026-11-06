@@ -76,9 +76,15 @@ DEFAULT_MAPPING_PATH = Path.home() / ".config" / "swarph" / "gh-identities.json"
 #: argv[0]. grok-researcher enumerated these against the first version, which
 #: matched none of them: `timeout 40 gh pr view 249` is the one it had itself run
 #: twice while reviewing these PRs, which is as real-world as a corpus gets.
+# An option argument may not start with '-'. The old `(?:\s+\S+)?` also
+# matched the next flag, so `sudo` / `xargs` backtracked on a run of flags
+# (#4469). `env -u NAME` needs the same argument slot or `env -u GH_TOKEN gh`
+# is invisible to targets_gh.
 _WRAPPERS = (
-    r"env(?:\s+-\w+)*|sudo(?:\s+-\w+(?:\s+\S+)?)*|command(?:\s+-\w+)*|exec|nohup"
-    r"|time|nice(?:\s+-n\s*-?\d+)?|timeout\s+\S+|stdbuf(?:\s+-\S+)*|rlwrap|xargs(?:\s+-\S+(?:\s+\S+)?)*"
+    r"env(?:\s+-\w+(?:\s+[^\s-]\S*)?)*|sudo(?:\s+-\w+(?:\s+[^\s-]\S*)?)*"
+    r"|command(?:\s+-\w+)*|exec|nohup"
+    r"|time|nice(?:\s+-n\s*-?\d+)?|timeout\s+\S+|stdbuf(?:\s+-\S+)*|rlwrap"
+    r"|xargs(?:\s+-\S+(?:\s+[^\s-]\S*)?)*"
 )
 
 #: Positions from which a command can start: string start, after a separator, inside
@@ -909,6 +915,19 @@ _GH_AUTH_TOKEN_INNER = re.compile(
     rf"(?:[ \t]+--user[ \t]+{_PLAIN_WORD}"
     rf"|[ \t]+--hostname[ \t]+{_PLAIN_WORD})*$")
 
+#: Exact r9 occurrence: optional ``export``, then
+#: ``GH_TOKEN=$(gh auth token [--user W] [--hostname W])``, ended by
+#: whitespace, ``;``, ``&``, ``|``, a newline, or end of text. W is a plain
+#: word. Either flag order, any count. Nothing else is stripped.
+_ALLOWLISTED_GH_TOKEN_RE = re.compile(
+    r"(?:(?<![A-Za-z0-9_])export[ \t]+)?"
+    r"(?<![A-Za-z0-9_])GH_TOKEN=\$\("
+    r"gh[ \t]+auth[ \t]+token"
+    rf"(?:[ \t]+--user[ \t]+{_PLAIN_WORD}"
+    rf"|[ \t]+--hostname[ \t]+{_PLAIN_WORD})*"
+    r"\)"
+    r"(?=[ \t;&|\n]|$)")
+
 
 def _subst_inner_ok(inner: str) -> bool:
     """A value substitution holds no gh call, except ``gh auth token``."""
@@ -1290,8 +1309,9 @@ def already_explicit(command: str) -> bool:
 
     #4467: <value> must be exactly the allowlisted
     ``$(gh auth token [--user W] [--hostname W])`` form; any other
-    GH_TOKEN value is not explicit (and is denied by
-    :func:`has_disallowed_gh_token_assignment`).
+    GH_TOKEN value is not explicit. #4479 denies any ``GH_TOKEN`` that
+    remains after that exact form is stripped
+    (:func:`has_disallowed_gh_token_assignment`).
     """
     raw = (command or "").replace("\\\r\n", "").replace("\\\n", "")
     if _has_unterminated_quote(raw):
@@ -1572,35 +1592,24 @@ def _is_executable_assignment_before(before: str) -> bool:
         return False
 
 
-def has_disallowed_gh_token_assignment(command: str) -> bool:
-    """True when an executable GH_TOKEN assignment is not allowlisted (#4467).
+def _strip_allowlisted_gh_token(command: str) -> str:
+    """Drop each exact allowlisted ``GH_TOKEN=$(gh auth token ...)`` occurrence."""
+    return _ALLOWLISTED_GH_TOKEN_RE.sub("", command or "")
 
-    Fail-closed allowlist: in an executable position (not quoted text,
-    not a heredoc body, not a comment), a GH_TOKEN assignment in any
-    statement form -- prefix, ``export``, ``declare``, ``typeset``,
-    ``readonly``, ``local``, or a bare statement -- is explicit only when
-    its whole value word is exactly
-    ``$(gh auth token [--user W] [--hostname W])``. Any other value
-    (empty, quoted, bare, ``$()``, backtick, or any other substitution)
-    is disallowed and must be denied, never rewritten. Backslash-newline
-    is folded before scanning and backtick is a segment joiner.
+
+def has_disallowed_gh_token_assignment(command: str) -> bool:
+    """True when ``GH_TOKEN`` survives the exact allowlisted form (#4479).
+
+    Before any rewrite, for a command that targets ``gh``: strip each
+    occurrence of ``[export ]GH_TOKEN=$(gh auth token [--user W]
+    [--hostname W])`` followed by whitespace, ``;``, ``&``, ``|``, a
+    newline, or end of text (W is a plain word). If ``GH_TOKEN`` is still
+    in the text anywhere — quoted, a heredoc, ``bash -c``, ``unset``,
+    ``env -u``, ``export -n``, a second assignment — deny. A non-exact
+    value is not stripped.
     """
-    folded = (command or "").replace("\\\r\n", "").replace("\\\n", "")
-    if "GH_TOKEN" not in folded:
-        return False
-    visible = _mask_explicit(folded)
-    for m in re.finditer(r"(?<![A-Za-z0-9_])GH_TOKEN=", visible):
-        if m.start() > 0 and visible[m.start() - 1] not in " \t\n;&|({`":
-            continue
-        seg_start = max(visible.rfind(ch, 0, m.start())
-                        for ch in ";\n&|({`") + 1
-        if not _is_executable_assignment_before(visible[seg_start:m.start()]):
-            continue
-        vend = _value_word_end(folded, m.end())
-        if _is_allowlisted_value(folded, m.end(), vend):
-            continue
-        return True
-    return False
+    stripped = _strip_allowlisted_gh_token(command or "")
+    return "GH_TOKEN" in stripped
 
 
 def inject(command: str, login: str) -> str:
