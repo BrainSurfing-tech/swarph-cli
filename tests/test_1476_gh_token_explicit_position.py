@@ -130,6 +130,28 @@ CASES = [
         "GH_TOKEN= gh pr view", "deny", id="n12-prefix-empty-bare"),
     pytest.param(
         "export GH_TOKEN=; gh pr view", "deny", id="n13-export-empty-bare"),
+    # #4459: statically empty command substitution is an empty value.
+    pytest.param(
+        "GH_TOKEN=$() gh pr view 1", "deny", id="n14-prefix-empty-subst"),
+    pytest.param(
+        "GH_TOKEN=$( ) gh pr view 1", "deny", id="n15-prefix-empty-subst-space"),
+    pytest.param(
+        "export GH_TOKEN=$(); gh pr view 1", "deny", id="n16-export-empty-subst"),
+    pytest.param(
+        "export GH_TOKEN=$( ); gh pr view 1", "deny",
+        id="n17-export-empty-subst-space"),
+    pytest.param(
+        "export GH_TOKEN=$() && gh pr view 1", "deny",
+        id="n18-export-empty-subst-and"),
+    pytest.param(
+        "export GH_TOKEN=$()\ngh pr view 1", "deny",
+        id="n19-export-empty-subst-newline"),
+    pytest.param(
+        "export GH_TOKEN=$( ) && gh pr view 1", "deny",
+        id="n20-export-empty-subst-space-and"),
+    pytest.param(
+        "export GH_TOKEN=$( )\ngh pr view 1", "deny",
+        id="n21-export-empty-subst-space-newline"),
     pytest.param(
         "GH_TOKEN=$(gh auth token --user lab-ovh) gh pr view 1",
         True, id="k4-prefix-auth-token-user"),

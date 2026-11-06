@@ -100,7 +100,7 @@ _START = (r"(?:^|[;&|]|\$\(|`|\(|\{"
           r"|\bthen\b|\bdo\b|\belse\b|\bif\b|\bwhile\b|\buntil\b|\belif\b"
           r"|&&|\|\|)")
 _LEAD = r"[ \t]*"                       # leading whitespace/tab — also missed before
-_ENVPFX = r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+)*"
+_ENVPFX = r"(?:[A-Za-z_][A-Za-z0-9_]*=(?:\$\([^)]*\)|\S*)[ \t]+)*"
 _WRAPPFX = rf"(?:(?:{_WRAPPERS})[ \t]+)*"
 #: `gh`, `./gh`, or any absolute path ending in /gh.
 _GH_WORD = r"(?:\.{0,2}/|(?:/[\w.-]+)*/)?gh"
@@ -1348,8 +1348,9 @@ _LEAD_KEYWORDS = frozenset({"then", "do", "else", "if", "while", "until", "elif"
 def has_empty_gh_token(command: str) -> bool:
     """True when an empty ``GH_TOKEN`` would shadow the routed token (#4450).
 
-    An empty assignment (``GH_TOKEN=""``, ``GH_TOKEN=''`` or bare
-    ``GH_TOKEN=``) on the gh command itself, or an empty
+    An empty assignment (``GH_TOKEN=""``, ``GH_TOKEN=''``, bare
+    ``GH_TOKEN=`` or a statically empty substitution ``GH_TOKEN=$()`` /
+    ``GH_TOKEN=$( )``) on the gh command itself, or an empty
     ``export GH_TOKEN=...`` anywhere in the same command list, cannot be
     rescued by the router's rewrite: the prefix form shadows the router's
     export for that command, the export form runs after it, and ``gh``
@@ -1367,6 +1368,12 @@ def has_empty_gh_token(command: str) -> bool:
         vpos = m.end()
         if visible[vpos:vpos + 2] in _EMPTY_GH_VALUE:
             vend = vpos + 2
+        elif visible.startswith("$(", vpos):
+            # Statically empty substitution: $() / $( ) (#4459).
+            subst_end = _subst_end(visible, vpos + 1)
+            if subst_end >= len(visible) or visible[vpos + 2:subst_end].strip():
+                continue
+            vend = subst_end + 1
         elif vpos >= len(visible) or visible[vpos] in " \t;\n&|":
             vend = vpos
         else:
