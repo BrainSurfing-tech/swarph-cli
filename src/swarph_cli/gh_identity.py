@@ -1337,6 +1337,92 @@ def already_explicit(command: str) -> bool:
             and substs_allowed(spans))
 
 
+_EMPTY_GH_VALUE = ('""', "''")
+_WRAPPER_WORDS = frozenset({
+    "env", "sudo", "command", "exec", "nohup", "time", "nice",
+    "timeout", "stdbuf", "rlwrap", "xargs",
+})
+_LEAD_KEYWORDS = frozenset({"then", "do", "else", "if", "while", "until", "elif", "!"})
+
+
+def has_empty_gh_token(command: str) -> bool:
+    """True when an empty ``GH_TOKEN`` would shadow the routed token (#4450).
+
+    An empty assignment (``GH_TOKEN=""``, ``GH_TOKEN=''`` or bare
+    ``GH_TOKEN=``) on the gh command itself, or an empty
+    ``export GH_TOKEN=...`` anywhere in the same command list, cannot be
+    rescued by the router's rewrite: the prefix form shadows the router's
+    export for that command, the export form runs after it, and ``gh``
+    treats an empty ``GH_TOKEN`` as unset, falling back to the ambient
+    hosts-file login. Detection runs on :func:`_mask_explicit` output, so
+    quoted mentions, comments and heredoc bodies do not count; on masked
+    text a non-empty quoted value holds at least one blank, so adjacent
+    quotes are exactly the empty quoted form.
+    """
+    raw = command or ""
+    if "GH_TOKEN" not in raw:
+        return False
+    visible = _mask_explicit(raw)
+    for m in re.finditer(r"GH_TOKEN=", visible):
+        vpos = m.end()
+        if visible[vpos:vpos + 2] in _EMPTY_GH_VALUE:
+            vend = vpos + 2
+        elif vpos >= len(visible) or visible[vpos] in " \t;\n&|":
+            vend = vpos
+        else:
+            continue
+        seg_start = max(visible.rfind(ch, 0, m.start()) for ch in ";\n&|({") + 1
+        before_words = visible[seg_start:m.start()].split()
+        while before_words and before_words[0] in _LEAD_KEYWORDS:
+            before_words.pop(0)
+        if before_words and before_words[0] == "export":
+            return True
+        # Prefix form: only assignments (and wrappers) may precede it.
+        if any(not re.match(r"[A-Za-z_][A-Za-z0-9_]*=", w)
+               and w not in _WRAPPER_WORDS and not re.fullmatch(r"-\w+", w)
+               and not re.fullmatch(r"-?\d+", w)
+               for w in before_words):
+            continue
+        i = vend
+        while True:
+            while i < len(visible) and visible[i] in " \t":
+                i += 1
+            am = re.match(r"([A-Za-z_][A-Za-z0-9_]*)=", visible[i:])
+            if am:
+                j = i + am.end()
+                if visible[j:j + 2] in _EMPTY_GH_VALUE:
+                    i = j + 2
+                    continue
+                if j < len(visible) and visible[j] in "'\"":
+                    _, i = _quoted_body(visible, j)
+                    continue
+                if visible.startswith("$(", j):
+                    i = _subst_end(visible, j + 1) + 1
+                    continue
+                k = j
+                while k < len(visible) and visible[k] not in " \t;\n&|":
+                    k += 1
+                if k == j:
+                    break
+                i = k
+                continue
+            wm = re.match(r"([A-Za-z]+)(?=[ \t]|$)", visible[i:])
+            if wm and wm.group(1) in _WRAPPER_WORDS:
+                i += wm.end()
+                if wm.group(1) == "timeout":
+                    while i < len(visible) and visible[i] in " \t":
+                        i += 1
+                    tok = _read_word(visible, i)
+                    if tok is not None:
+                        i = tok[1]
+                continue
+            break
+        word = _read_word(visible, i)
+        if word is not None and _GH_EXACT.match(word[0]):
+            return True
+    return False
+
+
 def inject(command: str, login: str) -> str:
     """Export the credential for this invocation. Leaves global `gh` state untouched.
 

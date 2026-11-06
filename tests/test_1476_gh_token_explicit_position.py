@@ -119,13 +119,17 @@ CASES = [
         'GH_TOKEN=x gh pr view "abc',
         False, id="n7-unterminated-double-quote"),
     pytest.param(
-        'GH_TOKEN="" gh pr view', False, id="n8-prefix-empty-double"),
+        'GH_TOKEN="" gh pr view', "deny", id="n8-prefix-empty-double"),
     pytest.param(
-        "GH_TOKEN='' gh pr view", False, id="n9-prefix-empty-single"),
+        "GH_TOKEN='' gh pr view", "deny", id="n9-prefix-empty-single"),
     pytest.param(
-        'export GH_TOKEN=""; gh pr view', False, id="n10-export-empty-double"),
+        'export GH_TOKEN=""; gh pr view', "deny", id="n10-export-empty-double"),
     pytest.param(
-        "export GH_TOKEN=''; gh pr view", False, id="n11-export-empty-single"),
+        "export GH_TOKEN=''; gh pr view", "deny", id="n11-export-empty-single"),
+    pytest.param(
+        "GH_TOKEN= gh pr view", "deny", id="n12-prefix-empty-bare"),
+    pytest.param(
+        "export GH_TOKEN=; gh pr view", "deny", id="n13-export-empty-bare"),
     pytest.param(
         "GH_TOKEN=$(gh auth token --user lab-ovh) gh pr view 1",
         True, id="k4-prefix-auth-token-user"),
@@ -156,6 +160,12 @@ def test_gh_token_explicit_only_by_position(
     }))
     assert rc == 0
     out = capsys.readouterr().out.strip()
+    if explicit == "deny":
+        output = json.loads(out)["hookSpecificOutput"]
+        assert output["permissionDecision"] == "deny"
+        assert "empty GH_TOKEN" in output["permissionDecisionReason"]
+        assert "updatedInput" not in output
+        return
     if explicit:
         assert out == ""
         return
@@ -167,3 +177,71 @@ def test_gh_token_explicit_only_by_position(
         assert rewritten.endswith(command)
     else:
         assert output["permissionDecision"] == "deny"
+
+
+def test_routed_token_reaches_gh_in_real_bash_with_stand_in_gh(
+        tmp_path, monkeypatch, capsys):
+    """Execute run_hook's rewrite in real bash; a stand-in gh logs its token."""
+    import os
+    import subprocess
+    import sys
+
+    mapping = tmp_path / "gh-identities.json"
+    mapping.write_text(json.dumps({"lab-ovh": "lab-ovh"}), encoding="utf-8")
+    monkeypatch.setenv(ghid.MAPPING_ENV, str(mapping))
+    monkeypatch.setenv("SWARPH_SELF", "lab-ovh")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    command = "GH_TOKEN=$(gh auth token --user u; gh pr merge 1) gh pr view 1"
+    rc = gh_route.run_hook(json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+    }))
+    assert rc == 0
+    rewritten = json.loads(capsys.readouterr().out.strip())[
+        "hookSpecificOutput"]["updatedInput"]["command"]
+    assert rewritten.startswith(
+        "export GH_TOKEN=$(gh auth token --user lab-ovh); ")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "gh.log"
+    stand_in = bin_dir / "gh"
+    stand_in.write_text(
+        "#!/bin/bash\n"
+        'printf \'gh args=%s GH_TOKEN=%s\\n\' "$*" "${GH_TOKEN-}" >> "$STANDIN_GH_LOG"\n'
+        'if [ "$1" = "auth" ] && [ "$2" = "token" ]; then\n'
+        '  user="unknown"\n'
+        '  while [ $# -gt 0 ]; do\n'
+        '    if [ "$1" = "--user" ]; then user="$2"; fi\n'
+        "    shift\n"
+        "  done\n"
+        '  printf \'standin-token-%s\\n\' "$user"\n'
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8")
+    stand_in.chmod(0o755)
+    if sys.platform == "win32":
+        from swarph_cli.commands.hooks import _windows_hook_bash
+        shell = _windows_hook_bash()
+        if shell == "bash":
+            pytest.skip("no non-WSL bash on this runner")
+    else:
+        shell = "bash"
+    env = dict(os.environ)
+    env.pop("GH_TOKEN", None)
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    env["STANDIN_GH_LOG"] = str(log)
+    result = subprocess.run(
+        [shell, "-c", rewritten], capture_output=True, text=True,
+        timeout=15, env=env)
+    assert result.returncode == 0, result.stderr
+    lines = log.read_text(encoding="utf-8").splitlines()
+    merge_lines = [ln for ln in lines if "pr merge 1" in ln]
+    view_lines = [ln for ln in lines if "pr view 1" in ln]
+    assert merge_lines, lines
+    assert view_lines, lines
+    # The gh call inside the user's $() sees the router's non-empty token.
+    assert "GH_TOKEN=standin-token-lab-ovh" in merge_lines[0]
+    # The outer gh call sees a non-empty token, never the empty fallback.
+    view_token = view_lines[0].rsplit("GH_TOKEN=", 1)[-1]
+    assert view_token and view_token != ""

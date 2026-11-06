@@ -68,6 +68,10 @@ def _run_hook(stdin_text: Optional[str] = None) -> int:
     command = (payload.get("tool_input") or {}).get("command") or ""
     if not ghid.targets_gh(command):
         return _allow_unchanged()
+    if ghid.has_empty_gh_token(command):
+        return _deny("empty GH_TOKEN assignment shadows the routed identity and "
+                     "gh would fall back to the ambient login; remove the empty "
+                     "GH_TOKEN or set it to a real token")
     if ghid.already_explicit(command):
         # The caller named a credential. #332: an explicit argument is a decision.
         return _allow_unchanged()
