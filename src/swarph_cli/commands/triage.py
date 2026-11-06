@@ -62,8 +62,9 @@ def _stuck_records(rows, by_id, peers, http_get, gateway, token, now,
         if waiter.get("status") != "open" or not waiter.get("taken_at"):
             continue
         step = waiter.get("step")
-        if not step:
-            continue
+        # A waiter with no step still matches a graph entry whose step is
+        # the same empty value. The DM prints a dash, not None (#1478).
+        waiter_step = step if step else "-"
         card_id = waiter.get("card_id")
         if not isinstance(card_id, int) or isinstance(card_id, bool):
             continue
@@ -91,6 +92,8 @@ def _stuck_records(rows, by_id, peers, http_get, gateway, token, now,
             base = {
                 "source_organ": _sensor.ORGAN_STUCK,
                 "waiter_id": waiter.get("id"),
+                "waiter": waiter.get("holder"),
+                "waiter_step": waiter_step,
                 "card_id": card_id,
                 "need": need.get("step"),
                 "need_id": rid,
@@ -109,6 +112,7 @@ def _stuck_records(rows, by_id, peers, http_get, gateway, token, now,
             holder = dep.get("holder")
             blocker = (holder if holder and dep.get("holder_known", True)
                        else None)
+            age_days = None
             if dep.get("status") == "closed":
                 classified = _sensor.map_stuck_finding(
                     {"blocker": blocker, "id": waiter.get("id"),
@@ -118,6 +122,7 @@ def _stuck_records(rows, by_id, peers, http_get, gateway, token, now,
                 changed = _sweep._row_last_change(dep)
                 if changed is None or now - changed < _sweep._STUCK_H * 3600:
                     continue
+                age_days = _sweep._age_days(now, changed)
                 need_card_id = dep.get("card_id")
                 due_at = (_need_card_due_at(http_get, gateway, token,
                                             need_card_id, card_cache)
@@ -135,7 +140,7 @@ def _stuck_records(rows, by_id, peers, http_get, gateway, token, now,
                 evidence=_sensor.stuck_evidence(waiter.get("id"), rid),
                 item_id=(f"stuck:{waiter.get('id')}:{rid}:"
                          f"{need.get('step')}"),
-                security=False)
+                security=False, age_days=age_days)
             records.append(record)
     return records
 
@@ -175,16 +180,17 @@ def run_triage(*, gateway, token, sender, owners_map, state_file,
     sent = _load_state(state_file)
 
     def dm_sender(record, owner):
+        raw_step = record.get("waiter_step")
         finding = {
             "kind": "row",
             "waiter_id": record.get("waiter_id"),
-            "waiter": None,
-            "waiter_step": None,
+            "waiter": record.get("waiter"),
+            "waiter_step": raw_step if raw_step else "-",
             "card_id": record.get("card_id"),
             "need": record.get("need"),
             "need_id": record.get("need_id"),
             "blocker": record.get("owner_hint"),
-            "age_days": None,
+            "age_days": record.get("age_days"),
         }
         key = _sweep._finding_key(finding)
         try:
