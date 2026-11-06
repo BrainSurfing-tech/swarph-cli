@@ -75,6 +75,26 @@ def test_chain_placeholder_literal_is_left_alone():
     assert json.loads(out.split("\n", 1)[1])["chain_token"] != sk
 
 
+def test_aiza_key_then_hyphen_suffix_is_redacted():
+    """A '-' after the 35-character body is a boundary, not a longer tail.
+
+    key-x and key-- must be scrubbed. Putting '-' back into the lookahead
+    (?![0-9A-Za-z\\-_]) hides both, because the next character is '-'.
+    """
+    secret = "AI" + "za" + ("m" * 35)
+    assert len(secret) == 39
+    assert not secret.endswith("-")
+    for suffix in ("-x", "--"):
+        text = secret + suffix
+        scrubbed = scrub_text(text)
+        assert scrubbed is not None
+        assert secret not in scrubbed
+        assert "REDACTED" in scrubbed
+        redacted = redact_text(text, caller="t")
+        assert secret not in redacted
+        assert "REDACTED" in redacted
+
+
 def test_aiza_key_ending_in_dash_is_redacted_before_space_quote_or_punctuation():
     secret = _aiza_trailing_dash()
     samples = [

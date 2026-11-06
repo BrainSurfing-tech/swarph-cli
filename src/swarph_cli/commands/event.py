@@ -47,15 +47,29 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+class ChainTokenAttachError(RuntimeError):
+    """The redacted event bytes are not JSON, so the chain token is not sent."""
+
+
 def _attach_chain_token(data: bytes, chain_token: str) -> bytes:
     """Add the CLI chain token onto an already-redacted event body.
 
     Same shape as ``mcp_server._search``: redact first, then set the one
     field that must reach the wire. A pasted chain_token line in the payload
     was already scrubbed and is not this value.
+
+    Redaction can rewrite a quote inside the content string and leave bytes
+    that are not JSON. That refusal is by name (``JSONDecodeError`` or
+    ``UnicodeDecodeError``). The token is not copied into the error, and the
+    caller sends nothing.
     """
-    body_obj = json.loads(data.decode("utf-8"))
-    inner = json.loads(body_obj["content"])
+    try:
+        body_obj = json.loads(data.decode("utf-8"))
+        inner = json.loads(body_obj["content"])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ChainTokenAttachError(
+            f"_attach_chain_token refused: {type(exc).__name__}"
+        ) from None
     inner["swarph_event"]["chain_token"] = chain_token
     body_obj["content"] = json.dumps(inner, separators=(",", ":"), sort_keys=True)
     return json.dumps(body_obj).encode("utf-8")
@@ -109,14 +123,21 @@ def _post_channel(
     if chain_token is None:
         status, resp = post_json(f"{base}/messages", body, token)
     else:
+        # Attach after redaction. If those bytes are not JSON, name the
+        # refusal and return before post_json: nothing is sent, no traceback.
+        try:
+            encoded = _attach_chain_token(
+                encode_outbound_json(body, caller="event.emit"),
+                chain_token,
+            )
+        except ChainTokenAttachError as exc:
+            print(f"swarph event: {exc}", file=sys.stderr)
+            return 2
         status, resp = post_json(
             f"{base}/messages",
             body,
             token,
-            encoded=_attach_chain_token(
-                encode_outbound_json(body, caller="event.emit"),
-                chain_token,
-            ),
+            encoded=encoded,
         )
     if 200 <= status < 300:
         print(f"emitted event={event} channel={channel} id={resp.get('id')}")

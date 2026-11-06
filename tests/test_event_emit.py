@@ -105,3 +105,62 @@ def test_chain_token_reaches_the_wire_and_the_payload_is_still_scrubbed(monkeypa
         assert ev["chain_token"] == chain
         assert classic not in ev["payload"]
         assert "REDACTED" in ev["payload"]
+
+
+def test_chain_token_on_unparseable_body_refuses_and_sends_nothing(monkeypatch, capsys):
+    """Redaction can break the content JSON (password="}, PASSWORD=", api_key=").
+
+    --chain-token must refuse by name, send nothing, and exit nonzero.
+    No traceback, and neither the payload nor the token reaches the stubbed wire.
+    """
+    from swarph_cli.commands import event as evmod
+
+    token = "chain-token-must-not-leak"
+    payloads = (
+        'password="}',
+        'export PASSWORD=" x',
+        'api_key="',
+    )
+    calls = []
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"id": 1}'
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req.data or b"")
+        return _Resp()
+
+    monkeypatch.setattr(
+        "swarph_cli.commands.mesh.urllib.request.urlopen", fake_urlopen
+    )
+    monkeypatch.setattr(evmod, "resolve_self_name", lambda *a, **k: "friendly-coder")
+    monkeypatch.setattr(evmod, "resolve_token", lambda *a, **k: "tok")
+
+    for payload in payloads:
+        before = len(calls)
+        rc = evmod.run_event([
+            "emit", "stage-done", payload,
+            "--chain-token", token,
+            "--gateway", "http://127.0.0.1:9",
+        ])
+        captured = capsys.readouterr()
+        assert rc != 0
+        assert "Traceback" not in captured.err
+        assert "Traceback" not in captured.out
+        assert "_attach_chain_token refused: JSONDecodeError" in captured.err
+        assert token not in captured.err
+        assert token not in captured.out
+        assert payload not in captured.err
+        assert payload not in captured.out
+        assert calls[before:] == []
+
+    assert calls == []

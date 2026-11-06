@@ -132,8 +132,11 @@ _ANTHROPIC_RE = re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{8,}\b")
 _OPENAI_RE = re.compile(r"\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9\-_]{16,}\b")
 _XAI_RE = re.compile(r"\bxai-[A-Za-z0-9\-_]{16,}\b")
 # Closing \b misses a 35th character of '-' before end, whitespace, a quote,
-# or other punctuation. Same lookahead as scrub.scrub_text (card #1472).
-_GCP_RE = re.compile(r"\bAIza[0-9A-Za-z\-_]{35}(?![0-9A-Za-z\-_])")
+# or other punctuation. A following '-' is a boundary too: key-x and key--
+# still match, and a key whose last character is '-' stays inside the
+# class. '_' and alphanumerics are a longer tail and do not. Same lookahead
+# as scrub.scrub_text (card #1472).
+_GCP_RE = re.compile(r"\bAIza[0-9A-Za-z\-_]{35}(?![0-9A-Za-z_])")
 _SLACK_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{8,}\b")
 _AWS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 _AWS_SECRET_RE = re.compile(

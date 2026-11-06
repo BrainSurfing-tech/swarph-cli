@@ -31,9 +31,11 @@ _SECRET_PATTERNS = [
     # Google AI Studio keys: AIza + 35 chars (msg 65982). Exact length:
     # a shorter made-up tail is not this shape. A closing \b misses a tail
     # whose 35th character is '-' when the next character is end, whitespace,
-    # a quote, or other punctuation (both non-word). The lookahead accepts
-    # those and still refuses a longer tail (card #1472).
-    (re.compile(r"\bAIza[0-9A-Za-z\-_]{35}(?![0-9A-Za-z\-_])"),
+    # a quote, or other punctuation (both non-word). A following '-' is a
+    # boundary too, so key-x and key-- match and a key that ends in '-' stays
+    # inside the class. The lookahead still refuses a longer alphanumeric or
+    # underscore tail (card #1472).
+    (re.compile(r"\bAIza[0-9A-Za-z\-_]{35}(?![0-9A-Za-z_])"),
      "[REDACTED-API-KEY]"),
     # GitHub + Slack tokens.
     (re.compile(r"\bgh[opusr]_[A-Za-z0-9_]{20,}\b"), "[REDACTED-TOKEN]"),
