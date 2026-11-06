@@ -109,15 +109,7 @@ _GH_INVOCATION = re.compile(
     rf"{_START}{_LEAD}{_ENVPFX}{_WRAPPFX}{_GH_WORD}(?=[ \t]|$)", re.MULTILINE)
 
 #: Already carries an explicit GH_TOKEN — an operator decision; do not double-inject.
-#: >>> `export GH_TOKEN=...` MUST COUNT. <<< The first version matched only the
-#: `VAR=x cmd` prefix form, so `export GH_TOKEN=abc; gh pr view` had its gh half
-#: detected and its token half missed — and the router stacked its own credential in
-#: front of the one the operator deliberately chose (#332: an explicit argument is a
-#: decision, not a hint). grok-researcher named this as the live stacking case.
-_HAS_GH_TOKEN = re.compile(
-    rf"{_START}{_LEAD}(?:(?:export|declare|local|typeset|readonly)[ \t]+)?"
-    rf"{_WRAPPFX}(?:[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+)*GH_TOKEN[ \t]*=",
-    re.MULTILINE)
+#: Card #1476 narrows this to position, not text presence (see already_explicit).
 
 
 class RouterRefusal(Exception):
@@ -647,11 +639,166 @@ def _targets_gh(command: str, depth: int) -> bool:
     return False
 
 
+_HEREDOC_OP = re.compile(r"<<(-)?(?!<)[ \t]*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
+_SEG_GH = re.compile(
+    rf"^[ \t]*(?:\([ \t]*|\{{[ \t]*)?"
+    rf"(?:(?:if|while|until|elif|then|do|else)\b[ \t]+)*"
+    rf"{_ENVPFX}{_WRAPPFX}({_GH_WORD})(?=[ \t]|$)")
+_EXPORT_CMD = re.compile(
+    r"^[ \t]*(?:(?:then|do|else)\b[ \t]+)?export\b[ \t]+(?P<rest>.*)$")
+_GH_TOKEN_ASSIGN = re.compile(r"(?:^|[ \t])GH_TOKEN[ \t]*=")
+
+
+def _mask_heredoc_bodies(command: str, visible: str) -> str:
+    """Blank heredoc bodies in ``visible`` (positions align with ``command``)."""
+    if "<<" not in visible:
+        return visible
+    chars = list(visible)
+    n = len(command)
+    pos = 0
+    while pos < n:
+        m = _HEREDOC_OP.search(command, pos)
+        if m is None:
+            break
+        if visible[m.start():m.start() + 2] != "<<":
+            pos = m.end()
+            continue
+        line_end = command.find("\n", m.start())
+        if line_end < 0:
+            break
+        delims = [mm.group(2) for mm in _HEREDOC_OP.finditer(command[m.start():line_end])]
+        cursor = line_end + 1
+        for delim in delims:
+            body_start = cursor
+            scan = cursor
+            body_end = n
+            after = n
+            while scan <= n:
+                nl = command.find("\n", scan)
+                lend = n if nl < 0 else nl
+                if command[scan:lend].strip(" \t") == delim:
+                    body_end = scan
+                    after = lend + 1 if nl >= 0 else n
+                    break
+                if nl < 0:
+                    break
+                scan = nl + 1
+            else:
+                after = n
+            for k in range(body_start, min(body_end, len(chars))):
+                if chars[k] != "\n":
+                    chars[k] = " "
+            cursor = after
+            if after >= n:
+                break
+        pos = max(cursor, line_end + 1)
+    return "".join(chars)
+
+
+def _is_export_gh_token(segment: str) -> bool:
+    m = _EXPORT_CMD.match(segment)
+    if not m:
+        return False
+    for tok in m.group("rest").split():
+        if tok.startswith("-"):
+            continue
+        if tok.startswith("GH_TOKEN=") or tok == "GH_TOKEN":
+            return tok.startswith("GH_TOKEN=")
+        if "=" not in tok:
+            break
+    return False
+
+
+class _Frame:
+    __slots__ = ("kind", "export_seen", "buf")
+
+    def __init__(self, kind: str, export_seen: bool):
+        self.kind = kind
+        self.export_seen = export_seen
+        self.buf: list[str] = []
+
+
 def already_explicit(command: str) -> bool:
-    """True when the caller already set GH_TOKEN — an explicit decision (#332: an
-    explicit argument is a decision, not a hint). The router must not override it,
-    and must not stack a second assignment in front of it."""
-    return bool(_HAS_GH_TOKEN.search(_mask_quoted(command or "", mask_comments=True)))
+    """True ONLY when GH_TOKEN is explicit for the gh call (card #1476).
+
+    (i) ``GH_TOKEN=`` is an assignment prefix of the gh simple command itself,
+    e.g. ``GH_TOKEN=$(cmd) gh pr view``; or (ii) ``export GH_TOKEN=`` appears
+    in the same command list BEFORE the gh call, e.g.
+    ``export GH_TOKEN=x; gh pr view``. Text anywhere else — heredoc bodies,
+    backticks, echo args, comments — does not count, and an export AFTER
+    the gh call does not count (#332: an explicit argument is a decision).
+    """
+    raw = command or ""
+    visible = _mask_heredoc_bodies(raw, _mask_quoted(raw, mask_comments=True))
+    frames: list[_Frame] = [_Frame("root", False)]
+    found = False
+
+    def finalize(frame: _Frame) -> None:
+        nonlocal found
+        segment = "".join(frame.buf)
+        frame.buf = []
+        if not segment.strip():
+            return
+        m = _SEG_GH.match(segment)
+        if m:
+            prefix = segment[:m.start(1)]
+            if frame.export_seen or _GH_TOKEN_ASSIGN.search(prefix):
+                found = True
+        if _is_export_gh_token(segment):
+            frame.export_seen = True
+
+    i = 0
+    n = len(visible)
+    while i < n:
+        c = visible[i]
+        frame = frames[-1]
+        if c == "`":
+            if frame.kind == "backtick":
+                finalize(frame)
+                frames.pop()
+                if frames:
+                    frames[-1].buf.append("`")
+            else:
+                frame.buf.append("`")
+                frames.append(_Frame("backtick", frame.export_seen))
+            i += 1
+            continue
+        if c == "$" and i + 1 < n and visible[i + 1] == "(":
+            frame.buf.append("$()")
+            frames.append(_Frame("subst", frame.export_seen))
+            i += 2
+            continue
+        if c == "(":
+            frame.buf.append("(")
+            frames.append(_Frame("subshell", frame.export_seen))
+            i += 1
+            continue
+        if c == ")":
+            if len(frames) > 1:
+                finalize(frame)
+                frames.pop()
+                frames[-1].buf.append(")")
+            else:
+                frame.buf.append(c)
+            i += 1
+            continue
+        if c in ";\n":
+            finalize(frame)
+            i += 1
+            continue
+        if c == "&":
+            finalize(frame)
+            i += 2 if i + 1 < n and visible[i + 1] == "&" else 1
+            continue
+        if c == "|":
+            finalize(frame)
+            i += 2 if i + 1 < n and visible[i + 1] == "|" else 1
+            continue
+        frame.buf.append(c)
+        i += 1
+    while frames:
+        finalize(frames.pop())
+    return found
 
 
 def inject(command: str, login: str) -> str:
