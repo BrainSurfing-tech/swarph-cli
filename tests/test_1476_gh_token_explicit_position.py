@@ -66,11 +66,36 @@ CASES = [
     pytest.param(
         "( export GH_TOKEN=x; cat <<< y\n)\ny\ngh pr view",
         False, id="s9-here-string-not-heredoc"),
-    # Keep-explicit: a PR-body heredoc AFTER a real export stays explicit.
+    # #4433 flip: a heredoc / $( in gh args now routes (was explicit).
     pytest.param(
         "export GH_TOKEN=x; gh pr create --body "
         "\"$(cat <<'EOF'\nIt's\nEOF)\"",
-        True, id="s10-export-then-body-heredoc"),
+        False, id="s10-export-then-body-heredoc"),
+    # #4433 allowlist: anything beyond the two allowed shapes routes.
+    pytest.param(
+        "true | export GH_TOKEN=x; gh pr view",
+        False, id="f1-pipe-before-export"),
+    pytest.param(
+        "gh api user; GH_TOKEN=y gh pr list",
+        False, id="f2-gh-before-prefix"),
+    pytest.param(
+        "export GH_TOKEN=x; gh api a; gh api b",
+        False, id="f3-second-gh-call"),
+    pytest.param(
+        "GH_TOKEN=x gh pr view | cat", False, id="f4-prefix-pipe"),
+    pytest.param(
+        "export GH_TOKEN=x && cd d && gh pr view",
+        False, id="f5-extra-command-between"),
+    # #4433 keep-explicit shapes.
+    pytest.param(
+        "GH_TOKEN=$(gh auth token --user u) gh pr view 1",
+        True, id="k1-prefix-auth-token-subst"),
+    pytest.param(
+        "export GH_TOKEN=$(cmd); gh pr view",
+        True, id="k2-export-subst-value"),
+    pytest.param(
+        'export GH_TOKEN="x" && gh pr create --body b',
+        True, id="k3-export-quoted-and-join"),
 ]
 
 

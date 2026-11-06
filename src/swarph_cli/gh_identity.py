@@ -708,13 +708,6 @@ def _targets_gh(command: str, depth: int) -> bool:
 
 
 _HEREDOC_OP = re.compile(r"<<(-)?(?!<)[ \t]*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
-_SEG_GH = re.compile(
-    rf"^[ \t]*(?:\([ \t]*|\{{[ \t]*)?"
-    rf"(?:(?:if|while|until|elif|then|do|else)\b[ \t]+)*"
-    rf"{_ENVPFX}{_WRAPPFX}({_GH_WORD})(?=[ \t]|$)")
-_EXPORT_CMD = re.compile(
-    r"^[ \t]*(?:(?:then|do|else)\b[ \t]+)?export\b[ \t]+(?P<rest>.*)$")
-_GH_TOKEN_ASSIGN = re.compile(r"(?:^|[ \t])GH_TOKEN[ \t]*=")
 
 
 def _is_terminator(line: str, delim: str, strip_tabs: bool) -> bool:
@@ -910,120 +903,335 @@ def _mask_explicit(command: str) -> str:
     return "".join(out)
 
 
-def _is_export_gh_token(segment: str) -> bool:
-    m = _EXPORT_CMD.match(segment)
-    if not m:
+_GH_AUTH_TOKEN_INNER = re.compile(
+    r"^(?:(?:/[\w.-]+)*/)?gh[ \t]+auth[ \t]+token(?:[ \t].*)?$", re.DOTALL)
+
+
+def _subst_inner_ok(inner: str) -> bool:
+    """A value substitution holds no gh call, except ``gh auth token``."""
+    if "$(" in inner or "`" in inner:
         return False
-    for tok in m.group("rest").split():
-        if tok == "--":
+    if not re.search(r"\bgh\b", inner):
+        return ";" not in inner and "|" not in inner and "&" not in inner \
+            and "\n" not in inner
+    return bool(_GH_AUTH_TOKEN_INNER.match(inner.strip()))
+
+
+def _scan_constructs(text: str, base: int = 0):
+    """Live backtick/heredoc flags and ``$(...)`` spans in ``text``.
+
+    Single-quoted text and heredoc bodies are not live. Double-quoted
+    interiors are live for substitutions and backticks. Spans are
+    absolute (offset by ``base``) so they can be checked against the
+    one allowed prefix-value substitution.
+    """
+    flags = {"tick": False, "heredoc": False}
+    spans: list[tuple[int, int]] = []
+    pending: list[tuple[str, bool]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "\n":
+            i += 1
+            while pending:
+                delim, strip_tabs = pending.pop(0)
+                while i < n:
+                    nl = text.find("\n", i)
+                    lend = n if nl < 0 else nl
+                    if _is_terminator(text[i:lend], delim, strip_tabs):
+                        i = lend + 1 if nl >= 0 else n
+                        break
+                    i = n if nl < 0 else nl + 1
             continue
-        if tok.startswith("-"):
-            return False
-        if tok.startswith("GH_TOKEN=") or tok == "GH_TOKEN":
-            return tok.startswith("GH_TOKEN=")
-        if "=" not in tok:
+        if c == "#" and (i == 0 or text[i - 1].isspace()
+                        or text[i - 1] in ";|&()"):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+            continue
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if c == "<":
+            if text.startswith("<<<", i):
+                flags["heredoc"] = True
+                i += 3
+                continue
+            m = None if (i > 0 and text[i - 1] == "<") \
+                else _HEREDOC_OP.match(text, i)
+            if m is not None:
+                flags["heredoc"] = True
+                pending.append((m.group(2), bool(m.group(1))))
+                i = m.end()
+                continue
+            i += 1
+            continue
+        if c == "$" and i + 1 < n and text[i + 1] == "'":
+            j = i + 2
+            while j < n:
+                if text[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if text[j] == "'":
+                    break
+                j += 1
+            i = j + 1 if j < n else n
+            continue
+        if c == "'":
+            j = text.find("'", i + 1)
+            i = n if j < 0 else j + 1
+            continue
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                if text[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                if text.startswith("$(", i):
+                    end = _subst_end_hd(text, i + 1)
+                    stop = end + 1 if end < n else n
+                    spans.append((base + i, base + stop))
+                    sub_flags, sub_spans = _scan_constructs(
+                        text[i + 2:end], base + i + 2)
+                    flags["tick"] |= sub_flags["tick"]
+                    flags["heredoc"] |= sub_flags["heredoc"]
+                    spans.extend(sub_spans)
+                    i = stop
+                    continue
+                if text[i] == "`":
+                    flags["tick"] = True
+                    j = text.find("`", i + 1)
+                    i = n if j < 0 else j + 1
+                    continue
+                i += 1
+            i = i + 1 if i < n else n
+            continue
+        if text.startswith("$(", i):
+            end = _subst_end_hd(text, i + 1)
+            stop = end + 1 if end < n else n
+            spans.append((base + i, base + stop))
+            sub_flags, sub_spans = _scan_constructs(
+                text[i + 2:end], base + i + 2)
+            flags["tick"] |= sub_flags["tick"]
+            flags["heredoc"] |= sub_flags["heredoc"]
+            spans.extend(sub_spans)
+            i = stop
+            continue
+        if c == "`":
+            flags["tick"] = True
+            j = text.find("`", i + 1)
+            if j < 0:
+                i = n
+            else:
+                _, sub_spans = _scan_constructs(text[i + 1:j], base + i + 1)
+                spans.extend(sub_spans)
+                i = j + 1
+            continue
+        i += 1
+    return flags, spans
+
+
+def _value_end(text: str, i: int) -> Optional[int]:
+    """End index of one GH_TOKEN value at ``i``, or None when not allowed.
+
+    Allowed: a bare word, a quoted string, or ONE ``$(...)`` (checked by
+    :func:`_subst_inner_ok`). Mixed forms like ``a$(cmd)`` are not allowed.
+    """
+    n = len(text)
+    if i >= n:
+        return None
+    if text.startswith("$(", i):
+        end = _subst_end(text, i + 1)
+        if end >= n:
+            return None
+        if not _subst_inner_ok(text[i + 2:end]):
+            return None
+        return end + 1
+    if text[i] in "'\"":
+        body, end = _quoted_body(text, i)
+        if "$(" in body or "`" in body:
+            return None
+        return end
+    j = i
+    while j < n and text[j] not in " \t;\n&|":
+        if text.startswith("$(", j) or text[j] in "'\"`(){}<>":
+            return None
+        if text[j] == "\\" and j + 1 < n:
+            j += 2
+            continue
+        j += 1
+    return j if j > i else None
+
+
+def _read_word(text: str, i: int) -> Optional[tuple[str, int]]:
+    """One bare or quoted word at/after ``i`` -> (unquoted text, end)."""
+    n = len(text)
+    while i < n and text[i] in " \t":
+        i += 1
+    if i >= n:
+        return None
+    if text[i] in "'\"":
+        body, end = _quoted_body(text, i)
+        return body, end
+    j = i
+    buf: list[str] = []
+    while j < n and text[j] not in " \t;\n&|":
+        if text[j] in "'\"":
             break
-    return False
+        if text[j] == "\\" and j + 1 < n:
+            buf.append(text[j + 1])
+            j += 2
+            continue
+        buf.append(text[j])
+        j += 1
+    if j == i:
+        return None
+    return "".join(buf), j
 
 
-class _Frame:
-    __slots__ = ("kind", "export_seen", "buf")
+def _parse_gh_simple(text: str, i: int, *, prefix: bool,
+                     spans: Optional[list] = None) -> Optional[int]:
+    """Parse ONE gh simple command at ``i``; return end index or None.
 
-    def __init__(self, kind: str, export_seen: bool):
-        self.kind = kind
-        self.export_seen = export_seen
-        self.buf: list[str] = []
+    With ``prefix``, leading ``NAME=value`` assignments are consumed and at
+    least one must be ``GH_TOKEN=<value>``. Arguments may not contain
+    separators, pipes, substitutions or parens: anything else ends the
+    allowlist match.
+    """
+    n = len(text)
+    saw_gh_token = False
+    if prefix:
+        while True:
+            while i < n and text[i] in " \t":
+                i += 1
+            am = re.match(r"([A-Za-z_][A-Za-z0-9_]*)=", text[i:])
+            if not am:
+                break
+            vend = _value_end(text, i + am.end())
+            if vend is None:
+                return None
+            if spans is not None and text.startswith("$(", i + am.end()):
+                spans.append((i + am.end(), vend))
+            if am.group(1) == "GH_TOKEN":
+                saw_gh_token = True
+            i = vend
+        if not saw_gh_token:
+            return None
+    word = _read_word(text, i)
+    if word is None:
+        return None
+    wtext, wend = word
+    if not _GH_EXACT.match(wtext):
+        return None
+    i = wend
+    while True:
+        while i < n and text[i] in " \t":
+            i += 1
+        if i >= n:
+            return i
+        c = text[i]
+        if c in "<>":
+            i += 1
+            continue
+        if c in ";\n&|(){}`$":
+            return None
+        tok = _read_word(text, i)
+        if tok is None:
+            return None
+        i = tok[1]
+
+
+def _skip_join(text: str, i: int) -> Optional[int]:
+    """Consume one joiner (``;``, ``&&`` or newline, plus blanks)."""
+    n = len(text)
+    while i < n and text[i] in " \t":
+        i += 1
+    if text.startswith("&&", i):
+        i += 2
+    elif i < n and text[i] == ";":
+        i += 1
+    elif i < n and text[i] == "\n":
+        while i < n and text[i] in "\n \t":
+            i += 1
+        return i
+    else:
+        return None
+    while i < n and text[i] in " \t\n":
+        i += 1
+    return i
 
 
 def already_explicit(command: str) -> bool:
-    """True ONLY when GH_TOKEN is explicit for the gh call (card #1476).
+    """True ONLY for the card #1476 allowlist (build #4433).
 
-    (i) ``GH_TOKEN=`` is an assignment prefix of the gh simple command itself,
-    e.g. ``GH_TOKEN=$(cmd) gh pr view``; or (ii) ``export GH_TOKEN=`` appears
-    in the same command list BEFORE the gh call, e.g.
-    ``export GH_TOKEN=x; gh pr view``. Text anywhere else — heredoc bodies,
-    backticks, echo args, comments — does not count, and an export AFTER
-    the gh call does not count (#332: an explicit argument is a decision).
+    (i) ONE simple gh command with a ``GH_TOKEN=<value>`` assignment prefix
+    and nothing else; or (ii) ``export GH_TOKEN=<value>`` (optionally
+    ``export -- GH_TOKEN=<value>``) as a simple command, joined by ``;``,
+    ``&&`` or a newline to EXACTLY ONE following gh simple command, and
+    nothing else. ``<value>`` is a bare word, a quoted string, or ONE
+    ``$(...)`` with no gh inside (``gh auth token`` excepted, as the
+    router's own injected form). Anything else -- a second gh call, any
+    pipe, ``||``, a single ``&``, subshell, brace group, control keyword,
+    function definition, heredoc or here-string, a backtick anywhere, or
+    ``$(`` outside the prefix value -- is False. Masking stays a
+    fail-closed pre-pass (:func:`_mask_explicit`), so hidden text can
+    only route.
     """
     raw = command or ""
     visible = _mask_explicit(raw)
-    frames: list[_Frame] = [_Frame("root", False)]
-    found = False
+    if not visible.strip():
+        return False
+    if "`" in visible or "<<" in visible:
+        return False
+    # _mask_explicit blanks heredoc bodies inside quotes, hiding their
+    # markers, so live constructs are scanned on the raw text as well.
+    flags, substs = _scan_constructs(raw)
+    if flags["tick"] or flags["heredoc"]:
+        return False
 
-    def finalize(frame: _Frame) -> None:
-        nonlocal found
-        segment = "".join(frame.buf)
-        frame.buf = []
-        if not segment.strip():
-            return
-        m = _SEG_GH.match(segment)
-        if m:
-            prefix = segment[:m.start(1)]
-            if frame.export_seen or _GH_TOKEN_ASSIGN.search(prefix):
-                found = True
-        if _is_export_gh_token(segment):
-            frame.export_seen = True
+    def substs_allowed(spans: list) -> bool:
+        if not substs:
+            return True
+        if len(visible) != len(raw):
+            return False
+        return all(any(s >= a and e <= b for a, b in spans)
+                   for s, e in substs)
 
-    i = 0
-    n = len(visible)
-    while i < n:
-        c = visible[i]
-        frame = frames[-1]
-        if c == "`":
-            if frame.kind == "backtick":
-                finalize(frame)
-                frames.pop()
-                if frames:
-                    frames[-1].buf.append("`")
-            else:
-                frame.buf.append("`")
-                frames.append(_Frame("backtick", frame.export_seen))
-            i += 1
-            continue
-        if c == "$" and i + 1 < n and visible[i + 1] == "(":
-            frame.buf.append("$()")
-            frames.append(_Frame("subst", frame.export_seen))
-            i += 2
-            continue
-        if c == "(":
-            frame.buf.append("(")
-            frames.append(_Frame("subshell", frame.export_seen))
-            i += 1
-            continue
-        if c == ")":
-            if len(frames) > 1:
-                finalize(frame)
-                frames.pop()
-                frames[-1].buf.append(")")
-            else:
-                frame.buf.append(c)
-            i += 1
-            continue
-        if c in ";\n":
-            finalize(frame)
-            i += 1
-            continue
-        if c == "&":
-            finalize(frame)
-            if i + 1 < n and visible[i + 1] == "&":
-                i += 2
-            else:
-                frame.export_seen = False
-                i += 1
-            continue
-        if c == "|":
-            finalize(frame)
-            if i + 1 < n and visible[i + 1] == "|":
-                i += 2
-            else:
-                frame.export_seen = False
-                i += 1
-            continue
-        frame.buf.append(c)
+    text = visible
+    start = 0
+    while start < len(text) and text[start] in " \t\r\n":
+        start += 1
+    spans: list = []
+    end = _parse_gh_simple(text, start, prefix=True, spans=spans)
+    if end is not None and not text[end:].strip(" \t\r\n"):
+        return substs_allowed(spans)
+    word = _read_word(text, start)
+    if word is None or word[0] != "export":
+        return False
+    i = word[1]
+    nxt = _read_word(text, i)
+    if nxt is not None and nxt[0] == "--":
+        i = nxt[1]
+    while i < len(text) and text[i] in " \t":
         i += 1
-    while frames:
-        finalize(frames.pop())
-    return found
+    if not text.startswith("GH_TOKEN=", i):
+        return False
+    vstart = i + len("GH_TOKEN=")
+    vend = _value_end(text, vstart)
+    if vend is None:
+        return False
+    spans = []
+    if text.startswith("$(", vstart):
+        spans.append((vstart, vend))
+    i = _skip_join(text, vend)
+    if i is None:
+        return False
+    end = _parse_gh_simple(text, i, prefix=False, spans=spans)
+    if end is not None and not text[end:].strip(" \t\r\n"):
+        return substs_allowed(spans)
+    end = _parse_gh_simple(text, i, prefix=True, spans=spans)
+    return (end is not None and not text[end:].strip(" \t\r\n")
+            and substs_allowed(spans))
 
 
 def inject(command: str, login: str) -> str:
