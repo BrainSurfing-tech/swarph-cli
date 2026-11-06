@@ -131,7 +131,9 @@ _GITHUB_RE = re.compile(r"\b(?:gh[opusr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9
 _ANTHROPIC_RE = re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{8,}\b")
 _OPENAI_RE = re.compile(r"\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9\-_]{16,}\b")
 _XAI_RE = re.compile(r"\bxai-[A-Za-z0-9\-_]{16,}\b")
-_GCP_RE = re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b")
+# Closing \b misses a 35th character of '-' before end, whitespace, a quote,
+# or other punctuation. Same lookahead as scrub.scrub_text (card #1472).
+_GCP_RE = re.compile(r"\bAIza[0-9A-Za-z\-_]{35}(?![0-9A-Za-z\-_])")
 _SLACK_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{8,}\b")
 _AWS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 _AWS_SECRET_RE = re.compile(
@@ -270,32 +272,6 @@ def _handle_opt_out(text: str, caller: str, opt_out_reason: str) -> None:
             pass
 
 
-# event emit puts the opaque --chain-token inside the JSON string that
-# mesh._post_json then redacts. A producer-signed token (payload.sig) survives
-# the assignment and standalone rules because of the dot. A dotless
-# credential-shaped value does not: the key contains "token", so layer 6
-# replaces it. Hold the field aside and put it back. Card #1472.
-_CHAIN_TOKEN_JSON_RE = re.compile(
-    r'("chain_token"\s*:\s*")((?:\\.|[^"\\])*)(")'
-)
-
-
-def _shield_chain_token_fields(text: str) -> tuple[str, list[str]]:
-    saved: list[str] = []
-
-    def repl(m: re.Match) -> str:
-        saved.append(m.group(2))
-        return f'{m.group(1)}SWARPH.CHAIN.{len(saved) - 1}.END{m.group(3)}'
-
-    return _CHAIN_TOKEN_JSON_RE.sub(repl, text), saved
-
-
-def _restore_chain_token_fields(text: str, saved: list[str]) -> str:
-    for i in range(len(saved) - 1, -1, -1):
-        text = text.replace(f"SWARPH.CHAIN.{i}.END", saved[i], 1)
-    return text
-
-
 def redact_text(
     text: str | None,
     *,
@@ -321,7 +297,7 @@ def redact_text(
             _handle_opt_out(text, caller, opt_out_reason)
         return text
 
-    out, shielded = _shield_chain_token_fields(text)
+    out = text
 
     # Layer 1: Custom Rules
     rules = _normalize_custom_rules(custom_rules)
@@ -358,8 +334,6 @@ def redact_text(
     # Layer 6: Shannon Entropy Scoring
     out = _SECRET_ASSIGN_RE.sub(_replace_secret_assignment, out)
     out = _replace_standalone_tokens(out)
-    if shielded:
-        out = _restore_chain_token_fields(out, shielded)
 
     return out
 
