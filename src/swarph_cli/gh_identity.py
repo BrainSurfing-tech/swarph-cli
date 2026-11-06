@@ -80,11 +80,19 @@ DEFAULT_MAPPING_PATH = Path.home() / ".config" / "swarph" / "gh-identities.json"
 # matched the next flag, so `sudo` / `xargs` backtracked on a run of flags
 # (#4469). `env -u NAME` needs the same argument slot or `env -u GH_TOKEN gh`
 # is invisible to targets_gh.
+# The argument also may not be a wrapper name. Otherwise `env -u env `,
+# `sudo -u sudo `, `xargs -a xargs ` and `sudo -u nohup ` each split two
+# ways per repetition and targets_gh is exponential. `sudo -u env gh` still
+# matches: `env` is the next wrapper, not sudo's user argument.
+_WRAP_ARG_NOT_NAME = (
+    r"(?:\s+(?!(?:env|sudo|command|exec|nohup|time|nice|timeout|stdbuf"
+    r"|rlwrap|xargs)(?=\s|$))[^\s-]\S*)?"
+)
 _WRAPPERS = (
-    r"env(?:\s+-\w+(?:\s+[^\s-]\S*)?)*|sudo(?:\s+-\w+(?:\s+[^\s-]\S*)?)*"
+    rf"env(?:\s+-\w+{_WRAP_ARG_NOT_NAME})*|sudo(?:\s+-\w+{_WRAP_ARG_NOT_NAME})*"
     r"|command(?:\s+-\w+)*|exec|nohup"
     r"|time|nice(?:\s+-n\s*-?\d+)?|timeout\s+\S+|stdbuf(?:\s+-\S+)*|rlwrap"
-    r"|xargs(?:\s+-\S+(?:\s+[^\s-]\S*)?)*"
+    rf"|xargs(?:\s+-\S+{_WRAP_ARG_NOT_NAME})*"
 )
 
 #: Positions from which a command can start: string start, after a separator, inside
@@ -918,14 +926,16 @@ _GH_AUTH_TOKEN_INNER = re.compile(
 #: Exact r9 occurrence: optional ``export``, then
 #: ``GH_TOKEN=$(gh auth token [--user W] [--hostname W])``, ended by
 #: whitespace, ``;``, ``&``, ``|``, a newline, or end of text. W is a plain
-#: word. Either flag order, any count. Nothing else is stripped.
+#: word. Either flag order, any count. Spaces or tabs (never a newline) may
+#: sit after ``$(`` and before ``)``. The left boundary and the end
+#: lookahead are load-bearing: ``XGH_TOKEN=`` and ``...)x`` are not stripped.
 _ALLOWLISTED_GH_TOKEN_RE = re.compile(
     r"(?:(?<![A-Za-z0-9_])export[ \t]+)?"
-    r"(?<![A-Za-z0-9_])GH_TOKEN=\$\("
+    r"(?<![A-Za-z0-9_])GH_TOKEN=\$\([ \t]*"
     r"gh[ \t]+auth[ \t]+token"
     rf"(?:[ \t]+--user[ \t]+{_PLAIN_WORD}"
     rf"|[ \t]+--hostname[ \t]+{_PLAIN_WORD})*"
-    r"\)"
+    r"[ \t]*\)"
     r"(?=[ \t;&|\n]|$)")
 
 
@@ -1593,19 +1603,27 @@ def _is_executable_assignment_before(before: str) -> bool:
 
 
 def _strip_allowlisted_gh_token(command: str) -> str:
-    """Drop each exact allowlisted ``GH_TOKEN=$(gh auth token ...)`` occurrence."""
-    return _ALLOWLISTED_GH_TOKEN_RE.sub("", command or "")
+    """Drop each exact allowlisted ``GH_TOKEN=$(gh auth token ...)`` occurrence.
+
+    A backslash-newline is folded first, as in :func:`already_explicit`,
+    so ``GH_\\nTOKEN=`` and ``G\\nH_TOKEN=`` are one name before the
+    allowlist runs.
+    """
+    folded = (command or "").replace("\\\r\n", "").replace("\\\n", "")
+    return _ALLOWLISTED_GH_TOKEN_RE.sub("", folded)
 
 
 def has_disallowed_gh_token_assignment(command: str) -> bool:
     """True when ``GH_TOKEN`` survives the exact allowlisted form (#4479).
 
-    Before any rewrite, for a command that targets ``gh``: strip each
-    occurrence of ``[export ]GH_TOKEN=$(gh auth token [--user W]
-    [--hostname W])`` followed by whitespace, ``;``, ``&``, ``|``, a
-    newline, or end of text (W is a plain word). If ``GH_TOKEN`` is still
-    in the text anywhere — quoted, a heredoc, ``bash -c``, ``unset``,
-    ``env -u``, ``export -n``, a second assignment — deny. A non-exact
+    Before any rewrite, for a command that targets ``gh``: fold a
+    backslash-newline, then strip each occurrence of ``[export
+    ]GH_TOKEN=$(gh auth token [--user W] [--hostname W])`` with optional
+    spaces or tabs inside the ``$( )`` (never a newline), followed by
+    whitespace, ``;``, ``&``, ``|``, a newline, or end of text (W is a
+    plain word). If ``GH_TOKEN`` is still in the text anywhere — quoted,
+    a heredoc, ``bash -c``, ``unset``, ``env -u``, ``export -n``, a
+    second assignment, a glued suffix, a longer name — deny. A non-exact
     value is not stripped.
     """
     stripped = _strip_allowlisted_gh_token(command or "")

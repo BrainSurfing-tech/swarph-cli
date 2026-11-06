@@ -3,9 +3,12 @@
 run_hook, before any rewrite, for every command targets_gh accepts:
 strip each exact ``[export ]GH_TOKEN=$(gh auth token [--user W]
 [--hostname W])`` (W a plain word) when it is followed by whitespace,
-``;``, ``&``, ``|``, a newline, or end of text. If ``GH_TOKEN`` remains
-anywhere, DENY on both cells with a reason that names ``--body-file``
-and that explicit form. Exercised through run_hook with stdin JSON.
+``;``, ``&``, ``|``, a newline, or end of text. Spaces or tabs may pad
+the inside of ``$( )``; a newline may not. A glued suffix or a longer
+name is not stripped. A backslash-newline is folded before the strip.
+If ``GH_TOKEN`` remains anywhere, DENY on both cells with a reason that
+names ``--body-file`` and that explicit form. Exercised through run_hook
+with stdin JSON.
 Routed means rewrite for mapped and deny for unmapped; explicit means
 the hook leaves the call unchanged.
 """
@@ -263,6 +266,46 @@ CASES = [
     pytest.param(
         'gh pr create --body "uses GH_TOKEN"', "deny",
         id="u3-body-mentions-token"),
+    # Padded $( ): spaces or tabs inside the parens stay explicit (1adea450).
+    # A newline in either slot is not the allowlisted form.
+    pytest.param(
+        "GH_TOKEN=$( gh auth token ) gh pr view 1",
+        True, id="pad-both-spaces"),
+    pytest.param(
+        "GH_TOKEN=$( gh auth token) gh pr view 1",
+        True, id="pad-after-open"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token ) gh pr view 1",
+        True, id="pad-before-close"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token --user u ) gh pr view 1",
+        True, id="pad-user-before-close"),
+    pytest.param(
+        "export GH_TOKEN=$( gh auth token --user u ); gh pr view 1",
+        True, id="pad-export-user"),
+    pytest.param(
+        "GH_TOKEN=$(\tgh auth token\t) gh pr view 1",
+        True, id="pad-tabs"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token\n) gh pr view 1",
+        "deny", id="pad-newline-before-close"),
+    pytest.param(
+        "GH_TOKEN=$(\ngh auth token) gh pr view 1",
+        "deny", id="pad-newline-after-open"),
+    # Boundaries. M24a drops the end lookahead; M24c drops the left one.
+    pytest.param(
+        "GH_TOKEN=$(gh auth token)x gh pr view 1",
+        "deny", id="m24a-glued-suffix"),
+    pytest.param(
+        "XGH_TOKEN=$(gh auth token) gh pr view 1",
+        "deny", id="m24c-xgh-token"),
+    # Backslash-newline inside the name is folded, then denied (1adea450).
+    pytest.param(
+        "GH_\\\nTOKEN=x gh pr view 1",
+        "deny", id="bn-split-gh-token"),
+    pytest.param(
+        "G\\\nH_TOKEN=x gh pr view 1",
+        "deny", id="bn-split-g-h-token"),
     # Routed: no residual GH_TOKEN after the exact form is stripped.
     pytest.param("gh pr view 1", False, id="r-plain-gh-view"),
     pytest.param(
@@ -363,6 +406,33 @@ def test_targets_gh_sudo_option_arg_no_redos():
     elapsed = time.perf_counter() - start
     assert result is False
     assert elapsed < 0.1, f"targets_gh took {elapsed:.3f}s"
+
+
+@pytest.mark.parametrize("piece", [
+    pytest.param("env -u env ", id="env-u-env"),
+    pytest.param("sudo -u sudo ", id="sudo-u-sudo"),
+    pytest.param("xargs -a xargs ", id="xargs-a-xargs"),
+    pytest.param("sudo -u nohup ", id="sudo-u-nohup"),
+])
+def test_targets_gh_wrapper_name_as_option_arg_no_redos(piece):
+    """A wrapper name is not an option argument, so n=20 stays under 0.1s."""
+    import time
+
+    command = piece * 20
+    start = time.perf_counter()
+    result = ghid.targets_gh(command)
+    elapsed = time.perf_counter() - start
+    assert result is False
+    assert elapsed < 0.1, f"targets_gh took {elapsed:.3f}s on {piece!r} * 20"
+
+
+@pytest.mark.parametrize("command", [
+    "sudo -u env gh",
+    "xargs -I {} gh",
+    "env -C /tmp gh",
+])
+def test_targets_gh_wrapper_option_arg_still_reaches_gh(command):
+    assert ghid.targets_gh(command) is True
 
 
 def test_routed_token_reaches_gh_in_real_bash_with_stand_in_gh(
