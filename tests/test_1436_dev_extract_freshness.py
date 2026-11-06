@@ -1101,3 +1101,107 @@ def test_fetch_head_rev_parse_failure_is_not_fresh(tmp_path):
     data = json.loads(payload.stdout)
     reason = data["pins"]["swarph-cli"]["ref_trust"]["reason"]
     assert reason == "FETCH_HEAD unreadable after fetch"
+
+
+# Validate #4314: query and fragment on every origin shape that prints (#4320).
+_SC4314 = "ghp_SC4314DUMMY"
+
+
+def _sc4314_origin(tmp_path: Path, url: str):
+    bare = _bare_at(tmp_path, "someuser")
+    work, local = _seed_and_clone(tmp_path, bare)
+    _git(work, "remote", "set-url", "origin", url, tmp=tmp_path)
+    db, report, ws = _layout(tmp_path, work, local)
+    line = _verb(tmp_path, db, report, ws)
+    payload = _verb(tmp_path, db, report, ws, extra=["--json"])
+    return line, payload
+
+
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        (
+            f"https://x:xpass@127.0.0.1:1/someuser/swarph-cli.git"
+            f"?private_token={_SC4314}",
+            "https://127.0.0.1:1/someuser/swarph-cli.git",
+        ),
+        (
+            f"https://x:xpass@127.0.0.1:1/someuser/swarph-cli.git"
+            f"#token={_SC4314}",
+            "https://127.0.0.1:1/someuser/swarph-cli.git",
+        ),
+        (
+            f"git@127.0.0.1:someuser/swarph-cli.git?private_token={_SC4314}",
+            "127.0.0.1:someuser/swarph-cli.git",
+        ),
+        (
+            f"git@127.0.0.1:someuser/swarph-cli.git#token={_SC4314}",
+            "127.0.0.1:someuser/swarph-cli.git",
+        ),
+        (
+            f"https://u:xpass@127.0.0.1:notaport/someuser/swarph-cli.git"
+            f"?private_token={_SC4314}",
+            "https://127.0.0.1:notaport/someuser/swarph-cli.git",
+        ),
+        (
+            f"https://u:xpass@[bad/someuser/swarph-cli.git#token={_SC4314}",
+            "https://[bad/someuser/swarph-cli.git",
+        ),
+    ],
+    ids=[
+        "user_query",
+        "user_fragment",
+        "scp_query",
+        "scp_fragment",
+        "malformed_query",
+        "malformed_fragment",
+    ],
+)
+def test_sc4314_no_query_on_any_printing_branch(
+    tmp_path, url: str, shown: str,
+):
+    """Query and fragment stay off the line and out of --json on every branch."""
+    line, payload = _sc4314_origin(tmp_path, url)
+    _assert_url_secret_absent(line, _SC4314, shown)
+    assert "not fresh" in _freshness(line.stdout)
+    _assert_url_secret_absent(payload, _SC4314, shown)
+    data = json.loads(payload.stdout)
+    reason = data["pins"]["swarph-cli"]["ref_trust"]["reason"]
+    assert _SC4314 not in reason
+    assert "?" not in reason
+    assert "#" not in reason
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        f"fatal: https://127.0.0.1/o/r?api_key={_SC4314} failed",
+        f"fatal: https://127.0.0.1/o/r#token={_SC4314} failed",
+    ],
+    ids=["query", "fragment"],
+)
+def test_sc4314_error_line_loses_query_and_fragment(tmp_path, said: str):
+    """A git error line must not replay query or fragment tokens."""
+    bare = _bare_at(tmp_path, "BrainSurfing-tech")
+    work, local = _seed_and_clone(tmp_path, bare)
+    _git(
+        work, "remote", "set-url", "origin",
+        "git@127.0.0.1:BrainSurfing-tech/swarph-cli.git",
+        tmp=tmp_path,
+    )
+    env = _ssh_deny_stub(tmp_path / "ssh-stub-sc4314", said)
+    db, report, ws = _layout(tmp_path, work, local)
+    line = _verb(tmp_path, db, report, ws, env_extra=env)
+    payload = _verb(
+        tmp_path, db, report, ws, extra=["--json"], env_extra=env,
+    )
+    assert line.returncode == 0, line.stderr
+    assert payload.returncode == 0, payload.stderr
+    blob = line.stdout + line.stderr + payload.stdout + payload.stderr
+    assert _SC4314 not in blob
+    assert "fetch failed" in _freshness(line.stdout)
+    data = json.loads(payload.stdout)
+    reason = data["pins"]["swarph-cli"]["ref_trust"]["reason"]
+    assert _SC4314 not in reason
+    assert "?" not in reason
+    assert "#" not in reason
