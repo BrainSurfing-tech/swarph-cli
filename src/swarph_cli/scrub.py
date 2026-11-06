@@ -29,13 +29,16 @@ _SECRET_PATTERNS = [
     # xAI keys (msg 65982).
     (re.compile(r"\bxai-[A-Za-z0-9\-_]{16,}\b"), "[REDACTED-API-KEY]"),
     # Google AI Studio keys: AIza + 35 chars (msg 65982). Exact length:
-    # a shorter made-up tail is not this shape. A closing \b misses a tail
-    # whose 35th character is '-' when the next character is end, whitespace,
-    # a quote, or other punctuation (both non-word). A following '-' is a
-    # boundary too, so key-x and key-- match and a key that ends in '-' stays
-    # inside the class. The lookahead still refuses a longer alphanumeric or
-    # underscore tail (card #1472).
-    (re.compile(r"\bAIza[0-9A-Za-z\-_]{35}(?![0-9A-Za-z_])"),
+    # a shorter made-up tail is not this shape. Those 35 are 34 from the
+    # key class, then either '-' or one word character. A final '-' is the
+    # boundary whatever follows it, and that alternative keeps the rest of
+    # the key-class run so a second key glued on after a word character
+    # (token=<dash-ending key>--chain_token<full key>) does not survive.
+    # A final word character matches only under (?![0-9A-Za-z_]), so key-x
+    # and key-- still match and a longer alphanumeric or underscore tail
+    # does not. Same pattern as redact._GCP_RE (card #1472).
+    (re.compile(
+        r"\bAIza[0-9A-Za-z\-_]{34}(?:-[0-9A-Za-z\-_]*|[0-9A-Za-z_](?![0-9A-Za-z_]))"),
      "[REDACTED-API-KEY]"),
     # GitHub + Slack tokens.
     (re.compile(r"\bgh[opusr]_[A-Za-z0-9_]{20,}\b"), "[REDACTED-TOKEN]"),

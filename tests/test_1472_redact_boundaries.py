@@ -95,6 +95,43 @@ def test_aiza_key_then_hyphen_suffix_is_redacted():
         assert "REDACTED" in redacted
 
 
+def _assert_scrub_and_redact(text: str, *secrets: str) -> None:
+    scrubbed = scrub_text(text)
+    assert scrubbed is not None
+    redacted = redact_text(text, caller="t")
+    for secret in secrets:
+        assert secret not in scrubbed
+        assert secret not in redacted
+    assert "REDACTED" in scrubbed
+    assert "REDACTED" in redacted
+
+
+def test_aiza_dash_key_followed_by_word_char_is_redacted():
+    """A 35th character of '-' then x, _, or 'abc def' (drop #4429).
+
+    {35}(?![0-9A-Za-z_]) refuses that follower, so the key stays visible.
+    Both scrub_text and redact_text have to take the dash.
+    """
+    secret = _aiza_trailing_dash()
+    for suffix in ("x", "_", "abc def"):
+        _assert_scrub_and_redact(secret + suffix, secret)
+
+
+def test_dash_ending_aiza_glued_through_chain_token_redacts_both_keys():
+    """token=<dash-ending key>--chain_token<full key> leaves neither key.
+
+    A match that stops on the first key leaves the second glued to the
+    word character at the end of chain_token. Values are built here, with
+    no digits, so the entropy layer cannot hide a miss.
+    """
+    dash_key = _aiza_trailing_dash()
+    full_key = "AI" + "za" + ("n" * 35)
+    assert len(full_key) == 39
+    assert "-" not in full_key
+    text = f"token={dash_key}--chain_token{full_key}"
+    _assert_scrub_and_redact(text, dash_key, full_key)
+
+
 def test_aiza_key_ending_in_dash_is_redacted_before_space_quote_or_punctuation():
     secret = _aiza_trailing_dash()
     samples = [

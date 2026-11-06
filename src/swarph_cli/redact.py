@@ -131,12 +131,17 @@ _GITHUB_RE = re.compile(r"\b(?:gh[opusr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9
 _ANTHROPIC_RE = re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{8,}\b")
 _OPENAI_RE = re.compile(r"\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9\-_]{16,}\b")
 _XAI_RE = re.compile(r"\bxai-[A-Za-z0-9\-_]{16,}\b")
-# Closing \b misses a 35th character of '-' before end, whitespace, a quote,
-# or other punctuation. A following '-' is a boundary too: key-x and key--
-# still match, and a key whose last character is '-' stays inside the
-# class. '_' and alphanumerics are a longer tail and do not. Same lookahead
-# as scrub.scrub_text (card #1472).
-_GCP_RE = re.compile(r"\bAIza[0-9A-Za-z\-_]{35}(?![0-9A-Za-z_])")
+# 35 characters after AIza: 34 from the key class, then either '-' or one
+# word character. A final '-' is the key boundary whatever follows it, and
+# that alternative keeps the rest of the key-class run. Otherwise a narrow
+# match of the dash-ending key leaves a second key glued on after a word
+# character (token=<dash-ending key>--chain_token<full key>). A final word
+# character matches only under (?![0-9A-Za-z_]): key-x and key-- still match,
+# and a longer alphanumeric or underscore tail does not. Same pattern as
+# scrub.scrub_text (card #1472).
+_GCP_RE = re.compile(
+    r"\bAIza[0-9A-Za-z\-_]{34}(?:-[0-9A-Za-z\-_]*|[0-9A-Za-z_](?![0-9A-Za-z_]))"
+)
 _SLACK_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{8,}\b")
 _AWS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 _AWS_SECRET_RE = re.compile(
