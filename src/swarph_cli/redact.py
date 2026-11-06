@@ -131,19 +131,11 @@ _GITHUB_RE = re.compile(r"\b(?:gh[opusr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9
 _ANTHROPIC_RE = re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{8,}\b")
 _OPENAI_RE = re.compile(r"\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9\-_]{16,}\b")
 _XAI_RE = re.compile(r"\bxai-[A-Za-z0-9\-_]{16,}\b")
-# 35 characters after AIza, so the match is the key's own 39 and nothing
-# after it. Those 35 are 34 from the key class, then either '-' or one word
-# character. A final '-' ends the match: a keyword glued on after it
-# (api_key=) stays visible to the keyword-value rules. A final word
-# character matches only under (?![0-9A-Za-z_]), so key-x and key-- still
-# match and a longer alphanumeric or underscore tail does not. The same
-# word-character ending also matches with no leading boundary, so a second
-# key glued on after a word character
-# (token=<dash-ending key>--chain_token<full key>) is still redacted.
-# Same pattern as scrub.scrub_text (card #1472).
-_GCP_RE = re.compile(
+_GCP_RE = re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b")
+_GCP_FINAL_RE = re.compile(
     r"(?:\bAIza[0-9A-Za-z\-_]{34}(?:-|[0-9A-Za-z_](?![0-9A-Za-z_]))"
-    r"|(?<=[0-9A-Za-z_])AIza[0-9A-Za-z\-_]{34}[0-9A-Za-z_](?![0-9A-Za-z_]))"
+    r"|(?<=[0-9A-Za-z_])AIza[0-9A-Za-z\-_]{34}[0-9A-Za-z_](?![0-9A-Za-z_])"
+    r"|(?<=\w)AIza[0-9A-Za-z\-_]{34}-)"
 )
 _SLACK_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{8,}\b")
 _AWS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
@@ -345,6 +337,7 @@ def redact_text(
     # Layer 6: Shannon Entropy Scoring
     out = _SECRET_ASSIGN_RE.sub(_replace_secret_assignment, out)
     out = _replace_standalone_tokens(out)
+    out = _GCP_FINAL_RE.sub("[REDACTED:GCP_API_KEY]", out)
 
     return out
 

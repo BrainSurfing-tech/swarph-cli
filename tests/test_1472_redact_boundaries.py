@@ -153,6 +153,49 @@ def test_dash_ending_aiza_glued_through_chain_token_redacts_both_keys():
     _assert_scrub_and_redact(text, dash_key, full_key)
 
 
+def test_drop_4452_chain_and_proj_shapes_leave_no_key():
+    """Drop #4452's two shapes, on scrub_text and redact_text.
+
+    chain_token<dash key>x<full key>{ leaves neither key. A proj key glued
+    to a dash-ending key and then api_key=<another dash key> leaves none of
+    the three. The keyword value below is a low-entropy secret: scrub_text
+    must hide it. redact_text's OpenAI rule is main's, and it still runs
+    before the keyword rule, so that low-entropy value can remain there.
+    """
+    dash = _aiza_trailing_dash()
+    full = "AI" + "za" + ("n" * 35)
+    _assert_scrub_and_redact(f"chain_token{dash}x{full}{{", dash, full)
+
+    proj = "sk-proj-" + ("n7" * 12)
+    trail = "AI" + "za" + ("p" * 34) + "-"
+    assert len(trail) == 39 and trail.endswith("-")
+    _assert_scrub_and_redact(f"{proj}{dash}api_key={trail}", proj, dash, trail)
+
+    secret = "plain-" + "secret-value"
+    text = f"{proj}{dash}api_key={secret}"
+    scrubbed = scrub_text(text)
+    assert scrubbed is not None
+    assert proj not in scrubbed
+    assert dash not in scrubbed
+    assert secret not in scrubbed
+    redacted = redact_text(text, caller="t")
+    assert proj not in redacted
+    assert dash not in redacted
+
+
+def test_dash_ending_key_glued_after_word_char_is_redacted():
+    """A dash-ending key glued after x, _, another key, or é is redacted.
+
+    No digits, so the entropy layer cannot hide a miss. Both scrub_text
+    and redact_text have to take the key.
+    """
+    dash = _aiza_trailing_dash()
+    other = "AI" + "za" + ("q" * 35)
+    assert len(other) == 39
+    for prefix in ("x", "_", other, "é"):
+        _assert_scrub_and_redact(prefix + dash, dash)
+
+
 def test_aiza_key_ending_in_dash_is_redacted_before_space_quote_or_punctuation():
     secret = _aiza_trailing_dash()
     samples = [
