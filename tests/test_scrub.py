@@ -14,9 +14,15 @@ from swarph_cli.scrub import scrub_text
 @pytest.mark.parametrize("secret", [
     "sk-ant-aaaa-bbbb-cccc-dddd",
     "sk-abcdefghijklmnop123456",
+    # Hyphenated OpenAI shapes, built here so the source has no key literal.
+    # The old [A-Za-z0-9] class stopped at the hyphen (card #1472).
+    "sk-proj-" + ("n7" * 12),
+    "sk-svcacct-" + ("m8" * 12),
     "xai-abcdefghijklmnop123456",
     # Built at runtime: the literal full shape trips gitleaks gcp-api-key.
     "AIza" + "SyDdI0T9mbB4y7KzQ3wX2vU5tS8rR1pP6oO",
+    # 35th character is '-'. A closing \b does not match before the space.
+    "AI" + "za" + ("m" * 34) + "-",
     "ghp_abcdefghijklmnopqrstuvwx1234567890",
     # Built at runtime: the literal full shape trips push protection.
     "xoxb-" + "123456789012-abcdefghijklmnop",

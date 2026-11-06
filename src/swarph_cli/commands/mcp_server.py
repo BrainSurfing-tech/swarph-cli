@@ -89,10 +89,16 @@ def _search(query: str, *, url: str, token: str | None = None) -> list[dict]:
     transport exception.
     """
     endpoint = url.rstrip("/") + "/api/ask"
-    payload: dict = {"message": query}
+    # Redact the query only. The auth token is the credential this call
+    # presents to the search face. Putting it in the dict that
+    # encode_outbound_json walks replaces a credential-shaped value
+    # (secrets.token_urlsafe(32), the gateway mint) with
+    # [REDACTED:HIGH_ENTROPY] before the request is sent. Card #1472.
+    data = encode_outbound_json({"message": query}, caller="mcp_server._search")
     if token:
-        payload["token"] = token
-    data = encode_outbound_json(payload, caller="mcp_server._search")
+        body_obj = json.loads(data.decode("utf-8"))
+        body_obj["token"] = token
+        data = json.dumps(body_obj).encode("utf-8")
     req = urllib.request.Request(
         endpoint,
         data=data,
