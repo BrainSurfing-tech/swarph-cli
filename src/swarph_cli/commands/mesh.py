@@ -444,9 +444,16 @@ def _post_json(
     token: str,
     *,
     timeout: float = 10.0,
+    encoded: bytes | None = None,
 ) -> tuple[int, dict]:
     _require_absolute_gateway_url(url)
-    data = encode_outbound_json(body, caller="mesh._post_json")
+    # event.emit redacts with no chain token, then passes the bytes with the
+    # CLI --chain-token already attached. Encoding those bytes again would
+    # strip that one value. Every other caller leaves encoded unset.
+    if encoded is None:
+        data = encode_outbound_json(body, caller="mesh._post_json")
+    else:
+        data = encoded
     req = urllib.request.Request(
         url,
         data=data,

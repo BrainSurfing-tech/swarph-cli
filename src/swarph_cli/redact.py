@@ -132,6 +132,11 @@ _ANTHROPIC_RE = re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{8,}\b")
 _OPENAI_RE = re.compile(r"\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9\-_]{16,}\b")
 _XAI_RE = re.compile(r"\bxai-[A-Za-z0-9\-_]{16,}\b")
 _GCP_RE = re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b")
+_GCP_FINAL_RE = re.compile(
+    r"(?:\bAIza[0-9A-Za-z\-_]{34}(?:-|[0-9A-Za-z_](?![0-9A-Za-z_]))"
+    r"|(?<=[0-9A-Za-z_])AIza[0-9A-Za-z\-_]{34}[0-9A-Za-z_](?![0-9A-Za-z_])"
+    r"|(?<=\w)AIza[0-9A-Za-z\-_]{34}-)"
+)
 _SLACK_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{8,}\b")
 _AWS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 _AWS_SECRET_RE = re.compile(
@@ -332,6 +337,7 @@ def redact_text(
     # Layer 6: Shannon Entropy Scoring
     out = _SECRET_ASSIGN_RE.sub(_replace_secret_assignment, out)
     out = _replace_standalone_tokens(out)
+    out = _GCP_FINAL_RE.sub("[REDACTED:GCP_API_KEY]", out)
 
     return out
 

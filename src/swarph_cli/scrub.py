@@ -39,6 +39,13 @@ _SECRET_PATTERNS = [
     # password/token/secret assignments.
     (re.compile(r"(?i)\b(password|passwd|pwd|api[_-]?key|auth[_-]?token|secret)\b\s*[:=]\s*\S+"),
      r"\1=[REDACTED]"),
+    (re.compile(r"\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9\-_]{16,}\b"),
+     "[REDACTED-API-KEY]"),
+    (re.compile(
+        r"(?:\bAIza[0-9A-Za-z\-_]{34}(?:-|[0-9A-Za-z_](?![0-9A-Za-z_]))"
+        r"|(?<=[0-9A-Za-z_])AIza[0-9A-Za-z\-_]{34}[0-9A-Za-z_](?![0-9A-Za-z_])"
+        r"|(?<=\w)AIza[0-9A-Za-z\-_]{34}-)"),
+     "[REDACTED-API-KEY]"),
 ]
 
 

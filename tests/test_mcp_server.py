@@ -94,6 +94,45 @@ def test_search_passes_token_when_given():
     assert captured["data"]["token"] == "secret"
 
 
+def test_search_keeps_a_credential_shaped_token_and_scrubs_the_message():
+    """PR 648: the auth token used to ride inside the redacted body.
+
+    A gateway-mint shape (token_urlsafe(32)) is often replaced with
+    [REDACTED:HIGH_ENTROPY]. The message is still scrubbed.
+    """
+    import secrets
+
+    from swarph_cli.redact import redact_text
+
+    tok = None
+    for _ in range(40):
+        candidate = secrets.token_urlsafe(32)
+        if redact_text(candidate, caller="t") != candidate:
+            tok = candidate
+            break
+    assert tok is not None, "need one credential-shaped token the redactor would eat"
+    classic = "sk-" + ("ab" * 12)
+    captured = {}
+
+    def _fake(req, timeout=None):  # noqa: ANN001 - test double
+        captured["data"] = json.loads(req.data.decode("utf-8"))
+        resp = mock.MagicMock()
+        resp.read.return_value = json.dumps({"results": []}).encode("utf-8")
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda s, *a: False
+        return resp
+
+    with mock.patch(
+        "swarph_cli.commands.mcp_server.urllib.request.urlopen", _fake
+    ):
+        mcp_server._search(
+            "look " + classic, url="https://metaedge.surf/", token=tok
+        )
+    assert captured["data"]["token"] == tok
+    assert classic not in captured["data"]["message"]
+    assert "REDACTED" in captured["data"]["message"]
+
+
 # --------------------------------------------------------------------------- #
 # _add — parse_uri gate + add.run_add dispatch
 # --------------------------------------------------------------------------- #

@@ -20,7 +20,7 @@ from ._gateway_client import (
     resolve_self_name,
     resolve_token,
 )
-from swarph_cli.redact import redact_text
+from swarph_cli.redact import encode_outbound_json, redact_text
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -45,6 +45,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     add_common_args(emit)
     return p
+
+
+class ChainTokenAttachError(RuntimeError):
+    """The redacted event bytes are not JSON, so the chain token is not sent."""
+
+
+def _attach_chain_token(data: bytes, chain_token: str) -> bytes:
+    """Add the CLI chain token onto an already-redacted event body.
+
+    Same shape as ``mcp_server._search``: redact first, then set the one
+    field that must reach the wire. A pasted chain_token line in the payload
+    was already scrubbed and is not this value.
+
+    Redaction can rewrite a quote inside the content string and leave bytes
+    that are not JSON. That refusal is by name (``JSONDecodeError`` or
+    ``UnicodeDecodeError``). The token is not copied into the error, and the
+    caller sends nothing.
+    """
+    try:
+        body_obj = json.loads(data.decode("utf-8"))
+        inner = json.loads(body_obj["content"])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ChainTokenAttachError(
+            f"_attach_chain_token refused: {type(exc).__name__}"
+        ) from None
+    inner["swarph_event"]["chain_token"] = chain_token
+    body_obj["content"] = json.dumps(inner, separators=(",", ":"), sort_keys=True)
+    return json.dumps(body_obj).encode("utf-8")
 
 
 def _post_channel(
@@ -76,8 +104,6 @@ def _post_channel(
     base = (gateway or env_gateway()).rstrip("/")
     payload = redact_text(payload, caller="event.emit") or ""
     ev: dict = {"event": event, "payload": payload}
-    if chain_token is not None:  # carry an explicit "" through; only omit when unset
-        ev["chain_token"] = chain_token
     # Sentinel-wrapped so P1's guard can UNAMBIGUOUSLY identify an event post: a
     # normal channel message won't carry the top-level `swarph_event` key, so the
     # guard keys off `content.swarph_event` — never a false-positive on a plain
@@ -91,7 +117,28 @@ def _post_channel(
         "kind": "fyi",
         "content": json.dumps(content, separators=(",", ":"), sort_keys=True),
     }
-    status, resp = post_json(f"{base}/messages", body, token)
+    # Redact with no chain token in the body. Attach the CLI value after, so
+    # only that value skips redaction. An explicit "" is carried; omit only
+    # when the flag was unset. Card #1472.
+    if chain_token is None:
+        status, resp = post_json(f"{base}/messages", body, token)
+    else:
+        # Attach after redaction. If those bytes are not JSON, name the
+        # refusal and return before post_json: nothing is sent, no traceback.
+        try:
+            encoded = _attach_chain_token(
+                encode_outbound_json(body, caller="event.emit"),
+                chain_token,
+            )
+        except ChainTokenAttachError as exc:
+            print(f"swarph event: {exc}", file=sys.stderr)
+            return 2
+        status, resp = post_json(
+            f"{base}/messages",
+            body,
+            token,
+            encoded=encoded,
+        )
     if 200 <= status < 300:
         print(f"emitted event={event} channel={channel} id={resp.get('id')}")
         return 0
