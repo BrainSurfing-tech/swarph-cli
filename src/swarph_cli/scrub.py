@@ -29,16 +29,19 @@ _SECRET_PATTERNS = [
     # xAI keys (msg 65982).
     (re.compile(r"\bxai-[A-Za-z0-9\-_]{16,}\b"), "[REDACTED-API-KEY]"),
     # Google AI Studio keys: AIza + 35 chars (msg 65982). Exact length:
-    # a shorter made-up tail is not this shape. Those 35 are 34 from the
-    # key class, then either '-' or one word character. A final '-' is the
-    # boundary whatever follows it, and that alternative keeps the rest of
-    # the key-class run so a second key glued on after a word character
-    # (token=<dash-ending key>--chain_token<full key>) does not survive.
+    # a shorter made-up tail is not this shape, and the match is the key's
+    # own 39 characters. Those 35 are 34 from the key class, then either
+    # '-' or one word character. A final '-' ends the match, so a keyword
+    # glued on after it (api_key=) stays visible to the keyword-value rule.
     # A final word character matches only under (?![0-9A-Za-z_]), so key-x
     # and key-- still match and a longer alphanumeric or underscore tail
-    # does not. Same pattern as redact._GCP_RE (card #1472).
+    # does not. That word-character ending also matches with no leading
+    # boundary, so a second key glued on after a word character
+    # (token=<dash-ending key>--chain_token<full key>) does not survive.
+    # Same pattern as redact._GCP_RE (card #1472).
     (re.compile(
-        r"\bAIza[0-9A-Za-z\-_]{34}(?:-[0-9A-Za-z\-_]*|[0-9A-Za-z_](?![0-9A-Za-z_]))"),
+        r"(?:\bAIza[0-9A-Za-z\-_]{34}(?:-|[0-9A-Za-z_](?![0-9A-Za-z_]))"
+        r"|(?<=[0-9A-Za-z_])AIza[0-9A-Za-z\-_]{34}[0-9A-Za-z_](?![0-9A-Za-z_]))"),
      "[REDACTED-API-KEY]"),
     # GitHub + Slack tokens.
     (re.compile(r"\bgh[opusr]_[A-Za-z0-9_]{20,}\b"), "[REDACTED-TOKEN]"),

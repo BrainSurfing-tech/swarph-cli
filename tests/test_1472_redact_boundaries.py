@@ -117,6 +117,27 @@ def test_aiza_dash_key_followed_by_word_char_is_redacted():
         _assert_scrub_and_redact(secret + suffix, secret)
 
 
+def test_dash_ending_aiza_then_api_key_hides_key_and_secret():
+    """:<dash-ending key>api_key=<secret> leaves neither (drop #4437).
+
+    The match stops on the key. A greedy tail would swallow api_key, and
+    the secret would stay where the keyword-value rule should have put
+    [REDACTED:DSN_CREDENTIAL].
+    """
+    key = _aiza_trailing_dash()
+    secret = "plain-" + "secret-value"
+    text = f":{key}api_key={secret}"
+    scrubbed = scrub_text(text)
+    assert scrubbed is not None
+    assert key not in scrubbed
+    assert secret not in scrubbed
+    assert "api_key=[REDACTED]" in scrubbed
+    redacted = redact_text(text, caller="t")
+    assert key not in redacted
+    assert secret not in redacted
+    assert "api_key=[REDACTED:DSN_CREDENTIAL]" in redacted
+
+
 def test_dash_ending_aiza_glued_through_chain_token_redacts_both_keys():
     """token=<dash-ending key>--chain_token<full key> leaves neither key.
 
