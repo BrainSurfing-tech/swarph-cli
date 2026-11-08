@@ -32,10 +32,10 @@ def _pack(kind="typed", egress=None, n=1):
 
 def _arm(**kw):
     base = dict(
-        name="jev", kind="typed", base_url="https://jevtypesafeai.com/api",
-        path="/v1/decide",
+        name="jev", kind="typed", base_url="https://api.typesafe.ai",
+        path="/v1/systemone",
         auth={"env": "JEV_API_KEY", "header": "Authorization", "scheme": "Bearer"},
-        price={"in_per_mtok": 0.42, "out_per_mtok": 0, "source": "example"},
+        price={"in_per_mtok": 0.042, "out_per_mtok": 0, "source": "example"},
         egress="external",
     )
     base.update(kw)

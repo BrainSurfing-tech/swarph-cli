@@ -1,15 +1,15 @@
 # Example only. The key is an env-var name. No secret belongs in this file.
-# Price: 0.42 USD per 1M input tokens, output free.
-# source: jevtypesafeai.com/docs#decide, card #927 post 47838
+# Price: 0.042 USD per 1M input tokens, output free.
+# source: docs.typesafe.ai/models, card #1503
 
 [jev]
 kind = "typed"
-base_url = "https://jevtypesafeai.com/api"
-path = "/v1/decide"
+base_url = "https://api.typesafe.ai"
+path = "/v1/systemone"
 egress = "external"
 auth = { env = "JEV_API_KEY", header = "Authorization", scheme = "Bearer" }
 usage = { in = "usage.input_tokens", out = "usage.output_tokens" }
-price = { in_per_mtok = 0.42, out_per_mtok = 0, source = "jevtypesafeai.com/docs#decide, card #927 post 47838" }
+price = { in_per_mtok = 0.042, out_per_mtok = 0, source = "docs.typesafe.ai/models" }
 
 # OpenAI Decisions. The key is the env-var name. Model is gpt-6-luna
 # (the only model the endpoint documents). Input is $0.10 per 1M tokens,
