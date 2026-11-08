@@ -1,6 +1,6 @@
 {
   "name": "swarph",
-  "version": "0.72.45",
+  "version": "0.72.46",
   "description": "Cursor: swarph mcp-server toolbelt (mesh DMs, search, memory). Set SWARPH_SELF and MESH_GATEWAY_URL in the host environment; install swarph-cli[mcp]. Claude inbox push stays on plugins/swarph/.mcp.json channel-serve.",
   "author": {"name": "BrainSurfing-tech"},
   "mcpServers": "./.cursor-mcp.json"
