@@ -5,7 +5,8 @@ strip each exact ``[export ]GH_TOKEN=$(gh auth token [--user W]
 [--hostname W])`` (W a plain word) when it is followed by whitespace,
 ``;``, ``&``, ``|``, a newline, or end of text. Spaces or tabs may pad
 the inside of ``$( )``; a newline may not. A glued suffix or a longer
-name is not stripped. A backslash-newline is folded before the strip.
+name is not stripped. A backslash-LF continuation is folded before
+the strip. Backslash-CR-LF is not a continuation and is not folded.
 If ``GH_TOKEN`` remains anywhere, DENY on both cells with a reason that
 names ``--body-file`` and that explicit form. Exercised through run_hook
 with stdin JSON.
@@ -299,7 +300,54 @@ CASES = [
     pytest.param(
         "XGH_TOKEN=$(gh auth token) gh pr view 1",
         "deny", id="m24c-xgh-token"),
-    # Backslash-newline inside the name is folded, then denied (1adea450).
+    # Backslash-LF inside the name is folded, then denied (1adea450).
+    # Backslash-CR-LF is not a continuation (r11): it stays in the text.
+    pytest.param(
+        "GH_TOKEN=$(gh auth token --user u\\\r\n) gh pr view 1",
+        "deny", id="crlf-user-inside-parens"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token) \\\r\ngh pr view 1",
+        False, id="crlf-before-gh"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token --user u) \\\r\ngh pr view 1",
+        False, id="crlf-before-gh-user"),
+    # Lab ruling: a backslash-LF join inside or beside the form stays explicit.
+    pytest.param(
+        "GH_TOKEN=$(gh auth token --user u\\\n) gh pr view 1",
+        True, id="lf-inside-user-stays-explicit"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token) \\\ngh pr view 1",
+        True, id="lf-beside-stays-explicit"),
+    # CR / NBSP / VT / FF are not the allowlist's space-or-tab blank class.
+    pytest.param(
+        "GH_TOKEN=$(gh auth token\r) gh pr view 1",
+        "deny", id="blank-cr-before-close"),
+    pytest.param(
+        "GH_TOKEN=$(\rgh auth token) gh pr view 1",
+        "deny", id="blank-cr-after-open"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token\u00a0) gh pr view 1",
+        "deny", id="blank-nbsp-before-close"),
+    pytest.param(
+        "GH_TOKEN=$(\u00a0gh auth token) gh pr view 1",
+        "deny", id="blank-nbsp-after-open"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token\v) gh pr view 1",
+        "deny", id="blank-vt-before-close"),
+    pytest.param(
+        "GH_TOKEN=$(\vgh auth token) gh pr view 1",
+        "deny", id="blank-vt-after-open"),
+    pytest.param(
+        "GH_TOKEN=$(gh auth token\f) gh pr view 1",
+        "deny", id="blank-ff-before-close"),
+    pytest.param(
+        "GH_TOKEN=$(\fgh auth token) gh pr view 1",
+        "deny", id="blank-ff-after-open"),
+    # M23c moves the residual deny to after already_explicit. A quote hides
+    # the second GH_TOKEN from already_explicit; the raw strip still sees it.
+    pytest.param(
+        'GH_TOKEN=$(gh auth token) gh pr view "GH_TOKEN"',
+        "deny", id="m23c-quoted-token-remains"),
     pytest.param(
         "GH_\\\nTOKEN=x gh pr view 1",
         "deny", id="bn-split-gh-token"),
@@ -433,6 +481,32 @@ def test_targets_gh_wrapper_name_as_option_arg_no_redos(piece):
 ])
 def test_targets_gh_wrapper_option_arg_still_reaches_gh(command):
     assert ghid.targets_gh(command) is True
+
+
+@pytest.mark.parametrize("command", [
+    "sudo -u envoy gh pr view 1",
+    "env -u timer gh pr view 1",
+    "env -C execs gh pr view 1",
+    "xargs -a timefile gh pr view 1",
+])
+def test_m31_wrapper_arg_lookahead_is_whole_word(command):
+    """M31 drops ``(?=\\s|$)``; a prefix of a wrapper name must still be an arg."""
+    assert ghid.targets_gh(command) is True
+
+
+@pytest.mark.parametrize("command", [
+    "GH_TOKEN=$(gh auth token\r) gh pr view 1",
+    "GH_TOKEN=$(\rgh auth token) gh pr view 1",
+    "GH_TOKEN=$(gh auth token\u00a0) gh pr view 1",
+    "GH_TOKEN=$(\u00a0gh auth token) gh pr view 1",
+    "GH_TOKEN=$(gh auth token\v) gh pr view 1",
+    "GH_TOKEN=$(\vgh auth token) gh pr view 1",
+    "GH_TOKEN=$(gh auth token\f) gh pr view 1",
+    "GH_TOKEN=$(\fgh auth token) gh pr view 1",
+])
+def test_already_explicit_blank_class_is_space_and_tab(command):
+    """Value trim is space/tab, matching the allowlist, not ``str.strip()``."""
+    assert ghid.already_explicit(command) is False
 
 
 def test_routed_token_reaches_gh_in_real_bash_with_stand_in_gh(

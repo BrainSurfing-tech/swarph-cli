@@ -84,6 +84,9 @@ DEFAULT_MAPPING_PATH = Path.home() / ".config" / "swarph" / "gh-identities.json"
 # `sudo -u sudo `, `xargs -a xargs ` and `sudo -u nohup ` each split two
 # ways per repetition and targets_gh is exponential. `sudo -u env gh` still
 # matches: `env` is the next wrapper, not sudo's user argument.
+# The `(?=\s|$)` end keeps the refusal to a whole word. Without it a longer
+# argument that only starts with a wrapper name (`envoy`, `timer`, `execs`,
+# `timefile`) is refused and the `gh` after it is invisible.
 _WRAP_ARG_NOT_NAME = (
     r"(?:\s+(?!(?:env|sudo|command|exec|nohup|time|nice|timeout|stdbuf"
     r"|rlwrap|xargs)(?=\s|$))[^\s-]\S*)?"
@@ -947,7 +950,9 @@ def _subst_inner_ok(inner: str) -> bool:
         return False
     if not re.search(r"\bgh\b", inner):
         return True
-    return bool(_GH_AUTH_TOKEN_INNER.match(inner.strip()))
+    # Same blanks as ``[ \t]`` in the allowlist. ``str.strip()`` would also
+    # drop CR, NBSP, VT and FF, which are not padding.
+    return bool(_GH_AUTH_TOKEN_INNER.match(inner.strip(" \t")))
 
 
 def _has_unterminated_quote(text: str) -> bool:
@@ -1298,7 +1303,10 @@ def _is_allowlisted_value(text: str, start: int, end: int) -> bool:
     raw = text[start:end]
     if not raw.startswith("$(") or not raw.endswith(")"):
         return False
-    return bool(_GH_AUTH_TOKEN_INNER.match(raw[2:-1].strip()))
+    # Space and tab only, the same class as ``[ \t]*`` in
+    # ``_ALLOWLISTED_GH_TOKEN_RE``. ``str.strip()`` also drops CR, NBSP,
+    # VT and FF, which would mark a non-allowlisted value explicit.
+    return bool(_GH_AUTH_TOKEN_INNER.match(raw[2:-1].strip(" \t")))
 
 
 def already_explicit(command: str) -> bool:
@@ -1322,8 +1330,12 @@ def already_explicit(command: str) -> bool:
     GH_TOKEN value is not explicit. #4479 denies any ``GH_TOKEN`` that
     remains after that exact form is stripped
     (:func:`has_disallowed_gh_token_assignment`).
+
+    A backslash followed by LF is a bash line continuation and is folded
+    away. A backslash followed by CR LF is not: bash quotes the CR and
+    keeps the newline, so that sequence is left in place.
     """
-    raw = (command or "").replace("\\\r\n", "").replace("\\\n", "")
+    raw = (command or "").replace("\\\n", "")
     if _has_unterminated_quote(raw):
         return False
     visible = _mask_explicit(raw)
@@ -1605,11 +1617,12 @@ def _is_executable_assignment_before(before: str) -> bool:
 def _strip_allowlisted_gh_token(command: str) -> str:
     """Drop each exact allowlisted ``GH_TOKEN=$(gh auth token ...)`` occurrence.
 
-    A backslash-newline is folded first, as in :func:`already_explicit`,
-    so ``GH_\\nTOKEN=`` and ``G\\nH_TOKEN=`` are one name before the
-    allowlist runs.
+    A backslash-LF continuation is folded first, as in
+    :func:`already_explicit`, so ``GH_\\nTOKEN=`` and ``G\\nH_TOKEN=``
+    are one name before the allowlist runs. Backslash-CR-LF is not a
+    continuation and is not folded.
     """
-    folded = (command or "").replace("\\\r\n", "").replace("\\\n", "")
+    folded = (command or "").replace("\\\n", "")
     return _ALLOWLISTED_GH_TOKEN_RE.sub("", folded)
 
 
@@ -1617,7 +1630,8 @@ def has_disallowed_gh_token_assignment(command: str) -> bool:
     """True when ``GH_TOKEN`` survives the exact allowlisted form (#4479).
 
     Before any rewrite, for a command that targets ``gh``: fold a
-    backslash-newline, then strip each occurrence of ``[export
+    backslash-LF continuation (not backslash-CR-LF), then strip each
+    occurrence of ``[export
     ]GH_TOKEN=$(gh auth token [--user W] [--hostname W])`` with optional
     spaces or tabs inside the ``$( )`` (never a newline), followed by
     whitespace, ``;``, ``&``, ``|``, a newline, or end of text (W is a
