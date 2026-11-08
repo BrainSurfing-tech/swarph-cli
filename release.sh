@@ -52,7 +52,7 @@ plan() {
   cat <<EOF
 release ${VERSION} would:
 1. scratch-clone ${REMOTE}
-2. bump version to ${VERSION} in pyproject.toml, src/swarph_cli/__init__.py, plugins/swarph/.claude-plugin/plugin.json
+2. bump version to ${VERSION} in pyproject.toml, src/swarph_cli/__init__.py, plugins/*/.*-plugin/plugin.json
 3. commit and push branch release/${VERSION}
 4. open the release PR and stop
 5. resume only when a review is APPROVED at that PR head; otherwise refuse to merge
@@ -194,14 +194,30 @@ restart_importers() {
 }
 
 open_release_pr() {
-  local scratch
+  local scratch plugin old_version grep_status
   scratch=$(mktemp -d)
   git clone --depth 1 "$REMOTE" "$scratch"
+  old_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$scratch/pyproject.toml")
+  if [ -z "$old_version" ]; then
+    echo "release: cannot read old version from pyproject.toml" >&2
+    exit 1
+  fi
   python3 "$LIB" bump --kind pyproject --version "$VERSION" "$scratch/pyproject.toml"
   python3 "$LIB" bump --kind init --version "$VERSION" "$scratch/src/swarph_cli/__init__.py"
-  python3 "$LIB" bump --kind plugin --version "$VERSION" "$scratch/plugins/swarph/.claude-plugin/plugin.json"
   git -C "$scratch" -c user.email="${RELEASE_GIT_EMAIL:-release.sh@local}" -c user.name="${RELEASE_GIT_NAME:-release.sh}" checkout -b "release/${VERSION}"
-  git -C "$scratch" add pyproject.toml src/swarph_cli/__init__.py plugins/swarph/.claude-plugin/plugin.json
+  for plugin in "$scratch"/plugins/*/.*-plugin/plugin.json; do
+    [ -f "$plugin" ] || continue
+    python3 "$LIB" bump --kind plugin --version "$VERSION" "$plugin"
+    git -C "$scratch" add -- "$plugin"
+  done
+  git -C "$scratch" add pyproject.toml src/swarph_cli/__init__.py
+  grep_status=0
+  git -C "$scratch" grep -n -F -e "$old_version" -- . ':(exclude)CHANGELOG*' || grep_status=$?
+  case "$grep_status" in
+    0) echo "release: refusing PR: old version ${old_version} remains outside CHANGELOG" >&2; exit 1 ;;
+    1) ;;  # git grep found no stale version.
+    *) echo "release: could not check for old version ${old_version} (git grep failed)" >&2; exit "$grep_status" ;;
+  esac
   git -C "$scratch" -c user.email="${RELEASE_GIT_EMAIL:-release.sh@local}" -c user.name="${RELEASE_GIT_NAME:-release.sh}" commit -m "release: swarph-cli ${VERSION}"
   git -C "$scratch" push -u origin "release/${VERSION}"
   gh pr create --repo "$REPO" --base main --head "release/${VERSION}" \

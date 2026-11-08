@@ -1,6 +1,8 @@
 """card #1065 — release.sh stops for an approval at head, then restarts importers one at a time."""
 import importlib.util
 import os
+import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -58,7 +60,7 @@ def test_dry_run_lists_every_step_and_touches_nothing(tmp_path):
     out = proc.stdout
     for phrase in (
         "scratch-clone",
-        "bump version to 9.9.9 in pyproject.toml, src/swarph_cli/__init__.py, plugins/swarph/.claude-plugin/plugin.json",
+        "bump version to 9.9.9 in pyproject.toml, src/swarph_cli/__init__.py, plugins/*/.*-plugin/plugin.json",
         "commit and push branch release/9.9.9",
         "open the release PR and stop",
         "refuse to merge",
@@ -431,7 +433,11 @@ esac
 
 
 @needs_bash
-def test_open_pr_bumps_three_files_and_stops(tmp_path):
+@pytest.mark.parametrize("stale_file", [None, "docs/stray version.txt", "README.md", "CHANGELOG.md",
+                                       "docs/lookalike.txt", "git-grep-error", "missing-old-version"],
+                         ids=["all-manifests", "stray-refused", "readme-refused", "changelog-allowed",
+                              "literal-match", "grep-error-refused", "unreadable-old-version"])
+def test_open_pr_bumps_all_plugin_manifests_and_stops(tmp_path, stale_file):
     src = tmp_path / "origin"
     src.mkdir()
     (src / "pyproject.toml").write_text('version = "0.0.1"\n')
@@ -441,6 +447,19 @@ def test_open_pr_bumps_three_files_and_stops(tmp_path):
     plugin = src / "plugins" / "swarph" / ".claude-plugin"
     plugin.mkdir(parents=True)
     (plugin / "plugin.json").write_text('{"version": "0.0.1"}\n')
+    manifests = ["plugins/swarph/.claude-plugin/plugin.json",
+                 "plugins/swarph/.cursor-plugin/plugin.json",
+                 "plugins/other plugin/.future-plugin/plugin.json"]
+    for manifest in manifests[1:]:
+        path = src / manifest
+        path.parent.mkdir(parents=True)
+        path.write_text('{"version": "0.0.1"}\n')
+    if stale_file and stale_file not in {"git-grep-error", "missing-old-version"}:
+        path = src / stale_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("0x0x1\n" if stale_file == "docs/lookalike.txt" else "Old swarph version: 0.0.1\n")
+    if stale_file == "missing-old-version":
+        (src / "pyproject.toml").write_text('name = "fixture"\n')
     subprocess.run(["git", "init", "-b", "main"], cwd=src, check=True, capture_output=True)
     subprocess.run(["git", "-C", str(src), "-c", "user.email=t@local", "-c", "user.name=t", "add", "."], check=True)
     subprocess.run(["git", "-C", str(src), "-c", "user.email=t@local", "-c", "user.name=t", "commit", "-m", "base"], check=True, capture_output=True)
@@ -458,10 +477,38 @@ case "$*" in
 esac
 """)
     (bin_dir / "gh").chmod(0o755)
+    if stale_file == "git-grep-error":
+        real_git = shutil.which("git")
+        assert real_git
+        (bin_dir / "git").write_text(f'''#!/bin/bash
+if [ "$1" = "-C" ] && [ "${{3:-}}" = "grep" ]; then
+  echo 'fixture git grep error' >&2
+  exit 2
+fi
+exec {shlex.quote(Path(real_git).as_posix())} "$@"
+''')
+        (bin_dir / "git").chmod(0o755)
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
     env["RELEASE_REMOTE"] = str(bare)
     proc = _run(["bash", str(RELEASE), "9.9.9"], env)
+    if stale_file in {"docs/stray version.txt", "README.md", "git-grep-error", "missing-old-version"}:
+        assert proc.returncode != 0
+        if stale_file == "git-grep-error":
+            assert proc.returncode == 2
+            assert "could not check for old version" in proc.stderr
+        elif stale_file == "missing-old-version":
+            assert "cannot read old version" in proc.stderr
+        else:
+            assert "old version 0.0.1" in proc.stderr
+            assert "outside CHANGELOG" in proc.stderr
+            assert stale_file in proc.stdout + proc.stderr
+        assert not log.exists(), "No gh command, especially pr create, is allowed"
+        assert subprocess.run(
+            ["git", "--git-dir", str(bare), "show-ref", "--verify", "refs/heads/release/9.9.9"],
+            text=True, capture_output=True,
+        ).returncode != 0, "Refusal must precede even the branch push"
+        return
     assert proc.returncode == 0, proc.stderr
     assert "stopped after opening the release PR" in proc.stdout
     assert "MERGE" not in log.read_text()
@@ -475,11 +522,12 @@ esac
         text=True, capture_output=True, check=True,
     )
     assert '__version__ = "9.9.9"' in init_show.stdout
-    plugin_show = subprocess.run(
-        ["git", "--git-dir", str(bare), "show", "release/9.9.9:plugins/swarph/.claude-plugin/plugin.json"],
-        text=True, capture_output=True, check=True,
-    )
-    assert '"version": "9.9.9"' in plugin_show.stdout
+    for manifest in manifests:
+        plugin_show = subprocess.run(
+            ["git", "--git-dir", str(bare), "show", f"release/9.9.9:{manifest}"],
+            text=True, capture_output=True, check=True,
+        )
+        assert '"version": "9.9.9"' in plugin_show.stdout, manifest
 
 
 def test_verify_fails_when_the_process_started_before_the_install(tmp_path):
