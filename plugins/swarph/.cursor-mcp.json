@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "swarph": {
+      "command": "swarph",
+      "args": ["mcp-server"]
+    }
+  }
+}

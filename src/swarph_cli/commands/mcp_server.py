@@ -9,9 +9,10 @@ A host mounts it with a stdio server entry, e.g. in ``.mcp.json`` /
 ``claude_desktop_config.json``::
 
     {"mcpServers": {"swarph": {"command": "swarph",
-                               "args": ["mcp-server"],
-                               "env": {"MESH_GATEWAY_URL": "http://<gw>:8788",
-                                       "SWARPH_BRAIN_MCP": "http://<gw>:8792/mcp"}}}}
+                               "args": ["mcp-server"]}}}
+
+    Host environment supplies ``MESH_GATEWAY_URL``, ``SWARPH_BRAIN_MCP``, and
+    ``SWARPH_SELF`` (#578, card #1499). DM tools refuse when ``SWARPH_SELF`` is unset.
 
 Six tools are exposed, each backed by a plain, unit-testable helper so the
 tool LOGIC is tested without spinning up the stdio transport:
@@ -48,6 +49,7 @@ from swarph_cli.commands import add
 from swarph_cli.commands import codegraph
 from swarph_cli.commands import brain_ask, memory, timeline
 from swarph_cli.commands import mesh as _mesh
+from swarph_cli import gateway_default
 from swarph_cli.gateway_default import env_gateway
 from swarph_cli.redact import encode_outbound_json, redact_text
 
@@ -285,11 +287,20 @@ DM_GATEWAY_WINDOW = 1000  # GET /messages `limit` max; `n` is the returned count
 
 
 def _dm_session(self_name: str | None = None) -> tuple[str, str, str]:
-    """(self, gateway, token) resolved the way every mesh verb resolves them:
-    explicit name, else $SWARPH_SELF; gateway from the environment; the peer's
-    own token file. Never another peer's unread by accident (#578 family)."""
-    who = _mesh._resolve_self_name(self_name)
+    """(self, gateway, token) for DM MCP tools only.
+
+    Requires an explicit tool argument or ``SWARPH_SELF`` — never ``SWARPH_CELL``
+    and never a box-owner fallback (#1499). Gateway and brain URLs come from the
+    host environment (#578).
+    """
+    who = identity.require(self_name, verb="mcp-server", env=identity.SELF_ONLY)
     gw = env_gateway().rstrip("/")
+    if not gw:
+        raise gateway_default.GatewayNotConfigured(
+            f"{gateway_default.ENV_GATEWAY} is not set, and swarph ships no default "
+            "mesh-gateway host.\n"
+            f"  Set {gateway_default.ENV_GATEWAY} in the MCP host environment."
+        )
     tok = _mesh._resolve_token(who, None)
     return who, gw, tok
 

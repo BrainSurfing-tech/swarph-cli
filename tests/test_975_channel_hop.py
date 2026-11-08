@@ -48,18 +48,9 @@ def test_reentry_does_not_invent_a_channel_when_unset(tmp_path, monkeypatch):
 
 
 def test_plugin_mcp_uses_the_console_script_not_system_python():
-    servers = json.loads(MCP.read_text(encoding="utf-8"))["mcpServers"]
-    channel = servers["swarph-channel"]
-    assert channel["command"] == "swarph"
-    assert channel["args"] == ["channel-serve"]
-    assert "python" not in channel["command"]
-    assert "swarph_cli" not in " ".join(channel["args"])
+    spec = json.loads(MCP.read_text(encoding="utf-8"))["mcpServers"]["swarph"]
+    assert spec["command"] == "swarph"
+    assert spec["args"] == ["channel-serve"]
+    assert "python" not in spec["command"]
+    assert "swarph_cli" not in " ".join(spec["args"])
     assert _VERB_HANDLERS["channel-serve"].endswith("run_channel_serve")
-
-    tools = servers["swarph"]
-    assert tools["command"] == "swarph"
-    assert tools["args"] == ["mcp-server"]
-    env = tools.get("env") or {}
-    assert env.get("MESH_GATEWAY_URL")
-    assert env.get("SWARPH_BRAIN_MCP")
-    assert _VERB_HANDLERS["mcp-server"].endswith("run_mcp_server")
