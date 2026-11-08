@@ -9,7 +9,9 @@ A host mounts it with a stdio server entry, e.g. in ``.mcp.json`` /
 ``claude_desktop_config.json``::
 
     {"mcpServers": {"swarph": {"command": "swarph",
-                               "args": ["mcp-server"]}}}
+                               "args": ["mcp-server"],
+                               "env": {"MESH_GATEWAY_URL": "http://<gw>:8788",
+                                       "SWARPH_BRAIN_MCP": "http://<gw>:8792/mcp"}}}}
 
 Six tools are exposed, each backed by a plain, unit-testable helper so the
 tool LOGIC is tested without spinning up the stdio transport:

@@ -1,8 +1,16 @@
 {
   "mcpServers": {
-    "swarph": {
+    "swarph-channel": {
       "command": "swarph",
       "args": ["channel-serve"]
+    },
+    "swarph": {
+      "command": "swarph",
+      "args": ["mcp-server"],
+      "env": {
+        "MESH_GATEWAY_URL": "http://100.64.189.91:8788",
+        "SWARPH_BRAIN_MCP": "http://100.64.189.91:8792/mcp"
+      }
     }
   }
 }

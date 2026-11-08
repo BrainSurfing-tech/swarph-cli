@@ -1,0 +1,7 @@
+{
+  "name": "swarph",
+  "version": "0.72.45",
+  "description": "Swarph on Cursor: mcp-server toolbelt (mesh DMs, search, memory) plus optional swarph-channel inbox push. Set SWARPH_SELF to this cell name in the swarph MCP env if DM tools should not fall back to the box owner.",
+  "author": {"name": "BrainSurfing-tech"},
+  "mcpServers": "./.mcp.json"
+}
