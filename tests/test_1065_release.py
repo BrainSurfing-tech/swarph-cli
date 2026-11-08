@@ -434,9 +434,9 @@ esac
 
 @needs_bash
 @pytest.mark.parametrize("stale_file", [None, "docs/stray version.txt", "README.md", "CHANGELOG.md",
-                                       "docs/lookalike.txt", "git-grep-error", "missing-old-version"],
+                                       "docs/lookalike.txt", "git-grep-error", "missing-old-version", "crlf-version"],
                          ids=["all-manifests", "stray-refused", "readme-refused", "changelog-allowed",
-                              "literal-match", "grep-error-refused", "unreadable-old-version"])
+                              "literal-match", "grep-error-refused", "unreadable-old-version", "crlf-version"])
 def test_open_pr_bumps_all_plugin_manifests_and_stops(tmp_path, stale_file):
     src = tmp_path / "origin"
     src.mkdir()
@@ -454,12 +454,14 @@ def test_open_pr_bumps_all_plugin_manifests_and_stops(tmp_path, stale_file):
         path = src / manifest
         path.parent.mkdir(parents=True)
         path.write_text('{"version": "0.0.1"}\n')
-    if stale_file and stale_file not in {"git-grep-error", "missing-old-version"}:
+    if stale_file and stale_file not in {"git-grep-error", "missing-old-version", "crlf-version"}:
         path = src / stale_file
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("0x0x1\n" if stale_file == "docs/lookalike.txt" else "Old swarph version: 0.0.1\n")
     if stale_file == "missing-old-version":
         (src / "pyproject.toml").write_text('name = "fixture"\n')
+    if stale_file == "crlf-version":
+        (src / "pyproject.toml").write_bytes(b'version = "0.0.1"\r\n')
     subprocess.run(["git", "init", "-b", "main"], cwd=src, check=True, capture_output=True)
     subprocess.run(["git", "-C", str(src), "-c", "user.email=t@local", "-c", "user.name=t", "add", "."], check=True)
     subprocess.run(["git", "-C", str(src), "-c", "user.email=t@local", "-c", "user.name=t", "commit", "-m", "base"], check=True, capture_output=True)

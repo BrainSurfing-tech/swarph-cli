@@ -197,7 +197,7 @@ open_release_pr() {
   local scratch plugin old_version grep_status
   scratch=$(mktemp -d)
   git clone --depth 1 "$REMOTE" "$scratch"
-  old_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$scratch/pyproject.toml")
+  old_version=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$scratch/pyproject.toml")
   if [ -z "$old_version" ]; then
     echo "release: cannot read old version from pyproject.toml" >&2
     exit 1
