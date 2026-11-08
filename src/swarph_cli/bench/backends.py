@@ -41,6 +41,16 @@ from typing import Any, Callable, Optional, Protocol
 from swarph_cli.redact import encode_outbound_json
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects: urllib would replay the Authorization header at Location."""
+
+    def redirect_request(self, *a, **k):
+        return None
+
+
+_AUTH_HTTP_OPENER = urllib.request.build_opener(_NoRedirect())
+
+
 @dataclass
 class BackendResult:
     text: str
@@ -636,7 +646,7 @@ class HttpBackend:
                 req = urllib.request.Request(
                     endpoint, data=raw_body, headers=headers, method="POST")
                 try:
-                    with urllib.request.urlopen(req, timeout=60) as resp:
+                    with _AUTH_HTTP_OPENER.open(req, timeout=60) as resp:
                         status, reason, raw = resp.status, resp.reason, resp.read()
                 except urllib.error.HTTPError as exc:
                     status, reason, raw = exc.code, exc.reason, exc.read()
@@ -929,7 +939,7 @@ class DecisionsBackend:
                 req = urllib.request.Request(
                     endpoint, data=raw_body, headers=headers, method="POST")
                 try:
-                    with urllib.request.urlopen(req, timeout=60) as resp:
+                    with _AUTH_HTTP_OPENER.open(req, timeout=60) as resp:
                         status, reason, raw = resp.status, resp.reason, resp.read()
                 except urllib.error.HTTPError as exc:
                     status, reason, raw = exc.code, exc.reason, exc.read()
