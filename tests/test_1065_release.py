@@ -44,6 +44,23 @@ def _run(args, env, cwd=None):
     )
 
 
+def _git_with_valid_merge_tree(body):
+    """Existing command-boundary fakes serve a valid tree for the new tag checks."""
+    return body.replace("#!/bin/bash\n", '''#!/bin/bash
+case "$1" in
+  show)
+    case "$2" in
+      *^1:pyproject.toml) echo 'version = "0.0.1"' ;;
+      *plugin.json) echo '{"version": "9.9.9"}' ;;
+      *) exit 99 ;;
+    esac
+    exit 0 ;;
+  ls-tree) printf 'plugins/swarph/.claude-plugin/plugin.json\\0plugins/swarph/.cursor-plugin/plugin.json\\0'; exit 0 ;;
+  -C) if [ "$3" = grep ]; then exit 1; fi ;;
+esac
+''', 1)
+
+
 @needs_bash
 def test_dry_run_lists_every_step_and_touches_nothing(tmp_path):
     bin_dir = tmp_path / "bin"
@@ -60,7 +77,7 @@ def test_dry_run_lists_every_step_and_touches_nothing(tmp_path):
     out = proc.stdout
     for phrase in (
         "scratch-clone",
-        "bump version to 9.9.9 in pyproject.toml, src/swarph_cli/__init__.py, plugins/*/.*-plugin/plugin.json",
+        "bump version to 9.9.9 in pyproject.toml, src/swarph_cli/__init__.py, plugins/swarph/.*-plugin/plugin.json",
         "commit and push branch release/9.9.9",
         "open the release PR and stop",
         "refuse to merge",
@@ -126,13 +143,13 @@ case "$*" in
   *) echo "unexpected gh: $*" >> {log}; exit 99 ;;
 esac
 """)
-    (bin_dir / "git").write_text(f"""#!/bin/bash
+    (bin_dir / "git").write_text(_git_with_valid_merge_tree(f"""#!/bin/bash
 echo "git $*" >> {log}
 case "$1" in
   rev-parse) exit 1 ;;
   *) exit 0 ;;
 esac
-""")
+"""))
     (bin_dir / "curl").write_text(
         "#!/bin/sh\npython3 -c 'import json,sys; json.dump({\"releases\":{\"9.9.9\":[]}}, sys.stdout)'\n"
     )
@@ -361,7 +378,7 @@ case "$*" in
   *) echo "unexpected gh: $*" >> {log}; exit 99 ;;
 esac
 """)
-    (bin_dir / "git").write_text(git_body.format(log=log, merge=merge))
+    (bin_dir / "git").write_text(_git_with_valid_merge_tree(git_body.format(log=log, merge=merge)))
     (bin_dir / "curl").write_text(
         "#!/bin/sh\npython3 -c 'import json,sys; json.dump({\"releases\":{\"9.9.9\":[]}}, sys.stdout)'\n"
     )
@@ -449,11 +466,14 @@ def test_open_pr_bumps_all_plugin_manifests_and_stops(tmp_path, stale_file):
     (plugin / "plugin.json").write_text('{"version": "0.0.1"}\n')
     manifests = ["plugins/swarph/.claude-plugin/plugin.json",
                  "plugins/swarph/.cursor-plugin/plugin.json",
-                 "plugins/other plugin/.future-plugin/plugin.json"]
+                 "plugins/swarph/.future-plugin/plugin.json"]
     for manifest in manifests[1:]:
         path = src / manifest
         path.parent.mkdir(parents=True)
         path.write_text('{"version": "0.0.1"}\n')
+    panel = src / "plugins/swarph-panel/.claude-plugin/plugin.json"
+    panel.parent.mkdir(parents=True)
+    panel.write_text('{"version": "0.1.0"}\n')
     if stale_file and stale_file not in {"git-grep-error", "missing-old-version", "crlf-version"}:
         path = src / stale_file
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -530,6 +550,113 @@ exec {shlex.quote(Path(real_git).as_posix())} "$@"
             text=True, capture_output=True, check=True,
         )
         assert '"version": "9.9.9"' in plugin_show.stdout, manifest
+    panel_show = subprocess.run(
+        ["git", "--git-dir", str(bare), "show", "release/9.9.9:plugins/swarph-panel/.claude-plugin/plugin.json"],
+        text=True, capture_output=True, check=True,
+    )
+    assert '"version": "0.1.0"' in panel_show.stdout
+
+
+@needs_bash
+@pytest.mark.parametrize("scenario", ["clean", "second-merge-stale", "wrong-manifest", "old-readme",
+                                     "changelog", "lookalike", "grep-error", "invalid-json", "no-manifests"])
+def test_resume_checks_the_real_merge_tree_before_tagging(tmp_path, scenario):
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), "-c", "user.name=fixture",
+                               "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                               *args], check=True, text=True, capture_output=True).stdout.strip()
+
+    def write(path, text):
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+
+    files = {"pyproject.toml": 'version = "0.0.1"\n',
+             "src/swarph_cli/__init__.py": '__version__ = "0.0.1"\n'}
+    if scenario != "no-manifests":
+        files.update({"plugins/swarph/.claude-plugin/plugin.json": '{"version": "0.0.1"}\n',
+                      "plugins/swarph/.cursor-plugin/plugin.json": '{"version": "0.0.1"}\n'})
+    git("init", "-b", "main")
+    for path, text in files.items():
+        write(path, text)
+    write("plugins/swarph-panel/.claude-plugin/plugin.json", '{"version": "0.1.0"}\n')
+    git("add", ".")
+    git("commit", "-qm", "base")
+    git("checkout", "-qb", "release/9.9.9")
+    for path, text in files.items():
+        write(path, text.replace("0.0.1", "9.9.9"))
+    git("add", ".")
+    git("commit", "-qm", "release")
+    head = git("rev-parse", "HEAD")
+    git("checkout", "-q", "main")
+    git("checkout", "-qb", "concurrent")
+    if scenario == "second-merge-stale":
+        write("plugins/swarph/.new-plugin/plugin.json", '{"version": "0.0.1"}\n')
+    elif scenario in {"wrong-manifest", "invalid-json"}:
+        write("plugins/swarph/.new-plugin/plugin.json",
+              '{"version": "8.8.8"}\n' if scenario == "wrong-manifest" else '{broken json\n')
+    elif scenario in {"old-readme", "changelog", "lookalike"}:
+        write("CHANGELOG.md" if scenario == "changelog" else "README.md",
+              "0x0x1\n" if scenario == "lookalike" else "0.0.1\n")
+    git("add", ".")
+    git("commit", "--allow-empty", "-qm", "concurrent change")
+    git("checkout", "-q", "main")
+    git("merge", "--no-ff", "concurrent", "-m", "other PR merges first")
+    git("merge", "--no-ff", "release/9.9.9", "-m", "release merge")
+    merge = git("rev-parse", "HEAD")
+    bare = tmp_path / "remote.git"
+    git("clone", "--bare", str(repo), str(bare))
+    git("remote", "add", "origin", str(bare))
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "gh").write_text(f'''#!/bin/bash
+case "$*" in
+  *"auth token"*) echo fixture-token ;;
+  *"pr list"*) echo 7 ;;
+  *"mergeCommit"*) echo {merge} ;;
+  *"pr view"*) echo {head} ;;
+  *"/reviews"*) echo '[{{"state":"APPROVED","commit_id":"{head}","user":{{"login":"reviewers-pixel"}},"id":1}}]' ;;
+  *"pr merge"*) exit 0 ;;
+  *) exit 99 ;;
+esac
+''')
+    (bindir / "curl").write_text('#!/bin/sh\necho \'{"releases":{"9.9.9":[]}}\'\n')
+    for name in ("pip", "sudo", "systemctl"):
+        (bindir / name).write_text('#!/bin/sh\nexit 0\n')
+    if scenario == "grep-error":
+        real_git = shutil.which("git")
+        (bindir / "git").write_text(f'#!/bin/bash\nif [ "${{3:-}}" = grep ]; then exit 2; fi\nexec {shlex.quote(real_git)} "$@"\n')
+    for tool in bindir.iterdir():
+        tool.chmod(0o755)
+    units = tmp_path / "units"
+    units.write_text("fixture.service\n")
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", RELEASE_INSTALL_EPOCH="1",
+               RELEASE_UNITS_FILE=str(units), RELEASE_VERIFY_CMD="true")
+    # The working tree is deliberately repaired; only the stored merge tree is authoritative.
+    if scenario in {"second-merge-stale", "wrong-manifest", "invalid-json"}:
+        write("plugins/swarph/.new-plugin/plugin.json", '{"version": "9.9.9"}\n')
+    proc = _run(["bash", str(RELEASE), "--resume", "9.9.9"], env, cwd=repo)
+    allowed = scenario in {"clean", "changelog", "lookalike"}
+    assert (proc.returncode == 0) == allowed, proc.stderr + proc.stdout
+    for location in (repo / ".git", bare):
+        tag = subprocess.run(["git", "--git-dir", str(location), "rev-parse", "--verify", "refs/tags/v9.9.9^{commit}"],
+                             text=True, capture_output=True)
+        assert (tag.returncode == 0) == allowed
+        if allowed:
+            assert tag.stdout.strip() == merge
+    if scenario == "grep-error":
+        assert proc.returncode == 2 and "could not check for old version" in proc.stderr
+    elif scenario in {"second-merge-stale", "old-readme"}:
+        assert "old version 0.0.1 remains outside CHANGELOG" in proc.stderr
+    elif scenario == "wrong-manifest":
+        assert "plugins/swarph/.new-plugin/plugin.json version does not equal 9.9.9" in proc.stderr
+    elif scenario == "invalid-json":
+        assert "JSONDecodeError" in proc.stderr
+    elif scenario == "no-manifests":
+        assert "no swarph plugin manifests" in proc.stderr
 
 
 def test_verify_fails_when_the_process_started_before_the_install(tmp_path):

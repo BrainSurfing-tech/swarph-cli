@@ -52,7 +52,7 @@ plan() {
   cat <<EOF
 release ${VERSION} would:
 1. scratch-clone ${REMOTE}
-2. bump version to ${VERSION} in pyproject.toml, src/swarph_cli/__init__.py, plugins/*/.*-plugin/plugin.json
+2. bump version to ${VERSION} in pyproject.toml, src/swarph_cli/__init__.py, plugins/swarph/.*-plugin/plugin.json
 3. commit and push branch release/${VERSION}
 4. open the release PR and stop
 5. resume only when a review is APPROVED at that PR head; otherwise refuse to merge
@@ -99,16 +99,51 @@ merge_as_orchestrators_hue() {
   GH_TOKEN="$token" gh pr merge "$number" --repo "$REPO" --merge --match-head-commit "$head"
 }
 
+check_old_version() {
+  local directory="$1" old_version="$2" grep_status=0
+  shift 2
+  if [ -z "$old_version" ]; then
+    echo "release: cannot read old version from pyproject.toml" >&2
+    exit 1
+  fi
+  git -C "$directory" grep -n -F -e "$old_version" "$@" -- . ':(exclude)CHANGELOG*' || grep_status=$?
+  case "$grep_status" in
+    0) echo "release: old version ${old_version} remains outside CHANGELOG; refusing release" >&2; exit 1 ;;
+    1) ;;  # git grep found no stale version.
+    *) echo "release: could not check for old version ${old_version} (git grep failed)" >&2; exit "$grep_status" ;;
+  esac
+}
+
 # A squash or merge commit is a new object. Tag that, never the PR head.
 tag_merged_release() {
   local number="$1"
-  local merge_oid existing
+  local merge_oid existing old_version
   merge_oid=$(gh pr view "$number" --repo "$REPO" --json mergeCommit --jq .mergeCommit.oid)
   if [ -z "$merge_oid" ] || [ "$merge_oid" = "null" ]; then
     echo "release: PR ${number} has no merge commit to tag" >&2
     exit 1
   fi
   git fetch origin "$merge_oid"
+  old_version=$(git show "${merge_oid}^1:pyproject.toml" | sed -n 's/^version = "\([^"]*\)".*/\1/p')
+  check_old_version . "$old_version" "$merge_oid"
+  # Check the stored merge tree, not a repaired or unrelated working tree.
+  python3 - "$merge_oid" "$VERSION" <<'PY'
+import json
+import re
+import subprocess
+import sys
+
+commit, version = sys.argv[1:]
+paths = subprocess.check_output(["git", "ls-tree", "-rz", "--name-only", commit, "--", "plugins/swarph/"]).split(b"\0")
+manifests = [path.decode("utf-8") for path in paths
+             if re.fullmatch(rb"plugins/swarph/\.[^/]*-plugin/plugin\.json", path)]
+if not manifests:
+    raise SystemExit("release: no swarph plugin manifests in merge commit")
+for path in manifests:
+    content = subprocess.check_output(["git", "show", f"{commit}:{path}"])
+    if json.loads(content).get("version") != version:
+        raise SystemExit(f"release: {path} version does not equal {version}; refusing tag")
+PY
   git fetch origin "refs/tags/v${VERSION}:refs/tags/v${VERSION}" || true
   if existing=$(git rev-parse --verify --quiet "refs/tags/v${VERSION}^{commit}"); then
     if [ "$existing" = "$merge_oid" ]; then
@@ -194,7 +229,7 @@ restart_importers() {
 }
 
 open_release_pr() {
-  local scratch plugin old_version grep_status
+  local scratch plugin old_version
   scratch=$(mktemp -d)
   git clone --depth 1 "$REMOTE" "$scratch"
   old_version=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$scratch/pyproject.toml")
@@ -205,19 +240,13 @@ open_release_pr() {
   python3 "$LIB" bump --kind pyproject --version "$VERSION" "$scratch/pyproject.toml"
   python3 "$LIB" bump --kind init --version "$VERSION" "$scratch/src/swarph_cli/__init__.py"
   git -C "$scratch" -c user.email="${RELEASE_GIT_EMAIL:-release.sh@local}" -c user.name="${RELEASE_GIT_NAME:-release.sh}" checkout -b "release/${VERSION}"
-  for plugin in "$scratch"/plugins/*/.*-plugin/plugin.json; do
+  for plugin in "$scratch"/plugins/swarph/.*-plugin/plugin.json; do
     [ -f "$plugin" ] || continue
     python3 "$LIB" bump --kind plugin --version "$VERSION" "$plugin"
     git -C "$scratch" add -- "$plugin"
   done
   git -C "$scratch" add pyproject.toml src/swarph_cli/__init__.py
-  grep_status=0
-  git -C "$scratch" grep -n -F -e "$old_version" -- . ':(exclude)CHANGELOG*' || grep_status=$?
-  case "$grep_status" in
-    0) echo "release: refusing PR: old version ${old_version} remains outside CHANGELOG" >&2; exit 1 ;;
-    1) ;;  # git grep found no stale version.
-    *) echo "release: could not check for old version ${old_version} (git grep failed)" >&2; exit "$grep_status" ;;
-  esac
+  check_old_version "$scratch" "$old_version"
   git -C "$scratch" -c user.email="${RELEASE_GIT_EMAIL:-release.sh@local}" -c user.name="${RELEASE_GIT_NAME:-release.sh}" commit -m "release: swarph-cli ${VERSION}"
   git -C "$scratch" push -u origin "release/${VERSION}"
   gh pr create --repo "$REPO" --base main --head "release/${VERSION}" \
