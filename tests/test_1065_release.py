@@ -38,6 +38,31 @@ def _gnu_bash() -> bool:
 needs_bash = pytest.mark.skipif(not _gnu_bash(), reason="release.sh needs GNU bash")
 
 
+@pytest.fixture(autouse=True)
+def local_release_environment(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    # Git's clone reflog otherwise discovers an email via the host's DNS name.
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "release-fixture")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "release-fixture@example.invalid")
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
+    monkeypatch.setenv("RELEASE_REMOTE", (tmp_path / "unused.git").as_uri())
+
+
+def test_release_fixtures_are_local_and_have_explicit_git_identity():
+    identity = subprocess.run(["git", "var", "GIT_COMMITTER_IDENT"], text=True, capture_output=True, check=True)
+    assert identity.stdout.startswith("release-fixture <release-fixture@example.invalid> ")
+    assert os.environ["RELEASE_REMOTE"].startswith("file://")
+    assert os.environ["GIT_ALLOW_PROTOCOL"] == "file"
+    refused = subprocess.run(["git", "ls-remote", "https://must-not-resolve.example.invalid/repo.git"],
+                             text=True, capture_output=True)
+    assert refused.returncode != 0 and "transport 'https' not allowed" in refused.stderr
+
+
 def _run(args, env, cwd=None):
     return subprocess.run(
         args, cwd=cwd or ROOT, env=env, text=True, capture_output=True,
@@ -512,7 +537,7 @@ exec {shlex.quote(Path(real_git).as_posix())} "$@"
         (bin_dir / "git").chmod(0o755)
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
-    env["RELEASE_REMOTE"] = str(bare)
+    env["RELEASE_REMOTE"] = bare.as_uri()
     proc = _run(["bash", str(RELEASE), "9.9.9"], env)
     if stale_file in {"docs/stray version.txt", "README.md", "git-grep-error", "missing-old-version"}:
         assert proc.returncode != 0
@@ -609,7 +634,7 @@ def test_resume_checks_the_real_merge_tree_before_tagging(tmp_path, scenario):
     merge = git("rev-parse", "HEAD")
     bare = tmp_path / "remote.git"
     git("clone", "--bare", str(repo), str(bare))
-    git("remote", "add", "origin", str(bare))
+    git("remote", "add", "origin", bare.as_uri())
     bindir = tmp_path / "bin"
     bindir.mkdir()
     (bindir / "gh").write_text(f'''#!/bin/bash
@@ -633,7 +658,7 @@ esac
         tool.chmod(0o755)
     units = tmp_path / "units"
     units.write_text("fixture.service\n")
-    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", RELEASE_INSTALL_EPOCH="1",
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", RELEASE_REMOTE=bare.as_uri(), RELEASE_INSTALL_EPOCH="1",
                RELEASE_UNITS_FILE=str(units), RELEASE_VERIFY_CMD="true")
     # The working tree is deliberately repaired; only the stored merge tree is authoritative.
     if scenario in {"second-merge-stale", "wrong-manifest", "invalid-json"}:
