@@ -91,9 +91,11 @@ def test_chain_token_reaches_the_wire_and_the_payload_is_still_scrubbed(monkeypa
         )
         monkeypatch.setattr(evmod, "resolve_self_name", lambda *a, **k: "friendly-coder")
         monkeypatch.setattr(evmod, "resolve_token", lambda *a, **k: "tok")
+        # chain can start with '-' (signed JWT or urlsafe); two-arg form breaks
+        # argparse on Windows (looks like another flag).
         rc = evmod.run_event([
             "emit", "stage-done", "note " + classic,
-            "--chain-token", chain,
+            f"--chain-token={chain}",
             "--gateway", "http://127.0.0.1:9",
         ])
         assert rc == 0, rc

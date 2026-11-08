@@ -68,6 +68,10 @@ def _run_hook(stdin_text: Optional[str] = None) -> int:
     command = (payload.get("tool_input") or {}).get("command") or ""
     if not ghid.targets_gh(command):
         return _allow_unchanged()
+    if ghid.has_disallowed_gh_token_assignment(command):
+        return _deny("text still contains GH_TOKEN; put that text in "
+                     "--body-file or use the explicit form "
+                     "GH_TOKEN=$(gh auth token [--user WORD] [--hostname WORD])")
     if ghid.already_explicit(command):
         # The caller named a credential. #332: an explicit argument is a decision.
         return _allow_unchanged()
