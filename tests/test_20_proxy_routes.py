@@ -345,6 +345,7 @@ def test_move_fails_closed_before_patch_on_old_gateway(wire_gateway, version):
 
 @pytest.mark.parametrize("verb,args,error", [
     ("/peers/register", {}, "verb_not_allowed"),
+    ("whoami", {"path": "/peers/register"}, "bad_args"),
     ("board.cards.say", {"id": 20, "content": "update", "thread_id": _WIRE_THREAD}, "bad_args"),
     ("mesh.send", {"to_node": "peer-two", "content": "hello", "from_node": "commander"}, "bad_args"),
     ("mesh.inbox", {"to_node": "peer-two"}, "bad_args"),
