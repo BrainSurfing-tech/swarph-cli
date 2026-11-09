@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from swarph_cli import identity
+
 _IMPORT_TIME_HOME = Path.home()
 DEFAULT_LEDGER_DIR = _IMPORT_TIME_HOME / "swarph_state" / "shim-ledger"
 DEFAULT_LEDGER_FILE = "firings.jsonl"
@@ -24,9 +26,6 @@ def _resolve_default_ledger_dir() -> Path:
         return current_home / "swarph_state" / "shim-ledger"
     if DEFAULT_LEDGER_DIR != _IMPORT_TIME_HOME / "swarph_state" / "shim-ledger":
         return DEFAULT_LEDGER_DIR
-    pytest_cur = os.environ.get("PYTEST_CURRENT_TEST", "")
-    if pytest_cur and "1521" not in pytest_cur:
-        return Path("/tmp/pytest-shim-ledger")
     return current_home / "swarph_state" / "shim-ledger"
 
 
@@ -61,7 +60,7 @@ def record_shim_firing(
             )
         resolved_cell = (
             (cell or "").strip()
-            or os.environ.get("SWARPH_SELF", "").strip()
+            or (identity.declared(env=identity.SELF_ONLY)[0] or "").strip()
             or "lab-ovh"
         )
         resolved_ts = (ts or "").strip() or datetime.now(timezone.utc).isoformat()

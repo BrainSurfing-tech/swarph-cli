@@ -157,6 +157,8 @@ _SWARPH_ENV = (
     "SWARPH_REDACT_AUDIT_LOG",
     "SWARPH_REDACT_CUSTOM_RULES",
     "SWARPH_REDACT_OPTOUT",
+    # card #1521: shim firing ledger directory override
+    "SWARPH_SHIM_LEDGER_DIR",
 )
 
 
