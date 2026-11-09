@@ -386,3 +386,30 @@ def test_numeric_token_cannot_be_reflected_as_a_number_or_audit_target(tmp_path)
         assert result["error"] == "upstream_error"
         assert secret not in json.dumps(result)
         assert secret not in proxy.config.audit_path.read_text()
+
+
+def test_proxy_refuses_startup_when_the_audit_file_has_unsafe_permissions(tmp_path):
+    from pathlib import Path
+    token, audit, endpoint = tmp_path / "peer_token", tmp_path / "audit", short_socket(tmp_path)
+    token.write_text("fake-startup-token")
+    token.chmod(0o600)
+    audit.write_text("")
+    audit.chmod(0o600)  # Contract requires the provisioned audit file to be 0640.
+    script = f'''from pathlib import Path
+from swarph_cli.local_proxy import Config, serve
+from swarph_cli.proxy_routes import ProxyError
+try:
+    serve(Config("alice", {os.getuid()+1234}, "http://127.0.0.1:1", Path({str(token)!r}), Path({str(endpoint)!r}), Path({str(audit)!r})))
+except ProxyError as error:
+    print(error.error)
+    raise SystemExit(2)
+'''
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+    try:
+        process = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=2)
+    except subprocess.TimeoutExpired:
+        pytest.fail("proxy accepted requests without a usable audit file")
+    finally:
+        endpoint.unlink(missing_ok=True)
+    assert process.returncode == 2 and process.stdout.strip() == "proxy_unavailable"
+    assert audit.read_text() == ""

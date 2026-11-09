@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+from contextlib import contextmanager
 import dataclasses
 import datetime as dt
 import http.client
@@ -355,23 +356,28 @@ class Proxy:
                  "verb": known_verb, "targets": targets,
                  "outcome": "ok" if reply["ok"] else reply["error"], "status": reply.get("status")}
         try:
-            safe_parent(self.config.audit_path, self.config.cell_uid)
-            flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
-            try:
-                fd = os.open(self.config.audit_path, flags | os.O_CREAT | os.O_EXCL, 0o640)
-            except FileExistsError:
-                fd = os.open(self.config.audit_path, flags)
-            else:
-                os.fchmod(fd, 0o640)  # The service's private umask must not hide the audit from its group.
-            with os.fdopen(fd, "a", encoding="utf-8") as stream:
-                info = os.fstat(stream.fileno())
-                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid()
-                        or stat.S_IMODE(info.st_mode) != 0o640):
-                    raise ProxyError("proxy_unavailable")
+            with self.audit_stream() as stream:
                 stream.write(json.dumps(entry, ensure_ascii=True) + "\n")
         except Exception:
             # A send may already have applied. Never invent a safe-to-retry result.
             print("proxy audit unavailable", file=sys.stderr)
+
+    @contextmanager
+    def audit_stream(self):
+        safe_parent(self.config.audit_path, self.config.cell_uid)
+        flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
+        try:
+            fd = os.open(self.config.audit_path, flags | os.O_CREAT | os.O_EXCL, 0o640)
+        except FileExistsError:
+            fd = os.open(self.config.audit_path, flags)
+        else:
+            os.fchmod(fd, 0o640)  # The service's private umask must not hide the audit from its group.
+        with os.fdopen(fd, "a", encoding="utf-8") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o640):
+                raise ProxyError("proxy_unavailable")
+            yield stream
 
     def handle(self, connection):
         with connection:
@@ -401,6 +407,8 @@ class Proxy:
 def serve(config: Config):
     harden_process()
     proxy = Proxy(config, read_token(config))
+    with proxy.audit_stream():
+        pass  # Never accept requests with a missing or unsafe provisioned audit sink.
     listener = None
     owned = False
     try:
