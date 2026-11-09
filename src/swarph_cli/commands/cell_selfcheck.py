@@ -688,14 +688,55 @@ def _unit_live(unit: str, *, user: bool) -> bool:
     return not (_q("is-active") != "active" and _q("is-enabled") in ("disabled", "masked"))
 
 
+# #1513: partner clients (A-I-D chantier 37) get verdicts only (check, verdict,
+# short reason) — never what selfcheck read (no path, URL, token, or content).
+_SELFCHECK_JSON_ALLOWLIST: tuple[str, ...] = (
+    "check",
+    "verdict",
+    "reason",
+)
+
+
+def _selfcheck_json_row(raw_row: dict) -> dict:
+    """Project an internal selfcheck record onto _SELFCHECK_JSON_ALLOWLIST (#1513)."""
+    return {k: raw_row[k] for k in _SELFCHECK_JSON_ALLOWLIST}
+
+
+def _coverage_short_reason(c: dict) -> tuple[str, str]:
+    """Return (check_name, short_reason) for a coverage surface without leaking paths."""
+    raw_cls = str(c.get("class") or "surface")
+    cls = "env file" if raw_cls.startswith("env file") else raw_cls
+    read = bool(c.get("read"))
+    if cls == "running processes":
+        return f"coverage:{cls}", "declared config only; running state not inspected"
+    if cls == "systemd units":
+        return f"coverage:{cls}", ("systemd unit surfaces inspected" if read else "systemd unit surfaces unreadable")
+    if cls == "user crontab":
+        return f"coverage:{cls}", ("user crontab inspected" if read else "user crontab unreadable")
+    if cls == "system cron":
+        return f"coverage:{cls}", ("system cron inspected" if read else "system cron unreadable")
+    if cls == "socket table":
+        return f"coverage:{cls}", ("local socket table read" if read else "local socket table not read")
+    if cls == "env file":
+        return f"coverage:{cls}", ("referenced env file read" if read else "referenced env file unreadable")
+    return f"coverage:{cls}", ("surface inspected" if read else "surface unreadable")
+
+
 def run_selfcheck(*, self_name: str, declaration: Path,
-                  resolver: Optional[dict] = None) -> int:
+                  resolver: Optional[dict] = None,
+                  json_output: bool = False) -> int:
     """Pure verdict pass over discovered surfaces. 0 clean, 1 drift, 2 DID NOT MEASURE.
 
     `resolver` injects the resolver-comparison inputs (gateway, token,
     listeners) so every verdict branch is testable from fixtures on any box.
     None means read this box via resolve_cell_inputs().
     """
+    json_rows: list[dict] = []
+
+    def _emit_text(line: str) -> None:
+        if not json_output:
+            print(line)
+
     # THE PER-CELL RENAME IN #148 IS A SILENT MIGRATION, AND IT LANDS ON THE BASELINE.
     # MEASURED on droplet: with the old shared cell_expected.json present and the
     # per-cell file absent, the run reported DRIFT on three keys and NEVER MENTIONED
@@ -716,11 +757,27 @@ def run_selfcheck(*, self_name: str, declaration: Path,
     if not declaration.exists():
         legacy = legacy_declaration_path(declaration)
         if legacy is not None and legacy.exists():
-            print(f"  DECLARATION NOT READ — found legacy shared {legacy}")
-            print(f"                         per-cell file expected at {declaration}")
-            print("                         NOT read: one declaration per cell since #148.")
-            print("                         Move or split it, then re-run.")
-            print("\n  verdict: DID NOT MEASURE (legacy declaration present, per-cell absent)")
+            _emit_text(f"  DECLARATION NOT READ — found legacy shared {legacy}")
+            _emit_text(f"                         per-cell file expected at {declaration}")
+            _emit_text("                         NOT read: one declaration per cell since #148.")
+            _emit_text("                         Move or split it, then re-run.")
+            _emit_text("\n  verdict: DID NOT MEASURE (legacy declaration present, per-cell absent)")
+            json_rows.append(_selfcheck_json_row({
+                "check": "declaration",
+                "verdict": "DID NOT MEASURE",
+                "reason": "legacy shared declaration present; per-cell declaration absent",
+                "value": str(legacy),
+                "surface": str(declaration),
+            }))
+            json_rows.append(_selfcheck_json_row({
+                "check": "selfcheck",
+                "verdict": "DID NOT MEASURE",
+                "reason": "legacy declaration present, per-cell absent",
+                "value": str(legacy),
+                "surface": str(declaration),
+            }))
+            if json_output:
+                print(json.dumps(json_rows, indent=2))
             return 2
 
     declared: dict = {}
@@ -728,7 +785,14 @@ def run_selfcheck(*, self_name: str, declaration: Path,
         try:
             declared = json.loads(declaration.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            print(f"  WARN      declaration unreadable ({exc}) — treating as absent")
+            _emit_text(f"  WARN      declaration unreadable ({exc}) — treating as absent")
+            json_rows.append(_selfcheck_json_row({
+                "check": "declaration",
+                "verdict": "WARN",
+                "reason": "per-cell declaration unreadable; treated as absent",
+                "value": str(exc),
+                "surface": str(declaration),
+            }))
 
     surfaces = discover_surfaces()
     coverage = [s for s in surfaces if s.get("kind") == "coverage"]
@@ -743,7 +807,7 @@ def run_selfcheck(*, self_name: str, declaration: Path,
     mine = [r for r in rows if r.owner in (None, self_name)]
     drift = False
 
-    print(f"cell selfcheck: {self_name}   ({len(rows)} flags across surfaces)")
+    _emit_text(f"cell selfcheck: {self_name}   ({len(rows)} flags across surfaces)")
 
     # COVERAGE FIRST, ALWAYS. A verdict is only as wide as what was inspected, and a
     # baseline that does not state its own coverage invites "consistent" to be read
@@ -751,17 +815,32 @@ def run_selfcheck(*, self_name: str, declaration: Path,
     # is the measured instance.
     for c in coverage:
         mark = "read" if c.get("read") else "NOT READ"
-        print(f"  COVERAGE  {c.get('class'):18s} {mark:9s} {c.get('detail','')}")
+        _emit_text(f"  COVERAGE  {c.get('class'):18s} {mark:9s} {c.get('detail','')}")
+        cov_check, cov_reason = _coverage_short_reason(c)
+        json_rows.append(_selfcheck_json_row({
+            "check": cov_check,
+            "verdict": mark,
+            "reason": cov_reason,
+            "value": str(c.get("detail", "")),
+            "surface": str(c.get("class", "")),
+        }))
     blind = [c for c in coverage if not c.get("read") and c.get("class") != "running processes"]
 
     for r in rows:
         if r.owner and r.owner != self_name:
-            print(f"  OTHER CELL[{r.owner}] --{r.key} {display_value(r)}   ({r.surface})")
+            _emit_text(f"  OTHER CELL[{r.owner}] --{r.key} {display_value(r)}   ({r.surface})")
 
     for r in rows:
         if not r.live:
             tag = "MALFORMED" if r.value == "<EMPTY>" else "FOSSIL"
-            print(f"  {tag:9s} --{r.key} {display_value(r)}   ({r.surface}, inactive+disabled)")
+            _emit_text(f"  {tag:9s} --{r.key} {display_value(r)}   ({r.surface}, inactive+disabled)")
+            json_rows.append(_selfcheck_json_row({
+                "check": f"inactive:{r.key}",
+                "verdict": tag,
+                "reason": "inactive and disabled surface",
+                "value": r.value,
+                "surface": r.surface,
+            }))
 
     for r in mine:
         if r.live and r.value == "<EMPTY>":
@@ -775,9 +854,23 @@ def run_selfcheck(*, self_name: str, declaration: Path,
                 decl = declared.get(f"{r.key}@{r.surface}")
                 decl_list = decl if isinstance(decl, list) else ([decl] if decl else [])
                 if "<EMPTY>" in decl_list:
-                    print(f"  DECLARED  --{r.key} is empty   ({r.surface}) — a stated choice")
+                    _emit_text(f"  DECLARED  --{r.key} is empty   ({r.surface}) — a stated choice")
+                    json_rows.append(_selfcheck_json_row({
+                        "check": f"flag:{r.key}",
+                        "verdict": "DECLARED",
+                        "reason": "empty value declared",
+                        "value": r.value,
+                        "surface": r.surface,
+                    }))
                     continue
-            print(f"  MALFORMED --{r.key} has no value   ({r.surface})")
+            _emit_text(f"  MALFORMED --{r.key} has no value   ({r.surface})")
+            json_rows.append(_selfcheck_json_row({
+                "check": f"flag:{r.key}",
+                "verdict": "MALFORMED",
+                "reason": "flag has no value",
+                "value": r.value,
+                "surface": r.surface,
+            }))
             drift = True
 
     # Shared surfaces: a line nobody claims rots unnoticed.
@@ -790,7 +883,14 @@ def run_selfcheck(*, self_name: str, declaration: Path,
     # earlier, reproduced inside the tool built while rejecting it.
     for r in rows:
         if r.shared and r.owner is None and r.live:
-            print(f"  UNOWNED   --{r.key} {display_value(r)}   ({r.surface}) — no --cell/--as on this line")
+            _emit_text(f"  UNOWNED   --{r.key} {display_value(r)}   ({r.surface}) — no --cell/--as on this line")
+            json_rows.append(_selfcheck_json_row({
+                "check": f"shared:{r.key}",
+                "verdict": "UNOWNED",
+                "reason": "no --cell/--as owner on shared surface line",
+                "value": r.value,
+                "surface": r.surface,
+            }))
             drift = True
 
     by_key: dict[str, set[str]] = {}
@@ -816,13 +916,34 @@ def run_selfcheck(*, self_name: str, declaration: Path,
 
     for key, vals in sorted(by_key.items()):
         if len(vals) == 1:
-            print(f"  OK        --{key} {_show(key, vals)[0]}")
+            _emit_text(f"  OK        --{key} {_show(key, vals)[0]}")
+            json_rows.append(_selfcheck_json_row({
+                "check": f"key:{key}",
+                "verdict": "OK",
+                "reason": "1 value across live surfaces",
+                "value": sorted(vals),
+                "surface": key,
+            }))
             continue
         allowed = declared.get(key)
         if allowed and set(vals) <= set(allowed if isinstance(allowed, list) else [allowed]):
-            print(f"  DECLARED  --{key} {_show(key, vals)} — divergence is a stated choice")
+            _emit_text(f"  DECLARED  --{key} {_show(key, vals)} — divergence is a stated choice")
+            json_rows.append(_selfcheck_json_row({
+                "check": f"key:{key}",
+                "verdict": "DECLARED",
+                "reason": f"{len(vals)} values declared",
+                "value": sorted(vals),
+                "surface": key,
+            }))
         else:
-            print(f"  DRIFT     --{key} {_show(key, vals)} — {len(vals)} values, none declared")
+            _emit_text(f"  DRIFT     --{key} {_show(key, vals)} — {len(vals)} values, none declared")
+            json_rows.append(_selfcheck_json_row({
+                "check": f"key:{key}",
+                "verdict": "DRIFT",
+                "reason": f"{len(vals)} values across live surfaces, none declared",
+                "value": sorted(vals),
+                "surface": key,
+            }))
             drift = True
 
     # RELATIONS ARE FACTS, AND FACTS ARE NOT PER-OWNER. The asymmetry (droplet, whose
@@ -853,8 +974,15 @@ def run_selfcheck(*, self_name: str, declaration: Path,
         sd = sorted(by_owner[owner].get("state-dir", []))
         if len(cur) == 1 and len(sd) == 1 and relation_broken(cur[0], sd[0]):
             tag = "RELATION BROKEN" if owner == self_name else f"RELATION BROKEN[{owner}]"
-            print(f"  {tag}  --cursor {cur[0]} is not under --state-dir {sd[0]}")
-            print("                   (both read OK per-key — the relation is the finding)")
+            _emit_text(f"  {tag}  --cursor {cur[0]} is not under --state-dir {sd[0]}")
+            _emit_text("                   (both read OK per-key — the relation is the finding)")
+            json_rows.append(_selfcheck_json_row({
+                "check": "relation:cursor-state-dir" if owner == self_name else f"relation:cursor-state-dir:{owner}",
+                "verdict": tag,
+                "reason": "--cursor is not under --state-dir",
+                "value": [cur[0], sd[0]],
+                "surface": owner,
+            }))
             if owner == self_name:
                 drift = True
 
@@ -874,8 +1002,15 @@ def run_selfcheck(*, self_name: str, declaration: Path,
     socket_state = resolver.get("socket_table", "absent")
 
     if socket_state == "read":
-        print(f"  COVERAGE  {'resolver comparison':18s} read      "
-              "gateway + token vs resolver; listeners from the local socket table")
+        _emit_text(f"  COVERAGE  {'resolver comparison':18s} read      "
+                   "gateway + token vs resolver; listeners from the local socket table")
+        json_rows.append(_selfcheck_json_row({
+            "check": "coverage:resolver comparison",
+            "verdict": "read",
+            "reason": "gateway and token compared against resolver",
+            "value": str(resolved_gw or ""),
+            "surface": "resolver",
+        }))
     else:
         # NOT a silent skip and NOT a false clean (PR #261 review): a run
         # that never saw a socket table cannot have checked reachability,
@@ -887,7 +1022,14 @@ def run_selfcheck(*, self_name: str, declaration: Path,
                   "unreadable — a /proc/net/tcp* read failed")
         coverage.append({"class": "socket table", "read": False, "detail": reason})
         blind.append({"class": "socket table", "read": False, "detail": reason})
-        print(f"  COVERAGE  {'socket table':18s} NOT READ  {reason}")
+        _emit_text(f"  COVERAGE  {'socket table':18s} NOT READ  {reason}")
+        json_rows.append(_selfcheck_json_row({
+            "check": "coverage:socket table",
+            "verdict": "NOT READ",
+            "reason": "local socket table absent" if socket_state == "absent" else "local socket table unreadable",
+            "value": reason,
+            "surface": "socket table",
+        }))
 
     gw_rows = [r for r in mine if r.live and r.value != "<EMPTY>"
                and r.key in ("gateway", "env:MESH_GATEWAY_URL")]
@@ -897,11 +1039,25 @@ def run_selfcheck(*, self_name: str, declaration: Path,
     if resolved_gw is not None:
         for lit in gw_literals:
             if lit != resolved_gw and lit not in allowed_gw_set:
-                print(f"  RESOLVER DRIFT --gateway {lit} != resolver {resolved_gw}   "
-                      f"({', '.join(sorted({r.surface for r in gw_rows if r.value == lit}))})")
+                _emit_text(f"  RESOLVER DRIFT --gateway {lit} != resolver {resolved_gw}   "
+                           f"({', '.join(sorted({r.surface for r in gw_rows if r.value == lit}))})")
+                json_rows.append(_selfcheck_json_row({
+                    "check": "resolver:gateway",
+                    "verdict": "RESOLVER DRIFT",
+                    "reason": "surface gateway differs from resolver",
+                    "value": [lit, resolved_gw],
+                    "surface": "gateway",
+                }))
                 drift = True
             elif lit != resolved_gw:
-                print(f"  DECLARED  --gateway {lit} != resolver {resolved_gw} — a stated choice")
+                _emit_text(f"  DECLARED  --gateway {lit} != resolver {resolved_gw} — a stated choice")
+                json_rows.append(_selfcheck_json_row({
+                    "check": "resolver:gateway",
+                    "verdict": "DECLARED",
+                    "reason": "surface gateway divergence declared",
+                    "value": [lit, resolved_gw],
+                    "surface": "gateway",
+                }))
     # Reachability of every distinct value in play, resolver's included —
     # ONLY when the socket table was actually read. Checking against an
     # absent table would report UNREACHABLE everywhere, which is the
@@ -911,28 +1067,63 @@ def run_selfcheck(*, self_name: str, declaration: Path,
         for val in sorted(set(gw_literals) | ({resolved_gw} if resolved_gw else set())):
             state = gateway_reachability(val, listeners)
             if state == "local-silent":
-                print(f"  UNREACHABLE gateway {val} — no listener on this box; "
-                      "if that host is remote this line does not apply, if it is "
-                      "local the gateway is DOWN for anything pointing there")
+                _emit_text(f"  UNREACHABLE gateway {val} — no listener on this box; "
+                           "if that host is remote this line does not apply, if it is "
+                           "local the gateway is DOWN for anything pointing there")
+                json_rows.append(_selfcheck_json_row({
+                    "check": "reachability:gateway",
+                    "verdict": "UNREACHABLE",
+                    "reason": "no local listener on gateway port",
+                    "value": val,
+                    "surface": "gateway",
+                }))
                 drift = True
             elif state == "wildcard-target":
-                print(f"  MALFORMED gateway {val} — 0.0.0.0/:: is a wildcard BIND "
-                      "address, not a target; nothing can dial it")
+                _emit_text(f"  MALFORMED gateway {val} — 0.0.0.0/:: is a wildcard BIND "
+                           "address, not a target; nothing can dial it")
+                json_rows.append(_selfcheck_json_row({
+                    "check": "reachability:gateway",
+                    "verdict": "MALFORMED",
+                    "reason": "wildcard bind address is not a dialable target",
+                    "value": val,
+                    "surface": "gateway",
+                }))
                 drift = True
             elif state == "unparseable":
-                print(f"  MALFORMED gateway value {val!r} does not parse as host:port")
+                _emit_text(f"  MALFORMED gateway value {val!r} does not parse as host:port")
+                json_rows.append(_selfcheck_json_row({
+                    "check": "reachability:gateway",
+                    "verdict": "MALFORMED",
+                    "reason": "gateway value does not parse as host:port",
+                    "value": val,
+                    "surface": "gateway",
+                }))
                 drift = True
 
     tok_rows = [r for r in mine if r.live and r.key == "env:MESH_GATEWAY_TOKEN"
                 and r.value != "<EMPTY>"]
     for r in tok_rows:
         if resolved_tok is None:
-            print(f"  UNCOMPARED  env:MESH_GATEWAY_TOKEN in {r.surface} — no token "
-                  "resolvable for this cell to compare against")
+            _emit_text(f"  UNCOMPARED  env:MESH_GATEWAY_TOKEN in {r.surface} — no token "
+                       "resolvable for this cell to compare against")
+            json_rows.append(_selfcheck_json_row({
+                "check": "resolver:token",
+                "verdict": "UNCOMPARED",
+                "reason": "no resolvable token for comparison",
+                "value": r.value,
+                "surface": r.surface,
+            }))
             continue
         if r.value == resolved_tok:
-            print(f"  OK        env:MESH_GATEWAY_TOKEN matches resolved credential "
-                  f"({len(r.value)} chars, from {tok_source})   ({r.surface})")
+            _emit_text(f"  OK        env:MESH_GATEWAY_TOKEN matches resolved credential "
+                       f"({len(r.value)} chars, from {tok_source})   ({r.surface})")
+            json_rows.append(_selfcheck_json_row({
+                "check": "resolver:token",
+                "verdict": "OK",
+                "reason": "surface token matches resolved credential",
+                "value": r.value,
+                "surface": r.surface,
+            }))
             continue
         # Wrong-era credentials differ in SHAPE, not just content — the
         # length pair is the finding and leaks nothing.
@@ -948,14 +1139,28 @@ def run_selfcheck(*, self_name: str, declaration: Path,
         decl_tok = declared.get(f"env:MESH_GATEWAY_TOKEN@{r.surface}")
         decl_list = decl_tok if isinstance(decl_tok, list) else ([decl_tok] if decl_tok else [])
         if redacted in decl_list:
-            print(f"  DECLARED  env:MESH_GATEWAY_TOKEN in {r.surface} "
-                  f"({len(r.value)} chars) != resolved credential — a stated choice")
+            _emit_text(f"  DECLARED  env:MESH_GATEWAY_TOKEN in {r.surface} "
+                       f"({len(r.value)} chars) != resolved credential — a stated choice")
+            json_rows.append(_selfcheck_json_row({
+                "check": "resolver:token",
+                "verdict": "DECLARED",
+                "reason": "surface token divergence declared",
+                "value": r.value,
+                "surface": r.surface,
+            }))
             continue
-        print(f"  TOKEN MISMATCH env:MESH_GATEWAY_TOKEN in {r.surface} "
-              f"({len(r.value)} chars) != resolved credential for {self_name} "
-              f"({len(resolved_tok)} chars, from {tok_source}) — a literal "
-              "from before a token migration reads exactly like this; if this "
-              "surface is the gateway's OWN config, declare it by surface")
+        _emit_text(f"  TOKEN MISMATCH env:MESH_GATEWAY_TOKEN in {r.surface} "
+                   f"({len(r.value)} chars) != resolved credential for {self_name} "
+                   f"({len(resolved_tok)} chars, from {tok_source}) — a literal "
+                   "from before a token migration reads exactly like this; if this "
+                   "surface is the gateway's OWN config, declare it by surface")
+        json_rows.append(_selfcheck_json_row({
+            "check": "resolver:token",
+            "verdict": "TOKEN MISMATCH",
+            "reason": "surface token differs from resolved credential",
+            "value": r.value,
+            "surface": r.surface,
+        }))
         drift = True
 
     # The no-resolver-claim bucket, AS A NUMBER (lab-ovh, DM 24706): a
@@ -974,9 +1179,9 @@ def run_selfcheck(*, self_name: str, declaration: Path,
     bucket_n = sum(1 for r in mine if r.live and r.value != "<EMPTY>"
                    and r.key.startswith("env:")
                    and r.key not in _RESOLVER_OWNED)
-    print(f"  NO-RESOLVER-CLAIM  {bucket_n} literal(s) across keys "
-          f"{bucket_keys or '[]'} — deliberate local choices, or keys the "
-          "resolver should own; counted so the bucket cannot quietly grow")
+    _emit_text(f"  NO-RESOLVER-CLAIM  {bucket_n} literal(s) across keys "
+               f"{bucket_keys or '[]'} — deliberate local choices, or keys the "
+               "resolver should own; counted so the bucket cannot quietly grow")
 
     if blind:
         # A surface class we MEANT to read and could not. Exit 2, not 0 and not 1:
@@ -984,7 +1189,16 @@ def run_selfcheck(*, self_name: str, declaration: Path,
         # `consistent` over an unread surface is precisely the lie this card exists
         # to catch — and the tool committed it against grok-researcher.
         names = ", ".join(str(c.get("class")) for c in blind)
-        print(f"\n  verdict: DID NOT MEASURE (could not read: {names})")
+        _emit_text(f"\n  verdict: DID NOT MEASURE (could not read: {names})")
+        json_rows.append(_selfcheck_json_row({
+            "check": "selfcheck",
+            "verdict": "DID NOT MEASURE",
+            "reason": f"{len(blind)} required surface class(es) unreadable",
+            "value": names,
+            "surface": self_name,
+        }))
+        if json_output:
+            print(json.dumps(json_rows, indent=2))
         return 2
 
     # Drop-on-meta-edge (PR #243 review): a reviewer who had just read the card
@@ -996,7 +1210,17 @@ def run_selfcheck(*, self_name: str, declaration: Path,
     # resolver output. Running state is still not inspected by design.
     scope = ("surfaces agree with each other AND with resolver output "
              "(gateway, token); running state NOT inspected")
-    print(f"\n  verdict: {'DRIFT' if drift else 'consistent'}  ({scope})")
+    overall_verdict = "DRIFT" if drift else "consistent"
+    _emit_text(f"\n  verdict: {overall_verdict}  ({scope})")
+    json_rows.append(_selfcheck_json_row({
+        "check": "selfcheck",
+        "verdict": overall_verdict,
+        "reason": "configuration drift detected across surfaces or resolver" if drift else scope,
+        "value": self_name,
+        "surface": self_name,
+    }))
+    if json_output:
+        print(json.dumps(json_rows, indent=2))
     return 1 if drift else 0
 
 
@@ -1033,13 +1257,17 @@ def run_cell_selfcheck(argv: list[str]) -> int:
                    help="this cell's peer name (default: $SWARPH_SELF)")
     p.add_argument("--declaration", default=None,
                    help="path to cell_expected.json declaring intentional divergence")
+    p.add_argument("--json", action="store_true",
+                   help="emit verdicts only (check, verdict, reason) as JSON; "
+                        "never prints read values, paths, URLs, tokens, or "
+                        "file contents (#1513)")
     args = p.parse_args(argv)
     if not args.self_name:
         print("swarph cell selfcheck: pass --as <peer> or set $SWARPH_SELF", file=sys.stderr)
         return 2
     decl = (Path(args.declaration).expanduser() if args.declaration
             else default_declaration_path(args.self_name))
-    return run_selfcheck(self_name=args.self_name, declaration=decl)
+    return run_selfcheck(self_name=args.self_name, declaration=decl, json_output=args.json)
 
 
 # RUNNABLE AS A BARE FILE, ON PURPOSE — do not remove.

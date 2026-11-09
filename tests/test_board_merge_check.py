@@ -150,8 +150,14 @@ def test_the_vocabulary_is_one_the_real_board_accepts():
     subset. If someone invents a stage again, this fails instead of the tool silently
     refusing everything forever.
     """
-    assert set(mc.READY_STAGES) <= {"build", "test", "spec", "proposed", "idea", "done"}
+    assert set(mc.READY_STAGES) <= {"build", "test", "review", "ready", "spec", "proposed", "idea", "done"}
     assert "peer-green" not in mc.READY_STAGES
+
+
+@pytest.mark.parametrize("stage", ["test", "review", "ready"])
+def test_1443_merge_check_accepts_both_stage_generations(stage):
+    decision = mc.decide(_card(stage=stage), _pr())
+    assert decision.verdict == "WOULD_MERGE", decision
 
 
 # ── the verdict parser: unrecognised is REPORTED, never guessed ───────────────
