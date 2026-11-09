@@ -18,9 +18,48 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.request
 from types import SimpleNamespace
 
 from swarph_cli import proxy_monitor
+
+
+def test_pinned_tick_keeps_unread_and_stall_alerts_off_urllib(monkeypatch, tmp_path, gateway):
+    from swarph_cli.commands import mesh, monitor
+    from swarph_cli.local_proxy import Config, Proxy
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("pinned monitor attempted urllib instead of private transport")
+
+    monkeypatch.setattr(urllib.request, "urlopen", forbidden)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", forbidden)
+    gateway.responses["/messages/unread-count"] = (200, {"to_node": "alice", "n": 1})
+
+    class BusySink:
+        name = "fixture-busy"
+        keeps_ledger = is_push = True
+
+        def observe(self, *args):
+            return False
+
+        def deliver(self, state, *args):
+            state.shutdown_requested = True
+            return None
+
+    config = Config("alice", os.getuid()+1234, gateway.url, tmp_path / "unused-token",
+                    tmp_path / "unused.sock", tmp_path / "audit")
+    state = mesh.MonitorState(self_name="alice", state_dir=tmp_path / "state",
+                              gateway=gateway.url, token="fixture-private-monitor-token",
+                              sinks=[BusySink()])
+    state.ledger("fixture-busy").update(deferred_ticks=59, wake_outstanding=True)
+    with proxy_monitor._private_transport(Proxy(config, "fixture-private-monitor-token")):
+        assert monitor._run_pinned(state, state.pidfile_path, "alice", state.sinks, state.poll_s) == 0
+    paths = [path for method, path, auth in gateway.calls]
+    assert "/messages/unread-count?to_node=alice" in paths
+    assert "/board/obligations?card_id=989&status=open" in paths
+    assert "/board/obligations?card_id=989&status=fallback_fired" in paths
+    assert "/board/cards/989/ask" in paths
+    assert state.iterations == 1 and state.ledger("fixture-busy")["deferred_ticks"] == 60
 
 
 @pytest.mark.parametrize("override", [

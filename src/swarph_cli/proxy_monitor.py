@@ -52,8 +52,8 @@ def _prepare_state(path, config):
 @contextmanager
 def _private_transport(proxy):
     """Constrain the existing engine only in this private foreground process."""
-    from . import duplicate_session
-    from .commands import mesh
+    from . import duplicate_session, stall_alert
+    from .commands import mesh, watchdog
     from .proxy_routes import ProxyError
 
     base = proxy.config.gateway_url
@@ -86,12 +86,22 @@ def _private_transport(proxy):
         except ProxyError:
             raise URLError("Gateway request failed.") from None
 
+    def watchdog_request(gateway, path, query, token):
+        try:
+            status, body = request("GET", f"{gateway.rstrip('/')}{path}?{urlencode(query)}", token)
+            return body, status
+        except ProxyError as exc:
+            return None, getattr(exc, "status", None)
+
     saved_get, saved_request = mesh._http_get_json, duplicate_session._request
+    saved_stall, saved_watchdog = stall_alert._request, watchdog._gateway_request
     mesh._http_get_json, duplicate_session._request = get, instance_request
+    stall_alert._request, watchdog._gateway_request = instance_request, watchdog_request
     try:
         yield
     finally:
         mesh._http_get_json, duplicate_session._request = saved_get, saved_request
+        stall_alert._request, watchdog._gateway_request = saved_stall, saved_watchdog
 
 
 def main(argv=None) -> int:

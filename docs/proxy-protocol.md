@@ -8,6 +8,10 @@ connecting uid (Linux `SO_PEERCRED`, macOS `getpeereid`) against its configured 
 uid before routing. No direct-token fallback, caching, redirects, or automatic
 retries are provided.
 
+Connections are handled concurrently. Each accepted connection has a 20-second
+request-read timeout; a silent client or a blocked upstream request does not hold
+up another connection. The upstream deadline remains 15 seconds per request.
+
 ```json
 {"verb":"board.card.get","args":{"id":20},"request_id":"97fb3490-9147-4da6-acb2-29bac3df210c"}
 ```
@@ -83,35 +87,43 @@ omitted fields are omitted upstream unless a default is stated.
   `evidence`: 1–4000, also non-whitespace strings.
 - `enabled_only`, `unread_only`, `overdue`, `grandfathered`: JSON booleans.
 - `ids`: array of 1–500 positive integers; every element is checked.
-- `outcome`: `pass`, `fail`, or `cannot_evaluate`.
+- `outcome`: `pass`, `fail`, `cannot_evaluate`, or `skipped`. Only the gateway
+  determines whether the row is an optional step that may be skipped.
+- `evidence_json`: JSON object with string keys and non-blank string values;
+  each value is at most 16000 characters, and the object serialized with Python's
+  `json.dumps(..., sort_keys=True)` (including ASCII escapes) is at most 64000
+  characters. Condition-id membership and completeness are enforced by the
+  gateway. Close requires at least one of `evidence` and `evidence_json`; both
+  may be supplied. `author` and `usage` remain forbidden (ruling 94005).
 
 ## Closed routes and gateway evidence
 
 This schema is deliberately narrower than the gateway's request models. Evidence
 is pinned to gateway commit
-`5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0`, not the older bundled CLI gateway.
+`657e7e9aed0b3d8c14589da8b5192041ed5f9f0f`, not the older bundled CLI gateway.
 Every link below points to the real handler/model at that commit. There is no
 generic gateway passthrough.
 
 | Verb | Complete args schema | Fixed gateway operation and evidence |
 | --- | --- | --- |
-| `whoami` | `{}` | `GET /whoami`; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L4639) |
-| `board.card.get` | `id` | `GET /board/cards/{id}?actor=<cell>`; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L16619) |
-| `board.obligations.list` | `id?`, `card_id?`, `status?`, `holder?:name`, `created_by?:name`, `limit?`, `overdue?`, `grandfathered?` | `GET /board/obligations`, pinned `actor=<cell>`; `id` becomes the gateway's `obligation_id` query key; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L17549). `SELF` for holder/creator is resolved by the gateway. |
-| `board.cards.thread` | `id`, `limit?` | `GET /board/cards/{id}/thread?actor=<cell>`; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L16638) |
-| `mesh.peers` | `enabled_only?` | `GET /peers`; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L4698) |
-| `rights` | `{}` | `GET /peers/<cell>/grants`, own cell only; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L21879) |
-| `mesh.inbox` | `limit?`, `unread_only?`, `since?`, `kind?` | `GET /messages?to_node=<cell>`, own inbox only; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L7360). Does not mark read. |
-| `memory.get` | `slug` | `POST /memory` with `{"op":"get","arguments":{"slug":...}}`; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L12098) |
-| `memory.list` | `type?:name`, `tag?:name`, `limit?` | `POST /memory` with fixed `op:"list"`, validated fields under `arguments`; [argument forwarding](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L12069) |
-| `board.cards.say` | `id`, `content`, `kind?`, `to_node?:name` | `POST /messages` with pinned `from_node=<cell>` and server-derived card thread; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L6472) |
-| `mesh.send` | `to_node:name`, `content`, `kind?`, `reply_to?` | `POST /messages` with pinned `from_node=<cell>`; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L6472) |
-| `channel.post` | `channel:name`, `content`, `kind?` | `POST /messages` with pinned `from_node=<cell>`, no DM recipient; [exclusive destination check](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L6523) |
-| `mesh.mark_read` | `ids` | `POST /messages/read`; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L7618). The gateway scopes writes to message participants. |
-| `board.obligations.take` | `id`, `expect_status` | `POST /board/obligations/{id}/take`; no actor field, token is the actor; [model](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L17847), [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L17906) |
-| `board.obligations.decline` | `id`, `expect_status`, `why` | `POST /board/obligations/{id}/decline`; [model](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L17851), [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L18032) |
-| `board.obligations.close` | `id`, `expect_status`, `expect_accept_sha256`, `outcome`, `evidence` | `POST /board/obligations/{id}/close`; [model](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L18504), [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L20520) |
-| `board.cards.move` | `id`, `stage`, `expect_stage`, `expect_stage_version` | `PATCH /board/cards/{id}` with pinned `actor=<cell>`; [model](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L13632), [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0/server.py#L20642) |
+| `whoami` | `{}` | `GET /whoami`; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L4661) |
+| `board.card.get` | `id` | `GET /board/cards/{id}?actor=<cell>`; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L16641) |
+| `board.cards.graph` | `id` | `GET /board/cards/{id}/graph?actor=<cell>`; [read-granted handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L17808). The actor is pinned, not caller-selectable. |
+| `board.obligations.list` | `id?`, `card_id?`, `status?`, `holder?:name`, `created_by?:name`, `limit?`, `overdue?`, `grandfathered?` | `GET /board/obligations`, pinned `actor=<cell>`; `id` becomes the gateway's `obligation_id` query key; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L17571). `SELF` for holder/creator is resolved by the gateway. |
+| `board.cards.thread` | `id`, `limit?` | `GET /board/cards/{id}/thread?actor=<cell>`; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L16660) |
+| `mesh.peers` | `enabled_only?` | `GET /peers`; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L4720) |
+| `rights` | `{}` | `GET /peers/<cell>/grants`, own cell only; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L22215) |
+| `mesh.inbox` | `limit?`, `unread_only?`, `since?`, `kind?` | `GET /messages?to_node=<cell>`, own inbox only; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L7381). Does not mark read. |
+| `memory.get` | `slug` | `POST /memory` with `{"op":"get","arguments":{"slug":...}}`; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L12124) |
+| `memory.list` | `type?:name`, `tag?:name`, `limit?` | `POST /memory` with fixed `op:"list"`, validated fields under `arguments`; [argument forwarding](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L12091) |
+| `board.cards.say` | `id`, `content`, `kind?`, `to_node?:name` | `POST /messages` with pinned `from_node=<cell>` and server-derived card thread; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L6493) |
+| `mesh.send` | `to_node:name`, `content`, `kind?`, `reply_to?` | `POST /messages` with pinned `from_node=<cell>`; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L6493) |
+| `channel.post` | `channel:name`, `content`, `kind?` | `POST /messages` with pinned `from_node=<cell>`, no DM recipient; [exclusive destination check](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L6545) |
+| `mesh.mark_read` | `ids` | `POST /messages/read`; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L7643). The gateway scopes writes to message participants. |
+| `board.obligations.take` | `id`, `expect_status` | `POST /board/obligations/{id}/take`; no actor field, token is the actor; [model](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L17868), [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L17939) |
+| `board.obligations.decline` | `id`, `expect_status`, `why` | `POST /board/obligations/{id}/decline`; [model](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L17872), [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L18065) |
+| `board.obligations.close` | `id`, `expect_status`, `expect_accept_sha256`, `outcome`, `evidence?`, `evidence_json?` (one evidence field required) | `POST /board/obligations/{id}/close`; [model](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L18531), [map validation](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L13963), [optional-only skipped rule](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L20461), [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L20547) |
+| `board.cards.move` | `id`, `stage`, `expect_stage`, `expect_stage_version` | `PATCH /board/cards/{id}` with pinned `actor=<cell>`; [model](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L13653), [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L20667) |
 
 For `board.cards.say`, the proxy first reads the card through the fixed card-read
 route and takes `thread_uuid` from that authenticated reply. Caller `thread_id`
@@ -134,8 +146,9 @@ Obligation identifiers use `id`. Memory callers cannot supply nested
 `arguments`, tool names, operations, or arbitrary metadata. `memory.links`,
 `release`, grants, project/card creation, peer registration, token lifecycle,
 committee-chair verbs, and every other unlisted operation are unavailable.
-The close schema currently accepts prose evidence only, not `evidence_json`,
-`usage`, `author`, or the gateway's extra `skipped` outcome.
+The close schema accepts bounded text and/or condition evidence and passes
+`skipped` through to the gateway. It deliberately does not expose the gateway's
+`usage` or `author` fields: the proxy token remains the only acting identity.
 
 ## Operations boundary
 

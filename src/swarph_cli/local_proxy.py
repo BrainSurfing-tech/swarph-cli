@@ -346,7 +346,7 @@ class Proxy:
 
     def audit(self, request_id, verb, args, reply):
         # Never write caller strings, body, gateway detail or exception text.
-        known_verb = verb if isinstance(verb, str) and re.fullmatch(r"[a-z.]{1,64}", verb) else None
+        known_verb = verb if isinstance(verb, str) and re.fullmatch(r"[a-z._]{1,64}", verb) else None
         if known_verb and self._token in known_verb:
             known_verb = None
         targets = {key: value for key, value in args.items()
@@ -429,7 +429,7 @@ def serve(config: Config):
             listener.listen(16)
         while True:
             connection, _ = listener.accept()
-            proxy.handle(connection)
+            threading.Thread(target=proxy.handle, args=(connection,), daemon=True).start()
     finally:
         if listener:
             listener.close()

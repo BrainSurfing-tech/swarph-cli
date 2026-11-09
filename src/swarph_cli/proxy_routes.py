@@ -1,4 +1,5 @@
 """Closed route construction for the token-isolating cell proxy."""
+import json
 import re
 from datetime import datetime
 from urllib.parse import urlencode
@@ -51,9 +52,18 @@ def _since(value):
         return False
 
 
+def _evidence_map(value):
+    # Gateway 657e7e9/server.py:13963; condition-id membership stays server-side.
+    return (type(value) is dict
+            and all(isinstance(k, str) and isinstance(v, str) and v.strip()
+                    and len(v) <= 16000 for k, v in value.items())
+            and len(json.dumps(value, sort_keys=True)) <= 64000)
+
+
 _SCHEMAS = {
     "whoami": ({}, {}),
     "board.card.get": ({"id": _id}, {}),
+    "board.cards.graph": ({"id": _id}, {}),
     "board.cards.thread": ({"id": _id}, {"limit": _limit}),
     "board.obligations.list": ({}, {
         "id": _id, "card_id": _id, "status": _status, "holder": _name,
@@ -73,7 +83,8 @@ _SCHEMAS = {
     "board.obligations.close": ({
         "id": _id, "expect_status": _status,
         "expect_accept_sha256": lambda v: isinstance(v, str) and re.fullmatch(r"[a-fA-F0-9]{64}", v) is not None,
-        "outcome": lambda v: v in ("pass", "fail", "cannot_evaluate"), "evidence": _text(4000)}, {}),
+        "outcome": lambda v: v in ("pass", "fail", "cannot_evaluate", "skipped")},
+        {"evidence": _text(4000), "evidence_json": _evidence_map}),
     "board.cards.move": ({"id": _id, "stage": _stage, "expect_stage": _stage,
                           "expect_stage_version": lambda v: type(v) is int and v >= 0}, {}),
 }
@@ -93,6 +104,8 @@ def route_for(verb: str, args: dict, cell: str) -> tuple[str, str, dict | None]:
             or not args.keys() <= allowed.keys() or not _name(cell)
             or any(not allowed[key](value) for key, value in args.items())):
         raise ProxyError("bad_args")
+    if verb == "board.obligations.close" and not {"evidence", "evidence_json"} & args.keys():
+        raise ProxyError("bad_args")
     if verb == "board.cards.move":
         if args["stage"] == "done":
             raise ProxyError("verb_not_allowed")
@@ -103,9 +116,10 @@ def route_for(verb: str, args: dict, cell: str) -> tuple[str, str, dict | None]:
     if verb == "mesh.mark_read":
         return "POST", "/messages/read", {"ids": list(args["ids"])}
     if verb.startswith("board.obligations.") and verb != "board.obligations.list":
-        return "POST", f"/board/obligations/{args['id']}/{verb.rsplit('.', 1)[1]}", {k: v for k, v in args.items() if k != "id"}
-    if verb in ("board.card.get", "board.cards.thread"):
-        suffix = "/thread" if verb == "board.cards.thread" else ""
+        return "POST", f"/board/obligations/{args['id']}/{verb.rsplit('.', 1)[1]}", {
+            k: dict(v) if k == "evidence_json" else v for k, v in args.items() if k != "id"}
+    if verb in ("board.card.get", "board.cards.thread", "board.cards.graph"):
+        suffix = {"board.cards.thread": "/thread", "board.cards.graph": "/graph"}.get(verb, "")
         params = {"actor": cell, **{k: v for k, v in args.items() if k != "id"}}
         return "GET", _query(f"/board/cards/{args['id']}" + suffix, params), None
     if verb == "board.obligations.list":

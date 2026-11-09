@@ -287,6 +287,135 @@ def test_audit_contains_only_validated_metadata_not_token_or_caller_body(tmp_pat
     assert "fake-secret20" not in config.audit_path.read_text() + json.dumps(result) + str(capsys.readouterr())
 
 
+def test_mark_read_audit_preserves_its_verb(tmp_path):
+    with gateway(tmp_path, lambda h: answer(h, b'{"updated":2}'), uid=os.getuid()+1234) as (proxy, seen):
+        assert request(proxy, "mesh.mark_read", {"ids": [3, 9]})["ok"] is True
+        assert seen == [("POST", "/messages/read", {"ids": [3, 9]})]
+        assert json.loads(proxy.config.audit_path.read_text())["verb"] == "mesh.mark_read"
+
+
+@contextmanager
+def running_fixture_proxy(proxy, tmp_path, *, read_timeout=20):
+    """Real CLI and SO_PEERCRED; map this test uid to a distinct fixture cell uid."""
+    token_file = proxy.config.token_file
+    token_file.write_text("fixture-secret-20")
+    token_file.chmod(0o600)
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps({
+        "cell_uid": proxy.config.cell_uid, "gateway_url": proxy.config.gateway_url,
+        "token_file": str(token_file), "socket_path": str(proxy.config.socket_path),
+        "audit_path": str(proxy.config.audit_path),
+    }))
+    config_file.chmod(0o600)
+    script = '''import os, sys
+import swarph_cli.local_proxy as proxy
+from swarph_cli.commands.proxy import run_proxy
+real_peer_uid = proxy.peer_uid
+def fixture_uid(connection):
+    uid = real_peer_uid(connection)
+    return os.getuid()+1234 if uid == os.getuid() else uid
+proxy.peer_uid = fixture_uid
+proxy.CLIENT_TIMEOUT = float(sys.argv[2])
+raise SystemExit(run_proxy(["serve", "--cell", "alice", "--config", sys.argv[1]]))
+'''
+    process = subprocess.Popen([sys.executable, "-c", script, str(config_file), str(read_timeout)],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 5
+        while not proxy.config.socket_path.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert proxy.config.socket_path.exists(), "fixture proxy did not listen"
+        yield process
+    finally:
+        process.terminate()
+        stdout, stderr = process.communicate(timeout=5)
+        assert b"fixture-secret-20" not in stdout + stderr
+
+
+def test_silent_client_does_not_delay_concurrent_whoami(tmp_path):
+    with gateway(tmp_path, lambda h: answer(h, b'{"peer":"alice"}'), uid=os.getuid()+1234) as (proxy, seen):
+        with running_fixture_proxy(proxy, tmp_path):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as silent:
+                silent.connect(str(proxy.config.socket_path))
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.settimeout(1)
+                    client.connect(str(proxy.config.socket_path))
+                    start = time.monotonic()
+                    client.sendall(json.dumps({"request_id": str(uuid.uuid4()), "verb": "whoami", "args": {}}).encode()+b"\n")
+                    reply = json.loads(client.makefile("rb").readline())
+                    assert time.monotonic() - start < 1
+                    assert reply["ok"] is True and reply["body"] == {"peer": "alice"}
+        assert seen == [("GET", "/whoami", None)]
+
+
+def test_connection_read_timeout_rejects_a_silent_client(tmp_path):
+    with gateway(tmp_path, lambda h: answer(h), uid=os.getuid()+1234) as (proxy, seen):
+        with running_fixture_proxy(proxy, tmp_path, read_timeout=0.05):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as silent:
+                silent.settimeout(1)
+                silent.connect(str(proxy.config.socket_path))
+                assert json.loads(silent.makefile("rb").readline())["error"] == "bad_args"
+        assert seen == []
+
+
+def test_stalled_upstream_does_not_delay_another_connection(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    entered, release = threading.Event(), threading.Event()
+
+    def respond(handler):
+        if handler.path == "/peers":
+            entered.set()
+            assert release.wait(5), "control was not released"
+        answer(handler, b'{"peer":"alice"}')
+
+    with gateway(tmp_path, respond, uid=os.getuid()+1234) as (proxy, seen):
+        with running_fixture_proxy(proxy, tmp_path):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                blocked = pool.submit(call, str(proxy.config.socket_path), "mesh.peers", {})
+                try:
+                    assert entered.wait(2), "first upstream request did not arrive"
+                    independent = pool.submit(call, str(proxy.config.socket_path), "whoami", {})
+                    assert independent.result(timeout=1)["ok"] is True
+                    assert not release.is_set()
+                finally:
+                    release.set()
+                assert blocked.result(timeout=2)["ok"] is True
+        assert [path for method, path, body in seen] == ["/peers", "/whoami"]
+
+
+def test_concurrent_serve_keeps_token_private_and_refuses_unlisted_controls(tmp_path, capsys):
+    from pathlib import Path
+
+    with gateway(tmp_path, lambda h: answer(h, b'{"peer":"alice"}'), uid=os.getuid()+1234) as (proxy, seen):
+        with running_fixture_proxy(proxy, tmp_path) as process:
+            endpoint = str(proxy.config.socket_path)
+            results = [call(endpoint, "whoami", {})]
+            for verb, args in [
+                ("/peers/register", {}), ("whoami", {"path": "/peers/register"}),
+                ("mesh.send", {"to_node": "bob", "content": "hi", "from_node": "commander"}),
+                ("mesh.send", {"to_node": "bob", "content": "hi", "cc": ["commander"]}),
+                ("mesh.send", {"to_node": "bob", "content": "hi", "obligation_id": 7}),
+                ("board.cards.move", {"id": 20, "stage": "done", "expect_stage": "ready", "expect_stage_version": 1}),
+                ("board.cards.move", {"id": 20, "stage": "build", "expect_stage": "ready"}),
+            ]:
+                result = call(endpoint, verb, args)
+                assert result["ok"] is False
+                results.append(result)
+            if sys.platform.startswith("linux"):
+                assert b"fixture-secret-20" not in Path(f"/proc/{process.pid}/cmdline").read_bytes()
+                try:
+                    environment = Path(f"/proc/{process.pid}/environ").read_bytes()
+                except PermissionError:
+                    pass  # The real non-dumpable child denies this parent /proc access.
+                else:
+                    assert b"fixture-secret-20" not in environment
+        assert results[0]["body"] == {"peer": "alice"}
+        assert seen == [("GET", "/whoami", None)]
+        surfaces = json.dumps(results) + proxy.config.audit_path.read_text() + str(capsys.readouterr())
+        assert "fixture-secret-20" not in surfaces
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX child process")
 def test_running_proxy_segv_has_zero_core_limit_and_no_core_dump(tmp_path):
     """Real secret-bearing fixture proxy only; no host kernel/sysctl changes."""

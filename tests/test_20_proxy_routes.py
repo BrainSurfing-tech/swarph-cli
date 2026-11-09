@@ -45,6 +45,8 @@ def test_fixed_card_read_pins_actor_and_rejects_raw_route_controls():
     ("whoami", {}, ("GET", "/whoami", None)),
     ("mesh.peers", {"enabled_only": False}, ("GET", "/peers?enabled_only=false", None)),
     ("rights", {}, ("GET", "/peers/cell-one/grants", None)),
+    # mesh-gateway@657e7e9/server.py:17808, actor is always the proxy cell.
+    ("board.cards.graph", {"id": 20}, ("GET", "/board/cards/20/graph?actor=cell-one", None)),
     ("board.cards.thread", {"id": 20, "limit": 5},
      ("GET", "/board/cards/20/thread?actor=cell-one&limit=5", None)),
     ("board.obligations.list", {"id": 7, "holder": "SELF", "overdue": True},
@@ -84,14 +86,16 @@ def test_closed_write_routes_pin_sender_and_required_guards(verb, args, expected
     assert route_for(verb, args, "cell-one") == expected
 
 
+@pytest.mark.parametrize("verb", ["board.card.get", "board.cards.graph"])
 @pytest.mark.parametrize("value", [True, False, 0, -1, 1.5, "20", None, {}, [], "../peers/register", "20?actor=commander"])
-def test_card_ids_are_positive_integers_without_coercion(value):
+def test_card_ids_are_positive_integers_without_coercion(value, verb):
     with pytest.raises(ProxyError, match="bad_args"):
-        route_for("board.card.get", {"id": value}, "cell-one")
+        route_for(verb, {"id": value}, "cell-one")
 
 
 @pytest.mark.parametrize("verb,args", [
     ("whoami", {}), ("board.card.get", {"id": 20}),
+    ("board.cards.graph", {"id": 20}),
     ("board.cards.thread", {"id": 20}), ("board.obligations.list", {}),
     ("mesh.peers", {}), ("rights", {}), ("mesh.inbox", {}),
     ("memory.get", {"slug": "reference_auth"}), ("memory.list", {}),
@@ -174,6 +178,49 @@ def test_route_result_does_not_retain_mutable_input_containers():
     assert body == {"ids": [1, 2]}
 
 
+def close_args(**extra):
+    return {"id": 7, "expect_status": "open", "expect_accept_sha256": "a"*64,
+            "outcome": "pass", **extra}
+
+
+@pytest.mark.parametrize("prose", [{}, {"evidence": "measured checks"}])
+def test_close_accepts_bounded_condition_evidence_without_requiring_prose(prose):
+    evidence = {"c1": "measured pass"}
+    args = close_args(evidence_json=evidence, **prose)
+    assert route_for("board.obligations.close", args, "cell-one") == (
+        "POST", "/board/obligations/7/close", {k: v for k, v in args.items() if k != "id"})
+
+
+def test_close_evidence_map_accepts_exact_gateway_limits():
+    evidence = {"a": "x"*16000, "b": "x"*16000, "c": "x"*16000, "d": "x"*15964}
+    assert len(json.dumps(evidence, sort_keys=True)) == 64000
+    assert route_for("board.obligations.close", close_args(evidence_json=evidence), "cell-one")[2]["evidence_json"] == evidence
+
+
+@pytest.mark.parametrize("evidence", [
+    None, [], "text", {"c1": ""}, {"c1": "   "}, {"c1": 1}, {"c1": True},
+    {"c1": {"nested": "not text"}}, {"c1": "x"*16001},
+    {"a": "x"*16000, "b": "x"*16000, "c": "x"*16000, "d": "x"*15965},
+    {"c1": "é"*11000},
+])
+def test_close_evidence_map_rejects_wrong_types_blank_values_and_oversize(evidence):
+    with pytest.raises(ProxyError, match="bad_args"):
+        route_for("board.obligations.close", close_args(evidence="also measured", evidence_json=evidence), "cell-one")
+
+
+@pytest.mark.parametrize("args", [close_args(), close_args(evidence_json={"c1": "ok"}, author="commander"),
+                                  close_args(evidence_json={"c1": "ok"}, usage={"agent": "other"})])
+def test_close_still_refuses_no_evidence_and_unlisted_identity_or_usage(args):
+    with pytest.raises(ProxyError, match="bad_args"):
+        route_for("board.obligations.close", args, "cell-one")
+
+
+def test_close_passes_skipped_through_for_gateway_optional_step_enforcement():
+    args = close_args(outcome="skipped", evidence="optional check deliberately skipped")
+    assert route_for("board.obligations.close", args, "cell-one") == (
+        "POST", "/board/obligations/7/close", {k: v for k, v in args.items() if k != "id"})
+
+
 # Independent wire fixtures: mesh-gateway@5a567e1aea4f1bcb49c31e59e16fde11d6d8b5d0.
 # server.py:16619/15936 card GET, :16707 thread, :17676 obligations,
 # :4698/:4728 peers, :21912 rights, :7550 inbox, :12103 memory,
@@ -207,6 +254,8 @@ def wire_gateway(tmp_path):
                              "kind": None, "is_root": False, "is_operator": False, "node": None,
                              "role": None, "scopes_note": "fixture credential"},
         ("GET", "/board/cards/20?actor=cell-one"): dict(_WIRE_CARD),
+        ("GET", "/board/cards/20/graph?actor=cell-one"):
+            {"card_id": 20, "stage": "plan", "assignee": "peer-two", "steps": []},
         ("GET", "/board/cards/20/thread?actor=cell-one&limit=5"):
             {"card_id": 20, "thread_uuid": _WIRE_THREAD, "messages": []},
         ("GET", "/board/obligations?actor=cell-one&obligation_id=7&holder=SELF&overdue=true"):
@@ -281,6 +330,8 @@ def wire_gateway(tmp_path):
      {"regime": "per_peer_token", "peer": "cell-one", "key_generation": 1, "kind": None,
       "is_root": False, "is_operator": False, "node": None, "role": None, "scopes_note": "fixture credential"}),
     ("board.card.get", {"id": 20}, [("GET", "/board/cards/20?actor=cell-one", None)], _WIRE_CARD),
+    ("board.cards.graph", {"id": 20}, [("GET", "/board/cards/20/graph?actor=cell-one", None)],
+     {"card_id": 20, "stage": "plan", "assignee": "peer-two", "steps": []}),
     ("board.cards.thread", {"id": 20, "limit": 5},
      [("GET", "/board/cards/20/thread?actor=cell-one&limit=5", None)],
      {"card_id": 20, "thread_uuid": _WIRE_THREAD, "messages": []}),
@@ -334,6 +385,29 @@ def test_every_verb_round_trips_through_real_http(wire_gateway, verb, args, expe
     assert result == {"request_id": request_id, "ok": True, "status": 200, "body": expected_body}
     assert seen == expected_wire
     assert authenticated and all(authenticated)
+
+
+@pytest.mark.parametrize("fields", [
+    {"evidence_json": {"c1": "measured pass"}},
+    {"evidence": "summary", "evidence_json": {"c1": "measured pass"}},
+    {"outcome": "skipped", "evidence": "optional step not needed"},
+])
+def test_close_extensions_round_trip_without_identity_or_usage_fields(wire_gateway, fields):
+    proxy, seen, authenticated, _ = wire_gateway
+    args = close_args(**fields)
+    result = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                            "verb": "board.obligations.close", "args": args})
+    assert result["ok"] is True
+    assert seen == [("POST", "/board/obligations/7/close", {k: v for k, v in args.items() if k != "id"})]
+    assert authenticated == [True]
+
+
+def test_oversized_close_map_never_reaches_gateway(wire_gateway):
+    proxy, seen, _, _ = wire_gateway
+    result = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                            "verb": "board.obligations.close",
+                            "args": close_args(evidence_json={"c1": "x"*16001})})
+    assert result["error"] == "bad_args" and seen == []
 
 
 @pytest.mark.parametrize("assignee,explicit,recipient", [
