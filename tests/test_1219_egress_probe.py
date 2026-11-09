@@ -268,10 +268,6 @@ def test_1524_egress_probe_leaves_no_tmp_dirs(tmp_path):
     prove_isolation, run_pytest) clean up their egress-probe-* directories."""
     scratch_tmp = tmp_path / "tmpdir"
     scratch_tmp.mkdir()
-    tree = tmp_path / "tree"
-    tests = tree / "tests"
-    tests.mkdir(parents=True)
-    (tests / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
     env = {
         "TMPDIR": str(scratch_tmp),
         "TEMP": str(scratch_tmp),
@@ -281,7 +277,10 @@ def test_1524_egress_probe_leaves_no_tmp_dirs(tmp_path):
     assert out_iso.returncode == 0, out_iso.stderr
     out_mut = _run(["--mutant", "os-system-curl"], **env)
     assert out_mut.returncode == 1, out_mut.stderr
-    out_py = _run(["--pytest", str(tests / "test_ok.py")], **env)
+    out_py = _run(
+        ["--pytest", "tests/test_1219_egress_probe.py::test_missing_bwrap_fails_closed_with_a_named_reason"],
+        **env,
+    )
     assert out_py.returncode == 0, out_py.stderr
     leftovers = [p.name for p in scratch_tmp.iterdir() if p.name.startswith("egress-probe-")]
     assert leftovers == [], f"leaked egress-probe- dirs in TMPDIR: {leftovers}"
