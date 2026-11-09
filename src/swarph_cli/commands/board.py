@@ -1173,6 +1173,13 @@ def _obligation_act_line(d) -> str:
 
 # ── parser + dispatch ─────────────────────────────────────────────────────────
 
+def _nonnegative_int(value):
+    result = int(value)
+    if result < 0:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer")
+    return result
+
+
 class _Parser(argparse.ArgumentParser):
     """`intermixed=True` lets positionals sit on either side of options —
     `ask <id> <holder> --accept "…" "<what>"`, the pre-#591 form with an
@@ -1234,6 +1241,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ca.add_argument("--json", action="store_true"); _add_common(ca)
     cm = cards.add_parser("move", help="move a card to a stage")
     cm.add_argument("--expect-stage", help="require this current card stage")
+    cm.add_argument("--expect-stage-version", type=_nonnegative_int,
+                    help="require this stage-history version (prevents stale ABA moves)")
     cm.add_argument("id", type=int); cm.add_argument("stage"); cm.add_argument("--json", action="store_true"); _add_common(cm)
     ck = cards.add_parser(
         "link",
@@ -1242,6 +1251,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ck.add_argument("id", type=int); ck.add_argument("key"); ck.add_argument("value")
     ck.add_argument("--expect-stage", help="require this current card stage")
+    ck.add_argument("--expect-stage-version", type=_nonnegative_int,
+                    help="require this stage-history version (prevents stale ABA moves)")
     ck.add_argument(
         "--replace", action="store_true",
         help="overwrite an existing different value for this key (sends replace_links=true)",
@@ -1249,9 +1260,13 @@ def _build_parser() -> argparse.ArgumentParser:
     ck.add_argument("--json", action="store_true"); _add_common(ck)
     cn = cards.add_parser("assign", help="set a card's assignee")
     cn.add_argument("--expect-stage", help="require this current card stage")
+    cn.add_argument("--expect-stage-version", type=_nonnegative_int,
+                    help="require this stage-history version (prevents stale ABA moves)")
     cn.add_argument("id", type=int); cn.add_argument("assignee"); cn.add_argument("--json", action="store_true"); _add_common(cn)
     cb = cards.add_parser("label", help="add/remove a label on a card")
     cb.add_argument("--expect-stage", help="require this current card stage")
+    cb.add_argument("--expect-stage-version", type=_nonnegative_int,
+                    help="require this stage-history version (prevents stale ABA moves)")
     cb.add_argument("action", choices=["add", "rm"])
     cb.add_argument("id", type=int); cb.add_argument("label")
     cb.add_argument("--json", action="store_true"); _add_common(cb)
@@ -1287,6 +1302,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "ask", intermixed=True,
         help="MINT an obligation on this card: name who owes what, as a ROW")
     ck.add_argument("--expect-stage", help="require this current card stage")
+    ck.add_argument("--expect-stage-version", type=_nonnegative_int,
+                    help="require this stage-history version (prevents stale ABA moves)")
     ck.add_argument("id", type=int)
     ck.add_argument("holder", nargs="?", default=None,
                     help="the peer who OWES the delivery (optional since #591: "
@@ -1347,6 +1364,8 @@ def _build_parser() -> argparse.ArgumentParser:
              "--holder step=peer). The gateway refuses moves into spec/plan/build until then")
     cf.add_argument("id", type=int)
     cf.add_argument("--expect-stage", help="require this current card stage")
+    cf.add_argument("--expect-stage-version", type=_nonnegative_int,
+                    help="require this stage-history version (prevents stale ABA moves)")
     cf.add_argument("--holder", action="append", default=None, metavar="STEP=PEER",
                     help="override the derived default for one step; repeatable")
     cf.add_argument("--what", default=None, help="one line used as every minted row's `what`")
@@ -1367,6 +1386,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     cr = cards.add_parser("ready", help="flag a card ready-to-advance (move_ready) for the orchestrator")
     cr.add_argument("--expect-stage", help="require this current card stage")
+    cr.add_argument("--expect-stage-version", type=_nonnegative_int,
+                    help="require this stage-history version (prevents stale ABA moves)")
     cr.add_argument("id", type=int); cr.add_argument("--clear", action="store_true", help="unset move_ready")
     cr.add_argument("--json", action="store_true"); _add_common(cr)
 
@@ -1376,6 +1397,8 @@ def _build_parser() -> argparse.ArgumentParser:
                      "only in its thread)")
     ce.add_argument("id", type=int)
     ce.add_argument("--expect-stage", help="require this current card stage")
+    ce.add_argument("--expect-stage-version", type=_nonnegative_int,
+                    help="require this stage-history version (prevents stale ABA moves)")
     add_content_args(ce, "--title", required=False,
                      noun="card title", noun_plural="titles")
     add_content_args(ce, "--body", required=False)
@@ -1402,7 +1425,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "outcome plus the evidence observed. A thread reply does NOT "
              "close an obligation (#562) — this does")
     oc.add_argument("id", type=int, help="the obligation id")
-    oc.add_argument("--expect-status", help="require this persisted obligation status")
+    oc.add_argument("--expect-status", help="compare persisted status; does not distinguish offered from taken")
     oc.add_argument("--expect-accept-sha", help="require this SHA-256 of the stored accept check")
     oc.add_argument("--outcome", required=True,
                     choices=("pass", "fail", "cannot_evaluate", "skipped"),
@@ -1437,19 +1460,19 @@ def _build_parser() -> argparse.ArgumentParser:
     ot = obl.add_parser("take", help="TAKE a requested/offered obligation: the receipt "
                                      "that you read it; starts the clock")
     ot.add_argument("id", type=int, help="the obligation id")
-    ot.add_argument("--expect-status", help="require this persisted obligation status")
+    ot.add_argument("--expect-status", help="compare persisted status; does not distinguish offered from taken")
     ot.add_argument("--json", action="store_true"); _add_common(ot)
     od = obl.add_parser("decline", help="DECLINE an offer: removes you from the row's "
                                         "eligible set and prints who remains")
     od.add_argument("id", type=int, help="the obligation id")
-    od.add_argument("--expect-status", help="require this persisted obligation status")
+    od.add_argument("--expect-status", help="compare persisted status; does not distinguish offered from taken")
     od.add_argument("--why", required=True, help="why you decline, in one line")
     od.add_argument("--json", action="store_true"); _add_common(od)
     oa = obl.add_parser("amend", help="AMEND a row's step/holder/accept/hours/edges "
                                       "(asker or card assignee; `--step` also backfills "
                                       "a pre-v0.4 unstepped row)")
     oa.add_argument("id", type=int, help="the obligation id")
-    oa.add_argument("--expect-status", help="require this persisted obligation status")
+    oa.add_argument("--expect-status", help="compare persisted status; does not distinguish offered from taken")
     oa.add_argument("--step", default=None, metavar="STEP")
     oa.add_argument("--holder", default=None, metavar="PEER",
                     help="reassign; pass an empty string to clear (back to requested)")
@@ -1474,7 +1497,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "A taken row is closed or declined, not withdrawn. Status becomes "
              "withdrawn, which is neither pass nor fail")
     ow.add_argument("id", type=int, help="the obligation id")
-    ow.add_argument("--expect-status", help="require this persisted obligation status")
+    ow.add_argument("--expect-status", help="compare persisted status; does not distinguish offered from taken")
     ow.add_argument("--reason", required=True,
                     help="why the row is withdrawn; whitespace is refused")
     ow.add_argument("--json", action="store_true"); _add_common(ow)
@@ -1484,7 +1507,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "project owner, or the commander's SSO session). Clears the "
              "holder and the clock. Writes no outcome. A closed row is refused")
     orel.add_argument("id", type=int, help="the obligation id")
-    orel.add_argument("--expect-status", help="require this persisted obligation status")
+    orel.add_argument("--expect-status", help="compare persisted status; does not distinguish offered from taken")
     orel.add_argument("--reason", required=True,
                       help="why the row is released; whitespace is refused")
     orel.add_argument("--json", action="store_true"); _add_common(orel)
@@ -1668,6 +1691,8 @@ def run_board(argv: list[str]) -> int:
     if args.group == "cards":
         expected = ({"expect_stage": args.expect_stage}
                     if getattr(args, "expect_stage", None) is not None else {})
+        if getattr(args, "expect_stage_version", None) is not None:
+            expected["expect_stage_version"] = args.expect_stage_version
         if args.command == "list":
             pid, err = _resolve_project(gw, token, args.project)
             if err:
