@@ -229,9 +229,30 @@ class Proxy:
         timer = None
         try:
             remaining = max(0.001, deadline - time.monotonic())
-            cls = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
-            connection = cls(url.hostname, url.port, timeout=remaining)
-            connection.connect()
+            connection = (http.client.HTTPSConnection(url.hostname, url.port, timeout=remaining)
+                          if url.scheme == "https" else
+                          http.client.HTTPConnection(url.hostname, url.port, timeout=remaining))
+            connected, abandoned, connect_failed = threading.Event(), threading.Event(), threading.Event()
+            def connect():
+                try:
+                    connection.connect()
+                except Exception:
+                    connect_failed.set()
+                finally:
+                    if abandoned.is_set():
+                        connection.close()
+                    connected.set()
+            # getaddrinfo can ignore socket timeouts. A late connection is closed
+            # without ever sending credentials, rather than blocking this cell.
+            connector = threading.Thread(target=connect, daemon=True)
+            connector.start()
+            if not connected.wait(max(0.001, deadline - time.monotonic())):
+                abandoned.set()
+                if connected.is_set():
+                    connection.close()
+                raise ProxyError("upstream_unreachable")
+            if connect_failed.is_set():
+                raise ProxyError("upstream_unreachable")
             upstream_socket = connection.sock
             def expire():
                 expired.set()

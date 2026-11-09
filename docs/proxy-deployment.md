@@ -128,6 +128,10 @@ groups, reviewed root-owned install and protected paths; this build does not
 create or install them. Replace `__CELL__` with the same validated cell name in
 both plists, and keep the installed plists root-owned and non-cell-writable.
 Do not use the older ordinary `swarph-monitor.plist` for the credential uid.
+The two proxy plists are generated from the effective systemd service/drop-in
+and socket group, but kept outside the ordinary cell-user `PORTED` install set.
+Regenerate them with `swarph_cli.launchd_render.write_templates()` when those
+sources change; do not install them through a user-agent smoke or installer.
 
 Use canonical paths, not macOS's `/var` symlink: the plists set HOME and working
 directory to `/private/var/lib/swarph-proxy/<cell>` and the monitor state to

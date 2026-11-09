@@ -94,6 +94,33 @@ def test_launchd_proxy_and_monitor_have_separate_users_and_disable_core_dumps():
             assert unit["ProgramArguments"][4:] == ["serve", "--cell", "__CELL__"]
 
 
+def test_proxy_renderer_tracks_effective_security_directives_without_auto_install(tmp_path, monkeypatch):
+    from swarph_cli import launchd_render
+
+    source = files("swarph_cli").joinpath("systemd")
+    shutil.copytree(source, tmp_path / "systemd")
+    monkeypatch.setattr(launchd_render, "_SYSTEMD", tmp_path / "systemd")
+    dropin = tmp_path / "systemd" / "swarph-monitor@.service.d" / "zzzz-proxy20.conf"
+    dropin.write_text(dropin.read_text().replace(
+        "User=proxy-%i", "User=review-%i").replace(
+        "UMask=0027", "UMask=0037").replace(
+        "LimitCORE=0", "LimitCORE=12"), encoding="utf-8")
+    socket = tmp_path / "systemd" / "swarph-proxy@.socket"
+    socket.write_text(socket.read_text().replace(
+        "SocketGroup=cell-%i", "SocketGroup=review-cell-%i"), encoding="utf-8")
+
+    rendered = plistlib.loads(launchd_render.render_proxy_template(
+        "swarph-proxy-monitor.plist").encode())
+    assert rendered["UserName"] == "review-__CELL__"
+    assert rendered["GroupName"] == "review-cell-__CELL__"
+    assert rendered["Umask"] == 0o037
+    assert rendered["SoftResourceLimits"] == rendered["HardResourceLimits"] == {"Core": 12}
+    assert rendered["EnvironmentVariables"] == {"HOME": "/private/var/lib/swarph-proxy/__CELL__"}
+    assert rendered["ProgramArguments"][3] == "swarph_cli.proxy_monitor"
+    assert {row[0] for row in launchd_render.PROXY_PORTED}.isdisjoint(
+        row[0] for row in launchd_render.PORTED)
+
+
 def test_built_wheel_contains_every_proxy_deployment_template(tmp_path):
     root = Path(__file__).resolve().parents[1]
     source = tmp_path / "source"

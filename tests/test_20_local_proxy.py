@@ -355,3 +355,18 @@ def test_escaped_token_reflection_is_also_refused(tmp_path):
     with gateway(tmp_path, lambda h: answer(h, json.dumps({"nested": [secret]}).encode())) as (proxy, _):
         proxy = Proxy(proxy.config, secret)
         assert request(proxy)["error"] == "upstream_error"
+
+
+def test_connection_setup_cannot_outlive_the_shared_upstream_deadline(tmp_path, monkeypatch):
+    import swarph_cli.local_proxy as local
+    def slow_connect(_):
+        time.sleep(0.2)  # Simulate a resolver that ignores the socket timeout.
+        raise OSError("fake-secret20")
+    monkeypatch.setattr(local.http.client.HTTPConnection, "connect", slow_connect)
+    monkeypatch.setattr(local, "UPSTREAM_TIMEOUT", 0.02)
+    config = Config("alice", os.getuid() + 1234, "http://127.0.0.1:1",
+                    tmp_path / "token", tmp_path / "socket", tmp_path / "audit")
+    before = time.monotonic()
+    result = request(Proxy(config, "fake-secret20"))
+    assert result["error"] == "upstream_unreachable"
+    assert time.monotonic() - before < 0.15

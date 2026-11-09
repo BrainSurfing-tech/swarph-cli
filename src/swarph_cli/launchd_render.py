@@ -25,6 +25,8 @@ Ported, and why (lab note 73433: a cell's keep-alive set, not all 22 units):
 
 from __future__ import annotations
 
+import configparser
+import plistlib
 import shlex
 from pathlib import Path
 
@@ -69,6 +71,14 @@ PORTED: tuple[tuple[str, str, str, str, bool], ...] = (
         "swarph-codex-outbox@.timer",
         False,
     ),
+)
+
+# Operator-only LaunchDaemons; never add these credential uids to user-agent installs.
+PROXY_PORTED = (
+    ("swarph-proxy.plist", "tech.brainsurfing.swarph.proxy.__CELL__",
+     "swarph-proxy@.service", ""),
+    ("swarph-proxy-monitor.plist", "tech.brainsurfing.swarph.proxy-monitor.__CELL__",
+     "swarph-monitor@.service", "swarph-monitor@.service.d/zzzz-proxy20.conf"),
 )
 
 
@@ -206,7 +216,46 @@ def render_template(plist_name: str) -> str:
 
 
 def render_all() -> dict[str, str]:
-    return {name: render_template(name) for name, *_ in PORTED}
+    return {
+        **{name: render_template(name) for name, *_ in PORTED},
+        **{name: render_proxy_template(name) for name, *_ in PROXY_PORTED},
+    }
+
+
+def render_proxy_template(plist_name: str) -> str:
+    """Render privileged templates separately from the ordinary cell agents."""
+    _, label, service_name, dropin = next(row for row in PROXY_PORTED if row[0] == plist_name)
+    unit = configparser.ConfigParser(interpolation=None, strict=False)
+    unit.optionxform = str
+    unit.read(_SYSTEMD / service_name, encoding="utf-8")
+    if dropin:
+        unit.read(_SYSTEMD / dropin, encoding="utf-8")
+    service = unit["Service"]
+    socket = configparser.ConfigParser(interpolation=None)
+    socket.optionxform = str
+    socket.read(_SYSTEMD / "swarph-proxy@.socket", encoding="utf-8")
+
+    def mac(value):
+        value = value.replace("%i", "__CELL__").replace("__PEER__", "__CELL__")
+        return "/private" + value if value.startswith("/var/") else value
+
+    env = dict(item.split("=", 1) for item in shlex.split(service["Environment"]))
+    core = int(service["LimitCORE"])
+    rendered = {
+        "Label": label,
+        "UserName": mac(service["User"]),
+        "GroupName": mac(socket["Socket"]["SocketGroup"]),
+        "ProgramArguments": [mac(arg) for arg in shlex.split(service["ExecStart"])],
+        "EnvironmentVariables": {key: mac(value) for key, value in env.items()},
+        "WorkingDirectory": mac(service["WorkingDirectory"]),
+        "Umask": int(service["UMask"], 8),
+        "SoftResourceLimits": {"Core": core},
+        "HardResourceLimits": {"Core": core},
+        "RunAtLoad": True,
+        "KeepAlive": service["Restart"] in {"always", "on-failure"},
+        "ThrottleInterval": _seconds(service["RestartSec"]),
+    }
+    return plistlib.dumps(rendered, sort_keys=False).decode("utf-8")
 
 
 def substitute(template: str, values: dict[str, str]) -> str:
