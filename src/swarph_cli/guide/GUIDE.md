@@ -559,6 +559,7 @@ answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not comman
 - `swarph rowclear-hook` -- SessionStart hook (card #432): when `source` is `clear`, write the new session id into the role's `<role>.session-id` pin so the next spawn resumes the cleared session.
 - `swarph scan` -- statically scan an artifact for dangerous patterns before publish.
 - `swarph schedule` -- the gateway's scheduled events: create, list, get, enable, disable, delete, fire-now.
+- `swarph subscribe` -- targeted event subscriptions: add, list, cancel, each with `--as <you>` and `--json`. Add takes `--trigger obligation_state|card_stage|time --target <id-or-HH:MMZ>`; `--cell` defaults to yourself and only lab or the commander may name another cell. Expiry defaults to 7 days (30 maximum); choose `--days` or `--expires-at`. CI-status triggers are not included.
 - `swarph service` -- stand up a $0 subscription-LLM HTTP lane.
 - `swarph skunkworks` -- the research pipeline (card #1405): `run`, `status`, `show`, `stop`, `decide`, each with `--as <you>` and `--json`. Ideation and the architect run on the mesh queue, research on the requesting cell's own Claude quota, nothing metered. Refused Monday to Friday 09:30-16:00 New York time. Approval produces no code. See `docs/skunkworks-howto.md` in the swarph-cli repo.
 - `swarph spawn` -- run a cell from its role name or yaml path.
