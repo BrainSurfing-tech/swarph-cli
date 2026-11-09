@@ -364,17 +364,32 @@ def test_escaped_token_reflection_is_also_refused(tmp_path):
 
 def test_connection_setup_cannot_outlive_the_shared_upstream_deadline(tmp_path, monkeypatch):
     import swarph_cli.local_proxy as local
+    entered, release, completed = threading.Event(), threading.Event(), threading.Event()
+    results = []
     def slow_connect(_):
-        time.sleep(0.2)  # Simulate a resolver that ignores the socket timeout.
+        entered.set()
+        assert release.wait(5)  # A resolver ignoring socket timeouts remains blocked.
         raise OSError("fake-secret20")
     monkeypatch.setattr(local.http.client.HTTPConnection, "connect", slow_connect)
     monkeypatch.setattr(local, "UPSTREAM_TIMEOUT", 0.02)
     config = Config("alice", os.getuid() + 1234, "http://127.0.0.1:1",
                     tmp_path / "token", tmp_path / "socket", tmp_path / "audit")
-    before = time.monotonic()
-    result = request(Proxy(config, "fake-secret20"))
-    assert result["error"] == "upstream_unreachable"
-    assert time.monotonic() - before < 0.15
+    def invoke():
+        try:
+            results.append(request(Proxy(config, "fake-secret20")))
+        finally:
+            completed.set()
+    caller = threading.Thread(target=invoke)
+    caller.start()
+    try:
+        assert entered.wait(2), "the connect control did not run"
+        assert completed.wait(2), "the request waited for connection setup instead of its deadline"
+        assert not release.is_set(), "the control must still be blocked when the request returns"
+        assert results[0]["error"] == "upstream_unreachable"
+    finally:
+        release.set()
+        caller.join(timeout=2)
+        assert not caller.is_alive()
 
 
 def test_numeric_token_cannot_be_reflected_as_a_number_or_audit_target(tmp_path):
