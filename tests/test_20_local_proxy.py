@@ -377,13 +377,16 @@ def test_silent_client_does_not_delay_concurrent_whoami(tmp_path):
 @pytest.mark.parametrize("configured_cap", [None, 2])
 def test_connection_cap_refuses_promptly_and_recovers_a_slot(tmp_path, configured_cap):
     cap = 32 if configured_cap is None else configured_cap
-    def connect_before(client, endpoint, deadline):
+    def connect_before(endpoint, deadline):
         while True:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             client.settimeout(max(0.001, deadline - time.monotonic()))
             try:
                 client.connect(endpoint)
-                return
-            except BlockingIOError:
+                return client
+            except (BlockingIOError, ConnectionRefusedError):
+                client.close()
+                # Bound backlog/startup retries without extending the refusal deadline.
                 assert time.monotonic() < deadline, "accept backlog did not drain"
                 time.sleep(0.001)
 
@@ -392,14 +395,10 @@ def test_connection_cap_refuses_promptly_and_recovers_a_slot(tmp_path, configure
             clients = []
             try:
                 for _ in range(cap):
-                    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    clients.append(client)
-                    client.connect(str(proxy.config.socket_path))
+                    clients.append(connect_before(str(proxy.config.socket_path), time.monotonic() + 1))
                 for _ in range(2):
-                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as extra:
-                        extra.settimeout(1)
-                        started = time.monotonic()
-                        connect_before(extra, str(proxy.config.socket_path), started + 1)
+                    started = time.monotonic()
+                    with connect_before(str(proxy.config.socket_path), started + 1) as extra:
                         reply = json.loads(extra.makefile("rb").readline())
                         assert time.monotonic() - started < 1
                         assert reply == failure(None, "proxy_unavailable")
@@ -407,8 +406,7 @@ def test_connection_cap_refuses_promptly_and_recovers_a_slot(tmp_path, configure
                 clients.pop().close()
                 deadline = time.monotonic() + 1
                 while time.monotonic() < deadline:
-                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                        connect_before(client, str(proxy.config.socket_path), deadline)
+                    with connect_before(str(proxy.config.socket_path), deadline) as client:
                         # An over-cap refusal precedes any request read; let the slot close race finish.
                         try:
                             client.sendall(json.dumps({"request_id": str(uuid.uuid4()), "verb": "whoami", "args": {}}).encode()+b"\n")
