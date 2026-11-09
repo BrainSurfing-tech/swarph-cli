@@ -43,6 +43,7 @@ class Config:
     token_file: Path
     socket_path: Path
     audit_path: Path
+    max_connections: int = 32
 
 
 def _cell_name(cell):
@@ -132,7 +133,10 @@ def load_config(cell: str, path=None) -> Config:
         store = path.parent.stat()
         if store.st_uid != os.geteuid() or stat.S_IMODE(store.st_mode) != 0o700:
             raise ProxyError("proxy_unavailable")
-        if set(data) - {"cell_uid", "gateway_url", "token_file", "socket_path", "audit_path"}:
+        if set(data) - {"cell_uid", "gateway_url", "token_file", "socket_path", "audit_path", "max_connections"}:
+            raise ProxyError("proxy_unavailable")
+        max_connections = data.get("max_connections", 32)
+        if type(max_connections) is not int or max_connections < 1:
             raise ProxyError("proxy_unavailable")
         gateway = data["gateway_url"]
         url = urlsplit(gateway)
@@ -143,7 +147,8 @@ def load_config(cell: str, path=None) -> Config:
         config = Config(cell, uid, gateway.rstrip("/"),
                         Path(data.get("token_file", path.parent / "peer_token")),
                         Path(data.get("socket_path", f"/run/swarph-proxy/{cell}.sock")),
-                        Path(data.get("audit_path", f"/var/log/swarph-proxy/{cell}.jsonl")))
+                        Path(data.get("audit_path", f"/var/log/swarph-proxy/{cell}.jsonl")),
+                        max_connections)
         for local_path in (config.token_file, config.socket_path, config.audit_path):
             safe_parent(local_path, uid)
         return config
@@ -409,6 +414,14 @@ def serve(config: Config):
     proxy = Proxy(config, read_token(config))
     with proxy.audit_stream():
         pass  # Never accept requests with a missing or unsafe provisioned audit sink.
+    slots = threading.BoundedSemaphore(config.max_connections)
+
+    def handle(connection):
+        try:
+            proxy.handle(connection)
+        finally:
+            slots.release()
+
     listener = None
     owned = False
     try:
@@ -429,7 +442,19 @@ def serve(config: Config):
             listener.listen(16)
         while True:
             connection, _ = listener.accept()
-            threading.Thread(target=proxy.handle, args=(connection,), daemon=True).start()
+            if not slots.acquire(blocking=False):
+                with connection:
+                    connection.setblocking(False)
+                    try:
+                        connection.sendall(json.dumps(failure(None, "proxy_unavailable")).encode() + b"\n")
+                    except OSError:
+                        pass
+                continue
+            try:
+                threading.Thread(target=handle, args=(connection,), daemon=True).start()
+            except RuntimeError:
+                connection.close()
+                slots.release()
     finally:
         if listener:
             listener.close()

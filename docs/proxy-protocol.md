@@ -8,9 +8,26 @@ connecting uid (Linux `SO_PEERCRED`, macOS `getpeereid`) against its configured 
 uid before routing. No direct-token fallback, caching, redirects, or automatic
 retries are provided.
 
-Connections are handled concurrently. Each accepted connection has a 20-second
-request-read timeout; a silent client or a blocked upstream request does not hold
-up another connection. The upstream deadline remains 15 seconds per request.
+Connections are handled concurrently, with at most **32 active handlers** by
+default. The proxy-owned JSON configuration may set `max_connections` to a
+positive integer (booleans are refused). This bounds the threads and request
+buffers a cell can occupy, including silent connections. At capacity, the accept
+loop sends a non-blocking `proxy_unavailable` reply with `request_id:null` and
+closes the extra connection without reading or forwarding a request. If even the
+small refusal cannot be written immediately, the connection is closed instead;
+the local client still returns `proxy_unavailable`. A completed, disconnected or
+timed-out handler releases its slot. There is no extra handler queue.
+
+Each admitted connection has a 20-second request-read timeout; a silent client or
+a blocked upstream request does not hold up another admitted connection. The
+upstream deadline remains 15 seconds per request. The systemd service ships
+`TasksMax=128`, covering the default 32 handlers, their connection/deadline helper
+threads and the accept loop. Operators increasing `max_connections` must also
+raise `TasksMax` (allow at least `3 * max_connections + 1` tasks plus headroom).
+That kernel limit also bounds late DNS-helper threads if name resolution stalls.
+The launchd template has no equivalent per-service thread-count limit on macOS;
+the same application-level connection cap applies there. No template installation
+or live unit change is performed by these settings.
 
 ```json
 {"verb":"board.card.get","args":{"id":20},"request_id":"97fb3490-9147-4da6-acb2-29bac3df210c"}

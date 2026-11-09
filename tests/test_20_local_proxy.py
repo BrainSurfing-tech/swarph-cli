@@ -253,6 +253,29 @@ def test_credential_store_rejects_writable_config_token_symlinks_and_env_urls(tm
         load_config("alice", path)
 
 
+@pytest.mark.parametrize("fields, expected", [
+    ({}, 32), ({"max_connections": 2}, 2), ({"max_connections": 64}, 64),
+    ({"max_connections": 0}, None), ({"max_connections": -1}, None),
+    ({"max_connections": True}, None), ({"max_connections": "32"}, None),
+    ({"max_connections": 1.5}, None), ({"max_connections": None}, None),
+])
+def test_protected_config_sets_only_a_positive_integer_connection_cap(tmp_path, fields, expected):
+    from swarph_cli.local_proxy import load_config
+    from swarph_cli.proxy_routes import ProxyError
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"cell_uid": os.getuid() + 1234,
+                               "gateway_url": "http://127.0.0.1:1234",
+                               "socket_path": str(tmp_path / "socket"),
+                               "audit_path": str(tmp_path / "audit"), **fields}))
+    path.chmod(0o600)
+    if expected is None:
+        with pytest.raises(ProxyError, match="^proxy_unavailable$"):
+            load_config("alice", path)
+    else:
+        assert load_config("alice", path).max_connections == expected
+
+
 def test_socket_directory_symlink_swap_cannot_chmod_the_token(tmp_path):
     from swarph_cli.local_proxy import safe_parent
     from swarph_cli.proxy_routes import ProxyError
@@ -295,17 +318,20 @@ def test_mark_read_audit_preserves_its_verb(tmp_path):
 
 
 @contextmanager
-def running_fixture_proxy(proxy, tmp_path, *, read_timeout=20):
+def running_fixture_proxy(proxy, tmp_path, *, read_timeout=20, max_connections=None):
     """Real CLI and SO_PEERCRED; map this test uid to a distinct fixture cell uid."""
     token_file = proxy.config.token_file
     token_file.write_text("fixture-secret-20")
     token_file.chmod(0o600)
     config_file = tmp_path / "config.json"
-    config_file.write_text(json.dumps({
+    data = {
         "cell_uid": proxy.config.cell_uid, "gateway_url": proxy.config.gateway_url,
         "token_file": str(token_file), "socket_path": str(proxy.config.socket_path),
         "audit_path": str(proxy.config.audit_path),
-    }))
+    }
+    if max_connections is not None:
+        data["max_connections"] = max_connections
+    config_file.write_text(json.dumps(data))
     config_file.chmod(0o600)
     script = '''import os, sys
 import swarph_cli.local_proxy as proxy
@@ -346,6 +372,59 @@ def test_silent_client_does_not_delay_concurrent_whoami(tmp_path):
                     assert time.monotonic() - start < 1
                     assert reply["ok"] is True and reply["body"] == {"peer": "alice"}
         assert seen == [("GET", "/whoami", None)]
+
+
+@pytest.mark.parametrize("configured_cap", [None, 2])
+def test_connection_cap_refuses_promptly_and_recovers_a_slot(tmp_path, configured_cap):
+    cap = 32 if configured_cap is None else configured_cap
+    def connect_before(client, endpoint, deadline):
+        while True:
+            client.settimeout(max(0.001, deadline - time.monotonic()))
+            try:
+                client.connect(endpoint)
+                return
+            except BlockingIOError:
+                assert time.monotonic() < deadline, "accept backlog did not drain"
+                time.sleep(0.001)
+
+    with gateway(tmp_path, lambda h: answer(h, b'{"peer":"alice"}'), uid=os.getuid()+1234) as (proxy, seen):
+        with running_fixture_proxy(proxy, tmp_path, max_connections=configured_cap):
+            clients = []
+            try:
+                for _ in range(cap):
+                    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    clients.append(client)
+                    client.connect(str(proxy.config.socket_path))
+                for _ in range(2):
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as extra:
+                        extra.settimeout(1)
+                        started = time.monotonic()
+                        connect_before(extra, str(proxy.config.socket_path), started + 1)
+                        reply = json.loads(extra.makefile("rb").readline())
+                        assert time.monotonic() - started < 1
+                        assert reply == failure(None, "proxy_unavailable")
+                assert seen == []
+                clients.pop().close()
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                        connect_before(client, str(proxy.config.socket_path), deadline)
+                        # An over-cap refusal precedes any request read; let the slot close race finish.
+                        try:
+                            client.sendall(json.dumps({"request_id": str(uuid.uuid4()), "verb": "whoami", "args": {}}).encode()+b"\n")
+                        except BrokenPipeError:
+                            pass
+                        reply = json.loads(client.makefile("rb").readline())
+                    if reply["ok"]:
+                        break
+                    assert reply == failure(None, "proxy_unavailable")
+                    time.sleep(0.01)
+                assert reply["ok"] is True and reply["body"] == {"peer": "alice"}
+                assert time.monotonic() < deadline
+                assert seen == [("GET", "/whoami", None)]
+            finally:
+                for client in clients:
+                    client.close()
 
 
 def test_connection_read_timeout_rejects_a_silent_client(tmp_path):

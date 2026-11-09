@@ -33,6 +33,7 @@ def test_proxy_service_uses_the_isolated_install_and_private_store():
     assert service["Environment"] == "HOME=/var/lib/swarph-proxy/%i"
     assert service["WorkingDirectory"] == "/var/lib/swarph-proxy/%i"
     assert service["LimitCORE"] == "0"
+    assert service["TasksMax"] == "128"
     assert service["UMask"] == "0077"
     assert "RuntimeDirectory" not in service
 
