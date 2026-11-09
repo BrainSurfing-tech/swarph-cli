@@ -1233,6 +1233,7 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="attach a label (repeatable)")
     ca.add_argument("--json", action="store_true"); _add_common(ca)
     cm = cards.add_parser("move", help="move a card to a stage")
+    cm.add_argument("--expect-stage", help="require this current card stage")
     cm.add_argument("id", type=int); cm.add_argument("stage"); cm.add_argument("--json", action="store_true"); _add_common(cm)
     ck = cards.add_parser(
         "link",
@@ -1240,14 +1241,17 @@ def _build_parser() -> argparse.ArgumentParser:
              "value unless --replace; #727)",
     )
     ck.add_argument("id", type=int); ck.add_argument("key"); ck.add_argument("value")
+    ck.add_argument("--expect-stage", help="require this current card stage")
     ck.add_argument(
         "--replace", action="store_true",
         help="overwrite an existing different value for this key (sends replace_links=true)",
     )
     ck.add_argument("--json", action="store_true"); _add_common(ck)
     cn = cards.add_parser("assign", help="set a card's assignee")
+    cn.add_argument("--expect-stage", help="require this current card stage")
     cn.add_argument("id", type=int); cn.add_argument("assignee"); cn.add_argument("--json", action="store_true"); _add_common(cn)
     cb = cards.add_parser("label", help="add/remove a label on a card")
+    cb.add_argument("--expect-stage", help="require this current card stage")
     cb.add_argument("action", choices=["add", "rm"])
     cb.add_argument("id", type=int); cb.add_argument("label")
     cb.add_argument("--json", action="store_true"); _add_common(cb)
@@ -1282,6 +1286,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ck = cards.add_parser(
         "ask", intermixed=True,
         help="MINT an obligation on this card: name who owes what, as a ROW")
+    ck.add_argument("--expect-stage", help="require this current card stage")
     ck.add_argument("id", type=int)
     ck.add_argument("holder", nargs="?", default=None,
                     help="the peer who OWES the delivery (optional since #591: "
@@ -1341,6 +1346,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "no row as an OFFER to its holder (the derived default from live grants, or "
              "--holder step=peer). The gateway refuses moves into spec/plan/build until then")
     cf.add_argument("id", type=int)
+    cf.add_argument("--expect-stage", help="require this current card stage")
     cf.add_argument("--holder", action="append", default=None, metavar="STEP=PEER",
                     help="override the derived default for one step; repeatable")
     cf.add_argument("--what", default=None, help="one line used as every minted row's `what`")
@@ -1360,6 +1366,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ch.add_argument("--json", action="store_true"); _add_common(ch)
 
     cr = cards.add_parser("ready", help="flag a card ready-to-advance (move_ready) for the orchestrator")
+    cr.add_argument("--expect-stage", help="require this current card stage")
     cr.add_argument("id", type=int); cr.add_argument("--clear", action="store_true", help="unset move_ready")
     cr.add_argument("--json", action="store_true"); _add_common(cr)
 
@@ -1368,6 +1375,7 @@ def _build_parser() -> argparse.ArgumentParser:
                      "priority (#191: a correction belongs ON the card, not "
                      "only in its thread)")
     ce.add_argument("id", type=int)
+    ce.add_argument("--expect-stage", help="require this current card stage")
     add_content_args(ce, "--title", required=False,
                      noun="card title", noun_plural="titles")
     add_content_args(ce, "--body", required=False)
@@ -1394,6 +1402,8 @@ def _build_parser() -> argparse.ArgumentParser:
              "outcome plus the evidence observed. A thread reply does NOT "
              "close an obligation (#562) — this does")
     oc.add_argument("id", type=int, help="the obligation id")
+    oc.add_argument("--expect-status", help="require this persisted obligation status")
+    oc.add_argument("--expect-accept-sha", help="require this SHA-256 of the stored accept check")
     oc.add_argument("--outcome", required=True,
                     choices=("pass", "fail", "cannot_evaluate", "skipped"),
                     help="the accept check's OUTCOME (`skipped` only on an "
@@ -1427,16 +1437,19 @@ def _build_parser() -> argparse.ArgumentParser:
     ot = obl.add_parser("take", help="TAKE a requested/offered obligation: the receipt "
                                      "that you read it; starts the clock")
     ot.add_argument("id", type=int, help="the obligation id")
+    ot.add_argument("--expect-status", help="require this persisted obligation status")
     ot.add_argument("--json", action="store_true"); _add_common(ot)
     od = obl.add_parser("decline", help="DECLINE an offer: removes you from the row's "
                                         "eligible set and prints who remains")
     od.add_argument("id", type=int, help="the obligation id")
+    od.add_argument("--expect-status", help="require this persisted obligation status")
     od.add_argument("--why", required=True, help="why you decline, in one line")
     od.add_argument("--json", action="store_true"); _add_common(od)
     oa = obl.add_parser("amend", help="AMEND a row's step/holder/accept/hours/edges "
                                       "(asker or card assignee; `--step` also backfills "
                                       "a pre-v0.4 unstepped row)")
     oa.add_argument("id", type=int, help="the obligation id")
+    oa.add_argument("--expect-status", help="require this persisted obligation status")
     oa.add_argument("--step", default=None, metavar="STEP")
     oa.add_argument("--holder", default=None, metavar="PEER",
                     help="reassign; pass an empty string to clear (back to requested)")
@@ -1461,6 +1474,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "A taken row is closed or declined, not withdrawn. Status becomes "
              "withdrawn, which is neither pass nor fail")
     ow.add_argument("id", type=int, help="the obligation id")
+    ow.add_argument("--expect-status", help="require this persisted obligation status")
     ow.add_argument("--reason", required=True,
                     help="why the row is withdrawn; whitespace is refused")
     ow.add_argument("--json", action="store_true"); _add_common(ow)
@@ -1470,6 +1484,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "project owner, or the commander's SSO session). Clears the "
              "holder and the clock. Writes no outcome. A closed row is refused")
     orel.add_argument("id", type=int, help="the obligation id")
+    orel.add_argument("--expect-status", help="require this persisted obligation status")
     orel.add_argument("--reason", required=True,
                       help="why the row is released; whitespace is refused")
     orel.add_argument("--json", action="store_true"); _add_common(orel)
@@ -1547,6 +1562,8 @@ def run_board(argv: list[str]) -> int:
         return _out(st, d, lambda body: format_cost(body, rates), aj)
 
     if args.group == "obligations":
+        expected = ({"expect_status": args.expect_status}
+                    if getattr(args, "expect_status", None) is not None else {})
         if args.command == "close":
             # #562's CLI half: the explicit close act. The gateway guards the
             # identity (holder, creator, or board orchestrator) and refuses a
@@ -1568,6 +1585,9 @@ def run_board(argv: list[str]) -> int:
                 payload = _close_payload(args.outcome, evidence, evidence_json,
                                          opt_out=getattr(args, "no_redact", False),
                                          usage=usage)
+                payload.update(expected)
+                if args.expect_accept_sha is not None:
+                    payload["expect_accept_sha256"] = args.expect_accept_sha
             except ValueError as exc:
                 print(f"swarph board obligations close: {exc}", file=sys.stderr)
                 return 2
@@ -1592,14 +1612,12 @@ def run_board(argv: list[str]) -> int:
                 token)
             return _out(st, d, _format_obligations, aj)
         if args.command == "take":
-            # The gateway takes no body (caller = token); `_post_json` always
-            # serialises a dict, so send the empty one.
-            st, d = _post_json(f"{gw}/board/obligations/{args.id}/take", {}, token)
+            st, d = _post_json(f"{gw}/board/obligations/{args.id}/take", expected, token)
             return _out(st, d, _obligation_act_line, aj)
         if args.command == "decline":
             why = redact_text(args.why, opt_out=getattr(args, "no_redact", False), caller="board.obligations")
             st, d = _post_json(f"{gw}/board/obligations/{args.id}/decline",
-                               {"why": why}, token)
+                               {"why": why, **expected}, token)
             return _out(st, d, _obligation_act_line, aj)
         if args.command == "amend":
             try:
@@ -1614,7 +1632,7 @@ def run_board(argv: list[str]) -> int:
             except ValueError as exc:
                 print(f"swarph board obligations amend: {exc}", file=sys.stderr)
                 return 2
-            st, d = _patch_json(f"{gw}/board/obligations/{args.id}/amend", patch, token)
+            st, d = _patch_json(f"{gw}/board/obligations/{args.id}/amend", {**patch, **expected}, token)
             return _out(st, d, _obligation_act_line, aj)
         if args.command == "withdraw":
             reason = args.reason
@@ -1625,7 +1643,7 @@ def run_board(argv: list[str]) -> int:
             reason = redact_text(reason, opt_out=getattr(args, "no_redact", False), caller="board.obligations")
             st, d = _post_json(
                 f"{gw}/board/obligations/{args.id}/withdraw",
-                {"reason": reason}, token)
+                {"reason": reason, **expected}, token)
             return _out(st, d, lambda x: (
                 f"obligation #{_s(x.get('id', args.id))} WITHDRAWN by "
                 f"{_s(x.get('closed_by', self_name))}"
@@ -1640,7 +1658,7 @@ def run_board(argv: list[str]) -> int:
             reason = redact_text(reason, opt_out=getattr(args, "no_redact", False), caller="board.obligations")
             st, d = _post_json(
                 f"{gw}/board/obligations/{args.id}/release",
-                {"reason": reason}, token)
+                {"reason": reason, **expected}, token)
             return _out(st, d, lambda x: (
                 f"obligation #{_s(x.get('id', args.id))} RELEASED "
                 f"state={_s(x.get('state', 'offered'))} "
@@ -1648,6 +1666,8 @@ def run_board(argv: list[str]) -> int:
             ), aj)
 
     if args.group == "cards":
+        expected = ({"expect_stage": args.expect_stage}
+                    if getattr(args, "expect_stage", None) is not None else {})
         if args.command == "list":
             pid, err = _resolve_project(gw, token, args.project)
             if err:
@@ -1709,14 +1729,14 @@ def run_board(argv: list[str]) -> int:
                 return 1
             new = _apply_label(cur.get("labels") or [], args.action, args.label)
             st, d = _patch_json(f"{gw}/board/cards/{args.id}",
-                                {"actor": self_name, "labels": new}, token)
+                                {"actor": self_name, "labels": new, **expected}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} labels -> "
                                          f"{', '.join(x.get('labels') or []) or '(none)'}", aj)
         if args.command == "move":
-            st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "stage": args.stage}, token)
+            st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "stage": args.stage, **expected}, token)
             return _out(st, d, _move_line, aj)
         if args.command == "assign":
-            st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "assignee": args.assignee}, token)
+            st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "assignee": args.assignee, **expected}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} assignee -> {x.get('assignee')}", aj)
         if args.command == "edit":
             if args.title == "-" and args.body == "-":
@@ -1769,7 +1789,7 @@ def run_board(argv: list[str]) -> int:
                       f"({exc}) — refusing to write, for the same reason: the "
                       f"replaced text would exist nowhere (#596)", file=sys.stderr)
                 return 1
-            st, d = _patch_json(f"{gw}/board/cards/{args.id}", patch, token)
+            st, d = _patch_json(f"{gw}/board/cards/{args.id}", {**patch, **expected}, token)
             # Surface body_version: it is the latch every verdict stamp keys on
             # (#199), so an edit that re-opens reviewed work is visible in the
             # success line, not only in a later audit.
@@ -1822,7 +1842,7 @@ def run_board(argv: list[str]) -> int:
             except ValueError as exc:
                 print(f"swarph board cards ask: {exc}", file=sys.stderr)
                 return 2
-            st, d = _post_json(f"{gw}/board/cards/{args.id}/ask", body, token)
+            st, d = _post_json(f"{gw}/board/cards/{args.id}/ask", {**body, **expected}, token)
             return _out(st, d, _ask_line, args.json)
         if args.command == "confirm-flow":
             try:
@@ -1831,7 +1851,7 @@ def run_board(argv: list[str]) -> int:
             except ValueError as e:
                 print(f"swarph board cards confirm-flow: {e}", file=sys.stderr)
                 return 2
-            st, d = _post_json(f"{gw}/board/cards/{args.id}/flow/confirm", body, token)
+            st, d = _post_json(f"{gw}/board/cards/{args.id}/flow/confirm", {**body, **expected}, token)
             return _out(st, d, _confirm_flow_line, args.json)
         if args.command == "graph":
             st, d = _http_get_json(f"{gw}/board/cards/{args.id}/graph", token)
@@ -1953,7 +1973,7 @@ def run_board(argv: list[str]) -> int:
                 args.to_node, aj, opt_out=getattr(args, "no_redact", False),
                 verb="dev-extract")
         if args.command == "ready":
-            st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "move_ready": not args.clear}, token)
+            st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "move_ready": not args.clear, **expected}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} move_ready -> {x.get('move_ready')}", aj)
         if args.command == "link":
             # #727: do NOT locally merge-then-PATCH the whole dict — that was a
@@ -1962,7 +1982,7 @@ def run_board(argv: list[str]) -> int:
             body = _link_patch_body(
                 self_name, args.key, args.value, replace=bool(args.replace),
             )
-            st, d = _patch_json(f"{gw}/board/cards/{args.id}", body, token)
+            st, d = _patch_json(f"{gw}/board/cards/{args.id}", {**body, **expected}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} link {args.key}={args.value}", aj)
 
     print("swarph board: unknown subcommand", file=sys.stderr)
