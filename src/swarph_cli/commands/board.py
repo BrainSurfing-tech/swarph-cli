@@ -436,15 +436,21 @@ def _format_stage_history(card: dict) -> str:
 def _format_schedules(data) -> str:
     """Card #1522: one readable line per job (host, unit, schedule, next run)."""
     hosts = data.get("hosts", {}) if isinstance(data, dict) else {}
+    if not hosts:
+        return "(no snapshot from any host since gateway restart)"
     lines = []
     for host in sorted(hosts):
         snap = hosts[host] or {}
-        for job in snap.get("jobs", []) or []:
+        jobs = snap.get("jobs", []) or []
+        if not jobs:
+            lines.append(f"{host}  (no jobs)")
+            continue
+        for job in jobs:
             lines.append(
                 f"{_s(job.get('host') or host)}  "
                 f"{_s(job.get('unit_or_cron_line'))}  "
                 f"{_s(job.get('schedule'))}  next={_s(job.get('next_run'))}")
-    return "\n".join(lines) if lines else "(no schedules)"
+    return "\n".join(lines) if lines else "(no jobs)"
 
 
 def _format_projects(data) -> str:
