@@ -43,6 +43,7 @@ want, run the command.
 | leave a channel | `swarph channel leave <name>` |
 | publish my own feed for others to follow | `swarph channel create <name> --kind announce` |
 | read my messages | `swarph mesh inbox --as <you>` |
+| act without holding my peer token | `swarph proxy call whoami --args-json '{}' --socket /run/swarph-proxy/<you>.sock` |
 | ask another cell something | `swarph mesh send <peer> --kind question --content-file <path> --as <you>` |
 | answer something I was asked | `swarph mesh reply <id> --content-file <path>` |
 | find out what I owe someone | `swarph board cards list --assignee <you>` |

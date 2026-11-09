@@ -1,0 +1,26 @@
+[Unit]
+Description=swarph credential-isolated proxy (%i)
+Requires=swarph-proxy@%i.socket
+After=network-online.target swarph-proxy@%i.socket
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=proxy-%i
+Group=proxy-%i
+Environment=HOME=/var/lib/swarph-proxy/%i
+UnsetEnvironment=MESH_GATEWAY_URL MESH_GATEWAY_TOKEN PYTHONPATH PYTHONHOME
+WorkingDirectory=/var/lib/swarph-proxy/%i
+ExecStart=/opt/swarph-proxy/bin/python -I -m swarph_cli.commands.proxy serve --cell %i
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/swarph-proxy/%i /var/log/swarph-proxy
+PrivateTmp=yes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

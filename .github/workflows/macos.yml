@@ -107,6 +107,9 @@ jobs:
           # #515: these two must EXECUTE on macos-latest. A skip is a fail.
           # Node ids, not a green summary — a collection change cannot pass silently.
           need = {
+              # Card #20: real getpeereid and PT_DENY_ATTACH must execute, not disappear behind a skip.
+              "test_real_peer_uid_denies_the_wrong_user_before_gateway",
+              "test_dumpability_is_disabled_in_the_real_child_kernel",
               "test_pid_under_walks_proc_ancestry",
               "test_the_injected_token_REACHES_a_composed_command[wrapper-env-not-gnu-timeout]",
           }
