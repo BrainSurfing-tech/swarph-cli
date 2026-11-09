@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.73.0 -- 2026-11-09
+
+- committee (card #1516, PR #692): new `swarph committee results <channel> [--motion ID] --json` prints a motion's gateway JSON exactly as returned (a sealed ballot stays body-less); without `--motion` it reads the open motion, and a closed motion needs `--motion ID`. `--json` is also added to `committee rooms open`, `committee motion`, and `committee post`.
+- mesh/cell (card #1513, PR #693): allowlisted `--json` on `swarph mesh peers`, `swarph cell selfcheck`, and `swarph cell probe` — projected rows only, never the raw gateway row, paths, URLs, tokens, or probe/selfcheck internals.
+- board (card #1443, PR #694): CLI readers accept `review` and `ready` alongside `build`/`test` — `READY_STAGES` is now `build`/`test`/`review`/`ready`, the operator stage filter accepts `review`, and `cards-ready` includes cards at stage `ready`.
+- board (card #1517, PR #696): expected-state guards on board writes — `--expect-stage` on card write verbs, `--expect-status` on obligation write verbs, and `--expect-accept-sha` on `obligations close`.
+- shim ledger (card #1521, PR #697): `wake-hook-output`, `codegraph-hook`, `watchdog`, and `sweep` record each shim firing as a `{ts, shim, cell, outcome}` line in `~/swarph_state/shim-ledger/firings.jsonl` via the shared `shim_ledger` helper.
+- subscribe (card #1523, PR #698): new `swarph subscribe add|list|cancel` for targeted event subscriptions — `add --trigger obligation_state|card_stage|time --target <id-or-HH:MMZ> [--cell <cell>] [--days N | --expires-at <ISO>]`, each verb with `--as` and `--json`; `--cell` defaults to yourself and only lab or the commander may name another cell.
+- board (card #1517, PR #699): `--expect-stage-version <N>` (nonnegative) on card writes, requiring the current stage-history version so a stale read cannot ABA a move; `--expect-status` help now states the persisted-value limitation (it does not distinguish offered from taken).
+
 ## Unreleased
 - mesh (card #1224): `swarph mesh send --reply-to <id>` posts `reply_to` with the DM (the gateway refuses an id that does not exist). Absent, the payload is unchanged. It does not set `thread_id`. The `swarph-panel` plugin uses it for its proposal DM.
 - bench: `<model>:codex` runs `codex exec` on the ChatGPT subscription, as a sibling of the claude `subscription` arm (`bench/codex_cli.py`). Isolated (`--ignore-user-config`, `--ignore-rules`, `--ephemeral`, read-only sandbox, empty temp cwd), billing keys stripped from the child env. The billing guard is checked before the call from `auth_mode` in `$CODEX_HOME/auth.json`, because the codex stream names no key source: anything but `chatgpt` is `billing:<mode>`, and an unreadable file is `billing:unknown`. Measured on codex-cli 0.157.0 (macOS arm64): 15,472 input tokens by default, 14,410 isolated. The floor is the CLI's own instructions, so input tokens are not comparable with the claude arm.
