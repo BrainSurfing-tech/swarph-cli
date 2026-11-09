@@ -36,6 +36,26 @@ def test_record_shim_firing_writes_to_swarph_state_shim_ledger(
         "outcome": "fired",
     }
 
+    # Unresolved identity (no cell arg, no SWARPH_SELF) -> records "unknown", NEVER "lab-ovh"
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    ok_unknown = shim_ledger.record_shim_firing(
+        "claude-settings-sessionstart-wake-hook",
+        outcome="fired",
+        ts="2026-11-09T16:31:00+00:00",
+    )
+    assert ok_unknown is True
+    rows = [
+        json.loads(line)
+        for line in target.read_text(encoding="utf-8").strip().splitlines()
+    ]
+    assert len(rows) == 2
+    assert rows[1] == {
+        "ts": "2026-11-09T16:31:00+00:00",
+        "shim": "claude-settings-sessionstart-wake-hook",
+        "cell": "unknown",
+        "outcome": "fired",
+    }
+
 
 def test_record_shim_firing_swallows_write_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

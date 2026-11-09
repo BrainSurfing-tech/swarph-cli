@@ -61,7 +61,7 @@ def record_shim_firing(
         resolved_cell = (
             (cell or "").strip()
             or (identity.declared(env=identity.SELF_ONLY)[0] or "").strip()
-            or "lab-ovh"
+            or "unknown"
         )
         resolved_ts = (ts or "").strip() or datetime.now(timezone.utc).isoformat()
         record = {
