@@ -95,6 +95,7 @@ FAKE_PEERS_FUTURE_GATEWAY_PAYLOAD = {
             "ratified": False,
             "last_seen": None,
             "last_health": "2026-11-09T12:00:00+00:00",
+            "swarph_cli_version": "9.9.9",  # top-level field ignored; only capabilities.swarph_cli_version is read
             "capabilities": {
                 "can_claim_tasks": True,
                 "internal_token_hint": "tok_should_not_appear",

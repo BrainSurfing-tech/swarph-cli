@@ -1222,16 +1222,14 @@ _PEERS_JSON_ALLOWLIST: tuple[str, ...] = (
 def _peer_json_row(p: dict) -> dict:
     """Project one /peers row onto _PEERS_JSON_ALLOWLIST (#1513).
 
+    swarph_cli_version is read strictly from capabilities.swarph_cli_version,
+    matching _run_peers so --stale-than and --json never disagree.
     last_health in GET /peers is a timestamp (mesh-gateway server.py:5257),
     never a verdict, so health_verdict comes only from health_verdict or
     last_health_status and is None (JSON null) otherwise.
     """
     caps = p.get("capabilities")
-    raw_ver = (
-        caps.get("swarph_cli_version")
-        if isinstance(caps, dict) and "swarph_cli_version" in caps
-        else p.get("swarph_cli_version")
-    )
+    raw_ver = caps.get("swarph_cli_version") if isinstance(caps, dict) else None
     version = (
         raw_ver.strip()
         if isinstance(raw_ver, str) and _version_tuple(raw_ver) is not None
