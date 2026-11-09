@@ -224,8 +224,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="emit a JSON list where each peer has ONLY the allowlisted keys "
              "{name, swarph_cli_version, last_seen, health_verdict} (#1513). "
              "swarph_cli_version is the registration-time report stored on "
-             "register (#535), never a live probe; raw /peers rows and "
-             "capabilities blobs are never dumped.",
+             "register (#535), never a live probe; health_verdict is null on "
+             "today's gateway because GET /peers does not return a status "
+             "(server.py:4700-4703); raw /peers rows and capabilities blobs "
+             "are never dumped.",
     )
 
     sidecar = sub.add_parser("sidecar", help="poll inbox and wake a tmux cell")
@@ -1218,7 +1220,12 @@ _PEERS_JSON_ALLOWLIST: tuple[str, ...] = (
 
 
 def _peer_json_row(p: dict) -> dict:
-    """Project one /peers row onto _PEERS_JSON_ALLOWLIST (#1513)."""
+    """Project one /peers row onto _PEERS_JSON_ALLOWLIST (#1513).
+
+    last_health in GET /peers is a timestamp (mesh-gateway server.py:5257),
+    never a verdict, so health_verdict comes only from health_verdict or
+    last_health_status and is None (JSON null) otherwise.
+    """
     caps = p.get("capabilities")
     raw_ver = (
         caps.get("swarph_cli_version")
@@ -1234,11 +1241,7 @@ def _peer_json_row(p: dict) -> dict:
     raw_health = (
         p.get("health_verdict")
         if p.get("health_verdict") is not None
-        else (
-            p.get("last_health_status")
-            if p.get("last_health_status") is not None
-            else p.get("last_health")
-        )
+        else p.get("last_health_status")
     )
     if isinstance(raw_health, dict):
         raw_health = raw_health.get("status") or raw_health.get("verdict")

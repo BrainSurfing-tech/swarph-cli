@@ -23,7 +23,49 @@ import pytest
 from swarph_cli.commands import cell, cell_probe as cp, cell_selfcheck as sc, mesh
 
 
-FAKE_PEERS_PAYLOAD = {
+# Exact 11 columns returned by today's mesh-gateway GET /peers (server.py:4700-4703).
+# Note: last_health is a TIMESTAMP (server.py:5257), not a health status verdict.
+TODAYS_GATEWAY_PEERS_COLUMNS = (
+    "name",
+    "url",
+    "capabilities",
+    "registered_at",
+    "last_health",
+    "last_seen",
+    "enabled",
+    "ratified",
+    "ratified_at",
+    "ratified_by",
+    "ratification_reason",
+)
+
+TODAYS_GATEWAY_PEERS_PAYLOAD = {
+    "peers": [
+        {
+            "name": "alpha-cell",
+            "url": "http://10.42.0.11:8787",
+            "capabilities": {
+                "swarph_cli_version": "0.72.47",
+                "can_claim_tasks": True,
+                "health": "claude-service /health internal dump on 127.0.0.1:8787 /home/ubuntu/secret",
+                "allowed_cwds_localhost": ["/home/ubuntu/private-repo"],
+            },
+            "registered_at": "2026-09-30T12:00:00+00:00",
+            "last_health": "2026-11-09T13:55:00+00:00",
+            "last_seen": "2026-11-09T14:00:00+00:00",
+            "enabled": 1,
+            "ratified": True,
+            "ratified_at": "2026-10-01T00:00:00+00:00",
+            "ratified_by": "lab-ovh",
+            "ratification_reason": "bootstrap handshake",
+        }
+    ]
+}
+
+# FUTURE GATEWAY SHAPE (not today's GET /peers in server.py:4700-4703):
+# carries a hypothetical future `last_health_status` column alongside extra
+# synthetic upstream fields to verify forward-compatibility and allowlist filtering.
+FAKE_PEERS_FUTURE_GATEWAY_PAYLOAD = {
     "peers": [
         {
             "name": "alpha-cell",
@@ -36,7 +78,7 @@ FAKE_PEERS_PAYLOAD = {
             "registered_at": "2026-09-30T12:00:00+00:00",
             "last_seen": "2026-11-09T14:00:00+00:00",
             "last_health": "2026-11-09T13:55:00+00:00",
-            "last_health_status": "healthy",
+            "last_health_status": "healthy",  # future gateway shape, not today's GET /peers
             "owner": "operator-internal",
             "extra_upstream_secret": " MUST_NEVER_LEAK_UPSTREAM_FIELD ",
             "capabilities": {
@@ -52,7 +94,7 @@ FAKE_PEERS_PAYLOAD = {
             "enabled": 1,
             "ratified": False,
             "last_seen": None,
-            "last_health": None,
+            "last_health": "2026-11-09T12:00:00+00:00",
             "capabilities": {
                 "can_claim_tasks": True,
                 "internal_token_hint": "tok_should_not_appear",
@@ -60,15 +102,72 @@ FAKE_PEERS_PAYLOAD = {
         },
     ]
 }
+FAKE_PEERS_PAYLOAD = FAKE_PEERS_FUTURE_GATEWAY_PAYLOAD
+
+
+def test_peers_json_todays_gateway_peers_row_shape(monkeypatch, capsys):
+    """Today's GET /peers row (exact columns from mesh-gateway server.py:4700-4703):
+    last_health is a timestamp (server.py:5257), so health_verdict MUST be null
+    (None), and url and capabilities (plus all other non-allowlisted columns)
+    must not leak."""
+    row = TODAYS_GATEWAY_PEERS_PAYLOAD["peers"][0]
+    assert set(row.keys()) == set(TODAYS_GATEWAY_PEERS_COLUMNS)
+    assert list(row.keys()) == list(TODAYS_GATEWAY_PEERS_COLUMNS)
+
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "shared-auth")
+    monkeypatch.setattr(
+        mesh,
+        "_http_get_json",
+        lambda url, token, *, timeout=10.0: (200, TODAYS_GATEWAY_PEERS_PAYLOAD),
+    )
+
+    rc = mesh.run_mesh(["peers", "--json", "--gateway", "http://127.0.0.1:8788"])
+    assert rc == 0
+    raw_out = capsys.readouterr().out
+    data = json.loads(raw_out)
+
+    assert data == [
+        {
+            "name": "alpha-cell",
+            "swarph_cli_version": "0.72.47",
+            "last_seen": "2026-11-09T14:00:00+00:00",
+            "health_verdict": None,
+        }
+    ]
+    assert data[0]["health_verdict"] is None
+
+    for forbidden in (
+        "url",
+        "10.42.0.11",
+        "8787",
+        "capabilities",
+        "can_claim_tasks",
+        "127.0.0.1:8787",
+        "/home/ubuntu",
+        "private-repo",
+        "registered_at",
+        "2026-09-30T12:00:00+00:00",
+        "last_health",
+        "2026-11-09T13:55:00+00:00",
+        "enabled",
+        "ratified",
+        "2026-10-01T00:00:00+00:00",
+        "ratification_reason",
+        "bootstrap handshake",
+    ):
+        assert forbidden not in raw_out, f"leaked {forbidden!r} from today's /peers row"
 
 
 def test_peers_json_allowlist_exact_keys_and_no_leak(monkeypatch, capsys):
-    """(1) `swarph mesh peers --json` emits a JSON list where each peer has
-    EXACTLY {name, swarph_cli_version, last_seen, health_verdict} and never
-    leaks capabilities or extra /peers columns."""
+    """Future gateway shape fixture (carrying last_health_status alongside extra
+    upstream fields): `swarph mesh peers --json` emits a JSON list where each
+    peer has EXACTLY {name, swarph_cli_version, last_seen, health_verdict} and
+    never leaks capabilities, last_health timestamps, or extra /peers columns."""
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "shared-auth")
     monkeypatch.setattr(
-        mesh, "_http_get_json", lambda url, token, *, timeout=10.0: (200, FAKE_PEERS_PAYLOAD)
+        mesh,
+        "_http_get_json",
+        lambda url, token, *, timeout=10.0: (200, FAKE_PEERS_FUTURE_GATEWAY_PAYLOAD),
     )
 
     rc = mesh.run_mesh(["peers", "--json", "--gateway", "http://127.0.0.1:8788"])
@@ -108,28 +207,33 @@ def test_peers_json_allowlist_exact_keys_and_no_leak(monkeypatch, capsys):
         "tok_should_not_appear",
         "ratification_reason",
         "operator-internal",
+        "2026-11-09T13:55:00+00:00",
+        "2026-11-09T12:00:00+00:00",
     ):
         assert forbidden not in raw_out, f"leaked {forbidden!r} into peers --json"
 
 
 def test_peers_help_labels_version_as_registration_time_report():
     parser = mesh._build_parser()
-    # Find the peers subparser help text
-    help_text = parser.format_help()
     peers_sub = [
         action
         for action in parser._actions
         if isinstance(action, pytest.importorskip("argparse")._SubParsersAction)
     ][0].choices["peers"]
-    peers_help = peers_sub.format_help()
+    peers_help = " ".join(peers_sub.format_help().split())
     assert "--json" in peers_help
     assert "registration-time report" in peers_help
+    assert "health_verdict is null on today's gateway" in peers_help
+    assert "GET /peers does not return a status" in peers_help
+    assert "server.py:4700-4703" in peers_help
 
 
 def test_peers_text_output_without_json_is_unchanged(monkeypatch, capsys):
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "shared-auth")
     monkeypatch.setattr(
-        mesh, "_http_get_json", lambda url, token, *, timeout=10.0: (200, FAKE_PEERS_PAYLOAD)
+        mesh,
+        "_http_get_json",
+        lambda url, token, *, timeout=10.0: (200, FAKE_PEERS_FUTURE_GATEWAY_PAYLOAD),
     )
     rc = mesh.run_mesh(["peers", "--gateway", "http://127.0.0.1:8788"])
     assert rc == 0
