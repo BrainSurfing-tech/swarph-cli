@@ -47,10 +47,33 @@ class Verdict:
     """One probe's answer. `consumer` is mandatory: the same endpoint is reached by
     different routes (MCP-server env vs a shell invocation), and a verdict that does
     not say which route it measured reported healthy on a box where the other was
-    broken."""
+    broken. `reason` is the short verdict-only explanation for `--json` (#1513) —
+    never carrying a path, URL, token, or file/memory content."""
     state: int
     consumer: str
     detail: str
+    reason: str = ""
+
+
+# #1513: partner clients (A-I-D chantier 37) get verdicts only (check, verdict,
+# short reason) — never what the probe read (no path, URL, token, or content).
+_PROBE_JSON_ALLOWLIST: tuple[str, ...] = (
+    "check",
+    "verdict",
+    "reason",
+)
+
+
+def short_reason(name: str, verdict: Verdict) -> str:
+    """Short verdict-only reason for `--json`, never `verdict.detail` (#1513)."""
+    if verdict.reason:
+        return verdict.reason
+    return "%s: %s" % (verdict.consumer or name, state_name(verdict.state).lower())
+
+
+def _probe_json_row(raw_row: dict) -> dict:
+    """Project an internal probe record onto _PROBE_JSON_ALLOWLIST (#1513)."""
+    return {k: raw_row[k] for k in _PROBE_JSON_ALLOWLIST}
 
 
 @dataclass
@@ -104,19 +127,26 @@ def probe_mcp_config(path: str | None = None) -> Verdict:
         found = read_mcp_env(path)
     except (OSError, ValueError) as exc:
         return Verdict(State.UNREADABLE, "mcp-server",
-                       "cannot read %s: %s" % (path, exc))
+                       "cannot read %s: %s" % (path, exc),
+                       reason="mcp config unreadable")
     if not found:
         return Verdict(State.NO_ENTRY, "mcp-server",
                        "no swarph MCP entry in %s — this box reaches gbrain another "
-                       "way; that is unmeasured, not healthy" % path)
+                       "way; that is unmeasured, not healthy" % path,
+                       reason="no swarph mcp entry configured")
     missing = [w for w, v in found if not v]
     if missing:
         return Verdict(State.ABSENT, "mcp-server",
                        "%s missing in: %s (of %d entr%s)"
                        % (ENV_KEY, ", ".join(missing), len(found),
-                          "y" if len(found) == 1 else "ies"))
+                          "y" if len(found) == 1 else "ies"),
+                       reason="%s missing in %d of %d mcp entr%s"
+                              % (ENV_KEY, len(missing), len(found),
+                                 "y" if len(found) == 1 else "ies"))
     return Verdict(State.PRESENT, "mcp-server",
-                   "; ".join("%s -> %s" % (w, v) for w, v in found))
+                   "; ".join("%s -> %s" % (w, v) for w, v in found),
+                   reason="%s configured (%d entr%s)"
+                          % (ENV_KEY, len(found), "y" if len(found) == 1 else "ies"))
 
 
 def probe_cli_path() -> Verdict:
@@ -131,13 +161,16 @@ def probe_cli_path() -> Verdict:
         from .brain_ask import _resolve_endpoint  # noqa: PLC0415 — see docstring
     except Exception as exc:  # noqa: BLE001 — an unimportable package is a verdict
         return Verdict(State.CLI_PATH_UNSET, "shell-invocation",
-                       "cannot import swarph_cli.brain_ask: %s" % exc)
+                       "cannot import swarph_cli.brain_ask: %s" % exc,
+                       reason="brain_ask module unimportable")
     try:
         url = _resolve_endpoint()
     except Exception as exc:  # noqa: BLE001 — GatewayNotConfigured and friends
         return Verdict(State.CLI_PATH_UNSET, "shell-invocation",
-                       "%s: %s" % (type(exc).__name__, str(exc).splitlines()[0]))
-    return Verdict(State.PRESENT, "shell-invocation", "resolves -> %s" % url)
+                       "%s: %s" % (type(exc).__name__, str(exc).splitlines()[0]),
+                       reason="cli endpoint unset (%s)" % type(exc).__name__)
+    return Verdict(State.PRESENT, "shell-invocation", "resolves -> %s" % url,
+                   reason="cli endpoint resolves")
 
 
 def gateway_memory_list(gateway: str, token: str, timeout: int = 15) -> list[str]:
@@ -168,23 +201,30 @@ def probe_gbrain_two_path(gateway: str, token: str,
         slugs = list_fn(gateway, token)
     except Exception as exc:  # noqa: BLE001 — reference path down = no known answer
         return Verdict(State.UNREADABLE, "gateway+mcp-tool",
-                       "no known answer available: gateway leg failed (%s)" % exc)
+                       "no known answer available: gateway leg failed (%s)" % exc,
+                       reason="no known answer: gateway leg failed (%s)" % type(exc).__name__)
     if not slugs:
         return Verdict(State.UNREADABLE, "gateway+mcp-tool",
-                       "no known answer available: gateway returned 0 slugs")
+                       "no known answer available: gateway returned 0 slugs",
+                       reason="no known answer: gateway returned 0 slugs")
     try:
         got = tool_list()
     except Exception as exc:  # noqa: BLE001
         return Verdict(State.ABSENT, "gateway+mcp-tool",
                        "gateway answered %d slugs; tool raised %s"
-                       % (len(slugs), type(exc).__name__))
+                       % (len(slugs), type(exc).__name__),
+                       reason="gateway answered %d slugs; tool raised %s"
+                              % (len(slugs), type(exc).__name__))
     if not got:
         return Verdict(State.ABSENT, "gateway+mcp-tool",
                        "gateway answered %d slugs (e.g. %s); tool returned nothing "
                        "— this is 'cannot ask', not 'nothing to return'"
-                       % (len(slugs), slugs[0]))
+                       % (len(slugs), slugs[0]),
+                       reason="gateway answered %d slugs; tool returned nothing" % len(slugs))
+    count_got = len(list(got))
     return Verdict(State.PRESENT, "gateway+mcp-tool",
-                   "both paths answered (gateway %d, tool %d)" % (len(slugs), len(list(got))))
+                   "both paths answered (gateway %d, tool %d)" % (len(slugs), count_got),
+                   reason="both paths answered (gateway %d, tool %d)" % (len(slugs), count_got))
 
 
 def self_sha256() -> str:
@@ -264,11 +304,13 @@ def run_gbrain_two_path() -> Verdict:
         from swarph_cli import tokens  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001
         return Verdict(State.UNREADABLE, "gateway+mcp-tool",
-                       "cannot import resolver: %s" % exc)
+                       "cannot import resolver: %s" % exc,
+                       reason="cannot import resolver")
     gw = env_gateway() or (os.environ.get("SWARPH_BRAIN_GATEWAY") or "").strip()
     if not gw:
         return Verdict(State.NO_ENTRY, "gateway+mcp-tool",
-                       "MESH_GATEWAY_URL unset — two-path has no gateway leg")
+                       "MESH_GATEWAY_URL unset — two-path has no gateway leg",
+                       reason="MESH_GATEWAY_URL unset")
     self_name = os.environ.get("SWARPH_SELF") or os.environ.get("SWARPH_NODE")
     try:
         res = tokens.resolve_token(self_name, None,
@@ -276,10 +318,12 @@ def run_gbrain_two_path() -> Verdict:
         token = (res.token if res else "") or ""
     except Exception as exc:  # noqa: BLE001
         return Verdict(State.UNREADABLE, "gateway+mcp-tool",
-                       "token resolve failed: %s" % exc)
+                       "token resolve failed: %s" % exc,
+                       reason="token resolve failed")
     if not token:
         return Verdict(State.UNREADABLE, "gateway+mcp-tool",
-                       "no mesh token — two-path has no gateway credential")
+                       "no mesh token — two-path has no gateway credential",
+                       reason="no mesh token")
     return probe_gbrain_two_path(gw, token, tool_list=_mcp_memory_list)
 
 
@@ -307,6 +351,10 @@ def run_cell_probe(argv: list[str]) -> int:
     p.add_argument("--can-fail", action="store_true",
                    help="run each probe's can-fail case instead, and verify it "
                         "produces a NON-present verdict")
+    p.add_argument("--json", action="store_true",
+                   help="emit verdicts only (check, verdict, reason) as JSON; "
+                        "never prints read values, paths, URLs, tokens, or "
+                        "file contents (#1513)")
     args = p.parse_args(argv)
 
     probes = PROBES
@@ -318,18 +366,42 @@ def run_cell_probe(argv: list[str]) -> int:
         probes = {args.only: PROBES[args.only]}
 
     worst = State.PRESENT
-    print("swarph cell probe  (cell_probe.py sha256 %s)" % self_sha256())
+    json_rows: list[dict] = []
+    if not args.json:
+        print("swarph cell probe  (cell_probe.py sha256 %s)" % self_sha256())
     for name, probe in sorted(probes.items()):
         verdict = probe.can_fail() if args.can_fail else probe.run()
         if args.can_fail and verdict.state == State.PRESENT:
-            print("  %-12s [%-8s] CAN-FAIL DID NOT FAIL — probe is unproven"
-                  % (name, "BROKEN"))
+            raw_row = {
+                "check": name,
+                "verdict": "BROKEN",
+                "reason": "can-fail case did not fail",
+                "consumer": probe.consumer,
+                "detail": verdict.detail,
+                "state": verdict.state,
+            }
+            json_rows.append(_probe_json_row(raw_row))
+            if not args.json:
+                print("  %-12s [%-8s] CAN-FAIL DID NOT FAIL — probe is unproven"
+                      % (name, "BROKEN"))
             worst = max(worst, State.UNREADABLE)
             continue
-        print("  %-12s [%-14s] consumer=%-16s %s"
-              % (name, state_name(verdict.state), verdict.consumer, verdict.detail))
+        raw_row = {
+            "check": name,
+            "verdict": state_name(verdict.state),
+            "reason": short_reason(name, verdict),
+            "consumer": verdict.consumer,
+            "detail": verdict.detail,
+            "state": verdict.state,
+        }
+        json_rows.append(_probe_json_row(raw_row))
+        if not args.json:
+            print("  %-12s [%-14s] consumer=%-16s %s"
+                  % (name, state_name(verdict.state), verdict.consumer, verdict.detail))
         if not args.can_fail:
             worst = max(worst, verdict.state)
+    if args.json:
+        print(json.dumps(json_rows, indent=2))
     return 0 if args.can_fail else worst
 
 

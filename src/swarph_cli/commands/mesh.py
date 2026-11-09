@@ -218,6 +218,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="mesh-gateway base URL",
     )
     peers.add_argument("--token-file", default=None, help="explicit bearer token file")
+    peers.add_argument(
+        "--json",
+        action="store_true",
+        help="emit a JSON list where each peer has ONLY the allowlisted keys "
+             "{name, swarph_cli_version, last_seen, health_verdict} (#1513). "
+             "swarph_cli_version is the registration-time report stored on "
+             "register (#535), never a live probe; health_verdict is null on "
+             "today's gateway because GET /peers does not return a status "
+             "(server.py:4700-4703); raw /peers rows and capabilities blobs "
+             "are never dumped.",
+    )
 
     sidecar = sub.add_parser("sidecar", help="poll inbox and wake a tmux cell")
     sidecar.add_argument("--tmux-target", default=None, help="tmux target pane")
@@ -1196,6 +1207,53 @@ def _version_is_stale(reported: object, cutoff: str) -> Optional[bool]:
     return have + (0,) * (width - len(have)) < want + (0,) * (width - len(want))
 
 
+# #1513: partner clients (A-I-D chantier 37) get a fixed allowlisted shape per
+# peer — never the raw /peers row or its capabilities blob, which can carry
+# claude-service /health snapshots, host paths, URLs, and other internals.
+# swarph_cli_version is the registration-time report stored by `mesh register`.
+_PEERS_JSON_ALLOWLIST: tuple[str, ...] = (
+    "name",
+    "swarph_cli_version",
+    "last_seen",
+    "health_verdict",
+)
+
+
+def _peer_json_row(p: dict) -> dict:
+    """Project one /peers row onto _PEERS_JSON_ALLOWLIST (#1513).
+
+    swarph_cli_version is read strictly from capabilities.swarph_cli_version,
+    matching _run_peers so --stale-than and --json never disagree.
+    last_health in GET /peers is a timestamp (mesh-gateway server.py:5257),
+    never a verdict, so health_verdict comes only from health_verdict or
+    last_health_status and is None (JSON null) otherwise.
+    """
+    caps = p.get("capabilities")
+    raw_ver = caps.get("swarph_cli_version") if isinstance(caps, dict) else None
+    version = (
+        raw_ver.strip()
+        if isinstance(raw_ver, str) and _version_tuple(raw_ver) is not None
+        else None
+    )
+    last_seen = p.get("last_seen") if isinstance(p.get("last_seen"), str) else None
+    raw_health = (
+        p.get("health_verdict")
+        if p.get("health_verdict") is not None
+        else p.get("last_health_status")
+    )
+    if isinstance(raw_health, dict):
+        raw_health = raw_health.get("status") or raw_health.get("verdict")
+    health_verdict = raw_health if isinstance(raw_health, str) else None
+    full_row = {
+        **p,
+        "name": p["name"],
+        "swarph_cli_version": version,
+        "last_seen": last_seen,
+        "health_verdict": health_verdict,
+    }
+    return {k: full_row[k] for k in _PEERS_JSON_ALLOWLIST}
+
+
 def _run_peers(args: argparse.Namespace) -> int:
     """#535: answer "which peers run older than X" from the STORED field —
     never by asking each cell out of band, never by assuming.
@@ -1231,6 +1289,7 @@ def _run_peers(args: argparse.Namespace) -> int:
         return 2
 
     stale, unreported, current = [], [], []
+    json_rows: list[dict] = []
     for p in peers:
         if not isinstance(p, dict) or not isinstance(p.get("name"), str):
             continue
@@ -1240,10 +1299,18 @@ def _run_peers(args: argparse.Namespace) -> int:
         verdict = _version_is_stale(version, cutoff) if cutoff else None
         if cutoff and verdict is True:
             stale.append((p["name"], version))
+            json_rows.append(_peer_json_row(p))
         elif not version_is_valid:
             unreported.append(p["name"])
+            json_rows.append(_peer_json_row(p))
         else:
             current.append((p["name"], version))
+            if not cutoff:
+                json_rows.append(_peer_json_row(p))
+
+    if getattr(args, "json", False):
+        print(json.dumps(json_rows, indent=2))
+        return 0
 
     if cutoff:
         for name, version in stale:
