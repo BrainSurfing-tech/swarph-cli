@@ -177,6 +177,8 @@ _WIRE_CHANNEL = {"id": 92, "from_node": "cell-one", "channel": "releases", "kind
 @pytest.fixture
 def wire_gateway(tmp_path):
     """A real HTTP boundary with a closed independent gateway route registry."""
+    if os.name != "posix":
+        pytest.skip("the credential-holding proxy is Unix-only; pure routing still runs")
     from swarph_cli.local_proxy import Config, Proxy
 
     routes = {
