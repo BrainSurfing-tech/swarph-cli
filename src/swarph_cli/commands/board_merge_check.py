@@ -55,7 +55,7 @@ from typing import Optional
 # NOTE THE DEPENDENCY THIS CREATES: card #141 — move_ready is unreachable on UNASSIGNED
 # cards — now blocks the merge process too, because a PR card nobody has claimed cannot
 # be flagged ready by the peer who reviewed it.
-READY_STAGES = ("build", "test")
+READY_STAGES = ("build", "test", "review", "ready")
 
 # Paths whose modification makes a PR PERMANENTLY HUMAN-MERGE-ONLY.
 # A process that can ship changes to its own gate has no gate.
