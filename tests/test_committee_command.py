@@ -250,7 +250,22 @@ def test_results_no_motions_is_an_error(monkeypatch, capsys):
     _spy(monkeypatch, "get_json", payload={"motions": []})
     rc = cm.run_committee(["results", "fusion-aid", "--json"])
     assert rc == 2
-    assert "no motions" in capsys.readouterr().err
+    assert ("no open motion on fusion-aid; a closed motion needs --motion ID "
+            "(the gateway lists open motions only)") in capsys.readouterr().err
+
+
+def test_results_closed_motion_needs_motion_id(monkeypatch, capsys):
+    # The gateway list route returns only open motions, so it is empty here
+    # even though a closed motion exists and its detail route serves it by id.
+    closed = _detail_payload(id=4, phase="closed")
+    _router(monkeypatch, {"motions": []}, closed)
+    rc = cm.run_committee(["results", "fusion-aid"])
+    assert rc == 2
+    assert ("no open motion on fusion-aid; a closed motion needs --motion ID "
+            "(the gateway lists open motions only)") in capsys.readouterr().err
+    rc = cm.run_committee(["results", "fusion-aid", "--motion", "4"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == closed
 
 
 def test_results_gateway_refusal_surfaces(monkeypatch, capsys):
@@ -266,20 +281,6 @@ def test_motion_list_json_parses(monkeypatch, capsys):
     rc = cm.run_committee(["motion", "fusion-aid", "--json"])
     assert rc == 0
     assert json.loads(capsys.readouterr().out) == payload
-
-
-def test_motion_json_all_includes_closed_motions_the_route_returns(monkeypatch, capsys):
-    payload = {"motions": [
-        {"id": 7, "channel": "fusion-aid", "phase": "vote",
-         "positions_deadline": "p", "rebuttal_deadline": "r", "vote_deadline": "v"},
-        {"id": 4, "channel": "fusion-aid", "phase": "closed",
-         "positions_deadline": "p", "rebuttal_deadline": "r", "vote_deadline": "v"},
-    ]}
-    _spy(monkeypatch, "get_json", payload=payload)
-    rc = cm.run_committee(["motion", "fusion-aid", "--json", "--all"])
-    assert rc == 0
-    parsed = json.loads(capsys.readouterr().out)
-    assert [m["id"] for m in parsed["motions"]] == [7, 4]
 
 
 def test_motion_open_json_parses(monkeypatch, capsys):

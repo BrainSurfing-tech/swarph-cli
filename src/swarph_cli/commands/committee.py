@@ -50,10 +50,6 @@ def _build_parser() -> argparse.ArgumentParser:
     motion.add_argument("--vote-deadline", default=None, help="ISO deadline")
     motion.add_argument("--json", action="store_true",
                         help="print the gateway's response JSON on stdout")
-    motion.add_argument("--all", action="store_true",
-                        help="list every motion the gateway list route returns, "
-                             "including closed ones if it returns them (the client "
-                             "applies no filtering either way)")
     add_common_args(motion)
 
     post = sub.add_parser(
@@ -71,7 +67,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "results", help="print a motion's results JSON exactly as the gateway returns it")
     results.add_argument("channel", help="committee channel name")
     results.add_argument("--motion", default=None,
-                         help="motion id (default: the latest motion on the channel)")
+                         help="motion id (default: the open motion on the channel; "
+                              "a closed motion needs --motion ID because the gateway "
+                              "lists open motions only)")
     results.add_argument("--json", action="store_true",
                          help="print the gateway's response JSON on stdout (the "
                               "default output of this verb)")
@@ -192,8 +190,6 @@ def _run_motion(args: argparse.Namespace) -> int:
     if not _ok(status):
         return _fail("motion", status, payload)
     if args.json:
-        # --all needs no client work: the listing never filtered. Every motion
-        # the route returns (open or closed) is already in this payload.
         _print_json(payload)
         return 0
     motions = payload.get("motions", []) if isinstance(payload, dict) else []
@@ -240,7 +236,9 @@ def _run_results(args: argparse.Namespace) -> int:
             return _fail("results", status, payload)
         motions = payload.get("motions", []) if isinstance(payload, dict) else []
         if not motions:
-            raise RuntimeError(f"no motions on channel {args.channel!r}")
+            raise RuntimeError(
+                f"no open motion on {args.channel}; a closed motion needs "
+                f"--motion ID (the gateway lists open motions only)")
         motion_id = _latest_motion(motions)["id"]
     status, payload = get_json(
         f"{base}/committee/{_quote(args.channel)}/motions/{motion_id}", token)
