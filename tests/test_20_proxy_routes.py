@@ -43,6 +43,11 @@ def test_fixed_card_read_pins_actor_and_rejects_raw_route_controls():
 @pytest.mark.parametrize("verb,args,expected", [
     # Gateway server.py:4639,4698,21879,16638,17549,7360,12103.
     ("whoami", {}, ("GET", "/whoami", None)),
+    # mesh-gateway@d9b3865/server.py:13460-13469,16618-16683.
+    ("board.projects.list", {}, ("GET", "/board/projects?actor=cell-one", None)),
+    ("board.cards.list", {"project": 7, "stage": "ready", "assignee": "peer-two",
+                          "label": "proxy", "q": "clé &actor=root?"},
+     ("GET", "/board/cards?actor=cell-one&project=7&stage=ready&assignee=peer-two&label=proxy&q=cl%C3%A9+%26actor%3Droot%3F", None)),
     ("mesh.peers", {"enabled_only": False}, ("GET", "/peers?enabled_only=false", None)),
     ("rights", {}, ("GET", "/peers/cell-one/grants", None)),
     # mesh-gateway@657e7e9/server.py:17808, actor is always the proxy cell.
@@ -60,6 +65,19 @@ def test_fixed_card_read_pins_actor_and_rejects_raw_route_controls():
 ])
 def test_closed_read_routes_match_gateway_fixtures(verb, args, expected):
     assert route_for(verb, args, "cell-one") == expected
+
+
+@pytest.mark.parametrize("stage", ["proposed", "idea", "spec", "plan", "build", "review", "ready", "done", "parked"])
+def test_card_list_accepts_the_deployed_stage_check_values(stage):
+    # mesh-gateway@d9b3865/server.py:1085 CHECK, not the legacy test alias.
+    assert route_for("board.cards.list", {"stage": stage}, "cell-one") == (
+        "GET", f"/board/cards?actor=cell-one&stage={stage}", None)
+
+
+def test_card_search_character_limit_is_inclusive_and_urlencoded():
+    text = "é"*1000
+    assert route_for("board.cards.list", {"q": text}, "cell-one")[1] == (
+        "/board/cards?actor=cell-one&q=" + "%C3%A9"*1000)
 
 
 @pytest.mark.parametrize("verb,args,expected", [
@@ -95,6 +113,7 @@ def test_card_ids_are_positive_integers_without_coercion(value, verb):
 
 @pytest.mark.parametrize("verb,args", [
     ("whoami", {}), ("board.card.get", {"id": 20}),
+    ("board.projects.list", {}), ("board.cards.list", {}),
     ("board.cards.graph", {"id": 20}),
     ("board.cards.thread", {"id": 20}), ("board.obligations.list", {}),
     ("mesh.peers", {}), ("rights", {}), ("mesh.inbox", {}),
@@ -230,6 +249,15 @@ _WIRE_THREAD = "12345678-1234-4321-8123-123456789abc"
 _WIRE_CARD = {"id": 20, "project_id": 1, "title": "proxy fixture", "stage": "plan",
               "stage_version": 0, "assignee": "peer-two", "thread_uuid": _WIRE_THREAD,
               "tasks": [], "open_obligations": []}
+# Copied envelopes: mesh-gateway@d9b3865/server.py:13461-13469,16619-16683.
+# The gateway, not the proxy, has already applied project readability.
+_WIRE_PROJECTS = {"projects": [{"id": 1, "slug": "proxy-fixture", "title": "visible project",
+                               "goal": "fixture goal", "status": "active",
+                               "owner_orchestrator": "lab-ovh", "created_by": "lab-ovh"}]}
+_WIRE_DUE = {"overdue": 0, "today": 0, "upcoming": 0, "undated": 1,
+             "unparseable": 0, "closed": 0, "as_of": "2026-11-09T12:00:00+00:00"}
+_WIRE_CARDS = {"cards": [{**_WIRE_CARD, "labels": ["proxy"]}], "due": _WIRE_DUE}
+_WIRE_CARD_SEARCH = {"cards": [], "due": {**_WIRE_DUE, "undated": 0}, "searched": 1}
 _WIRE_OBLIGATIONS = {"obligations": [], "as_of": "2026-11-09T12:00:00+00:00", "truncated": False}
 _WIRE_DM = {"id": 91, "from_node": "cell-one", "to_node": "peer-two", "kind": "status",
             "thread_id": None, "created_at": "2026-11-09T12:00:00Z", "closed_obligations": [],
@@ -250,6 +278,10 @@ def wire_gateway(tmp_path):
     from swarph_cli.local_proxy import Config, Proxy
 
     routes = {
+        ("GET", "/board/projects?actor=cell-one"): _WIRE_PROJECTS,
+        ("GET", "/board/cards?actor=cell-one"): _WIRE_CARDS,
+        ("GET", "/board/cards?actor=cell-one&project=1&stage=plan&assignee=peer-two&label=proxy&q=cl%C3%A9+%26actor%3Droot%3F"):
+            _WIRE_CARD_SEARCH,
         ("GET", "/whoami"): {"regime": "per_peer_token", "peer": "cell-one", "key_generation": 1,
                              "kind": None, "is_root": False, "is_operator": False, "node": None,
                              "role": None, "scopes_note": "fixture credential"},
@@ -326,6 +358,12 @@ def wire_gateway(tmp_path):
 
 
 @pytest.mark.parametrize("verb,args,expected_wire,expected_body", [
+    ("board.projects.list", {}, [("GET", "/board/projects?actor=cell-one", None)], _WIRE_PROJECTS),
+    ("board.cards.list", {}, [("GET", "/board/cards?actor=cell-one", None)], _WIRE_CARDS),
+    ("board.cards.list", {"project": 1, "stage": "plan", "assignee": "peer-two",
+                          "label": "proxy", "q": "clé &actor=root?"},
+     [("GET", "/board/cards?actor=cell-one&project=1&stage=plan&assignee=peer-two&label=proxy&q=cl%C3%A9+%26actor%3Droot%3F", None)],
+     _WIRE_CARD_SEARCH),
     ("whoami", {}, [("GET", "/whoami", None)],
      {"regime": "per_peer_token", "peer": "cell-one", "key_generation": 1, "kind": None,
       "is_root": False, "is_operator": False, "node": None, "role": None, "scopes_note": "fixture credential"}),
@@ -385,6 +423,50 @@ def test_every_verb_round_trips_through_real_http(wire_gateway, verb, args, expe
     assert result == {"request_id": request_id, "ok": True, "status": 200, "body": expected_body}
     assert seen == expected_wire
     assert authenticated and all(authenticated)
+
+
+@pytest.mark.parametrize("verb", ["board.projects.list", "board.cards.list"])
+@pytest.mark.parametrize("extra", ["path", "method", "headers", "actor", "filter", "since"])
+def test_board_list_unknown_filters_and_route_controls_never_reach_http(wire_gateway, verb, extra):
+    proxy, seen, _, _ = wire_gateway
+    value = {"actor": "commander", "since": "2026-11-09T12:00:00Z"}.get(extra, "/peers/register")
+    result = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                            "verb": verb, "args": {extra: value}})
+    assert result["error"] == "bad_args" and seen == []
+
+
+@pytest.mark.parametrize("args", [{"project": 1}, {"stage": "ready"}, {"assignee": "cell-one"},
+                                 {"label": "proxy"}, {"q": "search"}])
+def test_projects_list_does_not_advertise_filters_the_gateway_ignores(wire_gateway, args):
+    proxy, seen, _, _ = wire_gateway
+    result = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                            "verb": "board.projects.list", "args": args})
+    assert result["error"] == "bad_args" and seen == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("project", True), ("project", False), ("project", 0), ("project", -1),
+    ("project", 1.5), ("project", "1"), ("project", "proxy-fixture"),
+    ("project", None), ("project", {}), ("project", []),
+    ("stage", "test"), ("stage", "unknown"), ("stage", True), ("stage", None),
+    ("assignee", "../peer"), ("assignee", "peer&actor=root"), ("assignee", "x"*65),
+    ("assignee", 1), ("assignee", None), ("label", "proxy&actor=root"),
+    ("label", ""), ("label", "x"*65), ("label", True), ("label", []),
+    ("q", ""), ("q", " \n\t"), ("q", "x"*1001), ("q", "é"*1001),
+    ("q", 1), ("q", True), ("q", None), ("q", {}), ("q", []),
+])
+def test_board_card_list_untyped_filters_are_refused_before_http(wire_gateway, field, value):
+    proxy, seen, _, _ = wire_gateway
+    result = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                            "verb": "board.cards.list", "args": {field: value}})
+    assert result["error"] == "bad_args" and seen == []
+
+
+@pytest.mark.parametrize("path", ["/board/projects", "GET /board/cards", "board.cards.list?actor=root"])
+def test_raw_list_paths_never_reach_http(wire_gateway, path):
+    proxy, seen, _, _ = wire_gateway
+    result = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c", "verb": path, "args": {}})
+    assert result["error"] == "verb_not_allowed" and seen == []
 
 
 @pytest.mark.parametrize("fields", [
