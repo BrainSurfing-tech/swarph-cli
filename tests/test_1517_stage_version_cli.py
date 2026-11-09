@@ -4,7 +4,7 @@ import urllib.request
 import pytest
 
 from swarph_cli.main import main
-from tests.test_1517_expected_state_cli import cli_http
+from test_1517_expected_state_cli import cli_http
 
 
 def test_move_forwards_zero_version_without_requiring_a_stage_guard(cli_http):
