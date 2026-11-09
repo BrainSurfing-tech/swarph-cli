@@ -5,6 +5,12 @@ the room via ``motion <channel>`` (a GET list, added in the card-#1323 gateway
 PR) so a harness that blocks raw HTTP can still ballot. Chair-only verbs:
 ``rooms open``, ``motion <channel> --open``, ``recast``, ``baseline-absent``.
 Uses the shared token resolver and NEVER prints the token.
+
+Card #1516 adds ``results <channel> [--motion ID] --json`` and ``--json`` on
+``rooms open`` / ``motion`` / ``post``. ``results`` prints the gateway's motion
+JSON exactly as returned: a ballot body appears ONLY where the gateway
+returned one — the client never adds, infers, copies, or synthesizes a body
+from any other field, so a sealed round stays body-less on stdout.
 """
 
 from __future__ import annotations
@@ -42,6 +48,12 @@ def _build_parser() -> argparse.ArgumentParser:
     motion.add_argument("--positions-deadline", default=None, help="ISO deadline")
     motion.add_argument("--rebuttal-deadline", default=None, help="ISO deadline")
     motion.add_argument("--vote-deadline", default=None, help="ISO deadline")
+    motion.add_argument("--json", action="store_true",
+                        help="print the gateway's response JSON on stdout")
+    motion.add_argument("--all", action="store_true",
+                        help="list every motion the gateway list route returns, "
+                             "including closed ones if it returns them (the client "
+                             "applies no filtering either way)")
     add_common_args(motion)
 
     post = sub.add_parser(
@@ -51,7 +63,19 @@ def _build_parser() -> argparse.ArgumentParser:
     post.add_argument("--body-file", required=True, help="the ballot body, read verbatim")
     post.add_argument("--outcome", default=None, choices=("pass", "cannot_evaluate"),
                       help="sealed outcome (positions/vote only; default pass)")
+    post.add_argument("--json", action="store_true",
+                      help="print the gateway's response JSON on stdout")
     add_common_args(post)
+
+    results = sub.add_parser(
+        "results", help="print a motion's results JSON exactly as the gateway returns it")
+    results.add_argument("channel", help="committee channel name")
+    results.add_argument("--motion", default=None,
+                         help="motion id (default: the latest motion on the channel)")
+    results.add_argument("--json", action="store_true",
+                         help="print the gateway's response JSON on stdout (the "
+                              "default output of this verb)")
+    add_common_args(results)
 
     rooms = sub.add_parser("rooms", help="committee rooms")
     rsub = rooms.add_subparsers(dest="rooms_command")
@@ -61,6 +85,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ropen.add_argument("--card-id", type=int, required=True)
     ropen.add_argument("--seats-file", required=True,
                        help="JSON list of {\"peer\", \"role\", \"family\"}")
+    ropen.add_argument("--json", action="store_true",
+                       help="print the gateway's response JSON on stdout")
     add_common_args(ropen)
 
     recast = sub.add_parser("recast", help="recast a seat (chair only)")
@@ -108,6 +134,19 @@ def _read_file(path: str) -> str:
         raise RuntimeError(f"cannot read {path}: {exc}") from exc
 
 
+def _print_json(payload) -> None:
+    """Print the gateway payload exactly as returned (parseable JSON)."""
+    print(json.dumps(payload))
+
+
+def _latest_motion(motions: list) -> dict:
+    """The latest motion in a list payload: highest id, else the last entry."""
+    ids = [m.get("id") for m in motions if isinstance(m, dict)]
+    if ids and all(isinstance(i, int) for i in ids):
+        return max(motions, key=lambda m: m["id"])
+    return motions[-1]
+
+
 def _open_motion(base: str, token: str, channel: str, sub: str) -> dict:
     """The open motion on the channel, discovered from the list (never scanned)."""
     status, payload = get_json(f"{base}/committee/{_quote(channel)}/motions", token)
@@ -143,12 +182,20 @@ def _run_motion(args: argparse.Namespace) -> int:
                                     body, token)
         if not _ok(status):
             return _fail("motion open", status, payload)
+        if args.json:
+            _print_json(payload)
+            return 0
         print(f"opened motion {payload.get('id')} on {args.channel} "
               f"(phase {payload.get('phase')})")
         return 0
     status, payload = get_json(f"{base}/committee/{_quote(args.channel)}/motions", token)
     if not _ok(status):
         return _fail("motion", status, payload)
+    if args.json:
+        # --all needs no client work: the listing never filtered. Every motion
+        # the route returns (open or closed) is already in this payload.
+        _print_json(payload)
+        return 0
     motions = payload.get("motions", []) if isinstance(payload, dict) else []
     if not motions:
         print(f"no open motion on {args.channel}")
@@ -174,8 +221,34 @@ def _run_post(args: argparse.Namespace) -> int:
         body, token)
     if not _ok(status):
         return _fail("post", status, payload)
+    if args.json:
+        _print_json(payload)
+        return 0
     print(f"posted {args.round} on motion {payload.get('motion_id')} "
           f"(phase {payload.get('phase')}, msg:{payload.get('message_id')})")
+    return 0
+
+
+def _run_results(args: argparse.Namespace) -> int:
+    _, token = _auth(args)
+    base = args.gateway.rstrip("/")
+    if args.motion is not None:
+        motion_id = args.motion
+    else:
+        status, payload = get_json(f"{base}/committee/{_quote(args.channel)}/motions", token)
+        if not _ok(status):
+            return _fail("results", status, payload)
+        motions = payload.get("motions", []) if isinstance(payload, dict) else []
+        if not motions:
+            raise RuntimeError(f"no motions on channel {args.channel!r}")
+        motion_id = _latest_motion(motions)["id"]
+    status, payload = get_json(
+        f"{base}/committee/{_quote(args.channel)}/motions/{motion_id}", token)
+    if not _ok(status):
+        return _fail("results", status, payload)
+    # SEAL RULE: print the gateway payload verbatim. A ballot body appears
+    # only where the gateway returned one; nothing is filled in here.
+    _print_json(payload)
     return 0
 
 
@@ -192,6 +265,9 @@ def _run_rooms(args: argparse.Namespace) -> int:
     status, payload = post_json(f"{base}/committee/rooms", body, token)
     if not _ok(status):
         return _fail("rooms open", status, payload)
+    if args.json:
+        _print_json(payload)
+        return 0
     print(f"opened committee room {payload.get('channel')}")
     return 0
 
@@ -228,6 +304,7 @@ def _run_baseline_absent(args: argparse.Namespace) -> int:
 _DISPATCH = {
     "motion": _run_motion,
     "post": _run_post,
+    "results": _run_results,
     "rooms": _run_rooms,
     "recast": _run_recast,
     "baseline-absent": _run_baseline_absent,

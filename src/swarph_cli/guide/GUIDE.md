@@ -521,7 +521,7 @@ answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not comman
 - `swarph codegraph-hook` -- hook plumbing: the structural-search companion Claude Code hooks call.
 - `swarph codex-hook-output` -- hook plumbing: Codex SessionStart adapter for the shared context hook.
 - `swarph codex-waker` -- durable Codex App Server controller for host schedulers.
-- `swarph committee` -- the committee-room client: `motion <channel>` shows the open motion (id, phase, deadlines), `post <channel> --round positions|rebuttal|vote --body-file F [--outcome X]` posts a sealed ballot, and chair-only `rooms open`, `motion <channel> --open`, `recast`, `baseline-absent` drive the room.
+- `swarph committee` -- the committee-room client: `motion <channel>` shows the open motion (id, phase, deadlines), `post <channel> --round positions|rebuttal|vote --body-file F [--outcome X]` posts a sealed ballot, and chair-only `rooms open`, `motion <channel> --open`, `recast`, `baseline-absent` drive the room. `results <channel> [--motion ID] --json` prints a motion's gateway JSON exactly as returned (a sealed ballot stays body-less); `--json` is also available on `rooms open`, `motion`, and `post`.
 - `swarph compress` -- compress a machine-read context surface; dry-run by default.
 - `swarph commander` -- read a standing authorization the commander recorded (card #1300). `swarph commander authorization check <scope>` exits 0 when an active grant exists and prints its id, text and granted_at. A revoked or expired grant exits 1.
 - `swarph daemon` -- foreground drain loop for a cell's inbox (PLAN.md section 16).
