@@ -131,6 +131,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "channel-serve": "swarph_cli.commands.channel.run_channel_serve",
     "event": "swarph_cli.commands.event.run_event",
     "schedule": "swarph_cli.commands.schedule.run_schedule",
+    "subscribe": "swarph_cli.commands.subscribe.run_subscribe",
     "lane": "swarph_cli.commands.lane.run_lane",
     "install-multiplexer": "swarph_cli.commands.install_multiplexer.run_install_multiplexer",
     "highlight": "swarph_cli.commands.highlight.run_highlight",
