@@ -158,3 +158,167 @@ def test_recast_posts(monkeypatch):
     assert rc == 0
     assert seen["url"].endswith("/committee/fusion-aid/recast")
     assert seen["body"]["new_peer"] == "new"
+
+
+# --- card #1516: results verb + --json -------------------------------------
+
+
+def _detail_payload(**over):
+    payload = {
+        "id": 7, "channel": "fusion-aid", "phase": "vote",
+        "text": "Adopt the plan?",
+        "positions_deadline": "2026-10-28T12:00:00+00:00",
+        "rebuttal_deadline": "2026-10-29T12:00:00+00:00",
+        "vote_deadline": "2026-10-30T12:00:00+00:00",
+        "ballots": [{"peer": "drop", "round": "vote", "outcome": "pass",
+                     "body": "I vote yes."}],
+    }
+    payload.update(over)
+    return payload
+
+
+def _router(monkeypatch, list_payload, detail_payload):
+    calls = []
+
+    def fake(url, *args, **kwargs):
+        calls.append(url)
+        if url.endswith("/motions"):
+            return 200, list_payload
+        return 200, detail_payload
+
+    monkeypatch.setattr(cm, "get_json", fake)
+    return calls
+
+
+def test_results_with_motion_gets_the_detail_route(monkeypatch, capsys):
+    payload = _detail_payload()
+    seen = _spy(monkeypatch, "get_json", payload=payload)
+    rc = cm.run_committee(["results", "fusion-aid", "--motion", "7", "--json"])
+    assert rc == 0
+    assert seen["url"].endswith("/committee/fusion-aid/motions/7")
+    assert json.loads(capsys.readouterr().out) == payload
+
+
+def test_results_without_motion_picks_the_latest(monkeypatch, capsys):
+    detail = _detail_payload(id=9)
+    calls = _router(monkeypatch, {"motions": [{"id": 3}, {"id": 9}, {"id": 5}]}, detail)
+    rc = cm.run_committee(["results", "fusion-aid", "--json"])
+    assert rc == 0
+    assert calls[0].endswith("/committee/fusion-aid/motions")
+    assert calls[1].endswith("/committee/fusion-aid/motions/9")
+    assert json.loads(capsys.readouterr().out) == detail
+
+
+def test_results_sealed_ballot_prints_without_a_body(monkeypatch, capsys):
+    # Sealed round: the gateway omits every ballot body. The motion text and
+    # the ballot outcomes are present and COULD be copied into a body by a
+    # synthesizing client — the output must contain no body anywhere.
+    payload = _detail_payload(ballots=[
+        {"peer": "drop", "round": "vote", "outcome": "pass"},
+        {"peer": "c1", "round": "vote", "outcome": "cannot_evaluate"},
+    ])
+    _spy(monkeypatch, "get_json", payload=payload)
+    rc = cm.run_committee(["results", "fusion-aid", "--motion", "7", "--json"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert '"body"' not in out
+    parsed = json.loads(out)
+    assert parsed == payload
+    assert all("body" not in b for b in parsed["ballots"])
+
+
+def test_results_unsealed_ballot_keeps_its_body(monkeypatch, capsys):
+    payload = _detail_payload()
+    _spy(monkeypatch, "get_json", payload=payload)
+    rc = cm.run_committee(["results", "fusion-aid", "--motion", "7"])
+    assert rc == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed == payload
+    assert parsed["ballots"][0]["body"] == "I vote yes."
+
+
+def test_results_never_prints_the_token(monkeypatch, capsys):
+    _spy(monkeypatch, "get_json", payload=_detail_payload())
+    rc = cm.run_committee(["results", "fusion-aid", "--motion", "7", "--json"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "tok" not in out
+    assert "Bearer" not in out
+
+
+def test_results_no_motions_is_an_error(monkeypatch, capsys):
+    _spy(monkeypatch, "get_json", payload={"motions": []})
+    rc = cm.run_committee(["results", "fusion-aid", "--json"])
+    assert rc == 2
+    assert ("no open motion on fusion-aid; a closed motion needs --motion ID "
+            "(the gateway lists open motions only)") in capsys.readouterr().err
+
+
+def test_results_closed_motion_needs_motion_id(monkeypatch, capsys):
+    # The gateway list route returns only open motions, so it is empty here
+    # even though a closed motion exists and its detail route serves it by id.
+    closed = _detail_payload(id=4, phase="closed")
+    _router(monkeypatch, {"motions": []}, closed)
+    rc = cm.run_committee(["results", "fusion-aid"])
+    assert rc == 2
+    assert ("no open motion on fusion-aid; a closed motion needs --motion ID "
+            "(the gateway lists open motions only)") in capsys.readouterr().err
+    rc = cm.run_committee(["results", "fusion-aid", "--motion", "4"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == closed
+
+
+def test_results_gateway_refusal_surfaces(monkeypatch, capsys):
+    _spy(monkeypatch, "get_json", status=404, payload={"detail": "no such motion"})
+    rc = cm.run_committee(["results", "fusion-aid", "--motion", "7", "--json"])
+    assert rc == 1
+    assert "no such motion" in capsys.readouterr().err
+
+
+def test_motion_list_json_parses(monkeypatch, capsys):
+    payload = _open_motion_payload()
+    _spy(monkeypatch, "get_json", payload=payload)
+    rc = cm.run_committee(["motion", "fusion-aid", "--json"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == payload
+
+
+def test_motion_open_json_parses(monkeypatch, capsys):
+    payload = {"id": 7, "phase": "positions"}
+    _spy(monkeypatch, "post_json", payload=payload)
+    rc = cm.run_committee([
+        "motion", "fusion-aid", "--open", "--json",
+        "--text", "Adopt?", "--options", "Approve,Amend,Reject",
+        "--positions-deadline", "2026-10-28T12:00:00+00:00",
+        "--rebuttal-deadline", "2026-10-29T12:00:00+00:00",
+        "--vote-deadline", "2026-10-30T12:00:00+00:00",
+    ])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == payload
+
+
+def test_post_json_parses(monkeypatch, tmp_path, capsys):
+    body = tmp_path / "pos.txt"
+    body.write_text("I hold the motion.", encoding="utf-8")
+    payload = {"motion_id": 7, "phase": "positions", "message_id": 99}
+    _spy(monkeypatch, "get_json", payload=_open_motion_payload())
+    _spy(monkeypatch, "post_json", payload=payload)
+    rc = cm.run_committee(["post", "fusion-aid", "--round", "positions",
+                           "--body-file", str(body), "--json"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == payload
+
+
+def test_rooms_open_json_parses(monkeypatch, tmp_path, capsys):
+    charter = tmp_path / "charter.txt"
+    charter.write_text("A committee.", encoding="utf-8")
+    seats = tmp_path / "seats.json"
+    seats.write_text(json.dumps(
+        [{"peer": "drop", "role": "seat", "family": "claude"}]), encoding="utf-8")
+    payload = {"channel": "fusion-aid"}
+    _spy(monkeypatch, "post_json", payload=payload)
+    rc = cm.run_committee([
+        "rooms", "open", "--name", "fusion-aid", "--charter-file", str(charter),
+        "--card-id", "1319", "--seats-file", str(seats), "--json"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == payload
