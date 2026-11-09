@@ -1,12 +1,33 @@
 """Proxy route fixtures from gateway 5a567e1/server.py:4639,16619,6472."""
 import json
 import os
+import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from swarph_cli.proxy_routes import ProxyError, route_for
+
+
+def test_proxy_modules_can_be_imported_without_posix_identity_modules():
+    from pathlib import Path
+    script = '''import importlib.abc, sys
+class BlockPosix(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name in {"grp", "pwd", "resource"}:
+            raise ModuleNotFoundError(name)
+for name in ("grp", "pwd", "resource"):
+    sys.modules.pop(name, None)
+sys.meta_path.insert(0, BlockPosix())
+import swarph_cli.local_proxy
+import swarph_cli.proxy_monitor
+import swarph_cli.commands.proxy
+'''
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, timeout=10)
+    assert result.returncode == 0, result.stderr
 
 
 def test_fixed_card_read_pins_actor_and_rejects_raw_route_controls():

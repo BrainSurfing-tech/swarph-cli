@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-import grp
 import os
 from pathlib import Path
 import stat
@@ -13,6 +12,7 @@ from urllib.error import URLError
 
 
 def _prepare_state(path, config):
+    import grp
     from .local_proxy import safe_parent
     from .proxy_routes import ProxyError
 
