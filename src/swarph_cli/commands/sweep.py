@@ -345,6 +345,12 @@ def run_sweep(*, gateway, token, sender, repos, state_file, report_file,
             body.get("obligations"), list):
         print("swarph sweep: board unreadable — no findings, nothing sent",
               file=sys.stderr)
+        from swarph_cli.shim_ledger import record_shim_firing
+        record_shim_firing(
+            "swarph-stuck-sweep",
+            cell=sender if sender != "(dry-run)" else None,
+            outcome="error",
+        )
         return 1, []
     rows = [r for r in body["obligations"] if isinstance(r, dict)]
     by_id = {r.get("id"): r for r in rows
@@ -386,6 +392,12 @@ def run_sweep(*, gateway, token, sender, repos, state_file, report_file,
     if dry_run:
         for f in fresh:
             print("DRY " + _report_line(now_iso, f))
+        from swarph_cli.shim_ledger import record_shim_firing
+        record_shim_firing(
+            "swarph-stuck-sweep",
+            cell=sender if sender != "(dry-run)" else None,
+            outcome="dry-run",
+        )
         return 0, fresh
 
     owner_cache = {}
@@ -488,6 +500,12 @@ def run_sweep(*, gateway, token, sender, repos, state_file, report_file,
                 json.dump(sent, fp)
         except OSError as exc:
             print(f"swarph sweep: state write failed: {exc}", file=sys.stderr)
+    from swarph_cli.shim_ledger import record_shim_firing
+    record_shim_firing(
+        "swarph-stuck-sweep",
+        cell=sender if sender != "(dry-run)" else None,
+        outcome="nudged" if fresh else "ok",
+    )
     return 0, fresh
 
 

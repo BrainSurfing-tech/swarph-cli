@@ -2328,4 +2328,12 @@ def run_watchdog(argv: Optional[list[str]] = None) -> int:
         print(_USAGE, file=sys.stderr)
         return 4
 
-    return run_check(args)
+    rc = run_check(args)
+    from swarph_cli.shim_ledger import record_shim_firing
+    record_shim_firing(
+        "swarph-watchdog",
+        cell=getattr(args, "cell", None) or None,
+        outcome="error" if rc >= 4 else ("alerted" if rc in (1, 2, 3) else "ok"),
+    )
+    return rc
+

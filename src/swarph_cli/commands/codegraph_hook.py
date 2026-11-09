@@ -501,16 +501,28 @@ def run_codegraph_hook(argv: Optional[list] = None) -> int:
     try:
         payload = json.loads(sys.stdin.read() or "{}")
     except Exception:  # noqa: BLE001
+        from swarph_cli.shim_ledger import record_shim_firing
+        record_shim_firing(
+            "claude-settings-posttooluse-codegraph-on-grep",
+            cell=self_name or None,
+            outcome="error",
+        )
         return 0
 
     event = (payload.get("hook_event_name")
              or payload.get("hookEventName")
              or "")
     session_id = str(payload.get("session_id") or payload.get("sessionId") or "")
+    from swarph_cli.shim_ledger import record_shim_firing
 
     # #830: unknown non-empty event → report, never silent default to Bash.
     supported = supported_hook_events()
     if event and event not in supported:
+        record_shim_firing(
+            "claude-settings-posttooluse-codegraph-on-grep",
+            cell=self_name or None,
+            outcome="error",
+        )
         known = ", ".join(sorted(supported))
         _emit(
             f"CODEGRAPH HOOK: unknown hook_event_name={event!r} — this running "
@@ -520,6 +532,12 @@ def run_codegraph_hook(argv: Optional[list] = None) -> int:
             event,
         )
         return 0
+
+    record_shim_firing(
+        "claude-settings-posttooluse-codegraph-on-grep",
+        cell=self_name or None,
+        outcome="fired",
+    )
 
     if event in ("Stop", "StopFailure"):
         resolve_pending_outcome(self_name or "_unknown", "neither", session_id)
