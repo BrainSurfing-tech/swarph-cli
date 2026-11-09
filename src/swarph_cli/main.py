@@ -107,6 +107,7 @@ _VERB_HANDLERS: dict[str, str] = {
     "mesh": "swarph_cli.commands.mesh.run_mesh",
     "peer-reply-drain": "swarph_cli.commands.peer_reply_drain.run_peer_reply_drain",
     "monitor": "swarph_cli.commands.monitor.run_monitor",
+    "proxy": "swarph_cli.commands.proxy.run_proxy",
     "board": "swarph_cli.commands.board.run_board",
     # card #1405: research pipeline on subscription lanes (library: swarph_mesh.skunkworks).
     "skunkworks": "swarph_cli.commands.skunkworks.run_skunkworks",

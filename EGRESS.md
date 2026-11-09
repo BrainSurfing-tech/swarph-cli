@@ -18,6 +18,8 @@ the probe's own code. Measured on the lab host at this change: 152s.
 
 | file | client | destination | what it sends | opt-in or default |
 | --- | --- | --- | --- | --- |
+| src/swarph_cli/local_proxy.py | http.client | gateway base URL from protected proxy configuration only | closed-schema board/mesh/memory requests with proxy-held bearer token; no redirects, environment proxy, or retry | opt-in (separate proxy or pull-monitor process) |
+| src/swarph_cli/local_proxy.py | socket.socket | local AF_UNIX socket only (systemd activation or configured protected path) | newline JSON closed-verb requests/replies; never the bearer token | opt-in (proxy serve/call) |
 | src/swarph_cli/commands/_gateway_client.py | urllib.request.urlopen | mesh gateway HTTP API (configured base URL; loopback default) | board/mesh API requests as JSON with the caller's bearer token | default (all board/mesh commands) |
 | src/swarph_cli/commands/board.py | urllib.request.urlopen | mesh gateway HTTP API (via _gateway_client) | board card/obligation requests as JSON with bearer token | default |
 | src/swarph_cli/commands/mesh.py | urllib.request.urlopen | mesh gateway HTTP API (via _gateway_client) | mesh DM/peer requests as JSON with bearer token | default |
