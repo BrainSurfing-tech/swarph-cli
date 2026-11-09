@@ -60,7 +60,7 @@ def format_response(mode: str, d: Any) -> str:
     elif mode in ("cards", "cards-ready"):
         rows = _rows(d, "cards")
         if mode == "cards-ready":
-            rows = [c for c in rows if c.get("move_ready")]
+            rows = [c for c in rows if c.get("move_ready") or c.get("stage") == "ready"]
         lines.append(f"  {len(rows)} card(s)")
         for c in rows[:40]:
             ready = " READY" if c.get("move_ready") else ""

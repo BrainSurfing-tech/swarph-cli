@@ -239,7 +239,7 @@ def run_verb(identity: str, gateway: str, token: str, argv: list[str]) -> int:
                 "cards-ready", _api("GET", gateway, token, "/board/cards")
             ))
         elif filt in (
-            "build", "test", "proposed", "plan", "spec", "idea", "parked", "done",
+            "build", "test", "review", "proposed", "plan", "spec", "idea", "parked", "done",
         ):
             print(format_response(
                 "cards",

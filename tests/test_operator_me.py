@@ -20,6 +20,25 @@ from swarph_cli.operator.cli import extract_as, main, resolve_session
 
 OPERATOR_ROOT = Path(__file__).resolve().parents[1] / "src" / "swarph_cli" / "operator"
 
+
+@pytest.mark.parametrize("stage", ["test", "review"])
+def test_1443_operator_filters_both_stage_names(monkeypatch, capsys, stage):
+    from swarph_cli.operator import cli
+    calls = []
+    monkeypatch.setattr(cli, "_api", lambda method, gateway, token, path: calls.append(path) or {"cards": []})
+    assert cli.run_verb("commander", "http://fixture", "fixture", ["cards", stage]) == 0
+    assert calls == [f"/board/cards?stage={stage}"]
+
+
+def test_1443_operator_ready_includes_ready_stage_without_legacy_flag():
+    from swarph_cli.operator.fmt import format_response
+    result = format_response("cards-ready", {"cards": [
+        {"id": 31, "stage": "ready", "title": "new", "move_ready": False},
+        {"id": 32, "stage": "test", "title": "old", "move_ready": True},
+        {"id": 33, "stage": "build", "title": "busy", "move_ready": False},
+    ]})
+    assert "#31" in result and "#32" in result and "#33" not in result
+
 # Modules known to read or fall back to $SWARPH_SELF. Importing ANY of these
 # from the operator package is a FAIL under card #660.
 FORBIDDEN_IMPORT_ROOTS = {
