@@ -375,3 +375,14 @@ def test_connection_setup_cannot_outlive_the_shared_upstream_deadline(tmp_path, 
     result = request(Proxy(config, "fake-secret20"))
     assert result["error"] == "upstream_unreachable"
     assert time.monotonic() - before < 0.15
+
+
+def test_numeric_token_cannot_be_reflected_as_a_number_or_audit_target(tmp_path):
+    secret = "123456789012345678901234567890"
+    with gateway(tmp_path, lambda h: answer(h, b'{"id":123456789012345678901234567890}'),
+                 uid=os.getuid() + 1234) as (proxy, _):
+        proxy = Proxy(proxy.config, secret)
+        result = request(proxy, "board.card.get", {"id": int(secret)})
+        assert result["error"] == "upstream_error"
+        assert secret not in json.dumps(result)
+        assert secret not in proxy.config.audit_path.read_text()

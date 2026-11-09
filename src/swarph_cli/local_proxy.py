@@ -283,7 +283,7 @@ class Proxy:
                 raise ProxyError("upstream_error")
             result = _json(raw)
             # No allowed response may become a credential-reflection channel.
-            if _contains_secret(result, self._token):
+            if self._token in json.dumps(result, ensure_ascii=False) or _contains_secret(result, self._token):
                 raise ProxyError("upstream_error")
             return status, result
         except ProxyError as exc:
@@ -348,7 +348,9 @@ class Proxy:
         known_verb = verb if isinstance(verb, str) and re.fullmatch(r"[a-z.]{1,64}", verb) else None
         if known_verb and self._token in known_verb:
             known_verb = None
-        targets = {key: value for key, value in args.items() if key in {"id", "card_id"} and type(value) is int} if isinstance(args, dict) else {}
+        targets = {key: value for key, value in args.items()
+                   if key in {"id", "card_id"} and type(value) is int
+                   and self._token not in str(value)} if isinstance(args, dict) else {}
         entry = {"ts": dt.datetime.now(dt.timezone.utc).isoformat(), "request_id": request_id,
                  "verb": known_verb, "targets": targets,
                  "outcome": "ok" if reply["ok"] else reply["error"], "status": reply.get("status")}
