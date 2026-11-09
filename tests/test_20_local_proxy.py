@@ -25,6 +25,11 @@ def tmp_path(tmp_path):
     return tmp_path.resolve()
 
 
+def short_socket(tmp_path):
+    # Darwin's sun_path is shorter than pytest's descriptive per-test directories.
+    return tmp_path.parent / ("p20-" + uuid.uuid4().hex[:8])
+
+
 def test_complete_gateway_json_is_the_only_success(tmp_path):
     class Gateway(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -80,7 +85,7 @@ def gateway(tmp_path, response, *, uid=None):
     worker.start()
     config = Config("alice", os.getuid() if uid is None else uid,
                     f"http://127.0.0.1:{server.server_port}",
-                    tmp_path / "peer_token", tmp_path / "proxy.sock", tmp_path / "audit")
+                    tmp_path / "peer_token", short_socket(tmp_path), tmp_path / "audit")
     try:
         yield Proxy(config, "fixture-secret-20"), seen
     finally:
@@ -291,7 +296,7 @@ def test_running_proxy_segv_has_zero_core_limit_and_no_core_dump(tmp_path):
     token.write_text("fake-crash-token")
     token.chmod(0o600)
     config = Config("alice", os.getuid() + 1234, "http://127.0.0.1:1", token,
-                    tmp_path / "crash.sock", tmp_path / "audit")
+                    short_socket(tmp_path), tmp_path / "audit")
     pid = os.fork()
     if pid == 0:
         try:
