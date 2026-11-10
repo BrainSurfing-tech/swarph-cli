@@ -1,12 +1,19 @@
 # Changelog
 
+## 0.76.0 -- 2026-11-10
+
+- board usage readings (card #1519, PR #700): `swarph board obligations take/close --usage lane:unit=value[@resets]` records a lane reading (units `window_pct`, `weekly_pct`, `monthly_pct`, `usd`), and the new `swarph board usage [--lane] [--days] [--json]` lists them from the gateway's `GET /board/usage`.
+- board schedules (card #1522, PR #695): new `swarph board schedules [--json]` lists each host's timer and cron snapshot from `GET /board/schedules`. Every printed field is sanitized and kept on one line, and "no snapshot" is distinct from "no jobs".
+- watchdog (card #1556, PR #715): documented watchdog exits map to shim-ledger outcomes.
+- spawn (card #1564, PR #717): `swarph spawn copilot` no longer passes `--no-remote`, which Copilot CLI 1.0.103+ removed (1.0.109 rejects it). On 0.75.0 every copilot spawn fails.
+
 ## 0.75.0 -- 2026-11-10
 
 - CI security (card #1547, PR #711): fail closed on octopus merges and include merge-resolution changes in the gitleaks scans with `--remerge-diff`.
 - proxy read-only mode (card #1539, PR #712): protected `read_only` configuration refuses writes before any gateway call; it defaults to **true on Darwin** and false on Linux.
 - authenticated same-box gateway transport (card #1557, PR #713): proxy and private monitor share HTTP/1.1 over `gateway_socket`, checking the connected server uid against `gateway_uid` before sending request bytes; unsafe socket paths are refused and there is no TCP fallback.
 
-**BREAKING for proxy operators:** a loopback TCP `http://` `gateway_url`
+**BREAKING for proxy operators:** a loopback TCP `gateway_url`
 (`127.0.0.0/8`, `::1`, or `localhost`) now refuses startup unless the protected
 configuration explicitly sets `allow_loopback_tcp:true`. That escape is
 **unsafe**: a local process acquiring the port can receive the peer token.
