@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.74.0 -- 2026-11-10
+
+- service control (card #1413, PR #701): update the gemini-service model allowlist to current Gemini 3.x models.
+- per-cell proxy (cards #20 and #1536, PR #702): ship a closed, typed local credential proxy, private monitor transport, Linux/systemd and macOS/launchd templates, and bounded concurrent handlers (default 32).
+- tests only (card #1524, PR #704): clean up egress-probe temporary directories; no runtime behavior change.
+- proxy reads (card #1537, PR #705): add `board.projects.list` and `board.cards.list`, with pinned actor, typed filters and unchanged gateway JSON responses.
+- CI (card #1546, PR #709): scope pull-request secret scans to the PR's commits, refusing a missing base ref or git errors; main/manual scans retain full-history coverage.
+- selfcheck security (card #1541, PR #706): sanitize environment displays so secret values, DSNs and URL credentials are not printed; add isolated env fixtures and a host `.env` access guard for tests.
+- temporary-file hygiene (card #1540, PR #707): clean up gateway-test database directories, MCP-probe can-fail JSON and release-preparation scratch clones.
+- gateway display security (card #1548, PR #710): show only credential-free gateway origins with an optional bare trailing slash; redact paths and encoded credentials, and narrow the reviewed gitleaks fixture allowlist.
+
+The proxy ships as **code and templates only**. Installing it, creating the proxy
+user and performing the token cutover are operator steps in
+[docs/proxy-deployment.md](docs/proxy-deployment.md), not effects of this release.
+Per-act confirmation for A-I-D writes remains an **open decision (card #1539)**.
+
 ## 0.73.0 -- 2026-11-09
 
 - committee (card #1516, PR #692): new `swarph committee results <channel> [--motion ID] --json` prints a motion's gateway JSON exactly as returned (a sealed ballot stays body-less); without `--motion` it reads the open motion, and a closed motion needs `--motion ID`. `--json` is also added to `committee rooms open`, `committee motion`, and `committee post`.
