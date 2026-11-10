@@ -38,6 +38,7 @@ only on the one box that has a dead unit. Discovery shells out; verdicts are pur
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -47,6 +48,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse, urlunparse
 
 # Keys worth comparing. Deliberately small — see SCOPE.
 _KEYS = ("state-dir", "cursor", "gateway", "token-file", "as", "cell")
@@ -115,13 +117,55 @@ class Row:
     surface: str = ""
     shared: bool = False
     secret: bool = False
+    digest: Optional[str] = None
+    value_len: Optional[int] = None
+
+
+def _sha256_hex(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _strip_url_userinfo(value: str) -> str:
+    """Strip userinfo (user:password@) from a URL value, if present."""
+    text = str(value)
+    if "://" not in text:
+        return text
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return re.sub(r"(://)[^/@\s'\"]+@", r"\1", text)
+    if "@" not in parsed.netloc:
+        return text
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is not None:
+        netloc = f"{host}:{port}"
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+_URL_USERINFO_RE = re.compile(r"(://)[^/@\s'\"]+@")
+
+
+def _sanitize_urls_in_text(text: str) -> str:
+    """Strip userinfo from any URL appearing in a display string."""
+    return _URL_USERINFO_RE.sub(r"\1", str(text))
+
+
+def _row_len(row: "Row") -> int:
+    return row.value_len if row.value_len is not None else len(row.value)
 
 
 def display_value(row: "Row") -> str:
     """The value as printable. Secrets render as class+length, never content."""
     if row.secret:
-        return f"<redacted, {len(row.value)} chars>" if row.value != "<EMPTY>" else "<EMPTY>"
-    return row.value
+        return f"<redacted, {_row_len(row)} chars>" if row.value != "<EMPTY>" else "<EMPTY>"
+    return _strip_url_userinfo(row.value)
 
 
 _SECRET_KEY_RE = re.compile(r"TOKEN|SECRET|PASSWORD|PASS|APIKEY|API_KEY", re.IGNORECASE)
@@ -207,16 +251,46 @@ _ENV_RESOLVER_KEYS = {"MESH_GATEWAY_URL": "gateway", "MESH_GATEWAY_TOKEN": "toke
 _ENV_PAIR_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
 
 
+def _sanitized_envfile_text(text: str) -> str:
+    """Env-file text with every KEY=VALUE value removed for safe storage.
+
+    MESH_GATEWAY_URL keeps its stripped (userinfo-free) form; every other
+    value becomes a length-only placeholder. Raw values never survive
+    into a returned surface structure.
+    """
+    out_lines: list[str] = []
+    for line in str(text).splitlines():
+        m = _ENV_PAIR_RE.match(line) if line.strip() and not line.lstrip().startswith("#") else None
+        if not m:
+            out_lines.append(line)
+            continue
+        key, val = m.group(1), m.group(2)
+        raw = val
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+            raw = raw[1:-1]
+        if key == "MESH_GATEWAY_URL" and raw:
+            out_lines.append(f"{key}={_strip_url_userinfo(raw)}")
+        elif not raw:
+            out_lines.append(f"{key}=<EMPTY>")
+        else:
+            out_lines.append(f"{key}=<redacted, {len(raw)} chars>")
+    return "\n".join(out_lines) + ("\n" if out_lines else "")
+
+
 def extract_envfile(surface: dict) -> list[Row]:
     """Parse KEY=VALUE pairs out of an EnvironmentFile surface.
 
-    Resolver-owned keys (MESH_GATEWAY_URL/TOKEN) become comparable rows.
-    Other MESH_*/SWARPH_* keys become rows too — they are the
-    no-resolver-claim bucket, and the bucket must have rows to be counted.
-    Anything else is the unit's own business. Secret-class keys are
-    redacted on display. Owner inherits from the referencing unit (an env
-    file has no --as of its own); liveness rides the referencing unit.
+    Every env-file row is secret: its raw value is never stored on the
+    returned Row and never displayed. Sole exception: MESH_GATEWAY_URL
+    is stored/displayed with userinfo stripped. Other rows store only
+    a sha256 digest plus the original length, which preserves drift
+    distinctness and length reporting without retaining the secret.
+    Raw values exist only as local variables in this function.
     """
+    # Pre-extracted rows (from discover_surfaces) are already sanitized.
+    pre = surface.get("rows")
+    if pre is not None:
+        return list(pre)
     rows: list[Row] = []
     live = bool(surface.get("live", True))
     owner = surface.get("owner")
@@ -228,21 +302,25 @@ def extract_envfile(surface: dict) -> list[Row]:
         if not m:
             continue
         key, val = m.group(1), m.group(2)
-        # systemd env files permit KEY="value" / KEY='value'. A value that
-        # keeps its quotes can never match the resolver's unquoted output —
-        # a FALSE POSITIVE GENERATOR in a drift detector (PR #261, Copilot
-        # finding 1, confirmed by lab-ovh).
         if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
             val = val[1:-1]
         if key not in _ENV_RESOLVER_KEYS and not key.startswith(("MESH_", "SWARPH_")):
             continue
         if is_placeholder(val):
             continue
-        rows.append(Row(
-            key=f"env:{key}", value=val if val else "<EMPTY>", owner=owner,
-            live=live, surface=name,
-            secret=bool(_SECRET_KEY_RE.search(key)),
-        ))
+        if not val:
+            rows.append(Row(key=f"env:{key}", value="<EMPTY>", owner=owner,
+                            live=live, surface=name, secret=True, value_len=0))
+        elif key == "MESH_GATEWAY_URL":
+            stripped = _strip_url_userinfo(val)
+            rows.append(Row(key=f"env:{key}", value=stripped, owner=owner,
+                            live=live, surface=name, secret=False,
+                            digest=_sha256_hex(val), value_len=len(val)))
+        else:
+            digest = _sha256_hex(val)
+            rows.append(Row(key=f"env:{key}", value=digest, owner=owner,
+                            live=live, surface=name, secret=True,
+                            digest=digest, value_len=len(val)))
     return rows
 
 
@@ -584,8 +662,13 @@ def discover_surfaces(*, unit_dirs=None, system_cron_paths=None,
                                      "read": False,
                                      "detail": f"{exc.__class__.__name__} (referenced by {label})"})
                     continue
+                _env_surface = {"name": f"{ep} (via {label})", "kind": "envfile",
+                                "text": etext, "live": live, "owner": unit_owner}
+                _env_rows = extract_envfile(_env_surface)
                 surfaces.append({"name": f"{ep} (via {label})", "kind": "envfile",
-                                 "text": etext, "live": live, "owner": unit_owner})
+                                 "text": _sanitized_envfile_text(etext),
+                                 "rows": _env_rows,
+                                 "live": live, "owner": unit_owner})
     detail = ", ".join(str(d) for d in unit_dirs if d.is_dir()) or "none present"
     detail += (f"; {n_scanned} scanned, {n_units} units + {n_dropins} drop-ins relevant, "
                f"{len(envfiles_seen)} env files followed")
@@ -727,7 +810,8 @@ _SELFCHECK_JSON_ALLOWLIST: tuple[str, ...] = (
 
 def _selfcheck_json_row(raw_row: dict) -> dict:
     """Project an internal selfcheck record onto _SELFCHECK_JSON_ALLOWLIST (#1513)."""
-    return {k: raw_row[k] for k in _SELFCHECK_JSON_ALLOWLIST}
+    return {k: _sanitize_urls_in_text(raw_row[k]) if isinstance(raw_row.get(k), str) else raw_row[k]
+            for k in _SELFCHECK_JSON_ALLOWLIST}
 
 
 def _coverage_short_reason(c: dict) -> tuple[str, str]:
@@ -763,7 +847,7 @@ def run_selfcheck(*, self_name: str, declaration: Path,
 
     def _emit_text(line: str) -> None:
         if not json_output:
-            print(line)
+            print(_sanitize_urls_in_text(line))
 
     # THE PER-CELL RENAME IN #148 IS A SILENT MIGRATION, AND IT LANDS ON THE BASELINE.
     # MEASURED on droplet: with the old shared cell_expected.json present and the
@@ -927,20 +1011,19 @@ def run_selfcheck(*, self_name: str, declaration: Path,
             by_key.setdefault(r.key, set()).add(r.value)
 
     secret_keys = {r.key for r in rows if r.secret}
+    _secret_len_by_val: dict[str, int] = {}
+    for _r in rows:
+        if _r.secret:
+            _secret_len_by_val[_r.value] = _row_len(_r)
 
     def _show(key: str, vals: set[str]) -> list[str]:
         if key in secret_keys:
-            # Two DIFFERENT same-length secrets must not display as one
-            # repeated string while reporting "2 values" (PR #261, Copilot
-            # finding 4) — two 43-char tokens is exactly the peer-token
-            # case. Number by sorted order: stable within the run, and the
-            # number-to-value mapping is never printed, so nothing leaks.
             ordered = sorted(vals)
             if len(ordered) == 1:
-                return [f"<redacted, {len(ordered[0])} chars>"]
-            return [f"<redacted #{i}, {len(v)} chars>"
+                return [f"<redacted, {_secret_len_by_val.get(ordered[0], len(ordered[0]))} chars>"]
+            return [f"<redacted #{i}, {_secret_len_by_val.get(v, len(v))} chars>"
                     for i, v in enumerate(ordered, 1)]
-        return sorted(vals)
+        return [_strip_url_userinfo(v) for v in sorted(vals)]
 
     for key, vals in sorted(by_key.items()):
         if len(vals) == 1:
@@ -954,7 +1037,9 @@ def run_selfcheck(*, self_name: str, declaration: Path,
             }))
             continue
         allowed = declared.get(key)
-        if allowed and set(vals) <= set(allowed if isinstance(allowed, list) else [allowed]):
+        _allowed_set = set(allowed if isinstance(allowed, list) else [allowed]) if allowed else set()
+        if allowed and (set(vals) <= _allowed_set or set(_show(key, vals)) <= _allowed_set
+                        or {_strip_url_userinfo(v) for v in vals} <= _allowed_set):
             _emit_text(f"  DECLARED  --{key} {_show(key, vals)} — divergence is a stated choice")
             json_rows.append(_selfcheck_json_row({
                 "check": f"key:{key}",
@@ -1036,7 +1121,7 @@ def run_selfcheck(*, self_name: str, declaration: Path,
             "check": "coverage:resolver comparison",
             "verdict": "read",
             "reason": "gateway and token compared against resolver",
-            "value": str(resolved_gw or ""),
+            "value": str(_strip_url_userinfo(resolved_gw) if resolved_gw else ""),
             "surface": "resolver",
         }))
     else:
@@ -1061,29 +1146,30 @@ def run_selfcheck(*, self_name: str, declaration: Path,
 
     gw_rows = [r for r in mine if r.live and r.value != "<EMPTY>"
                and r.key in ("gateway", "env:MESH_GATEWAY_URL")]
-    gw_literals = sorted({r.value for r in gw_rows})
+    gw_literals = sorted({_strip_url_userinfo(r.value) for r in gw_rows})
+    resolved_gw_display = _strip_url_userinfo(resolved_gw) if resolved_gw else resolved_gw
     allowed_gw = declared.get("gateway")
-    allowed_gw_set = set(allowed_gw if isinstance(allowed_gw, list) else [allowed_gw]) if allowed_gw else set()
+    allowed_gw_set = {_strip_url_userinfo(str(v)) for v in (allowed_gw if isinstance(allowed_gw, list) else [allowed_gw])} if allowed_gw else set()
     if resolved_gw is not None:
         for lit in gw_literals:
-            if lit != resolved_gw and lit not in allowed_gw_set:
-                _emit_text(f"  RESOLVER DRIFT --gateway {lit} != resolver {resolved_gw}   "
-                           f"({', '.join(sorted({r.surface for r in gw_rows if r.value == lit}))})")
+            if lit != resolved_gw_display and lit not in allowed_gw_set:
+                _emit_text(f"  RESOLVER DRIFT --gateway {lit} != resolver {resolved_gw_display}   "
+                           f"({', '.join(sorted({r.surface for r in gw_rows if _strip_url_userinfo(r.value) == lit}))})")
                 json_rows.append(_selfcheck_json_row({
                     "check": "resolver:gateway",
                     "verdict": "RESOLVER DRIFT",
                     "reason": "surface gateway differs from resolver",
-                    "value": [lit, resolved_gw],
+                    "value": [lit, resolved_gw_display],
                     "surface": "gateway",
                 }))
                 drift = True
-            elif lit != resolved_gw:
-                _emit_text(f"  DECLARED  --gateway {lit} != resolver {resolved_gw} — a stated choice")
+            elif lit != resolved_gw_display:
+                _emit_text(f"  DECLARED  --gateway {lit} != resolver {resolved_gw_display} — a stated choice")
                 json_rows.append(_selfcheck_json_row({
                     "check": "resolver:gateway",
                     "verdict": "DECLARED",
                     "reason": "surface gateway divergence declared",
-                    "value": [lit, resolved_gw],
+                    "value": [lit, resolved_gw_display],
                     "surface": "gateway",
                 }))
     # Reachability of every distinct value in play, resolver's included —
@@ -1092,7 +1178,7 @@ def run_selfcheck(*, self_name: str, declaration: Path,
     # false-calm lie inverted: false alarm. local-silent on the RESOLVED
     # value means the cell's own CLI cannot reach the mesh either.
     if socket_state == "read":
-        for val in sorted(set(gw_literals) | ({resolved_gw} if resolved_gw else set())):
+        for val in sorted(set(gw_literals) | ({resolved_gw_display} if resolved_gw_display else set())):
             state = gateway_reachability(val, listeners)
             if state == "local-silent":
                 _emit_text(f"  UNREACHABLE gateway {val} — no listener on this box; "
@@ -1142,9 +1228,11 @@ def run_selfcheck(*, self_name: str, declaration: Path,
                 "surface": r.surface,
             }))
             continue
-        if r.value == resolved_tok:
+        _env_tok_digest = r.digest if r.digest is not None else _sha256_hex(r.value)
+        _resolved_tok_digest = _sha256_hex(resolved_tok)
+        if _env_tok_digest == _resolved_tok_digest:
             _emit_text(f"  OK        env:MESH_GATEWAY_TOKEN matches resolved credential "
-                       f"({len(r.value)} chars, from {tok_source})   ({r.surface})")
+                       f"({_row_len(r)} chars, from {tok_source})   ({r.surface})")
             json_rows.append(_selfcheck_json_row({
                 "check": "resolver:token",
                 "verdict": "OK",
@@ -1163,12 +1251,12 @@ def run_selfcheck(*, self_name: str, declaration: Path,
         # Declaration is by surface + redacted length so no secret enters
         # the declaration file:
         #   {"env:MESH_GATEWAY_TOKEN@<surface>": ["<redacted, 64 chars>"]}
-        redacted = f"<redacted, {len(r.value)} chars>"
+        redacted = f"<redacted, {_row_len(r)} chars>"
         decl_tok = declared.get(f"env:MESH_GATEWAY_TOKEN@{r.surface}")
         decl_list = decl_tok if isinstance(decl_tok, list) else ([decl_tok] if decl_tok else [])
         if redacted in decl_list:
             _emit_text(f"  DECLARED  env:MESH_GATEWAY_TOKEN in {r.surface} "
-                       f"({len(r.value)} chars) != resolved credential — a stated choice")
+                       f"({_row_len(r)} chars) != resolved credential — a stated choice")
             json_rows.append(_selfcheck_json_row({
                 "check": "resolver:token",
                 "verdict": "DECLARED",
@@ -1178,7 +1266,7 @@ def run_selfcheck(*, self_name: str, declaration: Path,
             }))
             continue
         _emit_text(f"  TOKEN MISMATCH env:MESH_GATEWAY_TOKEN in {r.surface} "
-                   f"({len(r.value)} chars) != resolved credential for {self_name} "
+                   f"({_row_len(r)} chars) != resolved credential for {self_name} "
                    f"({len(resolved_tok)} chars, from {tok_source}) — a literal "
                    "from before a token migration reads exactly like this; if this "
                    "surface is the gateway's OWN config, declare it by surface")

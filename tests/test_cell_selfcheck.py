@@ -589,9 +589,11 @@ def test_absent_cron_platform_is_not_the_same_as_failed_to_read(monkeypatch, tmp
 
     monkeypatch.setattr(sc.subprocess, "run", boom)
     surfaces = _discover()
-    # the fixture .env under tmp_path WAS read (guard allows tmp opens)
+    # the fixture .env under tmp_path WAS read (guard allows tmp opens);
+    # its stored text is sanitized — raw values never survive (card #1541)
     env_surfaces = [s for s in surfaces if s.get("kind") == "envfile"]
-    assert env_surfaces and "SENTINEL=fixture" in env_surfaces[0]["text"], surfaces
+    assert env_surfaces and "SENTINEL=" in env_surfaces[0]["text"], surfaces
+    assert "fixture" not in env_surfaces[0]["text"].split("SENTINEL=", 1)[1].splitlines()[0], surfaces
     cov = [s for s in surfaces
            if s.get("kind") == "coverage" and s.get("class") == "user crontab"]
     assert cov and cov[0]["read"] is True, cov
@@ -1101,3 +1103,144 @@ def test_same_length_secrets_display_as_distinct_numbered_values(monkeypatch, tm
     assert "<redacted #1, 43 chars>" in out and "<redacted #2, 43 chars>" in out
     assert "['<redacted, 43 chars>', '<redacted, 43 chars>']" not in out
     assert "a" * 43 not in out and "b" * 43 not in out
+
+
+# ── card #1541 rework: env secrets never in text/JSON output ─────────────────
+
+_PG_PW = "pg-sentinel-pw-1541"
+_URL_PW = "swarph-url-pw-1541"
+_FOO_SECRET = "mesh-foo-sentinel-secret-1541"
+_GW_PW = "gw-userinfo-pw-1541"
+_GW_USER = "gwuser1541"
+_TOKEN_MATCH = "tok-match-sentinel-1541-abcdefghij"
+_TOKEN_RESOLVER_OTHER = "tok-resolver-other-sentinel-1541-xyz"
+_SENTINELS = [_PG_PW, _URL_PW, _FOO_SECRET, _GW_PW, _GW_USER,
+              _TOKEN_MATCH, _TOKEN_RESOLVER_OTHER,
+              "postgresql://root:", "svc1541", "root:" + _PG_PW]
+
+
+def _sentinel_env_text():
+    return (
+        f"MESH_PG_ROOT_DSN=postgresql://root:{_PG_PW}@db.internal:5432/mesh\n"
+        f"SWARPH_BACKEND_URL=https://svc1541:{_URL_PW}@backend.internal:8443/api\n"
+        f"MESH_FOO={_FOO_SECRET}\n"
+        f"MESH_GATEWAY_URL=https://{_GW_USER}:{_GW_PW}@100.107.222.72:8788/\n"
+        f"MESH_GATEWAY_TOKEN={_TOKEN_MATCH}\n"
+    )
+
+
+def _sentinel_resolver(token):
+    return {"gateway": "https://100.107.222.72:8788/",
+            "token": (token, "peer file"),
+            "listeners": {("100.107.222.72", 8788)},
+            "socket_table": "read"}
+
+
+def _run_json(monkeypatch, tmp_path, surfaces, self_name, resolver, capsys):
+    monkeypatch.setattr(sc, "discover_surfaces", lambda: surfaces)
+    decl = tmp_path / "cell_expected.json"
+    rc = sc.run_selfcheck(self_name=self_name, declaration=decl,
+                          resolver=resolver, json_output=True)
+    return rc, capsys.readouterr().out
+
+
+def _assert_no_sentinels(serialized):
+    for s in _SENTINELS:
+        assert s not in serialized, f"sentinel leaked: {s!r} in {serialized[:2000]}"
+    assert _PG_PW not in serialized and _URL_PW not in serialized
+    assert _FOO_SECRET not in serialized and _TOKEN_MATCH not in serialized
+
+
+def test_env_secrets_never_in_text_output_token_match(monkeypatch, tmp_path, capsys):
+    fixture = tmp_path / "fixture.env"
+    fixture.write_text(_sentinel_env_text(), encoding="utf-8")
+    surface = _envfile(fixture.read_text(encoding="utf-8"), owner="lab-ovh")
+    rc, out = _run(monkeypatch, tmp_path, [surface], "lab-ovh",
+                   capsys=capsys, resolver=_sentinel_resolver(_TOKEN_MATCH))
+    _assert_no_sentinels(out)
+    assert "https://100.107.222.72:8788/" in out, out
+    assert "matches resolved credential" in out, out
+    assert "TOKEN MISMATCH" not in out, out
+
+
+def test_env_secrets_never_in_text_output_token_mismatch(monkeypatch, tmp_path, capsys):
+    fixture = tmp_path / "fixture.env"
+    fixture.write_text(_sentinel_env_text(), encoding="utf-8")
+    surface = _envfile(fixture.read_text(encoding="utf-8"), owner="lab-ovh")
+    rc, out = _run(monkeypatch, tmp_path, [surface], "lab-ovh",
+                   capsys=capsys, resolver=_sentinel_resolver(_TOKEN_RESOLVER_OTHER))
+    _assert_no_sentinels(out)
+    assert "https://100.107.222.72:8788/" in out, out
+    assert "TOKEN MISMATCH" in out, out
+    assert rc == 1, out
+
+
+def test_env_secrets_never_in_json_output_token_match(monkeypatch, tmp_path, capsys):
+    fixture = tmp_path / "fixture.env"
+    fixture.write_text(_sentinel_env_text(), encoding="utf-8")
+    surface = _envfile(fixture.read_text(encoding="utf-8"), owner="lab-ovh")
+    rc, out = _run_json(monkeypatch, tmp_path, [surface], "lab-ovh",
+                        _sentinel_resolver(_TOKEN_MATCH), capsys)
+    _assert_no_sentinels(out)
+    _assert_no_sentinels(json.dumps(json.loads(out)))
+    parsed = json.loads(out)
+    assert any(r.get("check") == "resolver:token" and r.get("verdict") == "OK"
+               for r in parsed), parsed
+
+
+def test_env_secrets_never_in_json_output_token_mismatch(monkeypatch, tmp_path, capsys):
+    fixture = tmp_path / "fixture.env"
+    fixture.write_text(_sentinel_env_text(), encoding="utf-8")
+    surface = _envfile(fixture.read_text(encoding="utf-8"), owner="lab-ovh")
+    rc, out = _run_json(monkeypatch, tmp_path, [surface], "lab-ovh",
+                        _sentinel_resolver(_TOKEN_RESOLVER_OTHER), capsys)
+    _assert_no_sentinels(out)
+    parsed = json.loads(out)
+    assert any(r.get("check") == "resolver:token" and r.get("verdict") == "TOKEN MISMATCH"
+               for r in parsed), parsed
+    assert rc == 1
+
+
+def test_discovered_envfile_surfaces_hold_no_raw_secrets(tmp_path, monkeypatch):
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    fixture = tmp_path / "fixture.env"
+    fixture.write_text(_sentinel_env_text(), encoding="utf-8")
+    (unit_dir / "fixture.service").write_text(
+        "[Service]\nExecStart=swarph monitor start --as lab-ovh\n"
+        f"EnvironmentFile={fixture.as_posix()}\n", encoding="utf-8")
+    cron_fixture = tmp_path / "crontab"
+    cron_fixture.write_text("", encoding="utf-8")
+    monkeypatch.setattr(sc, "_unit_live", lambda unit, user=False: True)
+    monkeypatch.setattr(sc.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("no crontab")))
+    surfaces = sc.discover_surfaces(unit_dirs=[unit_dir],
+                                    system_cron_paths=[cron_fixture],
+                                    platform_has_cron=True)
+    blob = repr(surfaces)
+    _assert_no_sentinels(blob)
+    assert "https://100.107.222.72:8788/" in blob, blob
+    # rows on the surface carry digests, not raw token/secret values
+    env_s = [s for s in surfaces if s.get("kind") == "envfile"]
+    assert env_s, surfaces
+    for row in env_s[0].get("rows", []):
+        assert _TOKEN_MATCH not in str(row.value)
+        assert _FOO_SECRET not in str(row.value)
+    import hashlib as _hl
+    tok_rows = [r for r in env_s[0]["rows"] if r.key == "env:MESH_GATEWAY_TOKEN"]
+    assert tok_rows and tok_rows[0].digest == _hl.sha256(_TOKEN_MATCH.encode()).hexdigest()
+
+
+def test_strip_url_userinfo_helper():
+    assert sc._strip_url_userinfo("https://user:pass@host:8443/x") == "https://host:8443/x"
+    assert sc._strip_url_userinfo("postgresql://root:pw@db:5432/mesh") == "postgresql://db:5432/mesh"
+    assert sc._strip_url_userinfo("http://100.107.222.72:8788") == "http://100.107.222.72:8788"
+    assert sc._strip_url_userinfo("/plain/path") == "/plain/path"
+
+
+def test_gateway_flag_url_userinfo_stripped_in_text(monkeypatch, tmp_path, capsys):
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("a.service", "ExecStart=x --as lab --gateway https://u1:pwflag1541@203.0.113.9:8788\n"),
+    ], "lab", capsys=capsys, resolver=_resolver(gateway="https://203.0.113.9:8788"))
+    assert "pwflag1541" not in out and "u1:" not in out, out
+    assert "203.0.113.9:8788" in out, out

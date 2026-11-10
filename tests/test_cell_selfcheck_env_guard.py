@@ -1,7 +1,7 @@
-"""Card #1541: the .env open guard for tests/test_cell_selfcheck.py.
+"""Card #1541: the .env open guard for the whole test suite.
 
 The guard itself lives in tests/conftest.py (`_no_host_env_open`, autouse,
-scoped to this module and test_cell_selfcheck.py). It patches
+suite-wide for all test modules). It patches
 builtins.open, io.open, os.open and pathlib.Path.open and RAISES
 AssertionError BEFORE any open whose name ends in '.env'/'dsn.env' and whose
 resolved path is outside the test's tmp_path. It never calls through on a

@@ -253,14 +253,13 @@ def _no_unmocked_tmux(request, monkeypatch):
     monkeypatch.setattr(subprocess, "run", _guarded_run)
 
 
-# ── card #1541: no real host .env may be opened by the selfcheck suite ──────
-# SCOPE: only tests in test_cell_selfcheck.py and its guard companion
-# test_cell_selfcheck_env_guard.py. The guard RAISES AssertionError BEFORE any
-# forbidden open executes (it never calls through on a forbidden path, so no
-# real file is ever opened). Opens under the test's tmp_path are allowed —
-# fixtures live there. It patches builtins.open, io.open, os.open and
+# ── card #1541: no real host .env may be opened by the test suite ──────
+# SCOPE: the WHOLE test suite (all test modules). The guard RAISES
+# AssertionError BEFORE any forbidden open executes (it never calls through
+# on a forbidden path, so no real file is ever opened). Opens under the
+# test's tmp_path (or the pytest basetemp) are allowed — fixtures live
+# there. It patches builtins.open, io.open, os.open and
 # pathlib.Path.open (Path.read_text/read_bytes go through Path.open).
-_ENV_GUARD_MODULES = {"test_cell_selfcheck.py", "test_cell_selfcheck_env_guard.py"}
 _REAL_BUILTINS_OPEN = builtins.open
 _REAL_IO_OPEN = io.open
 _REAL_OS_OPEN = os.open
@@ -268,10 +267,9 @@ _REAL_PATH_OPEN = pathlib.Path.open
 
 
 @pytest.fixture(autouse=True)
-def _no_host_env_open(request, monkeypatch, tmp_path):
-    if pathlib.Path(str(request.node.path)).name not in _ENV_GUARD_MODULES:
-        return
+def _no_host_env_open(request, monkeypatch, tmp_path, tmp_path_factory):
     allowed_root = tmp_path.resolve()
+    basetemp_root = tmp_path_factory.getbasetemp().resolve()
     _sep = "\\" if os.name == "nt" else "/"
 
     def _norm_key(path: pathlib.Path) -> str:
@@ -288,6 +286,8 @@ def _no_host_env_open(request, monkeypatch, tmp_path):
 
     allowed_key = _norm_key(allowed_root)
     allowed_prefix = allowed_key if allowed_key.endswith(_sep) else allowed_key + _sep
+    basetemp_key = _norm_key(basetemp_root)
+    basetemp_prefix = basetemp_key if basetemp_key.endswith(_sep) else basetemp_key + _sep
 
     def _forbidden(file) -> bool:
         if isinstance(file, int):
@@ -310,7 +310,11 @@ def _no_host_env_open(request, monkeypatch, tmp_path):
         if not resolved.is_absolute():
             resolved = pathlib.Path.cwd() / resolved
         candidate_key = _norm_key(resolved)
-        return candidate_key != allowed_key and not candidate_key.startswith(allowed_prefix)
+        if candidate_key == allowed_key or candidate_key.startswith(allowed_prefix):
+            return False
+        if candidate_key == basetemp_key or candidate_key.startswith(basetemp_prefix):
+            return False
+        return True
 
     def _check(file):
         if _forbidden(file):
