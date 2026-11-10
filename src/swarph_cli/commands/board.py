@@ -433,6 +433,31 @@ def _format_stage_history(card: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_schedules(data) -> str:
+    """Card #1522: one readable line per job (host, unit, schedule, next run)."""
+    def field(value):
+        text = str(value or "").replace("\n", " ").replace("\r", " ").replace("\t", " ")
+        return _s(text.replace("\u2028", " ").replace("\u2029", " "))
+
+    hosts = data.get("hosts", {}) if isinstance(data, dict) else {}
+    if not hosts:
+        return "(no snapshot from any host since gateway restart)"
+    lines = []
+    for host in sorted(hosts):
+        snap = hosts[host] or {}
+        jobs = snap.get("jobs", []) or []
+        if not jobs:
+            lines.append(f"{field(host)}  (no jobs)")
+            continue
+        for job in jobs:
+            next_run = job.get("next_run")
+            lines.append(
+                f"{field(job.get('host') or host)}  "
+                f"{field(job.get('unit_or_cron_line'))}  "
+                f"{field(job.get('schedule'))}  next={field(next_run if next_run is not None else '-')}")
+    return "\n".join(lines) if lines else "(no jobs)"
+
+
 def _format_projects(data) -> str:
     rows = data.get("projects", []) if isinstance(data, dict) else (data or [])
     if not rows:
@@ -1591,6 +1616,8 @@ def _build_parser() -> argparse.ArgumentParser:
     orel.add_argument("--reason", required=True,
                       help="why the row is released; whitespace is refused")
     orel.add_argument("--json", action="store_true"); _add_common(orel)
+    sched = top.add_parser("schedules", help="host schedules snapshots (#1522)")
+    sched.add_argument("--json", action="store_true"); _add_common(sched)
     cost = top.add_parser(
         "cost",
         help="tokens by job, the perfect-run rate, and cost per accepted outcome")
@@ -1654,6 +1681,10 @@ def run_board(argv: list[str]) -> int:
         if args.command == "add":
             st, d = _post_json(f"{gw}/board/projects", _project_add_payload(self_name, args.slug, args.title, goal=args.goal, opt_out=getattr(args, "no_redact", False)), token)
             return _out(st, d, lambda x: f"created project #{x.get('id')} ({x.get('slug')})", aj)
+
+    if args.group == "schedules":
+        st, d = _http_get_json(f"{gw}/board/schedules", token)
+        return _out(st, d, _format_schedules, aj)
 
     if args.group == "cost":
         from swarph_cli.commands.board_cost import format_cost
