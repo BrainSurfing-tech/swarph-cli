@@ -15,6 +15,11 @@
 # exercising the shared outbound scrub, not a credential. The fake is also
 # built at runtime in the test so the full shape never sits in a blob; the
 # allowlist covers the historical commits that predate that split.
+#
+# Card #1548: tests/test_cell_selfcheck.py has NO entry here. Its fixture
+# sentinels are assembled from fragments at runtime, so no contiguous
+# scanner-shaped literal sits in that file and a real-shaped secret
+# planted there is still caught by generic-api-key.
 [extend]
 useDefault = true
 
@@ -23,7 +28,6 @@ id = "generic-api-key"
 [rules.allowlist]
 paths = [
   '''tests/test_token_file_one_parser\.py''',
-  '''tests/test_cell_selfcheck\.py''',
 ]
 
 [[rules]]

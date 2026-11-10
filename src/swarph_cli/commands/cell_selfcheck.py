@@ -163,8 +163,14 @@ def _row_len(row: "Row") -> int:
 
 
 _GATEWAY_KEYS = ("gateway", "env:MESH_GATEWAY_URL")
+# Card #1548: show ONLY scheme://host[:port] with an optional bare '/'.
+# Host is [A-Za-z0-9.-]+ or a bracketed IPv6 literal (hex/colons/dots).
+# Any path beyond a bare '/', userinfo (literal or percent-encoded),
+# whitespace or empty host fails the strict host charset and redacts.
 _GATEWAY_SHOW_RE = re.compile(
-    r"^[A-Za-z][A-Za-z0-9+.-]*://[^\s/@?#:]+(:[0-9]+)?(/[^\s@?#]*)?$")
+    r"^[A-Za-z][A-Za-z0-9+.-]*://"
+    r"(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])"
+    r"(:[0-9]+)?/?$")
 
 
 def _gateway_display(value: str, length: Optional[int] = None) -> str:
@@ -172,8 +178,9 @@ def _gateway_display(value: str, length: Optional[int] = None) -> str:
 
     The '@'/'?'/'#' check comes FIRST and alone decides redaction: any
     value containing one anywhere is never parsed or partially stripped.
-    Only a value matching scheme://host[:port][/path] with none of those
-    characters is shown as-is; anything else also fails closed.
+    Only a value matching scheme://host[:port] with an optional bare
+    trailing '/' and none of those characters is shown as-is; anything
+    else also fails closed (card #1548).
     """
     text = str(value)
     n = len(text) if length is None else length
@@ -288,7 +295,7 @@ def _sanitized_envfile_text(text: str) -> str:
     """Env-file text with every KEY=VALUE value removed for safe storage.
 
     MESH_GATEWAY_URL keeps its fail-closed display form (plain
-    scheme://host[:port][/path] only; see _gateway_display); every other
+    scheme://host[:port] with optional bare '/' only; see _gateway_display); every other
     value becomes a length-only placeholder. Raw values never survive
     into a returned surface structure.
     """
