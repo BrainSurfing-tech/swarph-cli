@@ -14,10 +14,10 @@ Unix-socket connection. Do not share one proxy between cells.
 The store's `config.json` is a JSON object, not a token-bearing environment file:
 
 ```json
-{"cell_uid":1001,"gateway_url":"http://127.0.0.1:8788"}
+{"cell_uid":1001,"gateway_url":"http://localhost","gateway_socket":"/run/swarph-gateway/gateway.sock","gateway_uid":1000}
 ```
 
-Replace the example URL with the operator-chosen gateway. `cell_uid` is mandatory
+Replace the example paths and uids with operator-chosen values. `cell_uid` is mandatory
 and must differ from the proxy uid. Optional absolute paths are `token_file`
 (defaults beside the configuration as `peer_token`), `socket_path` (Linux default
 `/run/swarph-proxy/<cell>.sock`), and `audit_path` (Linux default
@@ -75,13 +75,44 @@ directory are the private proxy store. Isolated Python ignores the caller's
 `PYTHONPATH`, user site and current-directory import injection. It is not a
 substitute for filesystem ownership.
 
-Example store config (the address is illustrative; only the operator chooses it):
+### Gateway transport (card #1557)
+
+For a same-box gateway, provision a Unix listening socket as a separate operator
+step, for example with the gateway's `uvicorn --uds /run/swarph-gateway/gateway.sock`.
+This build does not change or start the gateway. Provision its parent directory
+as gateway-owned (or root-owned), non-cell-writable, without symlink ancestors;
+grant the proxy account permission to connect without granting the cell write
+access to that directory. `gateway_socket` must be an absolute, existing socket
+path. `gateway_uid` must be its expected server process uid (an integer, including
+0 if the operator deliberately runs the gateway as root). Both are protected
+config values, never caller arguments or environment overrides.
+
+The proxy and its private monitor use HTTP/1.1 over AF_UNIX. Before sending ANY
+request bytes, each connection's Linux SO_PEERCRED uid (macOS getpeereid) must
+equal `gateway_uid`; mismatch or an unavailable peer check is `proxy_unavailable`.
+The path and ancestors are checked at startup and before each connection using
+the existing safe_parent rules (including its root-owned sticky-/tmp exception).
+Symlinked socket inodes are refused too. The check applies to the connected
+socket, not just its filesystem owner, so replacing a listener cannot inherit
+authorization. Automatic reconnects and redirects are disabled. With
+`gateway_socket` set, `gateway_url` supplies only the logical HTTP host/base used
+by the monitor: no TCP connection or TLS handshake is made, even for a loopback URL.
+Missing sockets never fall back to TCP. Start/provision the gateway socket first.
+
+For a remote proxy, omit `gateway_socket` and `gateway_uid` and use the gateway's
+operator-verified tailnet address (or HTTPS), for example:
 
 ```json
-{"gateway_url":"http://127.0.0.1:8080","cell_uid":12345}
+{"gateway_url":"http://100.64.1.2:8788","cell_uid":12345}
 ```
 
 The gateway is loaded from this file, not a caller argument or environment.
+Loopback TCP URLs (127.0.0.0/8, ::1 and localhost) are refused at startup without
+a gateway socket. TCP connections resolving to loopback are also refused before
+any request bytes. An explicit protected JSON `allow_loopback_tcp:true` bypasses
+this refusal for legacy/test use: **UNSAFE**, any local user who acquires that
+port can receive the bearer token. It is false by default; non-booleans refuse
+startup. Do not use the escape for a production same-box deployment.
 `peer_token` is the default token filename. Never put a bearer token in a unit,
 plist, environment, command argument or deployment transcript. The monitor uses
 the same protected config and token file; it cannot accept a gateway override.
@@ -135,7 +166,7 @@ configuration loader even if the key is absent. Provision an explicit setting
 in the protected Mac config, for example (with operator-selected uid and paths):
 
 ```json
-{"cell_uid":12345,"gateway_url":"http://127.0.0.1:8080","read_only":true,"socket_path":"/private/var/run/swarph-proxy/alice/proxy.sock","audit_path":"/private/var/log/swarph-proxy/alice.jsonl"}
+{"cell_uid":12345,"gateway_url":"http://100.64.1.2:8788","read_only":true,"socket_path":"/private/var/run/swarph-proxy/alice/proxy.sock","audit_path":"/private/var/log/swarph-proxy/alice.jsonl"}
 ```
 
 A-I-D's Mac must stay read-only until per-act confirmation (#1539 (a)) or

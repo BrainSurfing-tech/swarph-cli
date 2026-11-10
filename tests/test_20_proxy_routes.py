@@ -347,7 +347,7 @@ def wire_gateway(tmp_path):
     worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     worker.start()
     config = Config("cell-one", os.getuid() + 77777, f"http://127.0.0.1:{server.server_port}",
-                    tmp_path / "unused-token", tmp_path / "unused.sock", tmp_path / "audit.jsonl")
+                    tmp_path / "unused-token", tmp_path / "unused.sock", tmp_path / "audit.jsonl", allow_loopback_tcp=True)
     try:
         yield Proxy(config, fixture_auth), seen, authenticated, routes
     finally:

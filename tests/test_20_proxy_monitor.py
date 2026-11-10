@@ -47,7 +47,7 @@ def test_pinned_tick_keeps_unread_and_stall_alerts_off_urllib(monkeypatch, tmp_p
             return None
 
     config = Config("alice", os.getuid()+1234, gateway.url, tmp_path / "unused-token",
-                    tmp_path / "unused.sock", tmp_path / "audit")
+                    tmp_path / "unused.sock", tmp_path / "audit", allow_loopback_tcp=True)
     state = mesh.MonitorState(self_name="alice", state_dir=tmp_path / "state",
                               gateway=gateway.url, token="fixture-private-monitor-token",
                               sinks=[BusySink()])
@@ -130,6 +130,7 @@ def monitor_install(monkeypatch, tmp_path):
         config.write_text(json.dumps({
             "cell_uid": os.getuid() + 1,
             "gateway_url": gateway,
+            "allow_loopback_tcp": True,
             "token_file": str(token),
             "socket_path": str(store / "proxy.sock"),
             "audit_path": str(store / "audit.jsonl"),

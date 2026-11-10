@@ -48,7 +48,7 @@ def test_complete_gateway_json_is_the_only_success(tmp_path):
     worker.start()
     try:
         config = Config("alice", 1001, f"http://127.0.0.1:{server.server_port}",
-                        tmp_path / "peer_token", tmp_path / "proxy.sock", tmp_path / "audit")
+                        tmp_path / "peer_token", tmp_path / "proxy.sock", tmp_path / "audit", allow_loopback_tcp=True)
         proxy = Proxy(config, "fixture-token")
         request = {"request_id": str(uuid.uuid4()), "verb": "whoami", "args": {}}
         reply = proxy.request(request)
@@ -85,7 +85,7 @@ def gateway(tmp_path, response, *, uid=None):
     worker.start()
     config = Config("alice", os.getuid() if uid is None else uid,
                     f"http://127.0.0.1:{server.server_port}",
-                    tmp_path / "peer_token", short_socket(tmp_path), tmp_path / "audit")
+                    tmp_path / "peer_token", short_socket(tmp_path), tmp_path / "audit", allow_loopback_tcp=True)
     try:
         yield Proxy(config, "fixture-secret-20"), seen
     finally:
@@ -192,7 +192,7 @@ def test_before_send_failure_is_unreachable_and_missing_proxy_has_no_fallback(tm
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     config = Config("alice", os.getuid() + 1, f"http://127.0.0.1:{port}",
-                    tmp_path / "token", tmp_path / "missing.sock", tmp_path / "audit")
+                    tmp_path / "token", tmp_path / "missing.sock", tmp_path / "audit", allow_loopback_tcp=True)
     assert request(Proxy(config, "fixture-secret-20"))["error"] == "upstream_unreachable"
     assert call(str(config.socket_path), "whoami", {})["error"] == "proxy_unavailable"
 
@@ -231,7 +231,7 @@ def test_credential_store_rejects_writable_config_token_symlinks_and_env_urls(tm
     token = tmp_path / "peer_token"
     token.write_text("fake-store-token")
     token.chmod(0o600)
-    path.write_text(json.dumps({"cell_uid": os.getuid() + 1234, "gateway_url": "http://127.0.0.1:1234",
+    path.write_text(json.dumps({"cell_uid": os.getuid() + 1234, "gateway_url": "http://127.0.0.1:1234", "allow_loopback_tcp": True,
                                "socket_path": str(tmp_path / "socket"), "audit_path": str(tmp_path / "audit")}))
     path.chmod(0o600)
     monkeypatch.setenv("MESH_GATEWAY_URL", "https://attacker.invalid")
@@ -266,6 +266,7 @@ def test_protected_config_sets_only_a_positive_integer_connection_cap(tmp_path, 
     path = tmp_path / "config.json"
     path.write_text(json.dumps({"cell_uid": os.getuid() + 1234,
                                "gateway_url": "http://127.0.0.1:1234",
+                               "allow_loopback_tcp": True,
                                "socket_path": str(tmp_path / "socket"),
                                "audit_path": str(tmp_path / "audit"), **fields}))
     path.chmod(0o600)
@@ -295,7 +296,7 @@ def test_socket_directory_symlink_swap_cannot_chmod_the_token(tmp_path):
 
 def test_audit_contains_only_validated_metadata_not_token_or_caller_body(tmp_path, capsys):
     config = Config("alice", os.getuid() + 1234, "http://127.0.0.1:1",
-                    tmp_path / "peer_token", tmp_path / "proxy.sock", tmp_path / "audit")
+                    tmp_path / "peer_token", tmp_path / "proxy.sock", tmp_path / "audit", allow_loopback_tcp=True)
     proxy = Proxy(config, "fake-secret20")
     mask = os.umask(0o077)
     try:
@@ -326,6 +327,7 @@ def running_fixture_proxy(proxy, tmp_path, *, read_timeout=20, max_connections=N
     config_file = tmp_path / "config.json"
     data = {
         "cell_uid": proxy.config.cell_uid, "gateway_url": proxy.config.gateway_url,
+        "allow_loopback_tcp": True,
         "token_file": str(token_file), "socket_path": str(proxy.config.socket_path),
         "audit_path": str(proxy.config.audit_path),
     }
@@ -603,7 +605,7 @@ def test_connection_setup_cannot_outlive_the_shared_upstream_deadline(tmp_path, 
     monkeypatch.setattr(local.http.client.HTTPConnection, "connect", slow_connect)
     monkeypatch.setattr(local, "UPSTREAM_TIMEOUT", 0.02)
     config = Config("alice", os.getuid() + 1234, "http://127.0.0.1:1",
-                    tmp_path / "token", tmp_path / "socket", tmp_path / "audit")
+                    tmp_path / "token", tmp_path / "socket", tmp_path / "audit", allow_loopback_tcp=True)
     def invoke():
         try:
             results.append(request(Proxy(config, "fake-secret20")))
