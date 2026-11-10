@@ -1,5 +1,6 @@
 """Card #1522: `swarph board schedules [--json]` against a fake gateway."""
 import json
+import pytest
 
 from swarph_cli.commands import board
 
@@ -83,3 +84,36 @@ def test_redacted_collector_rows_sentinel_never_printed(monkeypatch, capsys):
     assert "SENTINEL-DO-NOT-LEAK-1522" not in out.err
     assert "MESH_GATEWAY_URL=<redacted>" in out.out
     assert "--token-file <redacted>" in out.out
+
+
+def test_no_jobs_host_is_sanitized_and_one_line(monkeypatch, capsys):
+    payload = {"hosts": {"\x1b[31mhost\nFORGED\rentry": {"jobs": []}}}
+    rc, out, _ = _run(monkeypatch, capsys, ["schedules"], payload=payload)
+    assert rc == 0 and len(out.out.splitlines()) == 1
+    assert "\x1b" not in out.out and "\r" not in out.out
+    assert out.out == "[31mhost FORGED entry  (no jobs)\n"
+
+
+@pytest.mark.parametrize("field", ["host", "unit_or_cron_line", "schedule", "next_run"])
+@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n", "\t", "\u2028", "\u2029"])
+def test_each_job_field_stays_on_one_line(field, separator):
+    job = {"host": "h", "unit_or_cron_line": "job", "schedule": "daily", "next_run": "tomorrow"}
+    job[field] = "before" + separator + "after\x1b[31m"
+    out = board._format_schedules({"hosts": {"h": {"jobs": [job]}}})
+    assert len(out.splitlines()) == 1
+    assert "\x1b" not in out and "\t" not in out and "\r" not in out
+    expected = "before" + ("  " if separator == "\r\n" else " ") + "after[31m"
+    assert expected in out
+
+
+def test_fallback_host_key_is_also_single_line():
+    job = {"unit_or_cron_line": "job", "schedule": "daily", "next_run": None}
+    out = board._format_schedules({"hosts": {"host\nforged": {"jobs": [job]}}})
+    assert out == "host forged  job  daily  next=-"
+
+
+def test_null_next_run_uses_dash_without_changing_other_fields():
+    job = {"host": "h", "unit_or_cron_line": "job", "schedule": "daily", "next_run": None}
+    assert board._format_schedules({"hosts": {"h": {"jobs": [job]}}}) == "h  job  daily  next=-"
+    job["next_run"] = ""
+    assert board._format_schedules({"hosts": {"h": {"jobs": [job]}}}) == "h  job  daily  next="

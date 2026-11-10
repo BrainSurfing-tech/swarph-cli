@@ -435,6 +435,10 @@ def _format_stage_history(card: dict) -> str:
 
 def _format_schedules(data) -> str:
     """Card #1522: one readable line per job (host, unit, schedule, next run)."""
+    def field(value):
+        text = str(value or "").replace("\n", " ").replace("\r", " ").replace("\t", " ")
+        return _s(text.replace("\u2028", " ").replace("\u2029", " "))
+
     hosts = data.get("hosts", {}) if isinstance(data, dict) else {}
     if not hosts:
         return "(no snapshot from any host since gateway restart)"
@@ -443,13 +447,14 @@ def _format_schedules(data) -> str:
         snap = hosts[host] or {}
         jobs = snap.get("jobs", []) or []
         if not jobs:
-            lines.append(f"{host}  (no jobs)")
+            lines.append(f"{field(host)}  (no jobs)")
             continue
         for job in jobs:
+            next_run = job.get("next_run")
             lines.append(
-                f"{_s(job.get('host') or host)}  "
-                f"{_s(job.get('unit_or_cron_line'))}  "
-                f"{_s(job.get('schedule'))}  next={_s(job.get('next_run'))}")
+                f"{field(job.get('host') or host)}  "
+                f"{field(job.get('unit_or_cron_line'))}  "
+                f"{field(job.get('schedule'))}  next={field(next_run if next_run is not None else '-')}")
     return "\n".join(lines) if lines else "(no jobs)"
 
 
