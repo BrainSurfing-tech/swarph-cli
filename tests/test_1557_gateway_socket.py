@@ -3,9 +3,11 @@ import dataclasses
 import http.client
 import json
 import os
+from pathlib import Path
 import socket
 import socketserver
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -25,9 +27,14 @@ TOKEN = "fixture-only-1557-token"
 
 @pytest.fixture
 def store(tmp_path_factory):
+    # Darwin's long runner TMPDIR exceeds sun_path; keep a private, canonical store.
+    if sys.platform == "darwin":
+        with tempfile.TemporaryDirectory(prefix="p1557-", dir="/private/tmp") as directory:
+            yield Path(directory)
+        return
     path = tmp_path_factory.mktemp("uds1557").resolve()
     path.chmod(0o700)
-    return path
+    yield path
 
 
 @contextmanager
