@@ -70,6 +70,8 @@ swarph schedule <sub>    scheduled events — create/list/get/enable/disable/del
 swarph board <sub>       mesh board — projects/cards kanban (list/show/add/move/link/assign)
 swarph committee <sub>   committee rooms — motion/post/results; `results <channel> [--motion ID] --json` prints gateway JSON verbatim (--json also on rooms open/motion/post)
 swarph subscribe <sub>   targeted event subscriptions — add/list/cancel (add: --trigger/--target; each verb --as/--json)
+swarph proxy serve      serve the per-cell credential-isolating local proxy (operator setup required)
+swarph proxy call       call a closed proxy verb through the local Unix socket, never with a token
 swarph mesh peers --json allowlisted peer JSON (projected rows only; never the raw /peers row)
 swarph cell selfcheck --json   allowlisted selfcheck JSON rows (verdicts only, no paths/tokens)
 swarph cell probe --json       allowlisted probe JSON rows (verdicts only, no paths/tokens)
@@ -92,6 +94,12 @@ swarph import <path>     port a session from another CLI into swarph-native form
 ```
 
 Each verb is documented below.
+
+For `swarph proxy serve --cell CELL --config PATH` and
+`swarph proxy call VERB [--args-json '{}'] [--socket PATH]`, see the closed
+[proxy protocol](docs/proxy-protocol.md). Code and templates do not install or
+activate the proxy: the [deployment guide](docs/proxy-deployment.md) covers the
+operator-owned installation, proxy user and token cutover.
 
 ### `swarph guide` (v0.45.0)
 
