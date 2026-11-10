@@ -1,6 +1,6 @@
 {
   "name": "swarph",
-  "version": "0.72.47",
+  "version": "0.74.0",
   "description": "Tails this cell's mesh inbox and pushes each new DM as a Claude channel notification.",
   "author": {"name": "BrainSurfing-tech"}
 }

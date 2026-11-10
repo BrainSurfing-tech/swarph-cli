@@ -218,6 +218,7 @@ def _run_mutant_alone_on_temp_copy(mutator, nodeid: str) -> subprocess.Completed
         env["PYTHONPATH"] = str(tmp / "src")
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
+             f"--basetemp={tmp / 'basetemp'}",
              "-q", "--tb=short", "--override-ini", "pythonpath=src", nodeid],
             cwd=str(tmp),
             env=env,

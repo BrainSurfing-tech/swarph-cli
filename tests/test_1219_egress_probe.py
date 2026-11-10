@@ -205,6 +205,7 @@ def test_m4_removing_prove_isolation_is_killed(tmp_path):
     (repo / "EGRESS.md").write_text("# none\n", encoding="utf-8")
     out = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "--tb=line",
+         f"--basetemp={tmp_path / 'basetemp'}",
          "tests/test_1219_egress_probe.py::test_shim_through_pytest_exits_2"],
         cwd=repo, capture_output=True, text=True, timeout=90)
     assert out.returncode != 0, out.stdout + out.stderr
@@ -259,3 +260,27 @@ def test_make_prints_unproven_status(tmp_path):
         timeout=60, env=env)
     assert "egress-probe-status 2" in out.stdout, out.stdout + out.stderr
     assert "isolation-unproven:" in out.stderr
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="bwrap --unshare-net is Linux")
+def test_1524_egress_probe_leaves_no_tmp_dirs(tmp_path):
+    """Card #1524: all three mkdtemp sites in egress_probe.py (run_script,
+    prove_isolation, run_pytest) clean up their egress-probe-* directories."""
+    scratch_tmp = tmp_path / "tmpdir"
+    scratch_tmp.mkdir()
+    env = {
+        "TMPDIR": str(scratch_tmp),
+        "TEMP": str(scratch_tmp),
+        "TMP": str(scratch_tmp),
+    }
+    out_iso = _run(["--isolation"], **env)
+    assert out_iso.returncode == 0, out_iso.stderr
+    out_mut = _run(["--mutant", "os-system-curl"], **env)
+    assert out_mut.returncode == 1, out_mut.stderr
+    out_py = _run(
+        ["--pytest", "tests/test_1219_egress_probe.py::test_missing_bwrap_fails_closed_with_a_named_reason"],
+        **env,
+    )
+    assert out_py.returncode == 0, out_py.stderr
+    leftovers = [p.name for p in scratch_tmp.iterdir() if p.name.startswith("egress-probe-")]
+    assert leftovers == [], f"leaked egress-probe- dirs in TMPDIR: {leftovers}"

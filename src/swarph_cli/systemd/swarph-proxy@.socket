@@ -1,0 +1,14 @@
+[Unit]
+Description=swarph credential-isolated proxy socket (%i)
+
+[Socket]
+ListenStream=/run/swarph-proxy/%i.sock
+SocketUser=proxy-%i
+SocketGroup=cell-%i
+SocketMode=0660
+# systemd creates missing ancestors as root; never give this directory to a cell.
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

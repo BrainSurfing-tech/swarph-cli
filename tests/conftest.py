@@ -26,6 +26,8 @@ This is the same defect family as the other false instruments found the same day
 "rehearsal" that only marks a watermark: **the instrument could not reach the condition,
 and its output was read as evidence about it.**
 """
+import builtins
+import io
 import os
 import pathlib
 import subprocess
@@ -157,6 +159,12 @@ _SWARPH_ENV = (
     "SWARPH_REDACT_AUDIT_LOG",
     "SWARPH_REDACT_CUSTOM_RULES",
     "SWARPH_REDACT_OPTOUT",
+    # card #1521: shim firing ledger directory override
+    "SWARPH_SHIM_LEDGER_DIR",
+    # card #1541: cell_selfcheck fixture-root overrides — a test that wants
+    # them sets them itself; the box's values must not become the suite's.
+    "SWARPH_SELFCHECK_UNIT_DIRS",
+    "SWARPH_SELFCHECK_SYSTEM_CRON_PATHS",
 )
 
 
@@ -243,3 +251,95 @@ def _no_unmocked_tmux(request, monkeypatch):
         return _REAL_SUBPROCESS_RUN(argv, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", _guarded_run)
+
+
+# ── card #1541: no real host .env may be opened by the test suite ──────
+# SCOPE: the WHOLE test suite (all test modules). The guard RAISES
+# AssertionError BEFORE any forbidden open executes (it never calls through
+# on a forbidden path, so no real file is ever opened). Opens under the
+# test's tmp_path (or the pytest basetemp) are allowed — fixtures live
+# there. It patches builtins.open, io.open, os.open and
+# pathlib.Path.open (Path.read_text/read_bytes go through Path.open).
+_REAL_BUILTINS_OPEN = builtins.open
+_REAL_IO_OPEN = io.open
+_REAL_OS_OPEN = os.open
+_REAL_PATH_OPEN = pathlib.Path.open
+
+
+@pytest.fixture(autouse=True)
+def _no_host_env_open(request, monkeypatch, tmp_path, tmp_path_factory):
+    allowed_root = tmp_path.resolve()
+    basetemp_root = tmp_path_factory.getbasetemp().resolve()
+    _sep = "\\" if os.name == "nt" else "/"
+
+    def _norm_key(path: pathlib.Path) -> str:
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError):
+            resolved = path
+        text = str(resolved)
+        if os.name == "nt":
+            text = os.path.normcase(text.replace("/", "\\")).casefold()
+        else:
+            text = os.path.normpath(text)
+        return text.rstrip("\\/") or text
+
+    allowed_key = _norm_key(allowed_root)
+    allowed_prefix = allowed_key if allowed_key.endswith(_sep) else allowed_key + _sep
+    basetemp_key = _norm_key(basetemp_root)
+    basetemp_prefix = basetemp_key if basetemp_key.endswith(_sep) else basetemp_key + _sep
+
+    def _forbidden(file) -> bool:
+        if isinstance(file, int):
+            return False
+        try:
+            raw = os.fspath(file)
+        except TypeError:
+            return False
+        if isinstance(raw, bytes):
+            raw = os.fsdecode(raw)
+        # Normalise separators before naming/resolving so a forward-slash
+        # (systemd-style) spelling of a tmp_path fixture on Windows compares
+        # equal to the backslash spelling tmp_path itself uses.
+        if os.name == "nt":
+            raw = raw.replace("/", "\\")
+        name = pathlib.Path(raw).name
+        if not (name.endswith(".env") or name == "dsn.env"):
+            return False
+        resolved = pathlib.Path(raw).expanduser()
+        if not resolved.is_absolute():
+            resolved = pathlib.Path.cwd() / resolved
+        candidate_key = _norm_key(resolved)
+        if candidate_key == allowed_key or candidate_key.startswith(allowed_prefix):
+            return False
+        if candidate_key == basetemp_key or candidate_key.startswith(basetemp_prefix):
+            return False
+        return True
+
+    def _check(file):
+        if _forbidden(file):
+            raise AssertionError(
+                f"forbidden .env open outside tmp_path ({allowed_root}): "
+                f"{file!r} — point the selfcheck at a tmp_path fixture "
+                f"(card #1541)")
+
+    def _guarded_builtins_open(file, *args, **kwargs):
+        _check(file)
+        return _REAL_BUILTINS_OPEN(file, *args, **kwargs)
+
+    def _guarded_io_open(file, *args, **kwargs):
+        _check(file)
+        return _REAL_IO_OPEN(file, *args, **kwargs)
+
+    def _guarded_os_open(file, *args, **kwargs):
+        _check(file)
+        return _REAL_OS_OPEN(file, *args, **kwargs)
+
+    def _guarded_path_open(self, *args, **kwargs):
+        _check(self)
+        return _REAL_PATH_OPEN(self, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _guarded_builtins_open)
+    monkeypatch.setattr(io, "open", _guarded_io_open)
+    monkeypatch.setattr(os, "open", _guarded_os_open)
+    monkeypatch.setattr(pathlib.Path, "open", _guarded_path_open)

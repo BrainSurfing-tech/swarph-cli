@@ -22,7 +22,7 @@ LANE_META = {  # lane -> (peer/node name, port, provider, env model key, env fil
 MODEL_ALLOWLIST = {
     "claude-service": ("claude",),  # claude -p uses the session default; pin not exposed v1
     "gpt-service":    ("gpt-5.x",),
-    "gemini-service": ("gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite",
+    "gemini-service": ("gemini-3.8-flash", "gemini-3.1-pro-preview", "gemini-3.5-flash-lite",
                        "gemini-3.1-flash-lite", "gemini-3-flash-preview"),
     "grok-service":   ("grok",),
 }

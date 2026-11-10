@@ -494,7 +494,13 @@ def run_wake_hook_output(argv: Optional[list[str]] = None) -> int:
     stdin_data = _read_stdin_payload()
 
     harness = args.harness.strip().lower()
+    from swarph_cli.shim_ledger import record_shim_firing
     if harness not in _KNOWN_HARNESSES:
+        record_shim_firing(
+            "claude-settings-sessionstart-wake-hook",
+            cell=args.cell,
+            outcome="error",
+        )
         return _emit(
             {
                 "context": (
@@ -513,9 +519,19 @@ def run_wake_hook_output(argv: Optional[list[str]] = None) -> int:
     if harness == "antigravity":
         inv_num = stdin_data.get("invocationNum")
         if isinstance(inv_num, int) and inv_num > 1:
+            record_shim_firing(
+                "claude-settings-sessionstart-wake-hook",
+                cell=args.cell,
+                outcome="skipped",
+            )
             return _emit({"context": ""}, harness=harness)
 
     cell_name, cell_source = _resolve_cell(args.cell)
+    record_shim_firing(
+        "claude-settings-sessionstart-wake-hook",
+        cell=cell_name,
+        outcome="fired",
+    )
 
     if harness == "cursor":
         return _emit(
@@ -529,4 +545,5 @@ def run_wake_hook_output(argv: Optional[list[str]] = None) -> int:
     return _emit(
         {"context": _verify_report(cell_name, cell_source)}, harness=harness
     )
+
 

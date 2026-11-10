@@ -1,0 +1,9 @@
+# Card #1548: historical fixture hits only. Commit 20d66e0 (PR #706
+# history) introduced the unfragmented sentinel literals in
+# tests/test_cell_selfcheck.py before that file's sentinels were
+# fragmented at runtime and its whole-file allowlist entry removed.
+# These fingerprints pin those two historical blobs exactly; the
+# current file has no path allowlist, so a real-shaped secret planted
+# in it today is still caught by generic-api-key.
+20d66e0ddc7d8e498413c88257160ebaa2c476ee:tests/test_cell_selfcheck.py:generic-api-key:1112
+20d66e0ddc7d8e498413c88257160ebaa2c476ee:tests/test_cell_selfcheck.py:generic-api-key:1115

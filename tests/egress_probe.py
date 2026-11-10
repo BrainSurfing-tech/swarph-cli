@@ -162,30 +162,30 @@ def run_script(source: str, allowed: set[str]) -> tuple[int, list[str]]:
     strace = _strace()
     if not strace:
         return _die("strace missing"), []
-    work = tempfile.mkdtemp(prefix="egress-probe-")
-    script = os.path.join(work, "snippet.py")
-    trace_path = os.path.join(work, "trace")
-    with open(script, "w", encoding="utf-8") as fh:
-        fh.write(source)
-    cmd = [
-        bwrap, "--unshare-user", "--unshare-net", "--die-with-parent",
-        "--ro-bind", "/", "/",
-        "--bind", work, work,
-        "--dev", "/dev", "--proc", "/proc",
-        strace, "-f", "-e", "trace=connect,execve", "-s", "400",
-        "-o", trace_path,
-        sys.executable, script,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    trace = ""
-    if os.path.isfile(trace_path):
-        with open(trace_path, encoding="utf-8", errors="replace") as fh:
-            trace = fh.read()
-    if not trace:
-        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        tail = detail[-1] if detail else f"exit {proc.returncode}"
-        return _die(f"bwrap --unshare-net failed ({tail})"), []
-    return 0, violations(trace, allowed)
+    with tempfile.TemporaryDirectory(prefix="egress-probe-") as work:
+        script = os.path.join(work, "snippet.py")
+        trace_path = os.path.join(work, "trace")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(source)
+        cmd = [
+            bwrap, "--unshare-user", "--unshare-net", "--die-with-parent",
+            "--ro-bind", "/", "/",
+            "--bind", work, work,
+            "--dev", "/dev", "--proc", "/proc",
+            strace, "-f", "-e", "trace=connect,execve", "-s", "400",
+            "-o", trace_path,
+            sys.executable, script,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        trace = ""
+        if os.path.isfile(trace_path):
+            with open(trace_path, encoding="utf-8", errors="replace") as fh:
+                trace = fh.read()
+        if not trace:
+            detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            tail = detail[-1] if detail else f"exit {proc.returncode}"
+            return _die(f"bwrap --unshare-net failed ({tail})"), []
+        return 0, violations(trace, allowed)
 
 
 def prove_isolation() -> int:
@@ -204,36 +204,36 @@ def prove_isolation() -> int:
     strace = _strace()
     if not strace:
         return _die("strace missing")
-    work = tempfile.mkdtemp(prefix="egress-probe-")
-    script = os.path.join(work, "control.py")
-    trace_path = os.path.join(work, "trace")
-    with open(script, "w", encoding="utf-8") as fh:
-        fh.write(source)
-    cmd = [
-        bwrap, "--unshare-user", "--unshare-net", "--die-with-parent",
-        "--ro-bind", "/", "/",
-        "--bind", work, work,
-        "--dev", "/dev", "--proc", "/proc",
-        strace, "-f", "-e", "trace=connect", "-s", "200",
-        "-o", trace_path,
-        sys.executable, script,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    trace = ""
-    if os.path.isfile(trace_path):
-        with open(trace_path, encoding="utf-8", errors="replace") as fh:
-            trace = fh.read()
-    if proc.returncode != 0 or not trace:
-        return _die("bwrap --unshare-net failed")
-    lines = [ln for ln in trace.splitlines()
-             if CONTROL_IP in ln and "connect(" in ln]
-    if not lines:
-        return _die("control connect not observed")
-    if any(re.search(r"= 0\b", ln) for ln in lines):
-        return _die("control connect succeeded")
-    if not any("ENETUNREACH" in ln for ln in lines):
-        return _die("control connect was not ENETUNREACH")
-    return 0
+    with tempfile.TemporaryDirectory(prefix="egress-probe-") as work:
+        script = os.path.join(work, "control.py")
+        trace_path = os.path.join(work, "trace")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(source)
+        cmd = [
+            bwrap, "--unshare-user", "--unshare-net", "--die-with-parent",
+            "--ro-bind", "/", "/",
+            "--bind", work, work,
+            "--dev", "/dev", "--proc", "/proc",
+            strace, "-f", "-e", "trace=connect", "-s", "200",
+            "-o", trace_path,
+            sys.executable, script,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        trace = ""
+        if os.path.isfile(trace_path):
+            with open(trace_path, encoding="utf-8", errors="replace") as fh:
+                trace = fh.read()
+        if proc.returncode != 0 or not trace:
+            return _die("bwrap --unshare-net failed")
+        lines = [ln for ln in trace.splitlines()
+                 if CONTROL_IP in ln and "connect(" in ln]
+        if not lines:
+            return _die("control connect not observed")
+        if any(re.search(r"= 0\b", ln) for ln in lines):
+            return _die("control connect succeeded")
+        if not any("ENETUNREACH" in ln for ln in lines):
+            return _die("control connect was not ENETUNREACH")
+        return 0
 
 
 def run_pytest(cwd: Path, paths: list[str], allowed: set[str]) -> int:
@@ -254,42 +254,43 @@ def run_pytest(cwd: Path, paths: list[str], allowed: set[str]) -> int:
         return _die("bwrap missing")
     if not strace:
         return _die("strace missing")
-    work = tempfile.mkdtemp(prefix="egress-probe-")
-    trace_path = os.path.join(work, "trace")
-    cmd = [
-        bwrap, "--unshare-user", "--unshare-net", "--die-with-parent",
-        "--ro-bind", "/", "/",
-        "--tmpfs", "/tmp",
-        "--bind", work, work,
-        "--bind", str(cwd), str(cwd),
-        "--chdir", str(cwd),
-        "--dev", "/dev", "--proc", "/proc",
-        "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
-        # The operator's live gateway must not ride into the suite.
-        "--unsetenv", "MESH_GATEWAY_URL",
-        "--unsetenv", "MESH_GATEWAY_TOKEN",
-        "--unsetenv", "SWARPH_BRAIN_GATEWAY",
-        "--unsetenv", "SWARPH_BRAIN_MCP",
-        strace, "-f", "-e", "trace=connect,execve", "-s", "400",
-        "-o", trace_path,
-        sys.executable, "-m", "pytest", "-q", "--tb=line", *paths,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    trace = ""
-    if os.path.isfile(trace_path):
-        with open(trace_path, encoding="utf-8", errors="replace") as fh:
-            trace = fh.read()
-    if not trace:
-        return _die("bwrap --unshare-net failed")
-    # 2 interrupted, 3 internal, 4 usage, 5 nothing collected.
-    if proc.returncode in (2, 3, 4, 5):
-        return _die(f"pytest exited {proc.returncode}")
-    found = violations(trace, allowed)
-    if found:
-        print("unlisted-connect", file=sys.stderr)
-        print("unlisted connect: " + ", ".join(found), file=sys.stderr)
-        return 1
-    return 0
+    with tempfile.TemporaryDirectory(prefix="egress-probe-") as work:
+        trace_path = os.path.join(work, "trace")
+        cmd = [
+            bwrap, "--unshare-user", "--unshare-net", "--die-with-parent",
+            "--ro-bind", "/", "/",
+            "--tmpfs", "/tmp",
+            "--setenv", "TMPDIR", "/tmp",
+            "--bind", work, work,
+            "--bind", str(cwd), str(cwd),
+            "--chdir", str(cwd),
+            "--dev", "/dev", "--proc", "/proc",
+            "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
+            # The operator's live gateway must not ride into the suite.
+            "--unsetenv", "MESH_GATEWAY_URL",
+            "--unsetenv", "MESH_GATEWAY_TOKEN",
+            "--unsetenv", "SWARPH_BRAIN_GATEWAY",
+            "--unsetenv", "SWARPH_BRAIN_MCP",
+            strace, "-f", "-e", "trace=connect,execve", "-s", "400",
+            "-o", trace_path,
+            sys.executable, "-m", "pytest", "-q", "--tb=line", *paths,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        trace = ""
+        if os.path.isfile(trace_path):
+            with open(trace_path, encoding="utf-8", errors="replace") as fh:
+                trace = fh.read()
+        if not trace:
+            return _die("bwrap --unshare-net failed")
+        # 2 interrupted, 3 internal, 4 usage, 5 nothing collected.
+        if proc.returncode in (2, 3, 4, 5):
+            return _die(f"pytest exited {proc.returncode}")
+        found = violations(trace, allowed)
+        if found:
+            print("unlisted-connect", file=sys.stderr)
+            print("unlisted connect: " + ", ".join(found), file=sys.stderr)
+            return 1
+        return 0
 
 
 def smoke(allowed: set[str]) -> int:

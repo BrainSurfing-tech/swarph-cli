@@ -68,6 +68,13 @@ swarph service serve     stand up a $0 subscription-LLM HTTP lane (claude/codex/
 swarph channel <sub>     mesh channels — create/join/leave/list/members/post/read
 swarph schedule <sub>    scheduled events — create/list/get/enable/disable/delete/fire-now
 swarph board <sub>       mesh board — projects/cards kanban (list/show/add/move/link/assign)
+swarph committee <sub>   committee rooms — motion/post/results; `results <channel> [--motion ID] --json` prints gateway JSON verbatim (--json also on rooms open/motion/post)
+swarph subscribe <sub>   targeted event subscriptions — add/list/cancel (add: --trigger/--target; each verb --as/--json)
+swarph proxy serve      serve the per-cell credential-isolating local proxy (operator setup required)
+swarph proxy call       call a closed proxy verb through the local Unix socket, never with a token
+swarph mesh peers --json allowlisted peer JSON (projected rows only; never the raw /peers row)
+swarph cell selfcheck --json   allowlisted selfcheck JSON rows (verdicts only, no paths/tokens)
+swarph cell probe --json       allowlisted probe JSON rows (verdicts only, no paths/tokens)
 swarph lane <sub>        $0-lane orchestration — list/create/scale/delete/enqueue
 swarph bench <sub>       deterministic LLM benchmark-pack runner — run/validate/add/prices
 swarph highlight "<x>"   log a highlight to the shared git-backed swarph timeline
@@ -87,6 +94,12 @@ swarph import <path>     port a session from another CLI into swarph-native form
 ```
 
 Each verb is documented below.
+
+For `swarph proxy serve --cell CELL --config PATH` and
+`swarph proxy call VERB [--args-json '{}'] [--socket PATH]`, see the closed
+[proxy protocol](docs/proxy-protocol.md). Code and templates do not install or
+activate the proxy: the [deployment guide](docs/proxy-deployment.md) covers the
+operator-owned installation, proxy user and token cutover.
 
 ### `swarph guide` (v0.45.0)
 
@@ -150,6 +163,8 @@ swarph board obligations close <id> --outcome <pass|fail|cannot_evaluate|skipped
 ```
 
 `--project` accepts a numeric id **or** a slug (resolved via `projects list`). Note: card creation always starts at `proposed` (the gateway has no stage-on-create) — use `cards move` to advance.
+
+Board writes accept expected-state guards: `--expect-stage <stage>` and `--expect-stage-version <N>` on card writes, `--expect-status <status>` on obligation writes, and `--expect-accept-sha <sha256>` on `obligations close` — the write is refused when the current state does not match. `--expect-status` compares the persisted status and does not distinguish offered from taken.
 
 **`thread` / `say` (v0.41.6)** — every card carries a bound conversation, so a
 finding, a verdict, or a hand-off lands **on the card** instead of in a DM only the
