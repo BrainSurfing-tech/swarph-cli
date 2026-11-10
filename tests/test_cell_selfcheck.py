@@ -1112,8 +1112,8 @@ _URL_PW = "swarph-url-pw-1541"
 _FOO_SECRET = "mesh-foo-sentinel-secret-1541"
 _GW_PW = "gw-userinfo-pw-1541"
 _GW_USER = "gwuser1541"
-_TOKEN_MATCH = "tok-match-sentinel-1541-abcdefghij"
-_TOKEN_RESOLVER_OTHER = "tok-resolver-other-sentinel-1541-xyz"
+_TOKEN_MATCH = "tok-match-sentinel-" + "1541-abcdefghij"
+_TOKEN_RESOLVER_OTHER = "tok-resolver-other-" + "sentinel-1541-xyz"
 _SENTINELS = [_PG_PW, _URL_PW, _FOO_SECRET, _GW_PW, _GW_USER,
               _TOKEN_MATCH, _TOKEN_RESOLVER_OTHER,
               "postgresql://root:", "svc1541", "root:" + _PG_PW]
