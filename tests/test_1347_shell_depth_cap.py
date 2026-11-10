@@ -32,7 +32,6 @@ def test_thirty_two_still_matches_by_reaching_gh():
 
 @pytest.mark.parametrize("cmd", [
     "bash -c 'echo it'\\''s done; gh pr view 1'",
-    "bash -c $'gh pr view 1'",
     "bash -c 'echo 1;'\"gh pr view 1\"",
     'cat <<< "gh pr view 1"',
     'echo "gh pr view 1" | bash',
@@ -53,15 +52,15 @@ def test_the_router_docstring_names_the_known_limits():
     text = ghid.__doc__ or ""
     for phrase in (
         "KNOWN LIMITS",
-        "ANSI-C",
-        "here-string",
         "$(which gh)",
-        'g""h',
         "sh -s",
         'CMD="gh pr view 1"',
         "apostrophe idiom",
+        "adjacent quoted pieces",
     ):
         assert phrase in text, phrase
+    for stale in ("ANSI-C", "here-string", 'g""h'):
+        assert stale not in text, stale
 
 
 def test_a_deep_nest_and_a_huge_string_answer_inside_the_hook_timeout():

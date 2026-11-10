@@ -213,13 +213,22 @@ def test_1_bash_word_heredoc_delimiters_with_quote_removal_route(
 ])
 def test_1_unterminated_or_unclassifiable_heredoc_is_denied(
         tmp_path, monkeypatch, capsys, cmd):
-    """(1) & (5) If the heredoc terminator is never found or delimiter is
-    unclassifiable, DENY the command; never treat it as not-gh.
+    """(1), (5), & #5142 (C): If the heredoc terminator is never found or
+    delimiter is unclassifiable, DENY the command with its own heredoc reason
+    (never the GH_TOKEN message, and never treat it as not-gh).
     """
     assert ghid.targets_gh(cmd) is True
-    assert ghid.has_disallowed_gh_token_assignment(cmd) is True
+    assert ghid.has_unterminated_heredoc(cmd) is True
+    assert ghid.has_disallowed_gh_token_assignment(cmd) is False
     assert ghid.already_explicit(cmd) is False
-    _assert_denied_through_hook(tmp_path, monkeypatch, capsys, cmd)
+    for peer in ("lab-ovh", "unmapped-fixture-cell"):
+        out = _run_hook_for_cell(tmp_path, monkeypatch, capsys, cmd, peer=peer)
+        assert out is not None, f"expected DENY for {cmd!r} on {peer}"
+        hso = out["hookSpecificOutput"]
+        assert hso.get("permissionDecision") == "deny"
+        reason = hso.get("permissionDecisionReason", "")
+        assert "heredoc" in reason.lower(), reason
+        assert "GH_TOKEN" not in reason, reason
 
 
 @pytest.mark.parametrize("cmd", [
@@ -240,6 +249,57 @@ def test_2_heredoc_and_herestring_feeding_shell_scan_body_as_shell_text(
     """(2) When a heredoc or here-string feeds a shell, scan the body as shell text."""
     assert ghid.targets_gh(cmd) is True
     _assert_routes_through_hook(tmp_path, monkeypatch, capsys, cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    pytest.param(
+        "cat > x.sh <<'EOF'\ngh pr list\nEOF\nbash x.sh",
+        id="cat-redir-before-heredoc-then-bash",
+    ),
+    pytest.param(
+        "cat <<'EOF' > x.sh\n#!/bin/bash\ngh pr list\nEOF\nbash x.sh",
+        id="cat-heredoc-before-redir-then-bash",
+    ),
+    pytest.param(
+        "tee x.sh <<'EOF' >/dev/null\ngh pr list\nEOF\nsh x.sh",
+        id="tee-heredoc-then-sh",
+    ),
+    pytest.param(
+        "cat > f.sh <<'EOF'\nf() { gh pr list; }\nEOF\n. ./f.sh; f",
+        id="cat-redir-then-dot-source",
+    ),
+    pytest.param(
+        "cat > x.sh <<EOF\ngh pr list\nEOF\nchmod +x x.sh; ./x.sh",
+        id="cat-redir-then-chmod-and-direct-exec",
+    ),
+    pytest.param(
+        "cat >> x.sh <<'EOF'\ngh pr view 1\nEOF\nsource x.sh",
+        id="cat-append-redir-then-source",
+    ),
+    pytest.param(
+        "cat > s.py <<'EOF'\ngh pr list\nEOF\npython3 s.py",
+        id="cat-redir-then-python3",
+    ),
+])
+def test_2b_write_heredoc_to_path_then_run_routes(
+        tmp_path, monkeypatch, capsys, cmd):
+    """#5142 (A): When a heredoc is redirected to a path (>, >>, tee) and that
+    path later appears in the same command as a command word or as an argument
+    of bash/sh/zsh/python/./source, scan the heredoc body as shell text.
+    """
+    assert ghid.targets_gh(cmd) is True
+    _assert_routes_through_hook(tmp_path, monkeypatch, capsys, cmd)
+
+
+def test_2c_write_heredoc_to_path_without_running_does_not_route(
+        tmp_path, monkeypatch, capsys):
+    """Writing a heredoc to a file without executing it in the command stays inert."""
+    for cmd in (
+        "cat > x.sh <<'EOF'\ngh pr list\nEOF",
+        "cat > x.sh <<'EOF'\ngh pr list\nEOF\nrm -f x.sh",
+    ):
+        assert ghid.targets_gh(cmd) is False
+        _assert_unchanged_through_hook(tmp_path, monkeypatch, capsys, cmd)
 
 
 @pytest.mark.parametrize("cmd", [
@@ -273,10 +333,18 @@ def test_3_never_scan_inside_comments(tmp_path, monkeypatch, capsys, cmd):
     pytest.param(r"g\h pr merge 1", id="mid-backslash-gh"),
     pytest.param("$'gh' pr merge 1", id="ansi-c-quoted-gh"),
     pytest.param('$"gh" pr merge 1', id="locale-quoted-gh"),
+    pytest.param("bash -c $'gh pr view 1'", id="bash-c-ansi-c-gh"),
+    pytest.param("sh -c $'gh pr view 1'", id="sh-c-ansi-c-gh"),
+    pytest.param("eval $'gh pr view 1'", id="eval-ansi-c-gh"),
+    pytest.param(r"bash -c $'g\x68 pr view 1'", id="bash-c-ansi-c-hex-gh"),
+    pytest.param(r"sh -c $'\147\150 pr view 1'", id="sh-c-ansi-c-octal-gh"),
+    pytest.param(r"eval $'echo ok\ngh pr view 1'", id="eval-ansi-c-newline-gh"),
 ])
 def test_4_command_starts_and_quote_removed_gh_words_route(
         tmp_path, monkeypatch, capsys, cmd):
-    """(4) '!', 'env NAME=value', case arm 'pattern)', and quote-removed gh words route."""
+    """(4) & #5142 (B): '!', 'env NAME=value', case arm 'pattern)', quote-removed
+    gh words, and nested $'...' ANSI-C quoted shell strings route.
+    """
     assert ghid.targets_gh(cmd) is True
     _assert_routes_through_hook(tmp_path, monkeypatch, capsys, cmd)
 
@@ -366,10 +434,44 @@ def test_mutant_6_no_bang_or_env_assign_prefix_is_caught(
         tmp_path, monkeypatch, capsys, cmd_env, peer="lab-ovh") is None
 
 
+def test_mutant_7_no_write_then_run_scan_is_caught(
+        tmp_path, monkeypatch, capsys):
+    """Mutant 7 (#5142): disabling write-then-run heredoc scanning makes
+    the 4 write-then-run repros fail to route.
+    """
+    monkeypatch.setattr(ghid, "_SCAN_WRITE_THEN_RUN", False)
+    for cmd in (
+        "cat > x.sh <<'EOF'\ngh pr list\nEOF\nbash x.sh",
+        "cat <<'EOF' > x.sh\n#!/bin/bash\ngh pr list\nEOF\nbash x.sh",
+        "tee x.sh <<'EOF' >/dev/null\ngh pr list\nEOF\nsh x.sh",
+        "cat > f.sh <<'EOF'\nf() { gh pr list; }\nEOF\n. ./f.sh; f",
+    ):
+        assert ghid.targets_gh(cmd) is False
+        assert _run_hook_for_cell(
+            tmp_path, monkeypatch, capsys, cmd, peer="lab-ovh") is None
+
+
+def test_mutant_8_no_ansi_c_resolution_is_caught(
+        tmp_path, monkeypatch, capsys):
+    """Mutant 8 (#5142): disabling $'...' resolution makes the 4 nested
+    ANSI-C repros (and top-level $'gh') fail to route.
+    """
+    monkeypatch.setattr(ghid, "_RESOLVE_ANSI_C", False)
+    for cmd in (
+        "bash -c $'gh pr view 1'",
+        "sh -c $'gh pr view 1'",
+        "eval $'gh pr view 1'",
+        r"bash -c $'g\x68 pr view 1'",
+    ):
+        assert ghid.targets_gh(cmd) is False
+        assert _run_hook_for_cell(
+            tmp_path, monkeypatch, capsys, cmd, peer="lab-ovh") is None
+
+
 # ---------------------------------------------------------------------------
-# Differential Oracle Test (#5129 / #5131 item 6):
+# Differential Oracle Test (#5129 / #5131 / #5142):
 # Real bash + stub gh (no network), fixed seeds 7 and 42, >= 1500 random cases
-# plus 142 hand-written cases per seed.
+# plus hand-written cases (including A and B shapes) per seed.
 # ---------------------------------------------------------------------------
 
 _EXPL = "GH_TOKEN=$(gh auth token --user bob)"
@@ -404,6 +506,12 @@ _ORACLE_HAND: dict[str, str] = {
     "heredoc into bash":               "bash <<EOF\ngh pr list\nEOF",
     "heredoc into bash quoted":        "bash <<'EOF'\ngh pr list\nEOF",
     "heredoc into sh -s":              "sh -s <<EOF\ngh pr list\nEOF",
+    "heredoc write then run 1":        "cat > x.sh <<'EOF'\ngh pr list\nEOF\nbash x.sh",
+    "heredoc write then run 2":        "cat <<'EOF' > x.sh\n#!/bin/bash\ngh pr list\nEOF\nbash x.sh",
+    "heredoc write then run 3":        "tee x.sh <<'EOF' >/dev/null\ngh pr list\nEOF\nsh x.sh",
+    "heredoc write then run 4":        "cat > f.sh <<'EOF'\nf() { gh pr list; }\nEOF\n. ./f.sh; f",
+    "heredoc write then run chmod":    "cat > x.sh <<EOF\ngh pr list\nEOF\nchmod +x x.sh; ./x.sh",
+    "heredoc write only inert":        "cat > inert.sh <<'EOF'\ngh pr list\nEOF",
     "heredoc in subst":                "echo $(cat <<EOF\nit's\nEOF\n)\ngh pr list",
     "heredoc comment on op line":      "cat <<EOF # it's\nbody\nEOF\ngh pr list",
     "heredoc terminator in comment":   "cat <<EOF\nbody\n# EOF\ngh pr list\nEOF",
@@ -511,6 +619,10 @@ _ORACLE_HAND: dict[str, str] = {
     "env gh":                          "env A=1 gh pr list",
     "bash -c gh":                      "bash -c 'gh pr list'",
     "bash -c with comment":            "bash -c '# it is\ngh pr list'",
+    "bash -c ansi-c gh":               "bash -c $'gh pr view 1'",
+    "sh -c ansi-c gh":                 "sh -c $'gh pr view 1'",
+    "eval ansi-c gh":                  "eval $'gh pr view 1'",
+    "bash -c ansi-c hex gh":           r"bash -c $'g\x68 pr view 1'",
     "eval gh":                         "eval 'gh pr list'",
     "eval dq gh":                      "eval \"gh pr list\"",
     "case gh":                         "case a in a) gh pr list;; esac",
@@ -530,6 +642,14 @@ _ORACLE_GH = [
     "GH_TOKEN=$(gh auth token) gh pr view 1",
     "cat <<EOF | gh pr comment 1 --body-file -\nit's\nEOF",
     "cat <<EOF\n$(gh pr view 2)\nEOF", "bash -c 'gh pr list'",
+    "cat > x.sh <<'EOF'\ngh pr list\nEOF\nbash x.sh",
+    "cat <<'EOF' > x.sh\n#!/bin/bash\ngh pr list\nEOF\nbash x.sh",
+    "tee x.sh <<'EOF' >/dev/null\ngh pr list\nEOF\nsh x.sh",
+    "cat > f.sh <<'EOF'\nf() { gh pr list; }\nEOF\n. ./f.sh; f",
+    "bash -c $'gh pr view 1'",
+    "sh -c $'gh pr view 1'",
+    "eval $'gh pr view 1'",
+    r"bash -c $'g\x68 pr view 1'",
 ]
 _ORACLE_NON = [
     "echo hi", "true", "echo gh pr list", "echo 'gh pr list'",
@@ -542,6 +662,10 @@ _ORACLE_NON = [
     "cat <<EOF-1\nit's\nEOF-1", "cat <<< 'gh pr list'", "echo a\\ #b",
     "echo \"x\\\"y\"", "echo 'a\\'", ": ${X:-gh}", "[[ a#b == a#b ]]",
     "echo a \\\nb",
+    "cat > inert.sh <<'EOF'\ngh pr list\nEOF",
+    "bash -c $'echo gh pr view 1'",
+    r"sh -c $'echo g\x68'",
+    "eval $'echo gh pr list'",
 ]
 _ORACLE_COM = [
     "# note", "# what's open", "# say \"hi", "# gh pr list", "# tail \\",
@@ -571,6 +695,7 @@ def _compose_oracle(rng: random.Random) -> str:
                 if (
                     prev[0] == "C"
                     or "<<" in prev[1]
+                    or "<<" in text
                     or out.rstrip(" ").endswith(("\\", "#"))
                     or "#" in out.split("\n")[-1]
                 )
@@ -611,7 +736,7 @@ def _setup_stub_dir(tmp_path: Path, bash_bin: str) -> Path:
         encoding="utf-8",
     )
     stub_gh.chmod(stub_gh.stat().st_mode | stat.S_IEXEC)
-    for util in ("bash", "sh", "cat", "echo", "true", "false", "env", "pwd", "git", "time"):
+    for util in ("bash", "sh", "cat", "echo", "true", "false", "env", "pwd", "git", "time", "tee", "chmod"):
         target = shutil.which(util)
         if target and not (stub_dir / util).exists():
             try:
@@ -658,7 +783,7 @@ def test_6_bash_stub_gh_oracle_zero_escapes_overroutes_or_regressions(
         tmp_path, monkeypatch, seed):
     """(6) Ship drop's differential oracle as a test: hook decision through
     run_hook against real bash with a stub gh, no network, fixed seeds 7 and
-    42, 1500 random composed cases + 142 hand cases each = 1642 cases/seed.
+    42, 1500 random composed cases + 152 hand cases each = 1652 cases/seed.
     Asserts 0 escapes, 0 over-routes, and 0 regressions against main.
     """
     bash_bin = _find_real_bash()
@@ -684,22 +809,24 @@ def test_6_bash_stub_gh_oracle_zero_escapes_overroutes_or_regressions(
             seen.add(c)
             cases.append(("rand", c))
 
-    assert len(cases) == 1642
+    assert len(cases) >= 1650
 
     def eval_truth(idx_and_case: tuple[int, tuple[str, str]]):
         idx, (name, cmd) = idx_and_case
-        log_file = work_dir / f"gh_{idx}.log"
+        case_dir = work_dir / f"c_{idx}"
+        case_dir.mkdir(parents=True, exist_ok=True)
+        log_file = case_dir / "gh.log"
         log_file.write_text("", encoding="utf-8")
         env = {
             "PATH": str(stub_dir),
-            "HOME": str(work_dir),
+            "HOME": str(case_dir),
             "GH_LOG": str(log_file),
         }
         try:
             p = subprocess.run(
                 [str(stub_dir / "bash"), "-c", cmd],
                 env=env,
-                cwd=str(work_dir),
+                cwd=str(case_dir),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -712,7 +839,7 @@ def test_6_bash_stub_gh_oracle_zero_escapes_overroutes_or_regressions(
             line.rstrip("\n")
             for line in log_file.read_text(encoding="utf-8", errors="replace").splitlines()
         ]
-        log_file.unlink(missing_ok=True)
+        shutil.rmtree(case_dir, ignore_errors=True)
         return name, cmd, rc, calls
 
     with ThreadPoolExecutor(max_workers=8) as pool:

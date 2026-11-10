@@ -48,13 +48,9 @@ and #1346 did not introduce them:
 
 - gh after the apostrophe idiom inside a -c string:
   bash -c 'echo it'\\''s done; gh pr view 1'
-- ANSI-C quoting: bash -c $'gh pr view 1'
 - adjacent quoted pieces: bash -c 'echo 1;'"gh pr view 1"
-- a here-string: bash <<< "gh pr view 1"
 - a pipe into a shell: echo "gh pr view 1" | bash, and the same with | sh -s
-- a backslash command word: \\gh pr list
 - $(which gh) pr list
-- g""h pr list
 - bash -c "$(echo gh) pr view 1"
 - a variable: CMD="gh pr view 1"; bash -c "$CMD"
 """
@@ -333,6 +329,8 @@ _HEREDOC_IDENTIFIER_ONLY = False
 _SCAN_SHELL_HEREDOC = True
 _SCAN_COMMENTS_FOR_TARGETS = False
 _ENABLE_BANG_AND_ENV_ASSIGN = True
+_SCAN_WRITE_THEN_RUN = True
+_RESOLVE_ANSI_C = True
 
 _ANSI_C_SIMPLE = {
     "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b",
@@ -364,6 +362,21 @@ def _unescape_ansi_c(text: str, start: int) -> tuple[str, int, bool]:
                     buf.append(chr(int(text[j + 2:k], 16)))
                     j = k
                     continue
+            if nxt in ("u", "U") and j + 2 < n:
+                max_hex = 4 if nxt == "u" else 8
+                k = j + 2
+                while k < min(n, j + 2 + max_hex) and text[k] in "0123456789abcdefABCDEF":
+                    k += 1
+                if k > j + 2:
+                    cp = int(text[j + 2:k], 16)
+                    if 0 <= cp <= 0x10FFFF:
+                        buf.append(chr(cp))
+                        j = k
+                        continue
+            if nxt == "c" and j + 2 < n:
+                buf.append(chr(ord(text[j + 2]) & 0x1F))
+                j += 3
+                continue
             if nxt in "01234567":
                 k = j + 1
                 while k < min(n, j + 4) and text[k] in "01234567":
@@ -486,7 +499,7 @@ def _unquote_word_at(text: str, pos: int) -> tuple[Optional[str], int, bool]:
                 dynamic = True
                 j = n
             continue
-        if text.startswith("$'", j):
+        if _RESOLVE_ANSI_C and text.startswith("$'", j):
             had_qe = True
             val, j, closed = _unescape_ansi_c(text, j + 2)
             if not closed:
@@ -1110,6 +1123,205 @@ def _scan_subst_only_for_targets(segment: str, *, mask_comments: bool) -> str:
     return "".join(res)
 
 
+_SCRIPT_RUNNERS = frozenset({
+    "bash", "sh", "zsh", "dash", "ksh",
+    "python", "python2", "python3",
+    ".", "source",
+})
+
+
+def _normalize_script_path(path: str) -> str:
+    p = path.strip()
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
+
+def _split_top_level_segments(text: str) -> list[tuple[int, int, str]]:
+    """Split ``text`` into simple-command segments outside quotes and comments."""
+    segs: list[tuple[int, int, str]] = []
+    i = 0
+    n = len(text)
+    seg_start = 0
+    at_word_start = True
+    while i < n:
+        c = text[i]
+        if c in "\n;|&(){}":
+            if i > seg_start:
+                segs.append((seg_start, i, text[seg_start:i]))
+            i += 1
+            seg_start = i
+            at_word_start = True
+            continue
+        if _MASK_COMMENTS and at_word_start and c == "#":
+            if i > seg_start:
+                segs.append((seg_start, i, text[seg_start:i]))
+            end = text.find("\n", i)
+            i = n if end < 0 else end + 1
+            seg_start = i
+            at_word_start = True
+            continue
+        if c == "\\" and i + 1 < n:
+            i += 2
+            at_word_start = False
+            continue
+        if text.startswith("$'", i):
+            _, i, _ = _unescape_ansi_c(text, i + 2)
+            at_word_start = False
+            continue
+        if c == "'":
+            k = text.find("'", i + 1)
+            i = n if k < 0 else k + 1
+            at_word_start = False
+            continue
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                if text[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                i += 1
+            i = i + 1 if i < n else n
+            at_word_start = False
+            continue
+        if c in " \t":
+            i += 1
+            at_word_start = True
+            continue
+        i += 1
+        at_word_start = False
+    if n > seg_start:
+        segs.append((seg_start, n, text[seg_start:n]))
+    return segs
+
+
+def _extract_simple_cmd_words_and_redirs(
+    seg: str,
+) -> tuple[list[str], set[str]]:
+    """Extract ``(command_words, redirected_output_paths)`` from one simple command."""
+    words: list[str] = []
+    redirs: set[str] = set()
+    j = 0
+    n = len(seg)
+    while j < n:
+        while j < n and seg[j] in " \t":
+            j += 1
+        if j >= n:
+            break
+        if _MASK_COMMENTS and seg[j] == "#":
+            break
+        if seg.startswith("<<<", j):
+            j += 3
+            while j < n and seg[j] in " \t":
+                j += 1
+            _, wend, _ = _unquote_word_at(seg, j)
+            j = max(j + 1, wend)
+            continue
+        hd = _parse_heredoc_op(seg, j)
+        if hd is not None:
+            j = hd[3]
+            continue
+        rm = re.match(r"(?:[0-9]*>>?\|?|&>>?)(?!&)", seg[j:])
+        if rm is not None:
+            j += rm.end()
+            while j < n and seg[j] in " \t":
+                j += 1
+            if j < n:
+                unq, wend, _ = _unquote_word_at(seg, j)
+                target = unq if unq is not None else seg[j:wend]
+                norm = _normalize_script_path(target)
+                if norm and norm not in ("/dev/null", "-"):
+                    redirs.add(norm)
+                j = max(j + 1, wend)
+            continue
+        om = re.match(r"[0-9]*(?:>&[0-9-]+|<&?[0-9-]*)", seg[j:])
+        if om is not None:
+            j += om.end()
+            if not seg[j - 1].isdigit() and seg[j - 1] != "-":
+                while j < n and seg[j] in " \t":
+                    j += 1
+                if j < n:
+                    _, wend, _ = _unquote_word_at(seg, j)
+                    j = max(j + 1, wend)
+            continue
+        unq, wend, _ = _unquote_word_at(seg, j)
+        if wend <= j:
+            j += 1
+            continue
+        w = unq if unq is not None else seg[j:wend]
+        words.append(w)
+        j = wend
+    idx = 0
+    while idx < len(words):
+        w = words[idx]
+        if w in _LEAD_KEYWORDS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
+            idx += 1
+            continue
+        if w in _WRAPPER_WORDS:
+            idx += 1
+            while idx < len(words) and words[idx].startswith("-"):
+                idx += 1
+            continue
+        break
+    rem = words[idx:]
+    if rem and rem[0].rsplit("/", 1)[-1] == "tee":
+        for arg in rem[1:]:
+            if not arg.startswith("-"):
+                norm = _normalize_script_path(arg)
+                if norm and norm not in ("/dev/null", "-"):
+                    redirs.add(norm)
+    return rem, redirs
+
+
+def _heredoc_writes_executed_file(
+    text: str, op_start: int, after_heredoc_pos: int
+) -> bool:
+    """True when the heredoc at ``op_start`` writes to a file path (via ``>``,
+    ``>>``, or ``tee``) and that path later appears in the same command as a
+    command word or as an argument of ``bash``/``sh``/``zsh``/``python``/``.``/``source``.
+    """
+    line_start = text.rfind("\n", 0, op_start) + 1
+    line_end = text.find("\n", op_start)
+    if line_end < 0:
+        line_end = len(text)
+    line_segs = _split_top_level_segments(text[line_start:line_end])
+    rel_op = op_start - line_start
+    owner_idx = -1
+    for idx, (s, e, _) in enumerate(line_segs):
+        if s <= rel_op <= e:
+            owner_idx = idx
+            break
+    if owner_idx < 0:
+        return False
+    _, written_paths = _extract_simple_cmd_words_and_redirs(line_segs[owner_idx][2])
+    if owner_idx + 1 < len(line_segs):
+        next_rem, next_redirs = _extract_simple_cmd_words_and_redirs(
+            line_segs[owner_idx + 1][2]
+        )
+        if next_rem and next_rem[0].rsplit("/", 1)[-1] == "tee":
+            written_paths |= next_redirs
+    if not written_paths:
+        return False
+    later_segs = [seg for _, _, seg in line_segs[owner_idx + 1:]]
+    if after_heredoc_pos < len(text):
+        later_segs.extend(
+            seg for _, _, seg in _split_top_level_segments(text[after_heredoc_pos:])
+        )
+    for lseg in later_segs:
+        rem, _ = _extract_simple_cmd_words_and_redirs(lseg)
+        if not rem:
+            continue
+        cmd_w = rem[0]
+        if _normalize_script_path(cmd_w) in written_paths:
+            return True
+        cmd_base = cmd_w.rsplit("/", 1)[-1]
+        if cmd_base in _SCRIPT_RUNNERS:
+            for arg in rem[1:]:
+                if _normalize_script_path(arg) in written_paths:
+                    return True
+    return False
+
+
 def _heredoc_feeds_shell(text: str, op_start: int) -> bool:
     """True when the simple command owning ``<<`` / ``<<<`` at ``op_start`` invokes a shell."""
     seg_start = max(text.rfind(ch, 0, op_start) for ch in ";\n&|(){}") + 1
@@ -1150,7 +1362,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
     n = len(text)
     at_word_start = True
     brace_depth = 0
-    pending: list[tuple[str, bool, bool, bool]] = []
+    pending: list[tuple[str, bool, bool, bool, int]] = []
     unterminated = False
     unterminated_hd = False
     has_tick = False
@@ -1166,7 +1378,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
             i += 1
             at_word_start = True
             while pending:
-                delim, strip_tabs, quoted_delim, feeds_shell = pending.pop(0)
+                delim, strip_tabs, quoted_delim, feeds_shell, op_pos = pending.pop(0)
                 body_lines: list[str] = []
                 term_line: Optional[str] = None
                 term_has_nl = False
@@ -1186,7 +1398,11 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
                     i = nl + 1
                 if term_line is None:
                     unterminated_hd = True
-                if feeds_shell and body_lines:
+                scan_as_shell = feeds_shell or (
+                    _SCAN_WRITE_THEN_RUN
+                    and _heredoc_writes_executed_file(text, op_pos, i)
+                )
+                if scan_as_shell and body_lines:
                     body_raw = "\n".join(body_lines)
                     body_folded = _fold_bash_continuations(
                         body_raw,
@@ -1301,7 +1517,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
                     unterminated_hd = True
                 else:
                     feeds_sh = _SCAN_SHELL_HEREDOC and _heredoc_feeds_shell(text, i)
-                    pending.append((delim, strip_tabs, quoted_delim, feeds_sh))
+                    pending.append((delim, strip_tabs, quoted_delim, feeds_sh, i))
                 op_text = text[i:end_op]
                 out.append(op_text)
                 out_targets.append(op_text)
@@ -1579,8 +1795,13 @@ def _quoted_body(command: str, i: int) -> tuple[str, int]:
 
     An unterminated quote runs to the end and still returns. It does not raise.
     """
-    q = command[i]
     n = len(command)
+    if _RESOLVE_ANSI_C and command.startswith("$'", i):
+        val, end, _ = _unescape_ansi_c(command, i + 2)
+        return val, end
+    if command.startswith('$"', i):
+        i += 1
+    q = command[i]
     j = i + 1
     if q == "'":
         k = command.find("'", j)
@@ -1612,6 +1833,9 @@ def _next_token(command: str, i: int) -> Optional[tuple]:
         return ("sep", i, end, "")
     if command[i] in ";\n&|":
         return ("sep", i, i + 1, "")
+    if (_RESOLVE_ANSI_C and command.startswith("$'", i)) or command.startswith('$"', i):
+        body, end = _quoted_body(command, i)
+        return ("word", i, end, body)
     if command[i] in "'\"":
         body, end = _quoted_body(command, i)
         return ("word", i, end, body)
@@ -1748,6 +1972,12 @@ def _quoted_gh_command_word(command: str, visible: str) -> bool:
     i = 0
     n = len(command)
     while i < n:
+        if (_RESOLVE_ANSI_C and command.startswith("$'", i)) or command.startswith('$"', i):
+            body, end = _quoted_body(command, i)
+            if _GH_EXACT.match(body) and at_word.search(visible[:i]) is not None:
+                return True
+            i = end if end > i else i + 2
+            continue
         if command[i] not in "'\"":
             i += 1
             continue
@@ -1848,7 +2078,7 @@ def _value_end(text: str, i: int) -> Optional[int]:
         if not _subst_inner_ok(text[i + 2:end]):
             return None
         return end + 1
-    if text[i] in "'\"":
+    if text.startswith("$'", i) or text.startswith('$"', i) or text[i] in "'\"":
         body, end = _quoted_body(text, i)
         if not body:
             return None
@@ -1873,6 +2103,9 @@ def _read_word(text: str, i: int) -> Optional[tuple[str, int]]:
         i += 1
     if i >= n:
         return None
+    if (_RESOLVE_ANSI_C and text.startswith("$'", i)) or text.startswith('$"', i):
+        body, end = _quoted_body(text, i)
+        return body, end
     if text[i] in "'\"":
         body, end = _quoted_body(text, i)
         return body, end
@@ -2158,7 +2391,7 @@ def _value_word_end(text: str, i: int) -> int:
             i = n if j < 0 else j + 1
             continue
         if text.startswith("$'", i) or text.startswith('$"', i):
-            _, end = _quoted_body(text, i + 1)
+            _, end = _quoted_body(text, i)
             i = end
             continue
         if c in "'\"":
@@ -2183,7 +2416,7 @@ def _consume_visible_value(text: str, i: int) -> int:
         j = text.find("`", i + 1)
         return n if j < 0 else j + 1
     if text.startswith("$'", i) or text.startswith('$"', i):
-        _, end = _quoted_body(text, i + 1)
+        _, end = _quoted_body(text, i)
         return end
     if text[i] in "'\"":
         _, end = _quoted_body(text, i)
@@ -2279,6 +2512,11 @@ def _strip_allowlisted_gh_token(command: str) -> str:
     )
 
 
+def has_unterminated_heredoc(command: str) -> bool:
+    """True when ``command`` contains an unterminated or unclassifiable heredoc (#1555)."""
+    return _tokenize_bash(command or "").unterminated_heredoc
+
+
 def has_disallowed_gh_token_assignment(command: str) -> bool:
     """True when ``GH_TOKEN`` survives the exact allowlisted form (#4479).
 
@@ -2291,12 +2529,8 @@ def has_disallowed_gh_token_assignment(command: str) -> bool:
     plain word). If ``GH_TOKEN`` is still in the text anywhere — quoted,
     a heredoc, ``bash -c``, ``unset``, ``env -u``, ``export -n``, a
     second assignment, a glued suffix, a longer name — deny. A non-exact
-    value is not stripped. Also returns True when a heredoc is unterminated
-    or has an unclassifiable delimiter (#1555) so the router denies.
+    value is not stripped.
     """
-    scan = _tokenize_bash(command or "")
-    if scan.unterminated_heredoc:
-        return True
     stripped = _strip_allowlisted_gh_token(command or "")
     return "GH_TOKEN" in stripped
 
