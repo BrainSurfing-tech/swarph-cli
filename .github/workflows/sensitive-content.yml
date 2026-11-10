@@ -35,19 +35,46 @@ jobs:
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           /tmp/gitleaks --version
+          mkdir -p .git/info
+          printf '* diff\n' > .git/info/attributes
           if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
             if ! git show-ref --verify --quiet "refs/remotes/origin/${GITHUB_BASE_REF}"; then
               echo "error: base ref refs/remotes/origin/${GITHUB_BASE_REF} did not resolve" >&2
               exit 1
             fi
-            /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml \
-              --log-opts="refs/remotes/origin/${GITHUB_BASE_REF}..HEAD" 2>&1 | tee /tmp/gitleaks-pr.log
+            octo=$(git rev-list --min-parents=3 "refs/remotes/origin/${GITHUB_BASE_REF}..HEAD")
+            if [ -n "$octo" ]; then
+              echo "error: octopus merge in range" >&2
+              exit 1
+            fi
+            GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904 \
+              /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml \
+              --log-opts="--remerge-diff refs/remotes/origin/${GITHUB_BASE_REF}..HEAD" 2>&1 | tee /tmp/gitleaks-pr.log
             if grep -Fq "[git]" /tmp/gitleaks-pr.log; then
               echo "error: git stderr detected during gitleaks pull_request scan" >&2
               exit 1
             fi
+            if grep -Eq "partial scan|failed to scan Git repository" /tmp/gitleaks-pr.log; then
+              echo "error: partial scan detected during gitleaks pull_request scan" >&2
+              exit 1
+            fi
           else
-            /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml
+            octo=$(git rev-list --min-parents=3 --all)
+            if [ -n "$octo" ]; then
+              echo "error: octopus merge in range" >&2
+              exit 1
+            fi
+            GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904 \
+              /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml \
+              --log-opts="--all --full-history --remerge-diff" 2>&1 | tee /tmp/gitleaks-push.log
+            if grep -Fq "[git]" /tmp/gitleaks-push.log; then
+              echo "error: git stderr detected during gitleaks push scan" >&2
+              exit 1
+            fi
+            if grep -Eq "partial scan|failed to scan Git repository" /tmp/gitleaks-push.log; then
+              echo "error: partial scan detected during gitleaks push scan" >&2
+              exit 1
+            fi
           fi
 
       - name: Scan for sensitive identifiers

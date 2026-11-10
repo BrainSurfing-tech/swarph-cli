@@ -22,7 +22,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "sensitive-content.yml"
 SHOW_REF_LINE = (
     'git show-ref --verify --quiet "refs/remotes/origin/${GITHUB_BASE_REF}"'
 )
-LOG_OPTS_LINE = '--log-opts="refs/remotes/origin/${GITHUB_BASE_REF}..HEAD"'
+LOG_OPTS_LINE = '--log-opts="--remerge-diff refs/remotes/origin/${GITHUB_BASE_REF}..HEAD"'
 TEE_LINE = "2>&1 | tee /tmp/gitleaks-pr.log"
 GIT_ERR_CHECK_LINE = 'if grep -Fq "[git]" /tmp/gitleaks-pr.log; then'
 
@@ -117,7 +117,7 @@ def test_sensitive_content_workflow_preserves_version_config_redact_and_pins_gua
                 "--no-banner",
                 "--config",
                 ".gitleaks.toml",
-                "--log-opts=refs/remotes/origin/main..HEAD",
+                "--log-opts=--remerge-diff refs/remotes/origin/main..HEAD",
             ],
         ),
         (
@@ -131,6 +131,7 @@ def test_sensitive_content_workflow_preserves_version_config_redact_and_pins_gua
                 "--no-banner",
                 "--config",
                 ".gitleaks.toml",
+                "--log-opts=--all --full-history --remerge-diff",
             ],
         ),
         (
@@ -144,6 +145,7 @@ def test_sensitive_content_workflow_preserves_version_config_redact_and_pins_gua
                 "--no-banner",
                 "--config",
                 ".gitleaks.toml",
+                "--log-opts=--all --full-history --remerge-diff",
             ],
         ),
     ],
