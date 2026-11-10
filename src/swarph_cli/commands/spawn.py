@@ -3248,10 +3248,12 @@ def _build_copilot_argv(
     no_starter: bool,
     passthrough: list[str],
 ) -> list[str]:
-    """Build the ``copilot`` cell argv. Grounded against GitHub Copilot CLI 1.0.89
-    (``copilot --help``, 2026-10-09). The card measured 1.0.78, which had
+    """Build the ``copilot`` cell argv. Grounded against GitHub Copilot CLI 1.0.109
+    (``copilot --help``, 2026-11-10). The card measured 1.0.78, which had
     ``--no-banner``; 1.0.89 makes the banner opt-in via ``--banner``, so omitting
-    that flag is the no-banner posture.
+    that flag is the no-banner posture. 1.0.109 removed ``--no-remote``
+    ("Use /remote off in a session"); passing it fails the launch, so the
+    membrane omits it and a fresh local session is the no-remote posture.
 
     ``--session-id`` both resumes an existing session and sets the UUID of a new
     one. The cell DECLARES the session. It does not infer one from mtime.
@@ -3271,7 +3273,6 @@ def _build_copilot_argv(
         "--no-mouse",
         "--no-ask-user",
         "--no-auto-update",
-        "--no-remote",
         f"--session-id={session_id}",
         "--add-dir=.",
         "--deny-tool=shell(git push)",

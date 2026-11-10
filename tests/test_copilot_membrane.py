@@ -160,7 +160,9 @@ def test_argv_pins_the_session_and_contains_the_cell(tmp_path):
     assert "--no-mouse" in argv
     assert "--no-ask-user" in argv
     assert "--no-auto-update" in argv
-    assert "--no-remote" in argv
+    # Copilot CLI 1.0.109 removed --no-remote (launch errors: "Use /remote off
+    # in a session"). A spawn must not pass it.
+    assert "--no-remote" not in argv
 
 
 def test_argv_never_defaults_to_allow_all_or_claude_flags(tmp_path):
