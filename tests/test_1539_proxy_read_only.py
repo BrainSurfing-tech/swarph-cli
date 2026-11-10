@@ -24,6 +24,7 @@ def protected_config(tmp_path, fields):
     path = tmp_path / "config.json"
     path.write_text(json.dumps({
         "cell_uid": os.getuid() + 1234, "gateway_url": "http://127.0.0.1:1234",
+        "allow_loopback_tcp": True,
         "socket_path": str(tmp_path / "socket"), "audit_path": str(tmp_path / "audit"),
         **fields,
     }))
@@ -75,7 +76,7 @@ def gateway(tmp_path):
     thread.start()
     config = Config("alice", os.getuid() + 1234,
                     f"http://127.0.0.1:{server.server_port}", tmp_path / "unused-token",
-                    tmp_path / "socket", tmp_path / "audit", read_only=True)
+                    tmp_path / "socket", tmp_path / "audit", read_only=True, allow_loopback_tcp=True)
     try:
         yield Proxy(config, "fixture-only-credential-1539"), calls
     finally:

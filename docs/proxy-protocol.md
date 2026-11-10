@@ -8,6 +8,16 @@ connecting uid (Linux `SO_PEERCRED`, macOS `getpeereid`) against its configured 
 uid before routing. No direct-token fallback, caching, redirects, or automatic
 retries are provided.
 
+For a same-box upstream, protected config `gateway_socket` (absolute Unix socket
+path) and `gateway_uid` (integer) select HTTP/1.1 over AF_UNIX for BOTH proxy and
+private monitor. The path passes safe_parent and is not a symlink; every actual
+connection's peer uid is checked before any bytes are sent. A mismatch or unsafe
+path returns `proxy_unavailable`. There is no TCP fallback or automatic reconnect.
+Loopback TCP is refused at startup and before sending, unless protected config
+explicitly sets `allow_loopback_tcp:true` (unsafe; defaults false). A remote
+tailnet URL remains supported. Neither setting is accepted from a caller or
+environment. See `proxy-deployment.md` for the operator-only gateway UDS setup.
+
 Connections are handled concurrently, with at most **32 active handlers** by
 default. The proxy-owned JSON configuration may set `max_connections` to a
 positive integer (booleans are refused). This bounds the threads and request

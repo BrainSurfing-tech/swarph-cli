@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import dataclasses
 import datetime as dt
 import http.client
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -45,6 +46,9 @@ class Config:
     audit_path: Path
     max_connections: int = 32
     read_only: bool = False
+    gateway_socket: Path | None = None
+    gateway_uid: int | None = None
+    allow_loopback_tcp: bool = False
 
 
 def _cell_name(cell):
@@ -79,6 +83,46 @@ def safe_parent(path: Path, cell_uid: int):
             # socket/store directory must still never be writable by the cell.
             if parent == path.parent or not (info.st_mode & stat.S_ISVTX and info.st_uid == 0):
                 raise ProxyError("proxy_unavailable")
+
+
+def _loopback(host):
+    if host.rstrip(".").lower() == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+        return address.is_loopback or bool(getattr(address, "ipv4_mapped", None)
+                                          and address.ipv4_mapped.is_loopback)
+    except ValueError:
+        return False
+
+
+def _validate_gateway(config):
+    try:
+        if type(config.allow_loopback_tcp) is not bool:
+            raise ProxyError("proxy_unavailable")
+        if config.gateway_socket is not None:
+            if type(config.gateway_uid) is not int or config.gateway_uid < 0:
+                raise ProxyError("proxy_unavailable")
+            safe_parent(config.gateway_socket, config.cell_uid)
+            if not stat.S_ISSOCK(config.gateway_socket.lstat().st_mode):
+                raise ProxyError("proxy_unavailable")
+        elif config.gateway_uid is not None or (
+                _loopback(urlsplit(config.gateway_url).hostname)
+                and not config.allow_loopback_tcp):
+            raise ProxyError("proxy_unavailable")
+    except Exception:
+        raise ProxyError("proxy_unavailable") from None
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host, path, timeout):
+        super().__init__(host, timeout=timeout)
+        self.path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(str(self.path))
 
 
 def validate_install(paths, cell_uid):
@@ -134,7 +178,8 @@ def load_config(cell: str, path=None) -> Config:
         store = path.parent.stat()
         if store.st_uid != os.geteuid() or stat.S_IMODE(store.st_mode) != 0o700:
             raise ProxyError("proxy_unavailable")
-        if set(data) - {"cell_uid", "gateway_url", "token_file", "socket_path", "audit_path", "max_connections", "read_only"}:
+        if set(data) - {"cell_uid", "gateway_url", "token_file", "socket_path", "audit_path", "max_connections", "read_only",
+                        "gateway_socket", "gateway_uid", "allow_loopback_tcp"}:
             raise ProxyError("proxy_unavailable")
         read_only = data.get("read_only", sys.platform == "darwin")
         if type(read_only) is not bool:
@@ -148,11 +193,17 @@ def load_config(cell: str, path=None) -> Config:
                 or url.password or url.query or url.fragment or url.path not in {"", "/"}):
             raise ProxyError("proxy_unavailable")
         url.port  # Validate the port before a connection is attempted.
+        gateway_socket = data.get("gateway_socket")
+        if "gateway_socket" in data and (not isinstance(gateway_socket, str) or not gateway_socket):
+            raise ProxyError("proxy_unavailable")
         config = Config(cell, uid, gateway.rstrip("/"),
                         Path(data.get("token_file", path.parent / "peer_token")),
                         Path(data.get("socket_path", f"/run/swarph-proxy/{cell}.sock")),
                         Path(data.get("audit_path", f"/var/log/swarph-proxy/{cell}.jsonl")),
-                        max_connections, read_only)
+                        max_connections, read_only,
+                        Path(gateway_socket) if gateway_socket is not None else None,
+                        data.get("gateway_uid"), data.get("allow_loopback_tcp", False))
+        _validate_gateway(config)
         for local_path in (config.token_file, config.socket_path, config.audit_path):
             safe_parent(local_path, uid)
         source = "config" if "read_only" in data else "default"
@@ -240,10 +291,15 @@ class Proxy:
         expired = threading.Event()
         timer = None
         try:
+            _validate_gateway(self.config)
             remaining = max(0.001, deadline - time.monotonic())
-            connection = (http.client.HTTPSConnection(url.hostname, url.port, timeout=remaining)
+            connection = (_UnixHTTPConnection(url.netloc, self.config.gateway_socket, remaining)
+                          if self.config.gateway_socket is not None else
+                          http.client.HTTPSConnection(url.hostname, url.port, timeout=remaining)
                           if url.scheme == "https" else
                           http.client.HTTPConnection(url.hostname, url.port, timeout=remaining))
+            # Never let request()/send() reconnect after the checked connection closes.
+            connection.auto_open = False
             connected, abandoned, connect_failed = threading.Event(), threading.Event(), threading.Event()
             def connect():
                 try:
@@ -266,6 +322,15 @@ class Proxy:
             if connect_failed.is_set():
                 raise ProxyError("upstream_unreachable")
             upstream_socket = connection.sock
+            if self.config.gateway_socket is not None:
+                try:
+                    if peer_uid(upstream_socket) != self.config.gateway_uid:
+                        raise ProxyError("proxy_unavailable")
+                except Exception:
+                    raise ProxyError("proxy_unavailable") from None
+            elif not self.config.allow_loopback_tcp and _loopback(upstream_socket.getpeername()[0]):
+                # DNS aliases and non-canonical numeric hosts must not bypass startup's check.
+                raise ProxyError("proxy_unavailable")
             def expire():
                 expired.set()
                 try:
