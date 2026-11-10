@@ -38,6 +38,7 @@ only on the one box that has a dead unit. Discovery shells out; verdicts are pur
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -47,6 +48,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse, urlunparse
 
 # Keys worth comparing. Deliberately small — see SCOPE.
 _KEYS = ("state-dir", "cursor", "gateway", "token-file", "as", "cell")
@@ -115,13 +117,88 @@ class Row:
     surface: str = ""
     shared: bool = False
     secret: bool = False
+    digest: Optional[str] = None
+    value_len: Optional[int] = None
+    gateway_redacted: bool = False
+
+
+def _sha256_hex(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _strip_url_userinfo(value: str) -> str:
+    """Strip userinfo (user:password@) from a URL value, if present."""
+    text = str(value)
+    if "://" not in text:
+        return text
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return re.sub(r"(://)[^/@\s'\"]+@", r"\1", text)
+    if "@" not in parsed.netloc:
+        return text
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is not None:
+        netloc = f"{host}:{port}"
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+_URL_USERINFO_RE = re.compile(r"(://)[^/@\s'\"]+@")
+
+
+def _sanitize_urls_in_text(text: str) -> str:
+    """Strip userinfo from any URL appearing in a display string."""
+    return _URL_USERINFO_RE.sub(r"\1", str(text))
+
+
+def _row_len(row: "Row") -> int:
+    return row.value_len if row.value_len is not None else len(row.value)
+
+
+_GATEWAY_KEYS = ("gateway", "env:MESH_GATEWAY_URL")
+_GATEWAY_SHOW_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9+.-]*://[^\s/@?#:]+(:[0-9]+)?(/[^\s@?#]*)?$")
+
+
+def _gateway_display(value: str, length: Optional[int] = None) -> str:
+    """Fail-closed display for a gateway value.
+
+    The '@'/'?'/'#' check comes FIRST and alone decides redaction: any
+    value containing one anywhere is never parsed or partially stripped.
+    Only a value matching scheme://host[:port][/path] with none of those
+    characters is shown as-is; anything else also fails closed.
+    """
+    text = str(value)
+    n = len(text) if length is None else length
+    if any(ch in text for ch in "@?#"):
+        return f"<redacted, {n} chars>"
+    if _GATEWAY_SHOW_RE.match(text):
+        return text
+    return f"<redacted, {n} chars>"
+
+
+def _row_gateway_display(row: "Row") -> str:
+    if row.value == "<EMPTY>":
+        return "<EMPTY>"
+    if row.gateway_redacted:
+        return f"<redacted, {_row_len(row)} chars>"
+    return _gateway_display(row.value, _row_len(row))
 
 
 def display_value(row: "Row") -> str:
     """The value as printable. Secrets render as class+length, never content."""
     if row.secret:
-        return f"<redacted, {len(row.value)} chars>" if row.value != "<EMPTY>" else "<EMPTY>"
-    return row.value
+        return f"<redacted, {_row_len(row)} chars>" if row.value != "<EMPTY>" else "<EMPTY>"
+    if row.key in _GATEWAY_KEYS:
+        return _row_gateway_display(row)
+    return _strip_url_userinfo(row.value)
 
 
 _SECRET_KEY_RE = re.compile(r"TOKEN|SECRET|PASSWORD|PASS|APIKEY|API_KEY", re.IGNORECASE)
@@ -207,16 +284,49 @@ _ENV_RESOLVER_KEYS = {"MESH_GATEWAY_URL": "gateway", "MESH_GATEWAY_TOKEN": "toke
 _ENV_PAIR_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
 
 
+def _sanitized_envfile_text(text: str) -> str:
+    """Env-file text with every KEY=VALUE value removed for safe storage.
+
+    MESH_GATEWAY_URL keeps its fail-closed display form (plain
+    scheme://host[:port][/path] only; see _gateway_display); every other
+    value becomes a length-only placeholder. Raw values never survive
+    into a returned surface structure.
+    """
+    out_lines: list[str] = []
+    for line in str(text).splitlines():
+        m = _ENV_PAIR_RE.match(line) if line.strip() and not line.lstrip().startswith("#") else None
+        if not m:
+            out_lines.append(line)
+            continue
+        key, val = m.group(1), m.group(2)
+        raw = val
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+            raw = raw[1:-1]
+        if key == "MESH_GATEWAY_URL" and raw:
+            out_lines.append(f"{key}={_gateway_display(raw)}")
+        elif not raw:
+            out_lines.append(f"{key}=<EMPTY>")
+        else:
+            out_lines.append(f"{key}=<redacted, {len(raw)} chars>")
+    return "\n".join(out_lines) + ("\n" if out_lines else "")
+
+
 def extract_envfile(surface: dict) -> list[Row]:
     """Parse KEY=VALUE pairs out of an EnvironmentFile surface.
 
-    Resolver-owned keys (MESH_GATEWAY_URL/TOKEN) become comparable rows.
-    Other MESH_*/SWARPH_* keys become rows too — they are the
-    no-resolver-claim bucket, and the bucket must have rows to be counted.
-    Anything else is the unit's own business. Secret-class keys are
-    redacted on display. Owner inherits from the referencing unit (an env
-    file has no --as of its own); liveness rides the referencing unit.
+    Every env-file row is secret: its raw value is never stored on the
+    returned Row and never displayed. Sole exception: MESH_GATEWAY_URL
+    is stored with userinfo stripped for comparison, but displayed
+    fail-closed (see _gateway_display; gateway_redacted records that
+    the raw value may not be shown). Other rows store only
+    a sha256 digest plus the original length, which preserves drift
+    distinctness and length reporting without retaining the secret.
+    Raw values exist only as local variables in this function.
     """
+    # Pre-extracted rows (from discover_surfaces) are already sanitized.
+    pre = surface.get("rows")
+    if pre is not None:
+        return list(pre)
     rows: list[Row] = []
     live = bool(surface.get("live", True))
     owner = surface.get("owner")
@@ -228,21 +338,26 @@ def extract_envfile(surface: dict) -> list[Row]:
         if not m:
             continue
         key, val = m.group(1), m.group(2)
-        # systemd env files permit KEY="value" / KEY='value'. A value that
-        # keeps its quotes can never match the resolver's unquoted output —
-        # a FALSE POSITIVE GENERATOR in a drift detector (PR #261, Copilot
-        # finding 1, confirmed by lab-ovh).
         if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
             val = val[1:-1]
         if key not in _ENV_RESOLVER_KEYS and not key.startswith(("MESH_", "SWARPH_")):
             continue
         if is_placeholder(val):
             continue
-        rows.append(Row(
-            key=f"env:{key}", value=val if val else "<EMPTY>", owner=owner,
-            live=live, surface=name,
-            secret=bool(_SECRET_KEY_RE.search(key)),
-        ))
+        if not val:
+            rows.append(Row(key=f"env:{key}", value="<EMPTY>", owner=owner,
+                            live=live, surface=name, secret=True, value_len=0))
+        elif key == "MESH_GATEWAY_URL":
+            stripped = _strip_url_userinfo(val)
+            rows.append(Row(key=f"env:{key}", value=stripped, owner=owner,
+                            live=live, surface=name, secret=False,
+                            digest=_sha256_hex(val), value_len=len(val),
+                            gateway_redacted=(_gateway_display(val) != val)))
+        else:
+            digest = _sha256_hex(val)
+            rows.append(Row(key=f"env:{key}", value=digest, owner=owner,
+                            live=live, surface=name, secret=True,
+                            digest=digest, value_len=len(val)))
     return rows
 
 
@@ -507,15 +622,31 @@ def dropin_parent_unit(relpath: str) -> Optional[str]:
     return None
 
 
-def discover_surfaces() -> list[dict]:
+def discover_surfaces(*, unit_dirs=None, system_cron_paths=None,
+                      platform_has_cron=None) -> list[dict]:
     """Read this cell's units and crontab. THE ONLY IMPURE FUNCTION HERE.
 
     Shells to `systemctl`/`crontab -l` with capture-only, timeouts, and no writes.
     Tests replace this wholesale — every verdict test runs from string fixtures so
     it passes on any box, including boxes with no systemd at all.
+
+    `unit_dirs` / `system_cron_paths` (or the SWARPH_SELFCHECK_UNIT_DIRS /
+    SWARPH_SELFCHECK_SYSTEM_CRON_PATHS env overrides, pathsep-separated) point
+    discovery at fixture roots under a test's tmp_path (card #1541). Defaults
+    are the real host roots, unchanged. NOTE: this function READS the contents
+    of EnvironmentFile targets (see the `ep.read_text` below) — comparing those
+    literals against the resolver is its purpose, so it cannot be stat-only.
     """
     surfaces: list[dict] = []
-    unit_dirs = [Path("/etc/systemd/system"), Path.home() / ".config/systemd/user"]
+    if unit_dirs is None:
+        _override = os.environ.get("SWARPH_SELFCHECK_UNIT_DIRS")
+        if _override:
+            unit_dirs = [Path(p) for p in _override.split(os.pathsep) if p]
+        else:
+            unit_dirs = [Path("/etc/systemd/system"),
+                         Path.home() / ".config/systemd/user"]
+    else:
+        unit_dirs = [Path(p) for p in unit_dirs]
     n_units = 0
     n_dropins = 0
     n_scanned = 0
@@ -568,8 +699,13 @@ def discover_surfaces() -> list[dict]:
                                      "read": False,
                                      "detail": f"{exc.__class__.__name__} (referenced by {label})"})
                     continue
+                _env_surface = {"name": f"{ep} (via {label})", "kind": "envfile",
+                                "text": etext, "live": live, "owner": unit_owner}
+                _env_rows = extract_envfile(_env_surface)
                 surfaces.append({"name": f"{ep} (via {label})", "kind": "envfile",
-                                 "text": etext, "live": live, "owner": unit_owner})
+                                 "text": _sanitized_envfile_text(etext),
+                                 "rows": _env_rows,
+                                 "live": live, "owner": unit_owner})
     detail = ", ".join(str(d) for d in unit_dirs if d.is_dir()) or "none present"
     detail += (f"; {n_scanned} scanned, {n_units} units + {n_dropins} drop-ins relevant, "
                f"{len(envfiles_seen)} env files followed")
@@ -626,8 +762,18 @@ def discover_surfaces() -> list[dict]:
     # Never enumerated before, so they were invisible AND unmentioned: the tool could
     # not say they were clean and could not say it had not looked.
     sys_cron, inert, unreadable = [], [], []
-    for path in [Path("/etc/crontab")] + sorted(Path("/etc/cron.d").glob("*")
-                                                if Path("/etc/cron.d").is_dir() else []):
+    if system_cron_paths is None:
+        _cron_override = os.environ.get("SWARPH_SELFCHECK_SYSTEM_CRON_PATHS")
+        if _cron_override:
+            system_cron_paths = [Path(p) for p in
+                                 _cron_override.split(os.pathsep) if p]
+        else:
+            system_cron_paths = [Path("/etc/crontab")] + sorted(
+                Path("/etc/cron.d").glob("*")
+                if Path("/etc/cron.d").is_dir() else [])
+    else:
+        system_cron_paths = [Path(p) for p in system_cron_paths]
+    for path in system_cron_paths:
         if not path.is_file():
             continue
         try:
@@ -659,9 +805,11 @@ def discover_surfaces() -> list[dict]:
             # flag parser.
             surfaces.append({"name": f"({path})", "kind": "cron", "text": text,
                              "live": bool(executable), "shared": True})
+    if platform_has_cron is None:
+        platform_has_cron = (Path("/etc/crontab").exists()
+                             or Path("/etc/cron.d").is_dir())
     surfaces.append(system_cron_coverage(
-        sys_cron, inert, unreadable,
-        platform_has_cron=Path("/etc/crontab").exists() or Path("/etc/cron.d").is_dir()))
+        sys_cron, inert, unreadable, platform_has_cron=platform_has_cron))
 
     # NOT INSPECTED, stated so a clean verdict cannot be misread (science-claude,
     # 2026-07-27): her live monitor is a HAND-STARTED process, not a unit and not a
@@ -699,7 +847,8 @@ _SELFCHECK_JSON_ALLOWLIST: tuple[str, ...] = (
 
 def _selfcheck_json_row(raw_row: dict) -> dict:
     """Project an internal selfcheck record onto _SELFCHECK_JSON_ALLOWLIST (#1513)."""
-    return {k: raw_row[k] for k in _SELFCHECK_JSON_ALLOWLIST}
+    return {k: _sanitize_urls_in_text(raw_row[k]) if isinstance(raw_row.get(k), str) else raw_row[k]
+            for k in _SELFCHECK_JSON_ALLOWLIST}
 
 
 def _coverage_short_reason(c: dict) -> tuple[str, str]:
@@ -735,7 +884,7 @@ def run_selfcheck(*, self_name: str, declaration: Path,
 
     def _emit_text(line: str) -> None:
         if not json_output:
-            print(line)
+            print(_sanitize_urls_in_text(line))
 
     # THE PER-CELL RENAME IN #148 IS A SILENT MIGRATION, AND IT LANDS ON THE BASELINE.
     # MEASURED on droplet: with the old shared cell_expected.json present and the
@@ -899,20 +1048,26 @@ def run_selfcheck(*, self_name: str, declaration: Path,
             by_key.setdefault(r.key, set()).add(r.value)
 
     secret_keys = {r.key for r in rows if r.secret}
+    _secret_len_by_val: dict[str, int] = {}
+    for _r in rows:
+        if _r.secret:
+            _secret_len_by_val[_r.value] = _row_len(_r)
+
+    _gw_display_by_val: dict[str, str] = {}
+    for _r in rows:
+        if _r.key in _GATEWAY_KEYS:
+            _gw_display_by_val[_r.value] = _row_gateway_display(_r)
 
     def _show(key: str, vals: set[str]) -> list[str]:
         if key in secret_keys:
-            # Two DIFFERENT same-length secrets must not display as one
-            # repeated string while reporting "2 values" (PR #261, Copilot
-            # finding 4) — two 43-char tokens is exactly the peer-token
-            # case. Number by sorted order: stable within the run, and the
-            # number-to-value mapping is never printed, so nothing leaks.
             ordered = sorted(vals)
             if len(ordered) == 1:
-                return [f"<redacted, {len(ordered[0])} chars>"]
-            return [f"<redacted #{i}, {len(v)} chars>"
+                return [f"<redacted, {_secret_len_by_val.get(ordered[0], len(ordered[0]))} chars>"]
+            return [f"<redacted #{i}, {_secret_len_by_val.get(v, len(v))} chars>"
                     for i, v in enumerate(ordered, 1)]
-        return sorted(vals)
+        if key in _GATEWAY_KEYS:
+            return [_gw_display_by_val.get(v, _gateway_display(v)) for v in sorted(vals)]
+        return [_strip_url_userinfo(v) for v in sorted(vals)]
 
     for key, vals in sorted(by_key.items()):
         if len(vals) == 1:
@@ -926,7 +1081,9 @@ def run_selfcheck(*, self_name: str, declaration: Path,
             }))
             continue
         allowed = declared.get(key)
-        if allowed and set(vals) <= set(allowed if isinstance(allowed, list) else [allowed]):
+        _allowed_set = set(allowed if isinstance(allowed, list) else [allowed]) if allowed else set()
+        if allowed and (set(vals) <= _allowed_set or set(_show(key, vals)) <= _allowed_set
+                        or {_strip_url_userinfo(v) for v in vals} <= _allowed_set):
             _emit_text(f"  DECLARED  --{key} {_show(key, vals)} — divergence is a stated choice")
             json_rows.append(_selfcheck_json_row({
                 "check": f"key:{key}",
@@ -1008,7 +1165,7 @@ def run_selfcheck(*, self_name: str, declaration: Path,
             "check": "coverage:resolver comparison",
             "verdict": "read",
             "reason": "gateway and token compared against resolver",
-            "value": str(resolved_gw or ""),
+            "value": str(_gateway_display(resolved_gw) if resolved_gw else ""),
             "surface": "resolver",
         }))
     else:
@@ -1033,29 +1190,37 @@ def run_selfcheck(*, self_name: str, declaration: Path,
 
     gw_rows = [r for r in mine if r.live and r.value != "<EMPTY>"
                and r.key in ("gateway", "env:MESH_GATEWAY_URL")]
-    gw_literals = sorted({r.value for r in gw_rows})
+    # Comparison uses the canonical (userinfo-stripped) form; DISPLAY of
+    # every gateway value is fail-closed via _gateway_display/_row_gateway_display.
+    gw_literals = sorted({_strip_url_userinfo(r.value) for r in gw_rows})
+    _gw_display_by_lit: dict[str, str] = {}
+    for _r in gw_rows:
+        _gw_display_by_lit[_strip_url_userinfo(_r.value)] = _row_gateway_display(_r)
+    resolved_gw_canonical = _strip_url_userinfo(resolved_gw) if resolved_gw else resolved_gw
+    resolved_gw_display = _gateway_display(resolved_gw) if resolved_gw else resolved_gw
     allowed_gw = declared.get("gateway")
-    allowed_gw_set = set(allowed_gw if isinstance(allowed_gw, list) else [allowed_gw]) if allowed_gw else set()
+    allowed_gw_set = {_strip_url_userinfo(str(v)) for v in (allowed_gw if isinstance(allowed_gw, list) else [allowed_gw])} if allowed_gw else set()
     if resolved_gw is not None:
         for lit in gw_literals:
-            if lit != resolved_gw and lit not in allowed_gw_set:
-                _emit_text(f"  RESOLVER DRIFT --gateway {lit} != resolver {resolved_gw}   "
-                           f"({', '.join(sorted({r.surface for r in gw_rows if r.value == lit}))})")
+            lit_display = _gw_display_by_lit.get(lit, _gateway_display(lit))
+            if lit != resolved_gw_canonical and lit not in allowed_gw_set:
+                _emit_text(f"  RESOLVER DRIFT --gateway {lit_display} != resolver {resolved_gw_display}   "
+                           f"({', '.join(sorted({r.surface for r in gw_rows if _strip_url_userinfo(r.value) == lit}))})")
                 json_rows.append(_selfcheck_json_row({
                     "check": "resolver:gateway",
                     "verdict": "RESOLVER DRIFT",
                     "reason": "surface gateway differs from resolver",
-                    "value": [lit, resolved_gw],
+                    "value": [lit_display, resolved_gw_display],
                     "surface": "gateway",
                 }))
                 drift = True
-            elif lit != resolved_gw:
-                _emit_text(f"  DECLARED  --gateway {lit} != resolver {resolved_gw} — a stated choice")
+            elif lit != resolved_gw_canonical:
+                _emit_text(f"  DECLARED  --gateway {lit_display} != resolver {resolved_gw_display} — a stated choice")
                 json_rows.append(_selfcheck_json_row({
                     "check": "resolver:gateway",
                     "verdict": "DECLARED",
                     "reason": "surface gateway divergence declared",
-                    "value": [lit, resolved_gw],
+                    "value": [lit_display, resolved_gw_display],
                     "surface": "gateway",
                 }))
     # Reachability of every distinct value in play, resolver's included —
@@ -1064,38 +1229,42 @@ def run_selfcheck(*, self_name: str, declaration: Path,
     # false-calm lie inverted: false alarm. local-silent on the RESOLVED
     # value means the cell's own CLI cannot reach the mesh either.
     if socket_state == "read":
-        for val in sorted(set(gw_literals) | ({resolved_gw} if resolved_gw else set())):
+        for val in sorted(set(gw_literals) | ({resolved_gw_canonical} if resolved_gw_canonical else set())):
             state = gateway_reachability(val, listeners)
+            val_display = _gw_display_by_lit.get(val)
+            if val_display is None:
+                val_display = (resolved_gw_display if val == resolved_gw_canonical
+                               else _gateway_display(val))
             if state == "local-silent":
-                _emit_text(f"  UNREACHABLE gateway {val} — no listener on this box; "
+                _emit_text(f"  UNREACHABLE gateway {val_display} — no listener on this box; "
                            "if that host is remote this line does not apply, if it is "
                            "local the gateway is DOWN for anything pointing there")
                 json_rows.append(_selfcheck_json_row({
                     "check": "reachability:gateway",
                     "verdict": "UNREACHABLE",
                     "reason": "no local listener on gateway port",
-                    "value": val,
+                    "value": val_display,
                     "surface": "gateway",
                 }))
                 drift = True
             elif state == "wildcard-target":
-                _emit_text(f"  MALFORMED gateway {val} — 0.0.0.0/:: is a wildcard BIND "
+                _emit_text(f"  MALFORMED gateway {val_display} — 0.0.0.0/:: is a wildcard BIND "
                            "address, not a target; nothing can dial it")
                 json_rows.append(_selfcheck_json_row({
                     "check": "reachability:gateway",
                     "verdict": "MALFORMED",
                     "reason": "wildcard bind address is not a dialable target",
-                    "value": val,
+                    "value": val_display,
                     "surface": "gateway",
                 }))
                 drift = True
             elif state == "unparseable":
-                _emit_text(f"  MALFORMED gateway value {val!r} does not parse as host:port")
+                _emit_text(f"  MALFORMED gateway value {val_display!r} does not parse as host:port")
                 json_rows.append(_selfcheck_json_row({
                     "check": "reachability:gateway",
                     "verdict": "MALFORMED",
                     "reason": "gateway value does not parse as host:port",
-                    "value": val,
+                    "value": val_display,
                     "surface": "gateway",
                 }))
                 drift = True
@@ -1114,9 +1283,11 @@ def run_selfcheck(*, self_name: str, declaration: Path,
                 "surface": r.surface,
             }))
             continue
-        if r.value == resolved_tok:
+        _env_tok_digest = r.digest if r.digest is not None else _sha256_hex(r.value)
+        _resolved_tok_digest = _sha256_hex(resolved_tok)
+        if _env_tok_digest == _resolved_tok_digest:
             _emit_text(f"  OK        env:MESH_GATEWAY_TOKEN matches resolved credential "
-                       f"({len(r.value)} chars, from {tok_source})   ({r.surface})")
+                       f"({_row_len(r)} chars, from {tok_source})   ({r.surface})")
             json_rows.append(_selfcheck_json_row({
                 "check": "resolver:token",
                 "verdict": "OK",
@@ -1135,12 +1306,12 @@ def run_selfcheck(*, self_name: str, declaration: Path,
         # Declaration is by surface + redacted length so no secret enters
         # the declaration file:
         #   {"env:MESH_GATEWAY_TOKEN@<surface>": ["<redacted, 64 chars>"]}
-        redacted = f"<redacted, {len(r.value)} chars>"
+        redacted = f"<redacted, {_row_len(r)} chars>"
         decl_tok = declared.get(f"env:MESH_GATEWAY_TOKEN@{r.surface}")
         decl_list = decl_tok if isinstance(decl_tok, list) else ([decl_tok] if decl_tok else [])
         if redacted in decl_list:
             _emit_text(f"  DECLARED  env:MESH_GATEWAY_TOKEN in {r.surface} "
-                       f"({len(r.value)} chars) != resolved credential — a stated choice")
+                       f"({_row_len(r)} chars) != resolved credential — a stated choice")
             json_rows.append(_selfcheck_json_row({
                 "check": "resolver:token",
                 "verdict": "DECLARED",
@@ -1150,7 +1321,7 @@ def run_selfcheck(*, self_name: str, declaration: Path,
             }))
             continue
         _emit_text(f"  TOKEN MISMATCH env:MESH_GATEWAY_TOKEN in {r.surface} "
-                   f"({len(r.value)} chars) != resolved credential for {self_name} "
+                   f"({_row_len(r)} chars) != resolved credential for {self_name} "
                    f"({len(resolved_tok)} chars, from {tok_source}) — a literal "
                    "from before a token migration reads exactly like this; if this "
                    "surface is the gateway's OWN config, declare it by surface")

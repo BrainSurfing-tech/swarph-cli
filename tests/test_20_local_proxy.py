@@ -318,7 +318,7 @@ def test_mark_read_audit_preserves_its_verb(tmp_path):
 
 
 @contextmanager
-def running_fixture_proxy(proxy, tmp_path, *, read_timeout=20, max_connections=None):
+def running_fixture_proxy(proxy, tmp_path, *, read_timeout=20, max_connections=None, failed_starts=0):
     """Real CLI and SO_PEERCRED; map this test uid to a distinct fixture cell uid."""
     token_file = proxy.config.token_file
     token_file.write_text("fixture-secret-20")
@@ -342,9 +342,18 @@ def fixture_uid(connection):
     return os.getuid()+1234 if uid == os.getuid() else uid
 proxy.peer_uid = fixture_uid
 proxy.CLIENT_TIMEOUT = float(sys.argv[2])
+starts_left = int(sys.argv[3])
+real_start = proxy.threading.Thread.start
+def fixture_start(thread):
+    global starts_left
+    if starts_left:
+        starts_left -= 1
+        raise RuntimeError("fixture thread-start failure")
+    return real_start(thread)
+proxy.threading.Thread.start = fixture_start
 raise SystemExit(run_proxy(["serve", "--cell", "alice", "--config", sys.argv[1]]))
 '''
-    process = subprocess.Popen([sys.executable, "-c", script, str(config_file), str(read_timeout)],
+    process = subprocess.Popen([sys.executable, "-c", script, str(config_file), str(read_timeout), str(failed_starts)],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         deadline = time.monotonic() + 5
@@ -356,6 +365,21 @@ raise SystemExit(run_proxy(["serve", "--cell", "alice", "--config", sys.argv[1]]
         process.terminate()
         stdout, stderr = process.communicate(timeout=5)
         assert b"fixture-secret-20" not in stdout + stderr
+
+
+def test_thread_start_failures_release_the_connection_slot(tmp_path, monkeypatch):
+    import swarph_cli.local_proxy as local
+
+    monkeypatch.setattr(local, "CLIENT_TIMEOUT", 1)
+    with gateway(tmp_path, lambda h: answer(h, b'{"peer":"alice"}'), uid=os.getuid()+1234) as (proxy, seen):
+        with running_fixture_proxy(proxy, tmp_path, max_connections=1, failed_starts=3) as process:
+            for _ in range(3):
+                assert call(str(proxy.config.socket_path), "whoami", {})["error"] == "proxy_unavailable"
+            assert seen == []
+            reply = call(str(proxy.config.socket_path), "whoami", {})
+            assert reply["ok"] is True and reply["body"] == {"peer": "alice"}
+            assert process.poll() is None
+        assert seen == [("GET", "/whoami", None)]
 
 
 def test_silent_client_does_not_delay_concurrent_whoami(tmp_path):
