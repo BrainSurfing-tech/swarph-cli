@@ -36,8 +36,12 @@ jobs:
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           /tmp/gitleaks --version
           if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+            if ! git rev-parse --verify --quiet "refs/remotes/origin/${GITHUB_BASE_REF}^{commit}" >/dev/null; then
+              echo "error: base ref refs/remotes/origin/${GITHUB_BASE_REF} did not resolve to a commit" >&2
+              exit 1
+            fi
             /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml \
-              --log-opts="origin/${GITHUB_BASE_REF}..HEAD"
+              --log-opts="refs/remotes/origin/${GITHUB_BASE_REF}..HEAD"
           else
             /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml
           fi
