@@ -48,13 +48,9 @@ and #1346 did not introduce them:
 
 - gh after the apostrophe idiom inside a -c string:
   bash -c 'echo it'\\''s done; gh pr view 1'
-- ANSI-C quoting: bash -c $'gh pr view 1'
 - adjacent quoted pieces: bash -c 'echo 1;'"gh pr view 1"
-- a here-string: bash <<< "gh pr view 1"
 - a pipe into a shell: echo "gh pr view 1" | bash, and the same with | sh -s
-- a backslash command word: \\gh pr list
 - $(which gh) pr list
-- g""h pr list
 - bash -c "$(echo gh) pr view 1"
 - a variable: CMD="gh pr view 1"; bash -c "$CMD"
 """
@@ -113,16 +109,21 @@ _WRAPPERS = (
 # Found by re-running drop's own failing corpus rather than the PR's seven cases:
 # "0/7 false positives is measured against your seven cases, not mine, and the claim
 # as written is wider than its evidence." The token list was, too.
-_START = (r"(?:^|[;&|]|\$\(|`|\(|\{"
+_START = (r"(?:^|[;&|]|\$\(|`|\(|\)|\{"
           r"|\bthen\b|\bdo\b|\belse\b|\bif\b|\bwhile\b|\buntil\b|\belif\b"
           r"|&&|\|\|)")
 _LEAD = r"[ \t]*"                       # leading whitespace/tab — also missed before
+_BANGPFX = r"(?:![ \t]+)*"
 _ENVPFX = r"(?:[A-Za-z_][A-Za-z0-9_]*=(?:\$\([^)]*\)|(?!\$\()\S*)[ \t]+)*"
 _WRAPPFX = rf"(?:(?:{_WRAPPERS})[ \t]+)*"
+_WRAPPFX_PLUS = rf"(?:(?:{_WRAPPERS})[ \t]+)+"
+_CMD_PREFIX = rf"{_BANGPFX}{_ENVPFX}(?:{_WRAPPFX_PLUS}{_ENVPFX})?"
 #: `gh`, `./gh`, or any absolute path ending in /gh.
 _GH_WORD = r"(?:\.{0,2}/|(?:/[\w.-]+)*/)?gh"
 
 _GH_INVOCATION = re.compile(
+    rf"{_START}{_LEAD}{_CMD_PREFIX}{_GH_WORD}(?=[ \t]|$)", re.MULTILINE)
+_GH_INVOCATION_LEGACY = re.compile(
     rf"{_START}{_LEAD}{_ENVPFX}{_WRAPPFX}{_GH_WORD}(?=[ \t]|$)", re.MULTILINE)
 
 #: Already carries an explicit GH_TOKEN — an operator decision; do not double-inject.
@@ -316,6 +317,257 @@ def _unreadable_note(unreadable) -> str:
             + ", ".join(str(f) for f in unreadable) + "\n")
 
 
+_HEREDOC_OP_ID_ONLY = re.compile(
+    r"<<(-)?(?!<)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?=[ \t\n;|&()<>]|$)"
+)
+_ASSIGN_NAME_AT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+#: Module-level switches so mutant tests can flip each behavior and verify a test fails.
+_MASK_COMMENTS = True
+_FOLD_CONTINUATIONS_IN_COMMENTS = False
+_HEREDOC_IDENTIFIER_ONLY = False
+_SCAN_SHELL_HEREDOC = True
+_SCAN_COMMENTS_FOR_TARGETS = False
+_ENABLE_BANG_AND_ENV_ASSIGN = True
+_SCAN_WRITE_THEN_RUN = True
+_RESOLVE_ANSI_C = True
+
+_ANSI_C_SIMPLE = {
+    "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b",
+    "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+    "\\": "\\", "'": "'", '"': '"', "?": "?",
+}
+
+
+def _unescape_ansi_c(text: str, start: int) -> tuple[str, int, bool]:
+    """Parse ``$'...'`` starting after ``$'`` at ``start`` -> (unescaped, next_idx, closed)."""
+    n = len(text)
+    j = start
+    buf: list[str] = []
+    while j < n:
+        c = text[j]
+        if c == "'":
+            return "".join(buf), j + 1, True
+        if c == "\\" and j + 1 < n:
+            nxt = text[j + 1]
+            if nxt in _ANSI_C_SIMPLE:
+                buf.append(_ANSI_C_SIMPLE[nxt])
+                j += 2
+                continue
+            if nxt == "x" and j + 2 < n:
+                k = j + 2
+                while k < min(n, j + 4) and text[k] in "0123456789abcdefABCDEF":
+                    k += 1
+                if k > j + 2:
+                    buf.append(chr(int(text[j + 2:k], 16)))
+                    j = k
+                    continue
+            if nxt in ("u", "U") and j + 2 < n:
+                max_hex = 4 if nxt == "u" else 8
+                k = j + 2
+                while k < min(n, j + 2 + max_hex) and text[k] in "0123456789abcdefABCDEF":
+                    k += 1
+                if k > j + 2:
+                    cp = int(text[j + 2:k], 16)
+                    if 0 <= cp <= 0x10FFFF:
+                        buf.append(chr(cp))
+                        j = k
+                        continue
+            if nxt == "c" and j + 2 < n:
+                buf.append(chr(ord(text[j + 2]) & 0x1F))
+                j += 3
+                continue
+            if nxt in "01234567":
+                k = j + 1
+                while k < min(n, j + 4) and text[k] in "01234567":
+                    k += 1
+                buf.append(chr(int(text[j + 1:k], 8) & 0xFF))
+                j = k
+                continue
+            buf.append(text[j:j + 2])
+            j += 2
+            continue
+        buf.append(c)
+        j += 1
+    return "".join(buf), n, False
+
+
+def _parse_heredoc_op(
+    text: str,
+    pos: int,
+    *,
+    identifier_only: Optional[bool] = None,
+) -> Optional[tuple[str, bool, bool, int, bool]]:
+    """Parse ``<<[-] word`` at ``pos`` as bash does (any word, after quote removal).
+
+    Returns ``(delim, strip_tabs, quoted_delim, end_pos, bad_delim)`` or ``None``
+    when ``text[pos:]`` is not a heredoc operator.
+    """
+    if not text.startswith("<<", pos) or text.startswith("<<<", pos):
+        return None
+    if pos > 0 and text[pos - 1] == "<":
+        return None
+    id_only = _HEREDOC_IDENTIFIER_ONLY if identifier_only is None else identifier_only
+    if id_only:
+        m = _HEREDOC_OP_ID_ONLY.match(text, pos)
+        if m is None:
+            return None
+        return (m.group(3), bool(m.group(1)), bool(m.group(2)), m.end(), False)
+    strip_tabs = text.startswith("<<-", pos)
+    j = pos + (3 if strip_tabs else 2)
+    n = len(text)
+    while j < n and text[j] in " \t":
+        j += 1
+    if j >= n or text[j] in "\n;|&()<>#":
+        return ("", strip_tabs, False, j, True)
+    parts: list[str] = []
+    quoted = False
+    bad = False
+    while j < n and text[j] not in " \t\n;|&()<>":
+        c = text[j]
+        if c == "\\":
+            quoted = True
+            if j + 1 < n:
+                parts.append(text[j + 1])
+                j += 2
+            else:
+                bad = True
+                j = n
+            continue
+        if text.startswith("$'", j):
+            quoted = True
+            val, j, closed = _unescape_ansi_c(text, j + 2)
+            parts.append(val)
+            if not closed:
+                bad = True
+                break
+            continue
+        if c == "'":
+            quoted = True
+            k = text.find("'", j + 1)
+            if k < 0:
+                bad = True
+                j = n
+                break
+            parts.append(text[j + 1:k])
+            j = k + 1
+            continue
+        if c == '"' or text.startswith('$"', j):
+            quoted = True
+            k = j + (2 if c == "$" else 1)
+            while k < n and text[k] != '"':
+                if text[k] == "\\" and k + 1 < n:
+                    if text[k + 1] in '"\\$`\n':
+                        parts.append(text[k + 1])
+                    else:
+                        parts.append(text[k:k + 2])
+                    k += 2
+                    continue
+                parts.append(text[k])
+                k += 1
+            if k >= n:
+                bad = True
+                j = n
+                break
+            j = k + 1
+            continue
+        parts.append(c)
+        j += 1
+    return ("".join(parts), strip_tabs, quoted, j, bad)
+
+
+def _unquote_word_at(text: str, pos: int) -> tuple[Optional[str], int, bool]:
+    """Read one shell word at ``pos`` and perform bash quote/escape removal.
+
+    Returns ``(unquoted_or_None_if_dynamic, end_pos, had_quote_or_escape)``.
+    If the word contains unescaped ``$`` (other than ``$'...'`` / ``$"..."``)
+    or backticks, ``unquoted`` is ``None``.
+    """
+    n = len(text)
+    j = pos
+    parts: list[str] = []
+    dynamic = False
+    had_qe = False
+    while j < n and text[j] not in " \t\n;|&()<>":
+        c = text[j]
+        if c == "\\":
+            had_qe = True
+            if j + 1 < n:
+                parts.append(text[j + 1])
+                j += 2
+            else:
+                dynamic = True
+                j = n
+            continue
+        if _RESOLVE_ANSI_C and text.startswith("$'", j):
+            had_qe = True
+            val, j, closed = _unescape_ansi_c(text, j + 2)
+            if not closed:
+                dynamic = True
+                break
+            parts.append(val)
+            continue
+        if c == "'":
+            had_qe = True
+            k = text.find("'", j + 1)
+            if k < 0:
+                dynamic = True
+                j = n
+                break
+            parts.append(text[j + 1:k])
+            j = k + 1
+            continue
+        if c == '"' or text.startswith('$"', j):
+            had_qe = True
+            k = j + (2 if c == "$" else 1)
+            while k < n and text[k] != '"':
+                if text[k] == "\\" and k + 1 < n:
+                    if text[k + 1] in '"\\$`\n':
+                        parts.append(text[k + 1])
+                    else:
+                        parts.append(text[k:k + 2])
+                    k += 2
+                    continue
+                if text[k] in "$`":
+                    dynamic = True
+                parts.append(text[k])
+                k += 1
+            if k >= n:
+                dynamic = True
+                j = n
+                break
+            j = k + 1
+            continue
+        if c in "$`":
+            dynamic = True
+            if text.startswith("$(", j):
+                end = _subst_end_hd(text, j + 1)
+                j = end + 1 if end < n else n
+                continue
+            if text.startswith("${", j):
+                end = text.find("}", j + 2)
+                j = n if end < 0 else end + 1
+                continue
+            if c == "`":
+                end = text.find("`", j + 1)
+                j = n if end < 0 else end + 1
+                continue
+        parts.append(c)
+        j += 1
+    return (None if dynamic else "".join(parts)), j, had_qe
+
+
+def _blanks(text: str) -> str:
+    return "".join("\n" if ch == "\n" else " " for ch in text)
+
+
+def _is_terminator(line: str, delim: str, strip_tabs: bool) -> bool:
+    """Exact heredoc terminator: only leading tabs count, and only for ``<<-``."""
+    if strip_tabs:
+        return line.lstrip("\t") == delim
+    return line == delim
+
+
 def _subst_end(command: str, open_paren: int) -> int:
     """Index of the ``)`` matching ``command[open_paren] == '('``."""
     depth = 1
@@ -349,21 +601,37 @@ def _subst_end(command: str, open_paren: int) -> int:
     return n
 
 
-def _subst_end_hd(command: str, open_paren: int) -> int:
-    """Heredoc-aware ``_subst_end``: body lines are raw text.
+_CASE_WORD_RE = re.compile(r"case(?=[ \t\n])")
+_ESAC_WORD_RE = re.compile(r"esac(?=[ \t\n;|&)]|$)")
+_IN_WORD_RE = re.compile(r"in(?=[ \t\n;|&()]|$)")
 
-    A ``)`` or quote char inside a heredoc body neither closes the
-    substitution nor opens a quote. ``<<<`` is a here-string, not a
-    heredoc: a ``<<`` whose previous char is ``<`` never registers.
+
+def _subst_end_hd(command: str, open_paren: int, *,
+                  mask_comments: Optional[bool] = None) -> int:
+    """Heredoc-, comment-, and ``case``-aware ``_subst_end``: body lines are raw text.
+
+    A ``)`` or quote char inside a heredoc body or a word-start ``#``
+    comment neither closes the substitution nor opens a quote, and a ``)``
+    ending an unparenthesized ``case`` arm pattern ``pat)`` does not close
+    the enclosing ``$(...)``.
     """
+    mc = _MASK_COMMENTS if mask_comments is None else mask_comments
     depth = 1
+    brace_depth = 0
     i = open_paren + 1
     n = len(command)
+    at_word_start = True
     pending: list[tuple[str, bool]] = []
+    # Stack of [paren_depth_at_case, state] where state is one of:
+    # "pre_in", "expect_pat", "in_pat", "in_pat_open", "in_body".
+    case_stack: list[list] = []
     while i < n and depth:
         c = command[i]
         if c == "\n":
             i += 1
+            at_word_start = True
+            if case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "pre_in":
+                pass
             while pending:
                 delim, strip_tabs = pending.pop(0)
                 while i < n:
@@ -377,14 +645,45 @@ def _subst_end_hd(command: str, open_paren: int) -> int:
                         break
                     i = nl + 1
             continue
+        if mc and at_word_start and brace_depth == 0 and c == "#":
+            end = command.find("\n", i)
+            i = n if end < 0 else end
+            continue
         if c == "\\" and i + 1 < n:
+            if case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "expect_pat":
+                case_stack[-1][1] = "in_pat"
             i += 2
+            at_word_start = False
+            continue
+        if command.startswith("${", i):
+            if case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "expect_pat":
+                case_stack[-1][1] = "in_pat"
+            brace_depth += 1
+            i += 2
+            at_word_start = False
+            continue
+        if c == "}" and brace_depth > 0:
+            brace_depth -= 1
+            i += 1
+            at_word_start = False
+            continue
+        if c == "$" and i + 1 < n and command[i + 1] == "'":
+            if case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "expect_pat":
+                case_stack[-1][1] = "in_pat"
+            at_word_start = False
+            _, i, _ = _unescape_ansi_c(command, i + 2)
             continue
         if c == "'":
+            if case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "expect_pat":
+                case_stack[-1][1] = "in_pat"
+            at_word_start = False
             j = command.find("'", i + 1)
             i = n if j < 0 else j + 1
             continue
         if c == '"':
+            if case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "expect_pat":
+                case_stack[-1][1] = "in_pat"
+            at_word_start = False
             i += 1
             while i < n and command[i] != '"':
                 if command[i] == "\\" and i + 1 < n:
@@ -394,105 +693,1068 @@ def _subst_end_hd(command: str, open_paren: int) -> int:
             i = i + 1 if i < n else n
             continue
         if c == "<" and not (i > 0 and command[i - 1] == "<"):
-            m = _HEREDOC_OP.match(command, i)
-            if m is not None:
-                pending.append((m.group(2), bool(m.group(1))))
-                i = m.end()
+            if command.startswith("<<<", i):
+                i += 3
+                at_word_start = True
                 continue
+            hd = _parse_heredoc_op(command, i)
+            if hd is not None:
+                delim, strip_tabs, _, end_op, bad_delim = hd
+                if not bad_delim:
+                    pending.append((delim, strip_tabs))
+                i = end_op
+                at_word_start = False
+                continue
+            i += 1
+            at_word_start = True
+            continue
+        if c in " \t":
+            i += 1
+            at_word_start = True
+            continue
+        if c == ";" and case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "in_body":
+            if command.startswith(";;&", i):
+                case_stack[-1][1] = "expect_pat"
+                i += 3
+                at_word_start = True
+                continue
+            if command.startswith(";;", i) or command.startswith(";&", i):
+                case_stack[-1][1] = "expect_pat"
+                i += 2
+                at_word_start = True
+                continue
+        if c in ";|&>":
+            i += 1
+            at_word_start = True
+            continue
         if c == "(":
+            if case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "expect_pat":
+                case_stack[-1][1] = "in_pat_open"
             depth += 1
-        elif c == ")":
+            at_word_start = True
+            i += 1
+            continue
+        if c == ")":
+            if case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "in_pat":
+                case_stack[-1][1] = "in_body"
+                at_word_start = True
+                i += 1
+                continue
+            if case_stack and case_stack[-1][0] + 1 == depth and case_stack[-1][1] == "in_pat_open":
+                depth -= 1
+                case_stack[-1][1] = "in_body"
+                at_word_start = True
+                i += 1
+                continue
             depth -= 1
+            at_word_start = True
             if depth == 0:
                 return i
+            i += 1
+            continue
+        if at_word_start and brace_depth == 0:
+            if case_stack and case_stack[-1][0] == depth:
+                st = case_stack[-1][1]
+                if st in ("expect_pat", "in_body") and _ESAC_WORD_RE.match(command, i):
+                    case_stack.pop()
+                    i += 4
+                    at_word_start = False
+                    continue
+                if st == "pre_in" and _IN_WORD_RE.match(command, i):
+                    case_stack[-1][1] = "expect_pat"
+                    i += 2
+                    at_word_start = False
+                    continue
+            if _CASE_WORD_RE.match(command, i):
+                case_stack.append([depth, "pre_in"])
+                i += 4
+                at_word_start = False
+                continue
+            if case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "expect_pat":
+                case_stack[-1][1] = "in_pat"
+        at_word_start = False
         i += 1
     return n
 
 
-def _mask_quoted(command: str, *, mask_comments: bool = False) -> str:
-    """Blank the insides of quotes. A quoted ``gh`` is not a command (card #1340).
+@dataclass(frozen=True)
+class BashScan:
+    """Result of the shared bash tokenizer (:func:`_tokenize_bash`)."""
+    folded: str
+    visible: str
+    targets_visible: str
+    unterminated_quote: bool
+    has_backtick: bool
+    has_heredoc: bool
+    subst_spans: tuple[tuple[int, int], ...]
+    unterminated_heredoc: bool = False
 
-    ``$(...)`` and backticks stay, including inside double quotes, because those
-    are command substitutions. Their contents are masked the same way, so a
-    quote inside a substitution does not hide a real ``gh`` and a quoted
-    substitution does not invent one.
-    Comments are masked only for explicit-token detection: a hash in a heredoc
-    or expansion is not a reliable comment boundary for command detection.
+
+def _fold_bash_continuations(
+    command: str,
+    *,
+    mask_comments: bool,
+    fold_continuations_in_comments: bool,
+) -> str:
+    """Fold ``\\<LF>`` as bash does: outside comments, single quotes, and heredocs.
+
+    In bash:
+    - A ``#`` starts a comment ONLY at a word start, and the comment ends at
+      ``\\n``; a ``\\<LF>`` inside a comment does NOT continue the comment
+      onto the next line.
+    - Inside ``'...'`` and ``$'...'``, ``\\`` does not fold a newline.
+    - Outside single quotes, comments, and heredoc bodies (including inside
+      ``"..."`` and ``$(...)``), ``\\<LF>`` is a line continuation and is
+      removed without changing word-start state. ``\\<CR><LF>`` is not a
+      continuation and is kept in place.
     """
     out: list[str] = []
     i = 0
     n = len(command)
-
-    def blanks(text: str) -> str:
-        return "".join("\n" if ch == "\n" else " " for ch in text)
-
+    at_word_start = True
+    brace_depth = 0
+    pending: list[tuple[str, bool]] = []
     while i < n:
         c = command[i]
-        if mask_comments and c == "#" and (i == 0 or command[i - 1].isspace() or command[i - 1] in ";|&()"):
-            end = command.find("\n", i)
-            end = n if end < 0 else end
-            out.append(blanks(command[i:end]))
-            i = end
+        if c == "\n":
+            out.append("\n")
+            i += 1
+            at_word_start = True
+            while pending:
+                delim, strip_tabs = pending.pop(0)
+                while i < n:
+                    nl = command.find("\n", i)
+                    lend = n if nl < 0 else nl
+                    line = command[i:lend]
+                    out.append(line)
+                    if nl >= 0:
+                        out.append("\n")
+                        i = lend + 1
+                    else:
+                        i = n
+                    if _is_terminator(line, delim, strip_tabs):
+                        break
+            continue
+        if mask_comments and at_word_start and brace_depth == 0 and c == "#":
+            if not fold_continuations_in_comments:
+                end = command.find("\n", i)
+                end = n if end < 0 else end
+                out.append(command[i:end])
+                i = end
+                continue
+            j = i
+            while j < n:
+                if command[j] == "\\" and j + 1 < n and command[j + 1] == "\n":
+                    j += 2
+                    continue
+                if command[j] == "\n":
+                    break
+                out.append(command[j])
+                j += 1
+            i = j
             continue
         if c == "\\" and i + 1 < n:
+            if command[i + 1] == "\n":
+                i += 2
+                continue
             out.append(command[i:i + 2])
             i += 2
+            at_word_start = False
             continue
-        if c == "'":
-            j = command.find("'", i + 1)
-            if j < 0:
-                # An unmatched quote may be comment text; keep later commands visible.
-                out.append(command[i:])
-                break
-            out.append(c)
-            out.append(blanks(command[i + 1:j]))
-            out.append("'")
-            i = j + 1
+        if command.startswith("${", i):
+            brace_depth += 1
+            out.append("${")
+            i += 2
+            at_word_start = False
             continue
-        if c == '"':
-            quote_start, output_start = i, len(out)
-            subst_seen = False
+        if c == "}" and brace_depth > 0:
+            brace_depth -= 1
+            out.append("}")
+            i += 1
+            at_word_start = False
+            continue
+        if c == "<":
+            if command.startswith("<<<", i):
+                out.append("<<<")
+                i += 3
+                at_word_start = True
+                continue
+            hd = None if (i > 0 and command[i - 1] == "<") \
+                else _parse_heredoc_op(command, i)
+            if hd is not None:
+                delim, strip_tabs, _, end_op, bad_delim = hd
+                if not bad_delim:
+                    pending.append((delim, strip_tabs))
+                out.append(command[i:end_op])
+                i = end_op
+                at_word_start = False
+                continue
             out.append(c)
             i += 1
+            at_word_start = True
+            continue
+        if c in " \t":
+            out.append(c)
+            i += 1
+            at_word_start = True
+            continue
+        if c in ";|&()>":
+            out.append(c)
+            i += 1
+            at_word_start = True
+            continue
+        if c == "$" and i + 1 < n and command[i + 1] == "'":
+            at_word_start = False
+            j = i + 2
+            while j < n:
+                if command[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if command[j] == "'":
+                    j += 1
+                    break
+                j += 1
+            out.append(command[i:j])
+            i = j
+            continue
+        if c == "'":
+            at_word_start = False
+            j = command.find("'", i + 1)
+            end = n if j < 0 else j + 1
+            out.append(command[i:end])
+            i = end
+            continue
+        if c == '"' or (c == "$" and i + 1 < n and command[i + 1] == '"'):
+            at_word_start = False
+            if c == "$":
+                out.append('$"')
+                i += 2
+            else:
+                out.append('"')
+                i += 1
             while i < n and command[i] != '"':
                 if command[i] == "\\" and i + 1 < n:
-                    out.append("  ")
+                    if command[i + 1] == "\n":
+                        i += 2
+                        continue
+                    out.append(command[i:i + 2])
                     i += 2
                     continue
                 if command[i] == "$" and i + 1 < n and command[i + 1] == "(":
-                    subst_seen = True
-                    end = _subst_end_hd(command, i + 1)
-                    inner = _mask_quoted(command[i + 2:end], mask_comments=mask_comments)
+                    end = _subst_end_hd(command, i + 1, mask_comments=mask_comments)
+                    inner = _fold_bash_continuations(
+                        command[i + 2:end],
+                        mask_comments=mask_comments,
+                        fold_continuations_in_comments=fold_continuations_in_comments,
+                    )
                     out.append("$(" + inner + (")" if end < n else ""))
                     i = end + 1 if end < n else n
                     continue
-                if command[i] == "`":
-                    j = command.find("`", i + 1)
-                    if j < 0:
-                        out.append("`")
-                        out.append(_mask_quoted(command[i + 1:], mask_comments=mask_comments))
-                        i = n
-                        break
-                    out.append("`" + _mask_quoted(command[i + 1:j], mask_comments=mask_comments) + "`")
-                    i = j + 1
-                    continue
-                out.append("\n" if command[i] == "\n" else " ")
+                out.append(command[i])
                 i += 1
             if i < n and command[i] == '"':
                 out.append('"')
                 i += 1
-            elif subst_seen:
-                # Fail closed (see _mask_explicit): a substitution was
-                # seen, so this region held command text; never restore
-                # it raw. A bare unmatched quote may be comment text,
-                # so without a substitution later commands stay visible.
-                out[output_start:] = [blanks(command[quote_start:])]
-            else:
-                out[output_start:] = [command[quote_start:]]
             continue
         out.append(c)
         i += 1
+        at_word_start = False
     return "".join(out)
+
+
+def _closed_assignment_value_end(text: str, i: int, *,
+                                 mask_comments: bool) -> Optional[int]:
+    """End of a closed assignment value word starting at ``i`` in ``text``.
+
+    Handles concatenated bare chars, ``'...'``, ``$'...'``, ``"..."``,
+    ``$"..."``, ``$(...)``, ``$((...))``, ``${...}``, and backticks `` `...` ``.
+    Returns ``None`` if any quote or substitution in the value is unclosed.
+    """
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c in " \t;\n&|()<>":
+            break
+        if text.startswith("$(", i):
+            end = _subst_end_hd(text, i + 1, mask_comments=mask_comments)
+            if end >= n:
+                return None
+            i = end + 1
+            continue
+        if text.startswith("${", i):
+            end = text.find("}", i + 2)
+            if end < 0:
+                return None
+            i = end + 1
+            continue
+        if c == "`":
+            j = text.find("`", i + 1)
+            if j < 0:
+                return None
+            i = j + 1
+            continue
+        if text.startswith("$'", i):
+            j = i + 2
+            while j < n:
+                if text[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if text[j] == "'":
+                    break
+                j += 1
+            if j >= n:
+                return None
+            i = j + 1
+            continue
+        if text.startswith('$"', i):
+            j = i + 2
+            while j < n and text[j] != '"':
+                if text[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                j += 1
+            if j >= n:
+                return None
+            i = j + 1
+            continue
+        if c == "'":
+            j = text.find("'", i + 1)
+            if j < 0:
+                return None
+            i = j + 1
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                if text[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                j += 1
+            if j >= n:
+                return None
+            i = j + 1
+            continue
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        i += 1
+    return i
+
+
+def _normalize_assignment_values(
+    folded: str,
+    visible: str,
+    *,
+    mask_comments: bool,
+    quoted_gh_words: tuple[tuple[int, int], ...] = (),
+) -> str:
+    """Collapse closed env-prefix values (``$(...)``, ``$((...))``, `` `...` ``,
+    quotes) into ``x`` runs of identical length so ``_ENVPFX`` never hides a
+    following ``gh`` call, and normalize quote/escape-removed ``gh`` command
+    words at command start positions.
+    """
+    if "=" not in visible and not quoted_gh_words:
+        return visible
+    chars = list(visible)
+    n = len(visible)
+    gh_inv = _GH_INVOCATION if _ENABLE_BANG_AND_ENV_ASSIGN else _GH_INVOCATION_LEGACY
+    if "=" in visible:
+        i = 0
+        while i < n:
+            if i == 0 or visible[i - 1] in " \t\n;|&({":
+                am = _ASSIGN_NAME_AT.match(visible, i)
+                if am is not None:
+                    vstart = am.end()
+                    vend = _closed_assignment_value_end(
+                        folded, vstart, mask_comments=mask_comments)
+                    if vend is not None and vend > vstart:
+                        span_vis = "".join(chars[vstart:vend])
+                        if not gh_inv.search(span_vis):
+                            for k in range(vstart, vend):
+                                chars[k] = "x"
+                        i = vend
+                        continue
+            i += 1
+    if quoted_gh_words:
+        at_word = _AT_WORD if _ENABLE_BANG_AND_ENV_ASSIGN else _AT_WORD_LEGACY
+        cur = "".join(chars)
+        for wstart, wend in quoted_gh_words:
+            if wend - wstart >= 2 and at_word.search(cur[:wstart]) is not None:
+                rep = "gh" + (" " * (wend - wstart - 2))
+                for k, ch in enumerate(rep):
+                    chars[wstart + k] = ch
+                cur = "".join(chars)
+    return "".join(chars)
+
+
+def _scan_subst_only_for_targets(segment: str, *, mask_comments: bool) -> str:
+    """Blank ``segment`` while preserving any ``$(...)`` or `` `...` `` inside it."""
+    if "$(" not in segment and "`" not in segment:
+        return _blanks(segment)
+    res: list[str] = []
+    k = 0
+    m = len(segment)
+    while k < m:
+        if segment[k] == "\\" and k + 1 < m:
+            res.append("  ")
+            k += 2
+            continue
+        if segment.startswith("$(", k):
+            end = _subst_end_hd(segment, k + 1, mask_comments=mask_comments)
+            stop = end + 1 if end < m else m
+            sub = _scan_folded(segment[k + 2:end], 0, mask_comments=mask_comments)
+            close_p = ")" if end < m else ""
+            res.append("$(" + sub.targets_visible + close_p)
+            k = stop
+            continue
+        if segment[k] == "`":
+            j = segment.find("`", k + 1)
+            if j < 0:
+                sub = _scan_folded(segment[k + 1:], 0, mask_comments=mask_comments)
+                res.append("`" + sub.targets_visible)
+                k = m
+                continue
+            sub = _scan_folded(segment[k + 1:j], 0, mask_comments=mask_comments)
+            res.append("`" + sub.targets_visible + "`")
+            k = j + 1
+            continue
+        res.append("\n" if segment[k] == "\n" else " ")
+        k += 1
+    return "".join(res)
+
+
+_SCRIPT_RUNNERS = frozenset({
+    "bash", "sh", "zsh", "dash", "ksh",
+    "python", "python2", "python3",
+    ".", "source",
+})
+
+
+def _normalize_script_path(path: str) -> str:
+    p = path.strip()
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
+
+def _split_top_level_segments(text: str) -> list[tuple[int, int, str]]:
+    """Split ``text`` into simple-command segments outside quotes and comments."""
+    segs: list[tuple[int, int, str]] = []
+    i = 0
+    n = len(text)
+    seg_start = 0
+    at_word_start = True
+    while i < n:
+        c = text[i]
+        if c in "\n;|&(){}":
+            if i > seg_start:
+                segs.append((seg_start, i, text[seg_start:i]))
+            i += 1
+            seg_start = i
+            at_word_start = True
+            continue
+        if _MASK_COMMENTS and at_word_start and c == "#":
+            if i > seg_start:
+                segs.append((seg_start, i, text[seg_start:i]))
+            end = text.find("\n", i)
+            i = n if end < 0 else end + 1
+            seg_start = i
+            at_word_start = True
+            continue
+        if c == "\\" and i + 1 < n:
+            i += 2
+            at_word_start = False
+            continue
+        if text.startswith("$'", i):
+            _, i, _ = _unescape_ansi_c(text, i + 2)
+            at_word_start = False
+            continue
+        if c == "'":
+            k = text.find("'", i + 1)
+            i = n if k < 0 else k + 1
+            at_word_start = False
+            continue
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                if text[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                i += 1
+            i = i + 1 if i < n else n
+            at_word_start = False
+            continue
+        if c in " \t":
+            i += 1
+            at_word_start = True
+            continue
+        i += 1
+        at_word_start = False
+    if n > seg_start:
+        segs.append((seg_start, n, text[seg_start:n]))
+    return segs
+
+
+def _extract_simple_cmd_words_and_redirs(
+    seg: str,
+) -> tuple[list[str], set[str]]:
+    """Extract ``(command_words, redirected_output_paths)`` from one simple command."""
+    words: list[str] = []
+    redirs: set[str] = set()
+    j = 0
+    n = len(seg)
+    while j < n:
+        while j < n and seg[j] in " \t":
+            j += 1
+        if j >= n:
+            break
+        if _MASK_COMMENTS and seg[j] == "#":
+            break
+        if seg.startswith("<<<", j):
+            j += 3
+            while j < n and seg[j] in " \t":
+                j += 1
+            _, wend, _ = _unquote_word_at(seg, j)
+            j = max(j + 1, wend)
+            continue
+        hd = _parse_heredoc_op(seg, j)
+        if hd is not None:
+            j = hd[3]
+            continue
+        rm = re.match(r"(?:[0-9]*>>?\|?|&>>?)(?!&)", seg[j:])
+        if rm is not None:
+            j += rm.end()
+            while j < n and seg[j] in " \t":
+                j += 1
+            if j < n:
+                unq, wend, _ = _unquote_word_at(seg, j)
+                target = unq if unq is not None else seg[j:wend]
+                norm = _normalize_script_path(target)
+                if norm and norm not in ("/dev/null", "-"):
+                    redirs.add(norm)
+                j = max(j + 1, wend)
+            continue
+        om = re.match(r"[0-9]*(?:>&[0-9-]+|<&?[0-9-]*)", seg[j:])
+        if om is not None:
+            j += om.end()
+            if not seg[j - 1].isdigit() and seg[j - 1] != "-":
+                while j < n and seg[j] in " \t":
+                    j += 1
+                if j < n:
+                    _, wend, _ = _unquote_word_at(seg, j)
+                    j = max(j + 1, wend)
+            continue
+        unq, wend, _ = _unquote_word_at(seg, j)
+        if wend <= j:
+            j += 1
+            continue
+        w = unq if unq is not None else seg[j:wend]
+        words.append(w)
+        j = wend
+    idx = 0
+    while idx < len(words):
+        w = words[idx]
+        if w in _LEAD_KEYWORDS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
+            idx += 1
+            continue
+        if w in _WRAPPER_WORDS:
+            idx += 1
+            while idx < len(words) and words[idx].startswith("-"):
+                idx += 1
+            continue
+        break
+    rem = words[idx:]
+    if rem and rem[0].rsplit("/", 1)[-1] == "tee":
+        for arg in rem[1:]:
+            if not arg.startswith("-"):
+                norm = _normalize_script_path(arg)
+                if norm and norm not in ("/dev/null", "-"):
+                    redirs.add(norm)
+    return rem, redirs
+
+
+def _heredoc_writes_executed_file(
+    text: str, op_start: int, after_heredoc_pos: int
+) -> bool:
+    """True when the heredoc at ``op_start`` writes to a file path (via ``>``,
+    ``>>``, or ``tee``) and that path later appears in the same command as a
+    command word or as an argument of ``bash``/``sh``/``zsh``/``python``/``.``/``source``.
+    """
+    line_start = text.rfind("\n", 0, op_start) + 1
+    line_end = text.find("\n", op_start)
+    if line_end < 0:
+        line_end = len(text)
+    line_segs = _split_top_level_segments(text[line_start:line_end])
+    rel_op = op_start - line_start
+    owner_idx = -1
+    for idx, (s, e, _) in enumerate(line_segs):
+        if s <= rel_op <= e:
+            owner_idx = idx
+            break
+    if owner_idx < 0:
+        return False
+    _, written_paths = _extract_simple_cmd_words_and_redirs(line_segs[owner_idx][2])
+    if owner_idx + 1 < len(line_segs):
+        next_rem, next_redirs = _extract_simple_cmd_words_and_redirs(
+            line_segs[owner_idx + 1][2]
+        )
+        if next_rem and next_rem[0].rsplit("/", 1)[-1] == "tee":
+            written_paths |= next_redirs
+    if not written_paths:
+        return False
+    later_segs = [seg for _, _, seg in line_segs[owner_idx + 1:]]
+    if after_heredoc_pos < len(text):
+        later_segs.extend(
+            seg for _, _, seg in _split_top_level_segments(text[after_heredoc_pos:])
+        )
+    for lseg in later_segs:
+        rem, _ = _extract_simple_cmd_words_and_redirs(lseg)
+        if not rem:
+            continue
+        cmd_w = rem[0]
+        if _normalize_script_path(cmd_w) in written_paths:
+            return True
+        cmd_base = cmd_w.rsplit("/", 1)[-1]
+        if cmd_base in _SCRIPT_RUNNERS:
+            for arg in rem[1:]:
+                if _normalize_script_path(arg) in written_paths:
+                    return True
+    return False
+
+
+def _heredoc_feeds_shell(text: str, op_start: int) -> bool:
+    """True when the simple command owning ``<<`` / ``<<<`` at ``op_start`` invokes a shell."""
+    seg_start = max(text.rfind(ch, 0, op_start) for ch in ";\n&|(){}") + 1
+    j = seg_start
+    while j < op_start:
+        while j < op_start and text[j] in " \t":
+            j += 1
+        if j >= op_start:
+            break
+        if text[j] in "<>":
+            hd = _parse_heredoc_op(text, j)
+            if hd is not None:
+                j = hd[3]
+                continue
+            j += 1
+            continue
+        unq, wend, _ = _unquote_word_at(text, j)
+        if wend <= j:
+            j += 1
+            continue
+        w = unq if unq is not None else text[j:wend]
+        j = wend
+        if w in _LEAD_KEYWORDS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
+            continue
+        if w in _WRAPPER_WORDS:
+            continue
+        if w.startswith("-"):
+            continue
+        return w.rsplit("/", 1)[-1] in _SHELLS
+    return False
+
+
+def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> BashScan:
+    """Single-pass bash scanner on continuation-folded text."""
+    out: list[str] = []
+    out_targets: list[str] = []
+    i = 0
+    n = len(text)
+    at_word_start = True
+    brace_depth = 0
+    pending: list[tuple[str, bool, bool, bool, int]] = []
+    unterminated = False
+    unterminated_hd = False
+    has_tick = False
+    has_hd = False
+    spans: list[tuple[int, int]] = []
+    quoted_gh_words: list[tuple[int, int]] = []
+
+    while i < n:
+        c = text[i]
+        if c == "\n":
+            out.append("\n")
+            out_targets.append("\n")
+            i += 1
+            at_word_start = True
+            while pending:
+                delim, strip_tabs, quoted_delim, feeds_shell, op_pos = pending.pop(0)
+                body_lines: list[str] = []
+                term_line: Optional[str] = None
+                term_has_nl = False
+                while i < n:
+                    nl = text.find("\n", i)
+                    lend = n if nl < 0 else nl
+                    line = text[i:lend]
+                    if _is_terminator(line, delim, strip_tabs):
+                        term_line = line
+                        term_has_nl = nl >= 0
+                        i = lend + 1 if nl >= 0 else n
+                        break
+                    body_lines.append(line)
+                    if nl < 0:
+                        i = n
+                        break
+                    i = nl + 1
+                if term_line is None:
+                    unterminated_hd = True
+                scan_as_shell = feeds_shell or (
+                    _SCAN_WRITE_THEN_RUN
+                    and _heredoc_writes_executed_file(text, op_pos, i)
+                )
+                if scan_as_shell and body_lines:
+                    body_raw = "\n".join(body_lines)
+                    body_folded = _fold_bash_continuations(
+                        body_raw,
+                        mask_comments=mask_comments,
+                        fold_continuations_in_comments=_FOLD_CONTINUATIONS_IN_COMMENTS,
+                    )
+                    sub = _scan_folded(body_folded, 0, mask_comments=mask_comments)
+                    unterminated |= sub.unterminated_quote
+                    unterminated_hd |= sub.unterminated_heredoc
+                    has_tick |= sub.has_backtick
+                    has_hd |= sub.has_heredoc
+                    out.append(_blanks(body_raw))
+                    out_targets.append(sub.targets_visible)
+                    if term_line is not None or body_lines:
+                        out.append("\n")
+                        out_targets.append("\n")
+                else:
+                    for idx_l, line in enumerate(body_lines):
+                        blank_line = _blanks(line)
+                        out.append(blank_line)
+                        if quoted_delim:
+                            out_targets.append(blank_line)
+                        else:
+                            out_targets.append(
+                                _scan_subst_only_for_targets(line, mask_comments=mask_comments)
+                            )
+                        if idx_l + 1 < len(body_lines) or term_line is not None:
+                            out.append("\n")
+                            out_targets.append("\n")
+                if term_line is not None:
+                    out.append(term_line)
+                    out_targets.append(term_line)
+                    if term_has_nl:
+                        out.append("\n")
+                        out_targets.append("\n")
+            continue
+        if mask_comments and at_word_start and brace_depth == 0 and c == "#":
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            seg = text[i:end]
+            blank_seg = _blanks(seg)
+            out.append(blank_seg)
+            if _SCAN_COMMENTS_FOR_TARGETS:
+                out_targets.append(
+                    _scan_subst_only_for_targets(seg, mask_comments=mask_comments)
+                )
+            else:
+                out_targets.append(blank_seg)
+            i = end
+            continue
+        if at_word_start and brace_depth == 0 and c not in " \t\n;|&()<>#":
+            unq, wend, had_qe = _unquote_word_at(text, i)
+            if had_qe and unq is not None and _GH_EXACT.match(unq):
+                quoted_gh_words.append((i, wend))
+        if c == "\\" and i + 1 < n:
+            esc = text[i:i + 2]
+            out.append(esc)
+            out_targets.append(esc)
+            i += 2
+            at_word_start = False
+            continue
+        if text.startswith("${", i):
+            brace_depth += 1
+            out.append("${")
+            out_targets.append("${")
+            i += 2
+            at_word_start = False
+            continue
+        if c == "}" and brace_depth > 0:
+            brace_depth -= 1
+            out.append("}")
+            out_targets.append("}")
+            i += 1
+            at_word_start = False
+            continue
+        if c == "<":
+            if text.startswith("<<<", i):
+                has_hd = True
+                feeds_sh = _SCAN_SHELL_HEREDOC and _heredoc_feeds_shell(text, i)
+                out.append("<<<")
+                out_targets.append("<<<")
+                i += 3
+                if feeds_sh:
+                    while i < n and text[i] in " \t":
+                        out.append(text[i])
+                        out_targets.append(text[i])
+                        i += 1
+                    unq, wend, _ = _unquote_word_at(text, i)
+                    if unq is not None and wend > i:
+                        sub = _scan_folded(
+                            _fold_bash_continuations(
+                                unq,
+                                mask_comments=mask_comments,
+                                fold_continuations_in_comments=_FOLD_CONTINUATIONS_IN_COMMENTS,
+                            ),
+                            0,
+                            mask_comments=mask_comments,
+                        )
+                        out.append(_blanks(text[i:wend]))
+                        out_targets.append("(" + sub.targets_visible + ")")
+                        i = wend
+                        at_word_start = False
+                        continue
+                at_word_start = True
+                continue
+            hd = None if (i > 0 and text[i - 1] == "<") \
+                else _parse_heredoc_op(text, i)
+            if hd is not None:
+                has_hd = True
+                delim, strip_tabs, quoted_delim, end_op, bad_delim = hd
+                if bad_delim:
+                    unterminated_hd = True
+                else:
+                    feeds_sh = _SCAN_SHELL_HEREDOC and _heredoc_feeds_shell(text, i)
+                    pending.append((delim, strip_tabs, quoted_delim, feeds_sh, i))
+                op_text = text[i:end_op]
+                out.append(op_text)
+                out_targets.append(op_text)
+                i = end_op
+                at_word_start = False
+                continue
+            out.append(c)
+            out_targets.append(c)
+            i += 1
+            at_word_start = True
+            continue
+        if c in " \t":
+            out.append(c)
+            out_targets.append(c)
+            i += 1
+            at_word_start = True
+            continue
+        if c in ";|&()>":
+            out.append(c)
+            out_targets.append(c)
+            i += 1
+            at_word_start = True
+            continue
+        if c == "$" and i + 1 < n and text[i + 1] == "'":
+            at_word_start = False
+            j = i + 2
+            while j < n:
+                if text[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                if text[j] == "'":
+                    break
+                j += 1
+            if j >= n:
+                unterminated = True
+                out.append(_blanks(text[i:]))
+                out_targets.append(text[i:])
+                i = n
+                continue
+            masked_q = "$'" + _blanks(text[i + 2:j]) + "'"
+            out.append(masked_q)
+            out_targets.append(masked_q)
+            i = j + 1
+            continue
+        if c == "'":
+            at_word_start = False
+            j = text.find("'", i + 1)
+            if j < 0:
+                unterminated = True
+                out.append(_blanks(text[i:]))
+                out_targets.append(text[i:])
+                i = n
+                continue
+            masked_q = "'" + _blanks(text[i + 1:j]) + "'"
+            out.append(masked_q)
+            out_targets.append(masked_q)
+            i = j + 1
+            continue
+        if c == '"' or (c == "$" and i + 1 < n and text[i + 1] == '"'):
+            at_word_start = False
+            quote_start, output_start = i, len(out)
+            output_targets_start = len(out_targets)
+            subst_seen = False
+            if c == "$":
+                out.append('$"')
+                out_targets.append('$"')
+                i += 2
+            else:
+                out.append('"')
+                out_targets.append('"')
+                i += 1
+            while i < n and text[i] != '"':
+                if text[i] == "\\" and i + 1 < n:
+                    out.append("  ")
+                    out_targets.append("  ")
+                    i += 2
+                    continue
+                if text[i] == "$" and i + 1 < n and text[i + 1] == "(":
+                    subst_seen = True
+                    end = _subst_end_hd(text, i + 1, mask_comments=mask_comments)
+                    stop = end + 1 if end < n else n
+                    spans.append((base + i, base + stop))
+                    sub = _scan_folded(
+                        text[i + 2:end], base + i + 2, mask_comments=mask_comments)
+                    unterminated |= sub.unterminated_quote
+                    unterminated_hd |= sub.unterminated_heredoc
+                    has_tick |= sub.has_backtick
+                    has_hd |= sub.has_heredoc
+                    spans.extend(sub.subst_spans)
+                    close_p = ")" if end < n else ""
+                    out.append("$(" + sub.visible + close_p)
+                    out_targets.append("$(" + sub.targets_visible + close_p)
+                    i = stop
+                    continue
+                if text[i] == "`":
+                    subst_seen = True
+                    has_tick = True
+                    j = text.find("`", i + 1)
+                    if j < 0:
+                        unterminated = True
+                        tail = _blanks(text[i:])
+                        out.append(tail)
+                        out_targets.append(tail)
+                        i = n
+                        break
+                    sub = _scan_folded(
+                        text[i + 1:j], base + i + 1, mask_comments=mask_comments)
+                    unterminated |= sub.unterminated_quote
+                    unterminated_hd |= sub.unterminated_heredoc
+                    has_hd |= sub.has_heredoc
+                    spans.extend(sub.subst_spans)
+                    out.append("`" + sub.visible + "`")
+                    out_targets.append("`" + sub.targets_visible + "`")
+                    i = j + 1
+                    continue
+                ch_blank = "\n" if text[i] == "\n" else " "
+                out.append(ch_blank)
+                out_targets.append(ch_blank)
+                i += 1
+            if i < n and text[i] == '"':
+                out.append('"')
+                out_targets.append('"')
+                i += 1
+            else:
+                unterminated = True
+                tail = _blanks(text[quote_start:])
+                out[output_start:] = [tail]
+                if not subst_seen:
+                    out_targets[output_targets_start:] = [text[quote_start:]]
+            continue
+        if c == "$" and i + 1 < n and text[i + 1] == "(":
+            at_word_start = False
+            end = _subst_end_hd(text, i + 1, mask_comments=mask_comments)
+            stop = end + 1 if end < n else n
+            spans.append((base + i, base + stop))
+            sub = _scan_folded(
+                text[i + 2:end], base + i + 2, mask_comments=mask_comments)
+            unterminated |= sub.unterminated_quote
+            unterminated_hd |= sub.unterminated_heredoc
+            has_tick |= sub.has_backtick
+            has_hd |= sub.has_heredoc
+            spans.extend(sub.subst_spans)
+            close_p = ")" if end < n else ""
+            out.append("$(" + sub.visible + close_p)
+            out_targets.append("$(" + sub.targets_visible + close_p)
+            i = stop
+            continue
+        if c == "`":
+            at_word_start = False
+            has_tick = True
+            j = text.find("`", i + 1)
+            if j < 0:
+                sub = _scan_folded(
+                    text[i + 1:], base + i + 1, mask_comments=mask_comments)
+                unterminated |= sub.unterminated_quote
+                unterminated_hd |= sub.unterminated_heredoc
+                has_hd |= sub.has_heredoc
+                spans.extend(sub.subst_spans)
+                out.append("`" + sub.visible)
+                out_targets.append("`" + sub.targets_visible)
+                i = n
+                continue
+            sub = _scan_folded(
+                text[i + 1:j], base + i + 1, mask_comments=mask_comments)
+            unterminated |= sub.unterminated_quote
+            unterminated_hd |= sub.unterminated_heredoc
+            has_hd |= sub.has_heredoc
+            spans.extend(sub.subst_spans)
+            out.append("`" + sub.visible + "`")
+            out_targets.append("`" + sub.targets_visible + "`")
+            i = j + 1
+            continue
+        out.append(c)
+        out_targets.append(c)
+        i += 1
+        at_word_start = False
+
+    if pending:
+        unterminated_hd = True
+    visible = "".join(out)
+    targets_visible = _normalize_assignment_values(
+        text,
+        "".join(out_targets),
+        mask_comments=mask_comments,
+        quoted_gh_words=tuple(quoted_gh_words),
+    )
+    return BashScan(
+        folded=text,
+        visible=visible,
+        targets_visible=targets_visible,
+        unterminated_quote=unterminated,
+        has_backtick=has_tick,
+        has_heredoc=has_hd,
+        subst_spans=tuple(spans),
+        unterminated_heredoc=unterminated_hd,
+    )
+
+
+def _tokenize_bash(
+    command: str,
+    *,
+    mask_comments: Optional[bool] = None,
+    fold_continuations_in_comments: Optional[bool] = None,
+) -> BashScan:
+    """The one shared bash tokenizer for ``targets_gh``, ``already_explicit``
+    and ``_strip_allowlisted_gh_token`` (card #1555).
+
+    - ``#`` starts a comment ONLY at a word start and the comment ends at ``\\n``.
+    - ``\\<LF>`` is folded as bash does: outside comments, single quotes, and
+      heredoc bodies; a ``\\<LF>`` inside a comment does NOT continue the line.
+    - Heredoc delimiters are parsed as bash words (with quote removal); an
+      unterminated heredoc sets ``unterminated_heredoc=True`` so the command is
+      denied rather than treated as not-gh.
+    - ``$(...)``, backticks `` `...` ``, and arithmetic ``$((...))`` inside an
+      env-prefix value are normalized in ``targets_visible`` so they never hide
+      a following ``gh`` call.
+    """
+    mc = _MASK_COMMENTS if mask_comments is None else mask_comments
+    fcc = (_FOLD_CONTINUATIONS_IN_COMMENTS
+           if fold_continuations_in_comments is None
+           else fold_continuations_in_comments)
+    folded = _fold_bash_continuations(
+        command or "",
+        mask_comments=mc,
+        fold_continuations_in_comments=fcc,
+    )
+    return _scan_folded(folded, 0, mask_comments=mc)
+
+
+def _mask_quoted(command: str, *, mask_comments: Optional[bool] = None) -> str:
+    """Mask quotes, heredocs, and word-start comments via :func:`_tokenize_bash`."""
+    return _tokenize_bash(command, mask_comments=mask_comments).visible
+
+
+def _mask_explicit(command: str) -> str:
+    """Mask ``command`` via :func:`_tokenize_bash`."""
+    return _tokenize_bash(command).visible
 
 
 # Card #1346. A shell-executing string is command text, not a mention of gh.
@@ -503,19 +1765,21 @@ _MAX_SHELL_DEPTH = 32
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash"})
 _GH_EXACT = re.compile(rf"{_GH_WORD}\Z")
 _AT_WORD = re.compile(
+    rf"{_START}{_LEAD}{_CMD_PREFIX}\Z", re.MULTILINE)
+_AT_WORD_LEGACY = re.compile(
     rf"{_START}{_LEAD}{_ENVPFX}{_WRAPPFX}\Z", re.MULTILINE)
 _SHELL_BIN = r"(?:(?:/[\w.-]+)*/)?(?:bash|zsh|dash|sh)"
 _SHELL_AT = re.compile(
-    rf"{_START}{_LEAD}{_ENVPFX}{_WRAPPFX}(?P<bin>{_SHELL_BIN})(?=[ \t]|$)",
+    rf"{_START}{_LEAD}{_CMD_PREFIX}(?P<bin>{_SHELL_BIN})(?=[ \t]|$)",
     re.MULTILINE)
 _EVAL_AT = re.compile(
-    rf"{_START}{_LEAD}{_ENVPFX}{_WRAPPFX}(?:(?:/[\w.-]+)*/)?eval(?=[ \t]|$)",
+    rf"{_START}{_LEAD}{_CMD_PREFIX}(?:(?:/[\w.-]+)*/)?eval(?=[ \t]|$)",
     re.MULTILINE)
 _WATCH_AT = re.compile(
-    rf"{_START}{_LEAD}{_ENVPFX}{_WRAPPFX}(?:(?:/[\w.-]+)*/)?watch(?=[ \t]|$)",
+    rf"{_START}{_LEAD}{_CMD_PREFIX}(?:(?:/[\w.-]+)*/)?watch(?=[ \t]|$)",
     re.MULTILINE)
 _XARGS_AT = re.compile(
-    rf"{_START}{_LEAD}{_ENVPFX}{_WRAPPFX}(?:(?:/[\w.-]+)*/)?xargs(?=[ \t]|$)",
+    rf"{_START}{_LEAD}{_CMD_PREFIX}(?:(?:/[\w.-]+)*/)?xargs(?=[ \t]|$)",
     re.MULTILINE)
 _BASH_TAKES_ARG = frozenset({"-o", "--rcfile", "--init-file"})
 _WATCH_TAKES_ARG = frozenset({"-n", "--interval", "-e", "--errexit"})
@@ -531,8 +1795,13 @@ def _quoted_body(command: str, i: int) -> tuple[str, int]:
 
     An unterminated quote runs to the end and still returns. It does not raise.
     """
-    q = command[i]
     n = len(command)
+    if _RESOLVE_ANSI_C and command.startswith("$'", i):
+        val, end, _ = _unescape_ansi_c(command, i + 2)
+        return val, end
+    if command.startswith('$"', i):
+        i += 1
+    q = command[i]
     j = i + 1
     if q == "'":
         k = command.find("'", j)
@@ -558,8 +1827,15 @@ def _next_token(command: str, i: int) -> Optional[tuple]:
         i += 1
     if i >= n:
         return None
+    if _MASK_COMMENTS and command[i] == "#":
+        end = command.find("\n", i)
+        end = n if end < 0 else end + 1
+        return ("sep", i, end, "")
     if command[i] in ";\n&|":
         return ("sep", i, i + 1, "")
+    if (_RESOLVE_ANSI_C and command.startswith("$'", i)) or command.startswith('$"', i):
+        body, end = _quoted_body(command, i)
+        return ("word", i, end, body)
     if command[i] in "'\"":
         body, end = _quoted_body(command, i)
         return ("word", i, end, body)
@@ -692,232 +1968,46 @@ def _shell_texts(command: str, visible: str) -> list[str]:
 
 def _quoted_gh_command_word(command: str, visible: str) -> bool:
     """``"gh" pr view`` and ``'gh' pr list``: the command word is gh once unquoted."""
+    at_word = _AT_WORD if _ENABLE_BANG_AND_ENV_ASSIGN else _AT_WORD_LEGACY
     i = 0
     n = len(command)
     while i < n:
+        if (_RESOLVE_ANSI_C and command.startswith("$'", i)) or command.startswith('$"', i):
+            body, end = _quoted_body(command, i)
+            if _GH_EXACT.match(body) and at_word.search(visible[:i]) is not None:
+                return True
+            i = end if end > i else i + 2
+            continue
         if command[i] not in "'\"":
             i += 1
             continue
         body, end = _quoted_body(command, i)
-        if _GH_EXACT.match(body) and _AT_WORD.search(visible[:i]) is not None:
+        if _GH_EXACT.match(body) and at_word.search(visible[:i]) is not None:
             return True
         i = end if end > i else i + 1
     return False
 
 
 def targets_gh(command: str) -> bool:
-    """True when the command actually invokes `gh`, not when a quote mentions it."""
+    """True when the command actually invokes `gh`, not when a quote or comment mentions it."""
     return _targets_gh(command or "", 0)
 
 
 def _targets_gh(command: str, depth: int) -> bool:
-    visible = _mask_quoted(command, mask_comments=False)
-    if _GH_INVOCATION.search(visible):
+    scan = _tokenize_bash(command)
+    if scan.unterminated_heredoc:
+        return True
+    gh_inv = _GH_INVOCATION if _ENABLE_BANG_AND_ENV_ASSIGN else _GH_INVOCATION_LEGACY
+    if gh_inv.search(scan.visible) or gh_inv.search(scan.targets_visible):
         return True
     if depth >= _MAX_SHELL_DEPTH:
         return True
-    if _quoted_gh_command_word(command, visible):
+    if _quoted_gh_command_word(scan.folded, scan.targets_visible):
         return True
-    for inner in _shell_texts(command, visible):
+    for inner in _shell_texts(scan.folded, scan.targets_visible):
         if inner != command and _targets_gh(inner, depth + 1):
             return True
     return False
-
-
-_HEREDOC_OP = re.compile(r"<<(-)?(?!<)[ \t]*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
-
-
-def _is_terminator(line: str, delim: str, strip_tabs: bool) -> bool:
-    """Exact heredoc terminator: only leading tabs count, and only for ``<<-``."""
-    if strip_tabs:
-        return line.lstrip("\t") == delim
-    return line == delim
-
-
-def _mask_heredoc_bodies(command: str, visible: str) -> str:
-    """Blank heredoc bodies in ``visible`` (positions align with ``command``)."""
-    if "<<" not in visible:
-        return visible
-    chars = list(visible)
-    n = len(command)
-    pos = 0
-    while pos < n:
-        m = _HEREDOC_OP.search(command, pos)
-        if m is None:
-            break
-        if visible[m.start():m.start() + 2] != "<<":
-            pos = m.end()
-            continue
-        line_end = command.find("\n", m.start())
-        if line_end < 0:
-            break
-        delims = [(mm.group(2), bool(mm.group(1)))
-                  for mm in _HEREDOC_OP.finditer(command[m.start():line_end])]
-        cursor = line_end + 1
-        for delim, strip_tabs in delims:
-            body_start = cursor
-            scan = cursor
-            body_end = n
-            after = n
-            while scan <= n:
-                nl = command.find("\n", scan)
-                lend = n if nl < 0 else nl
-                if _is_terminator(command[scan:lend], delim, strip_tabs):
-                    body_end = scan
-                    after = lend + 1 if nl >= 0 else n
-                    break
-                if nl < 0:
-                    break
-                scan = nl + 1
-            else:
-                after = n
-            for k in range(body_start, min(body_end, len(chars))):
-                if chars[k] != "\n":
-                    chars[k] = " "
-            cursor = after
-            if after >= n:
-                break
-        pos = max(cursor, line_end + 1)
-    return "".join(chars)
-
-
-def _mask_explicit(command: str) -> str:
-    """Mask ``command`` for explicit-token detection, heredocs FIRST.
-
-    #4423: masking quotes before heredoc bodies lets a quote inside a body
-    pair across the body end and hide later real syntax. Here body lines are
-    consumed raw at each newline, so their quotes never enter quote state.
-    ``$'...'`` honours backslash escapes; plain ``'...'`` does not.
-
-    >>> INVARIANT: hiding text can only route (fail closed). <<< Any
-    region the masker cannot close — an unmatched single quote, ``$''``
-    quote or double quote, or an unclosed ``$(`` or backtick — blanks
-    the rest of the text and is NEVER restored raw: restored raw text
-    could expose a hidden ``export GH_TOKEN=`` as real syntax, while
-    blanked text can only make the call route (or deny), never falsely
-    explicit.
-    """
-    out: list[str] = []
-    i = 0
-    n = len(command)
-    pending: list[tuple[str, bool]] = []
-
-    def blanks(text: str) -> str:
-        return "".join("\n" if ch == "\n" else " " for ch in text)
-
-    while i < n:
-        c = command[i]
-        if c == "\n":
-            out.append("\n")
-            i += 1
-            while pending:
-                delim, strip_tabs = pending.pop(0)
-                while i < n:
-                    nl = command.find("\n", i)
-                    lend = n if nl < 0 else nl
-                    line = command[i:lend]
-                    if _is_terminator(line, delim, strip_tabs):
-                        out.append(line)
-                        if nl >= 0:
-                            out.append("\n")
-                            i = lend + 1
-                        else:
-                            i = n
-                        break
-                    out.append(blanks(line))
-                    if nl < 0:
-                        i = n
-                        break
-                    out.append("\n")
-                    i = nl + 1
-            continue
-        if c == "#" and (i == 0 or command[i - 1].isspace() or command[i - 1] in ";|&()"):
-            end = command.find("\n", i)
-            end = n if end < 0 else end
-            out.append(blanks(command[i:end]))
-            i = end
-            continue
-        if c == "\\" and i + 1 < n:
-            out.append(command[i:i + 2])
-            i += 2
-            continue
-        if c == "<":
-            # `<<<` is a here-string, not a heredoc: a `<<` whose
-            # previous char is `<` never registers a body.
-            m = None if (i > 0 and command[i - 1] == "<") \
-                else _HEREDOC_OP.match(command, i)
-            if m is not None:
-                pending.append((m.group(2), bool(m.group(1))))
-                out.append(command[i:m.end()])
-                i = m.end()
-                continue
-            out.append(c)
-            i += 1
-            continue
-        if c == "$" and i + 1 < n and command[i + 1] == "'":
-            j = i + 2
-            while j < n:
-                if command[j] == "\\" and j + 1 < n:
-                    j += 2
-                    continue
-                if command[j] == "'":
-                    break
-                j += 1
-            if j >= n:
-                out.append(blanks(command[i:]))
-                i = n
-                continue
-            out.append("$'")
-            out.append(blanks(command[i + 2:j]))
-            out.append("'")
-            i = j + 1
-            continue
-        if c == "'":
-            j = command.find("'", i + 1)
-            if j < 0:
-                out.append(blanks(command[i:]))
-                i = n
-                continue
-            out.append(c)
-            out.append(blanks(command[i + 1:j]))
-            out.append("'")
-            i = j + 1
-            continue
-        if c == '"':
-            quote_start, output_start = i, len(out)
-            out.append(c)
-            i += 1
-            while i < n and command[i] != '"':
-                if command[i] == "\\" and i + 1 < n:
-                    out.append("  ")
-                    i += 2
-                    continue
-                if command[i] == "$" and i + 1 < n and command[i + 1] == "(":
-                    end = _subst_end(command, i + 1)
-                    inner = _mask_explicit(command[i + 2:end])
-                    out.append("$(" + inner + (")" if end < n else ""))
-                    i = end + 1 if end < n else n
-                    continue
-                if command[i] == "`":
-                    j = command.find("`", i + 1)
-                    if j < 0:
-                        out.append(blanks(command[i:]))
-                        i = n
-                        break
-                    out.append("`" + _mask_explicit(command[i + 1:j]) + "`")
-                    i = j + 1
-                    continue
-                out.append("\n" if command[i] == "\n" else " ")
-                i += 1
-            if i < n and command[i] == '"':
-                out.append('"')
-                i += 1
-            else:
-                out[output_start:] = [blanks(command[quote_start:])]
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
 
 
 _PLAIN_WORD = r"[A-Za-z0-9._-]+"
@@ -956,210 +2046,18 @@ def _subst_inner_ok(inner: str) -> bool:
 
 
 def _has_unterminated_quote(text: str) -> bool:
-    """True when any quote in ``text`` is unterminated.
-
-    Heredoc bodies and comments are not live quote text. Double-quoted
-    interiors are live for ``$(...)``, whose inner text is checked too.
-    """
-    pending: list[tuple[str, bool]] = []
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if c == "\n":
-            i += 1
-            while pending:
-                delim, strip_tabs = pending.pop(0)
-                while i < n:
-                    nl = text.find("\n", i)
-                    lend = n if nl < 0 else nl
-                    if _is_terminator(text[i:lend], delim, strip_tabs):
-                        i = lend + 1 if nl >= 0 else n
-                        break
-                    i = n if nl < 0 else nl + 1
-            continue
-        if c == "#" and (i == 0 or text[i - 1].isspace()
-                         or text[i - 1] in ";|&()"):
-            end = text.find("\n", i)
-            i = n if end < 0 else end
-            continue
-        if c == "\\" and i + 1 < n:
-            i += 2
-            continue
-        if c == "<":
-            if text.startswith("<<<", i):
-                i += 3
-                continue
-            m = None if (i > 0 and text[i - 1] == "<") \
-                else _HEREDOC_OP.match(text, i)
-            if m is not None:
-                pending.append((m.group(2), bool(m.group(1))))
-                i = m.end()
-                continue
-            i += 1
-            continue
-        if c == "$" and i + 1 < n and text[i + 1] == "'":
-            j = i + 2
-            while j < n:
-                if text[j] == "\\" and j + 1 < n:
-                    j += 2
-                    continue
-                if text[j] == "'":
-                    break
-                j += 1
-            if j >= n:
-                return True
-            i = j + 1
-            continue
-        if c == "'":
-            j = text.find("'", i + 1)
-            if j < 0:
-                return True
-            i = j + 1
-            continue
-        if c == '"':
-            i += 1
-            closed = False
-            while i < n:
-                if text[i] == "\\" and i + 1 < n:
-                    i += 2
-                    continue
-                if text[i] == '"':
-                    closed = True
-                    i += 1
-                    break
-                if text.startswith("$(", i):
-                    end = _subst_end_hd(text, i + 1)
-                    if _has_unterminated_quote(text[i + 2:end]):
-                        return True
-                    i = end + 1 if end < n else n
-                    continue
-                i += 1
-            if not closed:
-                return True
-            continue
-        if text.startswith("$(", i):
-            end = _subst_end_hd(text, i + 1)
-            if _has_unterminated_quote(text[i + 2:end]):
-                return True
-            i = end + 1 if end < n else n
-            continue
-        i += 1
-    return False
+    """True when any quote in ``text`` is unterminated (via :func:`_tokenize_bash`)."""
+    return _tokenize_bash(text).unterminated_quote
 
 
 def _scan_constructs(text: str, base: int = 0):
-    """Live backtick/heredoc flags and ``$(...)`` spans in ``text``.
-
-    Single-quoted text and heredoc bodies are not live. Double-quoted
-    interiors are live for substitutions and backticks. Spans are
-    absolute (offset by ``base``) so they can be checked against the
-    one allowed prefix-value substitution.
-    """
-    flags = {"tick": False, "heredoc": False}
-    spans: list[tuple[int, int]] = []
-    pending: list[tuple[str, bool]] = []
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if c == "\n":
-            i += 1
-            while pending:
-                delim, strip_tabs = pending.pop(0)
-                while i < n:
-                    nl = text.find("\n", i)
-                    lend = n if nl < 0 else nl
-                    if _is_terminator(text[i:lend], delim, strip_tabs):
-                        i = lend + 1 if nl >= 0 else n
-                        break
-                    i = n if nl < 0 else nl + 1
-            continue
-        if c == "#" and (i == 0 or text[i - 1].isspace()
-                        or text[i - 1] in ";|&()"):
-            end = text.find("\n", i)
-            i = n if end < 0 else end
-            continue
-        if c == "\\" and i + 1 < n:
-            i += 2
-            continue
-        if c == "<":
-            if text.startswith("<<<", i):
-                flags["heredoc"] = True
-                i += 3
-                continue
-            m = None if (i > 0 and text[i - 1] == "<") \
-                else _HEREDOC_OP.match(text, i)
-            if m is not None:
-                flags["heredoc"] = True
-                pending.append((m.group(2), bool(m.group(1))))
-                i = m.end()
-                continue
-            i += 1
-            continue
-        if c == "$" and i + 1 < n and text[i + 1] == "'":
-            j = i + 2
-            while j < n:
-                if text[j] == "\\" and j + 1 < n:
-                    j += 2
-                    continue
-                if text[j] == "'":
-                    break
-                j += 1
-            i = j + 1 if j < n else n
-            continue
-        if c == "'":
-            j = text.find("'", i + 1)
-            i = n if j < 0 else j + 1
-            continue
-        if c == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                if text[i] == "\\" and i + 1 < n:
-                    i += 2
-                    continue
-                if text.startswith("$(", i):
-                    end = _subst_end_hd(text, i + 1)
-                    stop = end + 1 if end < n else n
-                    spans.append((base + i, base + stop))
-                    sub_flags, sub_spans = _scan_constructs(
-                        text[i + 2:end], base + i + 2)
-                    flags["tick"] |= sub_flags["tick"]
-                    flags["heredoc"] |= sub_flags["heredoc"]
-                    spans.extend(sub_spans)
-                    i = stop
-                    continue
-                if text[i] == "`":
-                    flags["tick"] = True
-                    j = text.find("`", i + 1)
-                    i = n if j < 0 else j + 1
-                    continue
-                i += 1
-            i = i + 1 if i < n else n
-            continue
-        if text.startswith("$(", i):
-            end = _subst_end_hd(text, i + 1)
-            stop = end + 1 if end < n else n
-            spans.append((base + i, base + stop))
-            sub_flags, sub_spans = _scan_constructs(
-                text[i + 2:end], base + i + 2)
-            flags["tick"] |= sub_flags["tick"]
-            flags["heredoc"] |= sub_flags["heredoc"]
-            spans.extend(sub_spans)
-            i = stop
-            continue
-        if c == "`":
-            flags["tick"] = True
-            j = text.find("`", i + 1)
-            if j < 0:
-                i = n
-            else:
-                _, sub_spans = _scan_constructs(text[i + 1:j], base + i + 1)
-                spans.extend(sub_spans)
-                i = j + 1
-            continue
-        i += 1
-    return flags, spans
+    """Live backtick/heredoc flags and ``$(...)`` spans in ``text`` (via :func:`_tokenize_bash`)."""
+    scan = _scan_folded(_fold_bash_continuations(
+        text or "",
+        mask_comments=_MASK_COMMENTS,
+        fold_continuations_in_comments=_FOLD_CONTINUATIONS_IN_COMMENTS,
+    ), base, mask_comments=_MASK_COMMENTS)
+    return {"tick": scan.has_backtick, "heredoc": scan.has_heredoc}, list(scan.subst_spans)
 
 
 def _value_end(text: str, i: int) -> Optional[int]:
@@ -1180,7 +2078,7 @@ def _value_end(text: str, i: int) -> Optional[int]:
         if not _subst_inner_ok(text[i + 2:end]):
             return None
         return end + 1
-    if text[i] in "'\"":
+    if text.startswith("$'", i) or text.startswith('$"', i) or text[i] in "'\"":
         body, end = _quoted_body(text, i)
         if not body:
             return None
@@ -1205,6 +2103,9 @@ def _read_word(text: str, i: int) -> Optional[tuple[str, int]]:
         i += 1
     if i >= n:
         return None
+    if (_RESOLVE_ANSI_C and text.startswith("$'", i)) or text.startswith('$"', i):
+        body, end = _quoted_body(text, i)
+        return body, end
     if text[i] in "'\"":
         body, end = _quoted_body(text, i)
         return body, end
@@ -1321,33 +2222,24 @@ def already_explicit(command: str) -> bool:
     router's own injected form). Anything else -- a second gh call, any
     pipe, ``||``, a single ``&``, subshell, brace group, control keyword,
     function definition, heredoc or here-string, a backtick anywhere, or
-    ``$(`` outside the prefix value -- is False. Masking stays a
-    fail-closed pre-pass (:func:`_mask_explicit`), so hidden text can
-    only route.
+    ``$(`` outside the prefix value -- is False.
 
-    #4467: <value> must be exactly the allowlisted
-    ``$(gh auth token [--user W] [--hostname W])`` form; any other
-    GH_TOKEN value is not explicit. #4479 denies any ``GH_TOKEN`` that
-    remains after that exact form is stripped
-    (:func:`has_disallowed_gh_token_assignment`).
-
-    A backslash followed by LF is a bash line continuation and is folded
-    away. A backslash followed by CR LF is not: bash quotes the CR and
-    keeps the newline, so that sequence is left in place.
+    #1555: shares :func:`_tokenize_bash` with :func:`targets_gh` and
+    :func:`_strip_allowlisted_gh_token`, so a ``\\<LF>`` inside a ``#``
+    comment does NOT continue the comment onto the next line.
     """
-    raw = (command or "").replace("\\\n", "")
-    if _has_unterminated_quote(raw):
+    scan = _tokenize_bash(command or "")
+    if scan.unterminated_quote or scan.unterminated_heredoc:
         return False
-    visible = _mask_explicit(raw)
+    raw = scan.folded
+    visible = scan.visible
     if not visible.strip():
         return False
     if "`" in visible or "<<" in visible:
         return False
-    # _mask_explicit blanks heredoc bodies inside quotes, hiding their
-    # markers, so live constructs are scanned on the raw text as well.
-    flags, substs = _scan_constructs(raw)
-    if flags["tick"] or flags["heredoc"]:
+    if scan.has_backtick or scan.has_heredoc:
         return False
+    substs = scan.subst_spans
 
     def substs_allowed(spans: list) -> bool:
         if not substs:
@@ -1405,24 +2297,11 @@ _LEAD_KEYWORDS = frozenset({"then", "do", "else", "if", "while", "until", "elif"
 
 
 def has_empty_gh_token(command: str) -> bool:
-    """True when an empty ``GH_TOKEN`` would shadow the routed token (#4450).
-
-    An empty assignment (``GH_TOKEN=""``, ``GH_TOKEN=''``, bare
-    ``GH_TOKEN=`` or a statically empty substitution ``GH_TOKEN=$()`` /
-    ``GH_TOKEN=$( )``) on the gh command itself, or an empty
-    ``export GH_TOKEN=...`` anywhere in the same command list, cannot be
-    rescued by the router's rewrite: the prefix form shadows the router's
-    export for that command, the export form runs after it, and ``gh``
-    treats an empty ``GH_TOKEN`` as unset, falling back to the ambient
-    hosts-file login. Detection runs on :func:`_mask_explicit` output, so
-    quoted mentions, comments and heredoc bodies do not count; on masked
-    text a non-empty quoted value holds at least one blank, so adjacent
-    quotes are exactly the empty quoted form.
-    """
+    """True when an empty ``GH_TOKEN`` would shadow the routed token (#4450)."""
     raw = command or ""
     if "GH_TOKEN" not in raw:
         return False
-    visible = _mask_explicit(raw)
+    visible = _tokenize_bash(raw).visible
     for m in re.finditer(r"GH_TOKEN=", visible):
         vpos = m.end()
         if visible[vpos:vpos + 2] in _EMPTY_GH_VALUE:
@@ -1512,7 +2391,7 @@ def _value_word_end(text: str, i: int) -> int:
             i = n if j < 0 else j + 1
             continue
         if text.startswith("$'", i) or text.startswith('$"', i):
-            _, end = _quoted_body(text, i + 1)
+            _, end = _quoted_body(text, i)
             i = end
             continue
         if c in "'\"":
@@ -1537,7 +2416,7 @@ def _consume_visible_value(text: str, i: int) -> int:
         j = text.find("`", i + 1)
         return n if j < 0 else j + 1
     if text.startswith("$'", i) or text.startswith('$"', i):
-        _, end = _quoted_body(text, i + 1)
+        _, end = _quoted_body(text, i)
         return end
     if text[i] in "'\"":
         _, end = _quoted_body(text, i)
@@ -1617,13 +2496,25 @@ def _is_executable_assignment_before(before: str) -> bool:
 def _strip_allowlisted_gh_token(command: str) -> str:
     """Drop each exact allowlisted ``GH_TOKEN=$(gh auth token ...)`` occurrence.
 
-    A backslash-LF continuation is folded first, as in
-    :func:`already_explicit`, so ``GH_\\nTOKEN=`` and ``G\\nH_TOKEN=``
-    are one name before the allowlist runs. Backslash-CR-LF is not a
-    continuation and is not folded.
+    #1555: shares :func:`_tokenize_bash` with :func:`targets_gh` and
+    :func:`already_explicit`, so backslash-LF continuations are folded only
+    where bash folds them (never inside a ``#`` comment, single quote or
+    heredoc body), and only live unmasked occurrences are stripped.
     """
-    folded = (command or "").replace("\\\n", "")
-    return _ALLOWLISTED_GH_TOKEN_RE.sub("", folded)
+    scan = _tokenize_bash(command or "")
+    return _ALLOWLISTED_GH_TOKEN_RE.sub(
+        lambda m: (
+            ""
+            if scan.visible[m.start():m.end()] == scan.folded[m.start():m.end()]
+            else m.group(0)
+        ),
+        scan.folded,
+    )
+
+
+def has_unterminated_heredoc(command: str) -> bool:
+    """True when ``command`` contains an unterminated or unclassifiable heredoc (#1555)."""
+    return _tokenize_bash(command or "").unterminated_heredoc
 
 
 def has_disallowed_gh_token_assignment(command: str) -> bool:

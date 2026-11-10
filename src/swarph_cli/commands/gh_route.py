@@ -72,6 +72,10 @@ def _run_hook(stdin_text: Optional[str] = None) -> int:
         return _deny("text still contains GH_TOKEN; put that text in "
                      "--body-file or use the explicit form "
                      "GH_TOKEN=$(gh auth token [--user WORD] [--hostname WORD])")
+    if ghid.has_unterminated_heredoc(command):
+        return _deny("command has an unterminated or unclassifiable heredoc; "
+                     "close the heredoc delimiter on its own line or pass input "
+                     "via a file")
     if ghid.already_explicit(command):
         # The caller named a credential. #332: an explicit argument is a decision.
         return _allow_unchanged()
