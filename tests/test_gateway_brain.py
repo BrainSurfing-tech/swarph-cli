@@ -1,6 +1,8 @@
+import atexit
 import json
 import os
 import importlib
+import shutil
 import tempfile
 import pytest
 from types import SimpleNamespace
@@ -11,6 +13,22 @@ from types import SimpleNamespace
 # guard the sibling gateway test tests/test_meta_edge_identity.py uses.
 pytest.importorskip("fastapi")
 pytest.importorskip("jwt")
+
+_TMP_DIRS: list[str] = []
+
+
+def _cleanup_tmp_dirs() -> None:
+    while _TMP_DIRS:
+        shutil.rmtree(_TMP_DIRS.pop(), ignore_errors=True)
+
+
+atexit.register(_cleanup_tmp_dirs)
+
+
+@pytest.fixture(autouse=True)
+def _clean_tmp_dirs_after_test():
+    yield
+    _cleanup_tmp_dirs()
 
 
 def _load_app(monkeypatch, *, gbrain_token="gbrain_hostheld", auth="tok_shared"):
@@ -26,7 +44,9 @@ def _load_app(monkeypatch, *, gbrain_token="gbrain_hostheld", auth="tok_shared")
     # AttributeError RED. Using a real temp-file path (matching the existing
     # pattern in tests/test_meta_edge_identity.py) fixes the scaffold without
     # touching production DB code, and restores the brief's intended RED.
-    monkeypatch.setenv("MESH_DB_PATH", os.path.join(tempfile.mkdtemp(), "mesh.db"))
+    tmp_dir = tempfile.mkdtemp(prefix="swarph-gw-brain-")
+    _TMP_DIRS.append(tmp_dir)
+    monkeypatch.setenv("MESH_DB_PATH", os.path.join(tmp_dir, "mesh.db"))
     from swarph_cli.gateway import server
     importlib.reload(server)          # re-read module-top env config
     return server
