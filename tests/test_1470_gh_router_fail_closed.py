@@ -50,7 +50,7 @@ def test_hook_errors_deny_instead_of_leaving_the_call_unchanged(payload, capsys)
     "cat <<EOF\nPR #679 head: $(gh pr view 679 --json headRefOid -q .headRefOid)\nEOF",
     "cat <<EOF\n# $(gh api user -q .login)\nEOF",
     r"echo a\ #$(gh pr list)",
-    r"echo a\\ #$(gh pr list)",
+    r"echo a\\#$(gh pr list)",
     "echo ${X:- #$(gh pr list)}",
 ], ids=["heredoc-header", "heredoc-hash", "escaped-space", "two-backslashes", "parameter-word"])
 @pytest.mark.parametrize("peer", ["lab-ovh", "unmapped-fixture-cell"], ids=["mapped", "unmapped"])
