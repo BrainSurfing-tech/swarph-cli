@@ -36,12 +36,16 @@ jobs:
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           /tmp/gitleaks --version
           if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
-            if ! git rev-parse --verify --quiet "refs/remotes/origin/${GITHUB_BASE_REF}^{commit}" >/dev/null; then
-              echo "error: base ref refs/remotes/origin/${GITHUB_BASE_REF} did not resolve to a commit" >&2
+            if ! git show-ref --verify --quiet "refs/remotes/origin/${GITHUB_BASE_REF}"; then
+              echo "error: base ref refs/remotes/origin/${GITHUB_BASE_REF} did not resolve" >&2
               exit 1
             fi
             /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml \
-              --log-opts="refs/remotes/origin/${GITHUB_BASE_REF}..HEAD"
+              --log-opts="refs/remotes/origin/${GITHUB_BASE_REF}..HEAD" 2>&1 | tee /tmp/gitleaks-pr.log
+            if grep -Fq "[git]" /tmp/gitleaks-pr.log; then
+              echo "error: git stderr detected during gitleaks pull_request scan" >&2
+              exit 1
+            fi
           else
             /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml
           fi
