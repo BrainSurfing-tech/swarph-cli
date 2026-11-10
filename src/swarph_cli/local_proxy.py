@@ -19,7 +19,7 @@ import time
 from urllib.parse import urlsplit
 import uuid
 
-from .proxy_routes import ProxyError, route_for
+from .proxy_routes import READ_VERBS, ProxyError, route_for
 
 UPSTREAM_TIMEOUT = 15
 CLIENT_TIMEOUT = UPSTREAM_TIMEOUT + 5
@@ -44,6 +44,7 @@ class Config:
     socket_path: Path
     audit_path: Path
     max_connections: int = 32
+    read_only: bool = False
 
 
 def _cell_name(cell):
@@ -133,7 +134,10 @@ def load_config(cell: str, path=None) -> Config:
         store = path.parent.stat()
         if store.st_uid != os.geteuid() or stat.S_IMODE(store.st_mode) != 0o700:
             raise ProxyError("proxy_unavailable")
-        if set(data) - {"cell_uid", "gateway_url", "token_file", "socket_path", "audit_path", "max_connections"}:
+        if set(data) - {"cell_uid", "gateway_url", "token_file", "socket_path", "audit_path", "max_connections", "read_only"}:
+            raise ProxyError("proxy_unavailable")
+        read_only = data.get("read_only", sys.platform == "darwin")
+        if type(read_only) is not bool:
             raise ProxyError("proxy_unavailable")
         max_connections = data.get("max_connections", 32)
         if type(max_connections) is not int or max_connections < 1:
@@ -148,9 +152,11 @@ def load_config(cell: str, path=None) -> Config:
                         Path(data.get("token_file", path.parent / "peer_token")),
                         Path(data.get("socket_path", f"/run/swarph-proxy/{cell}.sock")),
                         Path(data.get("audit_path", f"/var/log/swarph-proxy/{cell}.jsonl")),
-                        max_connections)
+                        max_connections, read_only)
         for local_path in (config.token_file, config.socket_path, config.audit_path):
             safe_parent(local_path, uid)
+        source = "config" if "read_only" in data else "default"
+        print(f"proxy read_only={str(read_only).lower()} source={source}", file=sys.stderr)
         return config
     except Exception:
         raise ProxyError("proxy_unavailable") from None
@@ -321,6 +327,8 @@ class Proxy:
                 request_id = None
                 raise ProxyError("bad_args")
             verb, args = request["verb"], request["args"]
+            if self.config.read_only and (not isinstance(verb, str) or verb not in READ_VERBS):
+                raise ProxyError("verb_not_allowed")
             method, path, body = route_for(verb, args, self.config.cell)
             deadline = time.monotonic() + UPSTREAM_TIMEOUT
             if verb in {"board.cards.move", "board.cards.say"}:

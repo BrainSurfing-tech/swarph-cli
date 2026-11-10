@@ -4,6 +4,13 @@ import re
 from datetime import datetime
 from urllib.parse import urlencode
 
+# Memory reads use POST; HTTP method is not a capability boundary.
+READ_VERBS = frozenset({
+    "whoami", "board.projects.list", "board.cards.list", "board.card.get",
+    "board.cards.graph", "board.cards.thread", "board.obligations.list",
+    "mesh.peers", "rights", "mesh.inbox", "memory.get", "memory.list",
+})
+
 
 class ProxyError(Exception):
     def __init__(self, error: str):
