@@ -26,6 +26,8 @@ This is the same defect family as the other false instruments found the same day
 "rehearsal" that only marks a watermark: **the instrument could not reach the condition,
 and its output was read as evidence about it.**
 """
+import builtins
+import io
 import os
 import pathlib
 import subprocess
@@ -159,6 +161,10 @@ _SWARPH_ENV = (
     "SWARPH_REDACT_OPTOUT",
     # card #1521: shim firing ledger directory override
     "SWARPH_SHIM_LEDGER_DIR",
+    # card #1541: cell_selfcheck fixture-root overrides — a test that wants
+    # them sets them itself; the box's values must not become the suite's.
+    "SWARPH_SELFCHECK_UNIT_DIRS",
+    "SWARPH_SELFCHECK_SYSTEM_CRON_PATHS",
 )
 
 
@@ -245,3 +251,70 @@ def _no_unmocked_tmux(request, monkeypatch):
         return _REAL_SUBPROCESS_RUN(argv, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", _guarded_run)
+
+
+# ── card #1541: no real host .env may be opened by the selfcheck suite ──────
+# SCOPE: only tests in test_cell_selfcheck.py and its guard companion
+# test_cell_selfcheck_env_guard.py. The guard RAISES AssertionError BEFORE any
+# forbidden open executes (it never calls through on a forbidden path, so no
+# real file is ever opened). Opens under the test's tmp_path are allowed —
+# fixtures live there. It patches builtins.open, io.open, os.open and
+# pathlib.Path.open (Path.read_text/read_bytes go through Path.open).
+_ENV_GUARD_MODULES = {"test_cell_selfcheck.py", "test_cell_selfcheck_env_guard.py"}
+_REAL_BUILTINS_OPEN = builtins.open
+_REAL_IO_OPEN = io.open
+_REAL_OS_OPEN = os.open
+_REAL_PATH_OPEN = pathlib.Path.open
+
+
+@pytest.fixture(autouse=True)
+def _no_host_env_open(request, monkeypatch, tmp_path):
+    if pathlib.Path(str(request.node.path)).name not in _ENV_GUARD_MODULES:
+        return
+    allowed_root = tmp_path.resolve()
+
+    def _forbidden(file) -> bool:
+        if isinstance(file, int):
+            return False
+        try:
+            raw = os.fspath(file)
+        except TypeError:
+            return False
+        if isinstance(raw, bytes):
+            raw = os.fsdecode(raw)
+        name = pathlib.Path(raw).name
+        if not (name.endswith(".env") or name == "dsn.env"):
+            return False
+        resolved = pathlib.Path(raw).expanduser()
+        if not resolved.is_absolute():
+            resolved = pathlib.Path.cwd() / resolved
+        resolved = resolved.resolve()
+        return resolved != allowed_root and allowed_root not in resolved.parents
+
+    def _check(file):
+        if _forbidden(file):
+            raise AssertionError(
+                f"forbidden .env open outside tmp_path ({allowed_root}): "
+                f"{file!r} — point the selfcheck at a tmp_path fixture "
+                f"(card #1541)")
+
+    def _guarded_builtins_open(file, *args, **kwargs):
+        _check(file)
+        return _REAL_BUILTINS_OPEN(file, *args, **kwargs)
+
+    def _guarded_io_open(file, *args, **kwargs):
+        _check(file)
+        return _REAL_IO_OPEN(file, *args, **kwargs)
+
+    def _guarded_os_open(file, *args, **kwargs):
+        _check(file)
+        return _REAL_OS_OPEN(file, *args, **kwargs)
+
+    def _guarded_path_open(self, *args, **kwargs):
+        _check(self)
+        return _REAL_PATH_OPEN(self, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _guarded_builtins_open)
+    monkeypatch.setattr(io, "open", _guarded_io_open)
+    monkeypatch.setattr(os, "open", _guarded_os_open)
+    monkeypatch.setattr(pathlib.Path, "open", _guarded_path_open)

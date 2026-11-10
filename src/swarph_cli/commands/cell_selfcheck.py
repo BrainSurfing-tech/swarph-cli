@@ -507,15 +507,31 @@ def dropin_parent_unit(relpath: str) -> Optional[str]:
     return None
 
 
-def discover_surfaces() -> list[dict]:
+def discover_surfaces(*, unit_dirs=None, system_cron_paths=None,
+                      platform_has_cron=None) -> list[dict]:
     """Read this cell's units and crontab. THE ONLY IMPURE FUNCTION HERE.
 
     Shells to `systemctl`/`crontab -l` with capture-only, timeouts, and no writes.
     Tests replace this wholesale — every verdict test runs from string fixtures so
     it passes on any box, including boxes with no systemd at all.
+
+    `unit_dirs` / `system_cron_paths` (or the SWARPH_SELFCHECK_UNIT_DIRS /
+    SWARPH_SELFCHECK_SYSTEM_CRON_PATHS env overrides, pathsep-separated) point
+    discovery at fixture roots under a test's tmp_path (card #1541). Defaults
+    are the real host roots, unchanged. NOTE: this function READS the contents
+    of EnvironmentFile targets (see the `ep.read_text` below) — comparing those
+    literals against the resolver is its purpose, so it cannot be stat-only.
     """
     surfaces: list[dict] = []
-    unit_dirs = [Path("/etc/systemd/system"), Path.home() / ".config/systemd/user"]
+    if unit_dirs is None:
+        _override = os.environ.get("SWARPH_SELFCHECK_UNIT_DIRS")
+        if _override:
+            unit_dirs = [Path(p) for p in _override.split(os.pathsep) if p]
+        else:
+            unit_dirs = [Path("/etc/systemd/system"),
+                         Path.home() / ".config/systemd/user"]
+    else:
+        unit_dirs = [Path(p) for p in unit_dirs]
     n_units = 0
     n_dropins = 0
     n_scanned = 0
@@ -626,8 +642,18 @@ def discover_surfaces() -> list[dict]:
     # Never enumerated before, so they were invisible AND unmentioned: the tool could
     # not say they were clean and could not say it had not looked.
     sys_cron, inert, unreadable = [], [], []
-    for path in [Path("/etc/crontab")] + sorted(Path("/etc/cron.d").glob("*")
-                                                if Path("/etc/cron.d").is_dir() else []):
+    if system_cron_paths is None:
+        _cron_override = os.environ.get("SWARPH_SELFCHECK_SYSTEM_CRON_PATHS")
+        if _cron_override:
+            system_cron_paths = [Path(p) for p in
+                                 _cron_override.split(os.pathsep) if p]
+        else:
+            system_cron_paths = [Path("/etc/crontab")] + sorted(
+                Path("/etc/cron.d").glob("*")
+                if Path("/etc/cron.d").is_dir() else [])
+    else:
+        system_cron_paths = [Path(p) for p in system_cron_paths]
+    for path in system_cron_paths:
         if not path.is_file():
             continue
         try:
@@ -659,9 +685,11 @@ def discover_surfaces() -> list[dict]:
             # flag parser.
             surfaces.append({"name": f"({path})", "kind": "cron", "text": text,
                              "live": bool(executable), "shared": True})
+    if platform_has_cron is None:
+        platform_has_cron = (Path("/etc/crontab").exists()
+                             or Path("/etc/cron.d").is_dir())
     surfaces.append(system_cron_coverage(
-        sys_cron, inert, unreadable,
-        platform_has_cron=Path("/etc/crontab").exists() or Path("/etc/cron.d").is_dir()))
+        sys_cron, inert, unreadable, platform_has_cron=platform_has_cron))
 
     # NOT INSPECTED, stated so a clean verdict cannot be misread (science-claude,
     # 2026-07-27): her live monitor is a HAND-STARTED process, not a unit and not a

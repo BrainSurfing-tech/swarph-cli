@@ -339,10 +339,33 @@ def test_runs_as_a_bare_file_in_isolated_mode(tmp_path):
 
     Asserts the ENTRY POINT works, not merely that the imports resolve.
     """
+    # Card #1541: the bare file runs in a subprocess (the in-process guard
+    # cannot reach it), so point its discovery at tmp_path fixtures via env:
+    # a fixture unit dir + fixture .env + fixture system-cron file, HOME under
+    # tmp_path. Without this it read the real host's units/EnvironmentFiles.
+    import os as _os
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    fixture_env = tmp_path / "fixture.env"
+    fixture_env.write_text("SENTINEL=fixture\n", encoding="utf-8")
+    (unit_dir / "fixture.service").write_text(
+        "[Service]\nExecStart=swarph monitor start --as test-cell\n"
+        f"EnvironmentFile={fixture_env}\n", encoding="utf-8")
+    cron_fixture = tmp_path / "crontab"
+    cron_fixture.write_text("", encoding="utf-8")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    env = dict(_os.environ)
+    env.update({
+        "HOME": str(fake_home),
+        "SWARPH_SELFCHECK_UNIT_DIRS": str(unit_dir),
+        "SWARPH_SELFCHECK_SYSTEM_CRON_PATHS": str(cron_fixture),
+    })
+    env.pop("SWARPH_SELF", None)
     proc = subprocess.run(
         [sys.executable, "-I", "-S", str(_MODULE), "--as", "test-cell",
          "--declaration", str(tmp_path / "absent.json")],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=60, env=env,
     )
     # 2 (DID NOT MEASURE) is a REPORTING outcome, not a crash: on a box where
     # a followed EnvironmentFile is root-owned, blind coverage must exit 2.
@@ -527,7 +550,7 @@ def test_user_crontab_class_is_named_for_what_it_actually_reads():
     assert cls == {"user crontab"}, f"class name overstates its scope: {cls}"
 
 
-def test_absent_cron_platform_is_not_the_same_as_failed_to_read(monkeypatch):
+def test_absent_cron_platform_is_not_the_same_as_failed_to_read(monkeypatch, tmp_path):
     """NOT APPLICABLE is a THIRD state, and Windows CI is what found it.
 
     On Windows there is no crontab binary, so the probe raised, the class went
@@ -537,12 +560,39 @@ def test_absent_cron_platform_is_not_the_same_as_failed_to_read(monkeypatch):
     people to ignore exit 2 on the platform where it will one day mean something.
 
     A PermissionError must still be blind: we meant to read it and could not.
+
+    Card #1541: discovery is pointed at tmp_path fixtures ONLY — a fixture unit
+    referencing a fixture .env under tmp_path. The real discover_surfaces()
+    follows EnvironmentFile= and READS that file's contents, so calling it
+    against the host roots opened real host .env files on this box.
     """
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    fixture_env = tmp_path / "fixture.env"
+    fixture_env.write_text("SENTINEL=fixture\n", encoding="utf-8")
+    (unit_dir / "fixture.service").write_text(
+        "[Service]\n"
+        "ExecStart=swarph monitor start --as fixture-cell "
+        "--state-dir /var/lib/swarph/fixture\n"
+        f"EnvironmentFile={fixture_env}\n", encoding="utf-8")
+    cron_fixture = tmp_path / "crontab"
+    cron_fixture.write_text("", encoding="utf-8")
+    monkeypatch.setattr(sc, "_unit_live", lambda unit, user=False: True)
+
+    def _discover():
+        return sc.discover_surfaces(unit_dirs=[unit_dir],
+                                    system_cron_paths=[cron_fixture],
+                                    platform_has_cron=True)
+
     def boom(cmd, **kw):
         raise FileNotFoundError(2, "No such file or directory: 'crontab'")
 
     monkeypatch.setattr(sc.subprocess, "run", boom)
-    cov = [s for s in sc.discover_surfaces()
+    surfaces = _discover()
+    # the fixture .env under tmp_path WAS read (guard allows tmp opens)
+    env_surfaces = [s for s in surfaces if s.get("kind") == "envfile"]
+    assert env_surfaces and "SENTINEL=fixture" in env_surfaces[0]["text"], surfaces
+    cov = [s for s in surfaces
            if s.get("kind") == "coverage" and s.get("class") == "user crontab"]
     assert cov and cov[0]["read"] is True, cov
     assert "not applicable" in cov[0]["detail"], cov
@@ -551,7 +601,7 @@ def test_absent_cron_platform_is_not_the_same_as_failed_to_read(monkeypatch):
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(sc.subprocess, "run", denied)
-    cov = [s for s in sc.discover_surfaces()
+    cov = [s for s in _discover()
            if s.get("kind") == "coverage" and s.get("class") == "user crontab"]
     assert cov and cov[0]["read"] is False, "a real failure must stay blind"
 
@@ -724,7 +774,7 @@ def test_instance_dropin_text_is_owned_by_the_named_cell():
         "swarph-monitor@cursor-lin.service.d/override.conf",
         "ExecStart=swarph monitor start --as cursor-lin "
         "--gateway http://100.107.222.72:8788 "
-        "--token-file /home/ubuntu/.config/swarph/cursor-lin.peer_token\n",
+        "--token-file /cell-fixture/cursor-lin.peer_token\n",
     ))
     by_key = {r.key: r.value for r in rows}
     assert by_key["as"] == "cursor-lin"
@@ -929,7 +979,7 @@ def test_gateway_own_token_is_declarable_by_surface_and_length(monkeypatch, tmp_
     never equal a peer token (measured: mesh-gateway.service on lab-ovh).
     A permanent red line there trains ignoring the signal — so it is
     declarable, by surface + redacted length, with no secret in the file."""
-    surface = "/home/ubuntu/mesh-gateway/.env (via mesh-gateway.service)"
+    surface = f"{tmp_path}/mesh-gateway.env (via mesh-gateway.service)"
     server_tok = "s" * 43
     rc, out = _run(monkeypatch, tmp_path, [
         _envfile(f"MESH_GATEWAY_TOKEN={server_tok}\n", name=surface, owner=None),
@@ -945,7 +995,7 @@ def test_gateway_own_token_is_declarable_by_surface_and_length(monkeypatch, tmp_
 def test_undeclared_surface_token_mismatch_still_fires(monkeypatch, tmp_path, capsys):
     """Non-vacuity partner for the declaration path: a DIFFERENT surface
     with the same-length token is not covered by the declaration."""
-    surface = "/home/ubuntu/mesh-gateway/.env (via mesh-gateway.service)"
+    surface = f"{tmp_path}/mesh-gateway.env (via mesh-gateway.service)"
     rc, out = _run(monkeypatch, tmp_path, [
         _envfile(f"MESH_GATEWAY_TOKEN={'s' * 43}\n", name=surface, owner=None),
         _envfile(f"MESH_GATEWAY_TOKEN={'x' * 43}\n", owner=None,
@@ -963,7 +1013,7 @@ def test_empty_env_value_is_declarable_by_surface(monkeypatch, tmp_path, capsys)
     disabled' and 'never filled in' look identical (measured: the gateway's
     empty MESH_GATEWAY_COMMANDER_TOKEN is vestigial and guarded, not a
     hole). The declaration is how the operator says which."""
-    surface = "/home/ubuntu/mesh-gateway/.env (via mesh-gateway.service)"
+    surface = f"{tmp_path}/mesh-gateway.env (via mesh-gateway.service)"
     rc, out = _run(monkeypatch, tmp_path, [
         _envfile("MESH_GATEWAY_COMMANDER_TOKEN=\n", name=surface, owner=None),
     ], "cursor-lin",
