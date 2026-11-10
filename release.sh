@@ -231,6 +231,8 @@ restart_importers() {
 open_release_pr() {
   local scratch plugin old_version
   scratch=$(mktemp -d)
+  _RELEASE_SCRATCH="$scratch"
+  trap 'rm -rf -- "${_RELEASE_SCRATCH:-}"' EXIT
   git clone --depth 1 "$REMOTE" "$scratch"
   old_version=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$scratch/pyproject.toml")
   if [ -z "$old_version" ]; then
