@@ -261,12 +261,24 @@ def _without_env(keys, fn: Callable[[], Verdict]) -> Verdict:
                 os.environ[k] = old
 
 
+def _mcp_config_can_fail() -> Verdict:
+    path = _write_tmp_json(
+        {"mcpServers": {"swarph": {"env": {"MESH_GATEWAY_URL": "x"}}}}
+    )
+    try:
+        return probe_mcp_config(path)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 register(Probe(
     name="mcp-config", consumer="mcp-server",
     run=probe_mcp_config,
     # CAN-FAIL: a constructed doc whose swarph entry has the wrong key.
-    can_fail=lambda: probe_mcp_config(_write_tmp_json(
-        {"mcpServers": {"swarph": {"env": {"MESH_GATEWAY_URL": "x"}}}})),
+    can_fail=_mcp_config_can_fail,
 ))
 
 register(Probe(
