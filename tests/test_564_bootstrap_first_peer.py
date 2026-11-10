@@ -9,7 +9,9 @@ These tests hit the bundled gateway the new-mesh path actually serves.
 """
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import sqlite3
 import tempfile
 
@@ -18,11 +20,29 @@ import pytest
 pytest.importorskip("fastapi")
 pytest.importorskip("jwt")
 
+_TMP_DIRS: list[str] = []
+
+
+def _cleanup_tmp_dirs() -> None:
+    while _TMP_DIRS:
+        shutil.rmtree(_TMP_DIRS.pop(), ignore_errors=True)
+
+
+atexit.register(_cleanup_tmp_dirs)
+
+
+@pytest.fixture(autouse=True)
+def _clean_tmp_dirs_after_test():
+    yield
+    _cleanup_tmp_dirs()
+
 
 def _load(monkeypatch):
     import importlib
+    tmp_dir = tempfile.mkdtemp(prefix="swarph-564-")
+    _TMP_DIRS.append(tmp_dir)
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "test-token")
-    monkeypatch.setenv("MESH_DB_PATH", os.path.join(tempfile.mkdtemp(), "mesh.db"))
+    monkeypatch.setenv("MESH_DB_PATH", os.path.join(tmp_dir, "mesh.db"))
     from swarph_cli.gateway import server
     importlib.reload(server)
     return server
