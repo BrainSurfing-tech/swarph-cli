@@ -42,6 +42,11 @@ jobs:
               echo "error: base ref refs/remotes/origin/${GITHUB_BASE_REF} did not resolve" >&2
               exit 1
             fi
+            octo=$(git rev-list --min-parents=3 "refs/remotes/origin/${GITHUB_BASE_REF}..HEAD")
+            if [ -n "$octo" ]; then
+              echo "error: octopus merge in range" >&2
+              exit 1
+            fi
             GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904 \
               /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml \
               --log-opts="--remerge-diff refs/remotes/origin/${GITHUB_BASE_REF}..HEAD" 2>&1 | tee /tmp/gitleaks-pr.log
@@ -54,6 +59,11 @@ jobs:
               exit 1
             fi
           else
+            octo=$(git rev-list --min-parents=3 --all)
+            if [ -n "$octo" ]; then
+              echo "error: octopus merge in range" >&2
+              exit 1
+            fi
             GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904 \
               /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml \
               --log-opts="--all --full-history --remerge-diff" 2>&1 | tee /tmp/gitleaks-push.log

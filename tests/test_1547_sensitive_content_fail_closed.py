@@ -28,6 +28,9 @@ INFO_ATTR_LINE = "printf '* diff\\n' > .git/info/attributes"
 EMPTY_TREE_ATTR_SOURCE = (
     "GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 )
+PR_OCTO_LINE = (
+    'octo=$(git rev-list --min-parents=3 "refs/remotes/origin/${GITHUB_BASE_REF}..HEAD")'
+)
 PR_LOG_OPTS_LINE = (
     '--log-opts="--remerge-diff refs/remotes/origin/${GITHUB_BASE_REF}..HEAD"'
 )
@@ -36,6 +39,7 @@ PR_GIT_ERR_LINE = 'if grep -Fq "[git]" /tmp/gitleaks-pr.log; then'
 PR_PARTIAL_LINE = (
     'if grep -Eq "partial scan|failed to scan Git repository" /tmp/gitleaks-pr.log; then'
 )
+PUSH_OCTO_LINE = "octo=$(git rev-list --min-parents=3 --all)"
 PUSH_LOG_OPTS_LINE = '--log-opts="--all --full-history --remerge-diff"'
 PUSH_TEE_LINE = "2>&1 | tee /tmp/gitleaks-push.log"
 PUSH_GIT_ERR_LINE = 'if grep -Fq "[git]" /tmp/gitleaks-push.log; then'
@@ -136,7 +140,7 @@ def _run_workflow_step(
     return res, repo_dir, fake_tmp
 
 
-def test_card_1547_static_pins_for_pipefail_gitattributes_remerge_diff_and_both_scan_guards() -> None:
+def test_card_1547_static_pins_for_pipefail_gitattributes_remerge_diff_octopus_and_both_scan_guards() -> None:
     step = _gitleaks_step()
     run_script = step["run"]
 
@@ -144,11 +148,13 @@ def test_card_1547_static_pins_for_pipefail_gitattributes_remerge_diff_and_both_
     assert INFO_ATTR_LINE in run_script
     assert run_script.count(EMPTY_TREE_ATTR_SOURCE) == 2
 
+    assert PR_OCTO_LINE in run_script
     assert PR_LOG_OPTS_LINE in run_script
     assert PR_TEE_LINE in run_script
     assert PR_GIT_ERR_LINE in run_script
     assert PR_PARTIAL_LINE in run_script
 
+    assert PUSH_OCTO_LINE in run_script
     assert PUSH_LOG_OPTS_LINE in run_script
     assert PUSH_TEE_LINE in run_script
     assert PUSH_GIT_ERR_LINE in run_script
@@ -157,10 +163,12 @@ def test_card_1547_static_pins_for_pipefail_gitattributes_remerge_diff_and_both_
     assert (
         run_script.index(PIPEFAIL_LINE)
         < run_script.index(INFO_ATTR_LINE)
+        < run_script.index(PR_OCTO_LINE)
         < run_script.index(PR_LOG_OPTS_LINE)
         < run_script.index(PR_TEE_LINE)
         < run_script.index(PR_GIT_ERR_LINE)
         < run_script.index(PR_PARTIAL_LINE)
+        < run_script.index(PUSH_OCTO_LINE)
         < run_script.index(PUSH_LOG_OPTS_LINE)
         < run_script.index(PUSH_TEE_LINE)
         < run_script.index(PUSH_GIT_ERR_LINE)
@@ -345,4 +353,95 @@ def test_card_1547_remerge_diff_passed_and_surfaces_evil_merge_content(
     )
     assert res.returncode == 0, res.stderr
     assert f"ARG={expected_log_opts}" in res.stdout
+
+
+@needs_bash
+@pytest.mark.parametrize("event_name", ["pull_request", "push", "workflow_dispatch"])
+def test_card_1547_octopus_merge_refused_in_both_modes(
+    tmp_path: Path, event_name: str
+) -> None:
+    """Build 3 (#5011): verify that an octopus merge (3+ parents) in the
+    scanned range causes the workflow step to print 'error: octopus merge in
+    range' to stderr and exit 1 before invoking gitleaks in pull_request,
+    push, and workflow_dispatch modes."""
+    assert BASH is not None
+    step = _gitleaks_step()
+    repo_dir = tmp_path / f"repo_octo_{event_name}"
+    _init_repo(repo_dir, "main")
+
+    # Create two side branches and an octopus merge (3 parents) on HEAD
+    for idx in (1, 2):
+        subprocess.run(
+            ["git", "checkout", "-q", "-b", f"side-{idx}", "refs/remotes/origin/main"],
+            cwd=str(repo_dir),
+            check=True,
+        )
+        (repo_dir / f"side_{idx}.txt").write_text(f"side {idx}\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", f"side_{idx}.txt"], cwd=str(repo_dir), check=True
+        )
+        subprocess.run(
+            ["git", "commit", "-q", "-m", f"side {idx}"],
+            cwd=str(repo_dir),
+            check=True,
+        )
+
+    subprocess.run(
+        ["git", "checkout", "-q", "-b", "pr-octo", "refs/remotes/origin/main"],
+        cwd=str(repo_dir),
+        check=True,
+    )
+    (repo_dir / "pr_main.txt").write_text("pr main\n", encoding="utf-8")
+    subprocess.run(["git", "add", "pr_main.txt"], cwd=str(repo_dir), check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "pr main"], cwd=str(repo_dir), check=True
+    )
+    subprocess.run(
+        ["git", "merge", "-q", "--no-ff", "-m", "octopus merge", "side-1", "side-2"],
+        cwd=str(repo_dir),
+        check=True,
+    )
+
+    fake_tmp = tmp_path / f"fake_tmp_octo_{event_name}"
+    fake_tmp.mkdir()
+    bin_dir = tmp_path / f"bin_octo_{event_name}"
+    bin_dir.mkdir()
+    gitleaks_called = tmp_path / f"gitleaks_called_{event_name}"
+
+    for tool in ("curl", "tar"):
+        shim = bin_dir / tool
+        shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        shim.chmod(0o755)
+
+    gitleaks_shim = fake_tmp / "gitleaks"
+    gitleaks_shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then exit 0; fi\n'
+        f'touch "{gitleaks_called}"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    gitleaks_shim.chmod(0o755)
+
+    script = step["run"].replace("/tmp", str(fake_tmp))
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+    env["GITLEAKS_VERSION"] = step["env"]["GITLEAKS_VERSION"]
+    env["GITHUB_EVENT_NAME"] = event_name
+    if event_name == "pull_request":
+        env["GITHUB_BASE_REF"] = "main"
+    else:
+        env.pop("GITHUB_BASE_REF", None)
+
+    res = subprocess.run(
+        [BASH, "-c", script],
+        cwd=str(repo_dir),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert res.returncode == 1
+    assert "error: octopus merge in range" in res.stderr
+    assert not gitleaks_called.exists()
 
