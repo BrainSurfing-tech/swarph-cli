@@ -272,6 +272,22 @@ def _no_host_env_open(request, monkeypatch, tmp_path):
     if pathlib.Path(str(request.node.path)).name not in _ENV_GUARD_MODULES:
         return
     allowed_root = tmp_path.resolve()
+    _sep = "\\" if os.name == "nt" else "/"
+
+    def _norm_key(path: pathlib.Path) -> str:
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError):
+            resolved = path
+        text = str(resolved)
+        if os.name == "nt":
+            text = os.path.normcase(text.replace("/", "\\")).casefold()
+        else:
+            text = os.path.normpath(text)
+        return text.rstrip("\\/") or text
+
+    allowed_key = _norm_key(allowed_root)
+    allowed_prefix = allowed_key if allowed_key.endswith(_sep) else allowed_key + _sep
 
     def _forbidden(file) -> bool:
         if isinstance(file, int):
@@ -282,14 +298,19 @@ def _no_host_env_open(request, monkeypatch, tmp_path):
             return False
         if isinstance(raw, bytes):
             raw = os.fsdecode(raw)
+        # Normalise separators before naming/resolving so a forward-slash
+        # (systemd-style) spelling of a tmp_path fixture on Windows compares
+        # equal to the backslash spelling tmp_path itself uses.
+        if os.name == "nt":
+            raw = raw.replace("/", "\\")
         name = pathlib.Path(raw).name
         if not (name.endswith(".env") or name == "dsn.env"):
             return False
         resolved = pathlib.Path(raw).expanduser()
         if not resolved.is_absolute():
             resolved = pathlib.Path.cwd() / resolved
-        resolved = resolved.resolve()
-        return resolved != allowed_root and allowed_root not in resolved.parents
+        candidate_key = _norm_key(resolved)
+        return candidate_key != allowed_key and not candidate_key.startswith(allowed_prefix)
 
     def _check(file):
         if _forbidden(file):

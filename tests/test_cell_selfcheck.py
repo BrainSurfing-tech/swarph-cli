@@ -350,7 +350,7 @@ def test_runs_as_a_bare_file_in_isolated_mode(tmp_path):
     fixture_env.write_text("SENTINEL=fixture\n", encoding="utf-8")
     (unit_dir / "fixture.service").write_text(
         "[Service]\nExecStart=swarph monitor start --as test-cell\n"
-        f"EnvironmentFile={fixture_env}\n", encoding="utf-8")
+        f"EnvironmentFile={fixture_env.as_posix()}\n", encoding="utf-8")
     cron_fixture = tmp_path / "crontab"
     cron_fixture.write_text("", encoding="utf-8")
     fake_home = tmp_path / "home"
@@ -574,7 +574,7 @@ def test_absent_cron_platform_is_not_the_same_as_failed_to_read(monkeypatch, tmp
         "[Service]\n"
         "ExecStart=swarph monitor start --as fixture-cell "
         "--state-dir /var/lib/swarph/fixture\n"
-        f"EnvironmentFile={fixture_env}\n", encoding="utf-8")
+        f"EnvironmentFile={fixture_env.as_posix()}\n", encoding="utf-8")
     cron_fixture = tmp_path / "crontab"
     cron_fixture.write_text("", encoding="utf-8")
     monkeypatch.setattr(sc, "_unit_live", lambda unit, user=False: True)
