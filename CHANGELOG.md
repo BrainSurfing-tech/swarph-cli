@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.75.0 -- 2026-11-10
+
+- CI security (card #1547, PR #711): fail closed on octopus merges and include merge-resolution changes in the gitleaks scans with `--remerge-diff`.
+- proxy read-only mode (card #1539, PR #712): protected `read_only` configuration refuses writes before any gateway call; it defaults to **true on Darwin** and false on Linux.
+- authenticated same-box gateway transport (card #1557, PR #713): proxy and private monitor share HTTP/1.1 over `gateway_socket`, checking the connected server uid against `gateway_uid` before sending request bytes; unsafe socket paths are refused and there is no TCP fallback.
+
+**BREAKING for proxy operators:** a loopback TCP `http://` `gateway_url`
+(`127.0.0.0/8`, `::1`, or `localhost`) now refuses startup unless the protected
+configuration explicitly sets `allow_loopback_tcp:true`. That escape is
+**unsafe**: a local process acquiring the port can receive the peer token.
+Same-box proxies must use `gateway_socket` plus `gateway_uid`; with that transport
+configured, the URL is only a logical host and no TCP connection is made.
+
+The proxy still ships as **code and templates only**. Installing it, provisioning
+its users and gateway socket, and performing the token cutover remain operator
+steps in [docs/proxy-deployment.md](docs/proxy-deployment.md), not effects of this
+release. No proxy is installed or restarted by this version bump.
+
 ## 0.74.0 -- 2026-11-10
 
 - service control (card #1413, PR #701): update the gemini-service model allowlist to current Gemini 3.x models.
