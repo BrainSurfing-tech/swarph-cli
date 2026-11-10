@@ -62,6 +62,9 @@ def _evidence_map(value):
 
 _SCHEMAS = {
     "whoami": ({}, {}),
+    "board.projects.list": ({}, {}),
+    "board.cards.list": ({}, {"project": _id, "stage": _stage, "assignee": _name,
+                             "label": _name, "q": _text(1000)}),
     "board.card.get": ({"id": _id}, {}),
     "board.cards.graph": ({"id": _id}, {}),
     "board.cards.thread": ({"id": _id}, {"limit": _limit}),
@@ -122,6 +125,9 @@ def route_for(verb: str, args: dict, cell: str) -> tuple[str, str, dict | None]:
         suffix = {"board.cards.thread": "/thread", "board.cards.graph": "/graph"}.get(verb, "")
         params = {"actor": cell, **{k: v for k, v in args.items() if k != "id"}}
         return "GET", _query(f"/board/cards/{args['id']}" + suffix, params), None
+    if verb in ("board.projects.list", "board.cards.list"):
+        path = "/board/projects" if verb == "board.projects.list" else "/board/cards"
+        return "GET", _query(path, {"actor": cell, **args}), None
     if verb == "board.obligations.list":
         params = {"actor": cell, **{("obligation_id" if k == "id" else k): v for k, v in args.items()}}
         return "GET", _query("/board/obligations", params), None

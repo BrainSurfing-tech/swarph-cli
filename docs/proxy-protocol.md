@@ -17,6 +17,8 @@ closes the extra connection without reading or forwarding a request. If even the
 small refusal cannot be written immediately, the connection is closed instead;
 the local client still returns `proxy_unavailable`. A completed, disconnected or
 timed-out handler releases its slot. There is no extra handler queue.
+If a handler thread cannot start, its connection is closed and its slot is
+released before the accept loop continues.
 
 Each admitted connection has a 20-second request-read timeout; a silent client or
 a blocked upstream request does not hold up another admitted connection. The
@@ -87,21 +89,27 @@ Every field not listed for a verb is forbidden. A `?` below means optional;
 omitted fields are omitted upstream unless a default is stated.
 
 - `id`, `card_id`, `reply_to`: positive JSON integers, never booleans.
+- `project`: positive JSON integer only. Slugs and numeric strings are refused;
+  A-I-D resolves a slug using `board.projects.list` before calling cards-list
+  (ruling 94345). The proxy does not perform a preparatory lookup for these verbs.
 - `limit`: integer 1–1000. If omitted, gateway defaults apply: inbox 100,
   card thread 200, memory list 50; obligation list is unbounded.
 - `name`: regex `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}` (full-string match).
-  Used for peers, channels, holders, creators, memory type and tag.
+  Used for peers, channels, holders, creators, memory type/tag, assignee and label.
 - `slug`: regex `[A-Za-z0-9][A-Za-z0-9_.-]{0,199}` (full-string match).
 - `kind`: `status`, `question`, `answer`, `unblock`, or `fyi`; outgoing posts
   default to `status`.
 - `status` / `expect_status`: `open`, `closed`, `fallback_fired`, or `withdrawn`.
 - `stage` / `expect_stage`: `proposed`, `idea`, `spec`, `plan`, `build`, `review`,
-  `ready`, `done`, or `parked`. Target `done` is always refused.
+  `ready`, `done`, or `parked`. Target `done` is refused by card-move; a read
+  filter may select it. The legacy `test` alias is not a proxy stage value.
 - `expect_stage_version`: nonnegative JSON integer, never a boolean.
 - `expect_accept_sha256`: exactly 64 hexadecimal characters.
 - `since`: timezone-aware ISO-8601 timestamp string, at most 64 characters.
 - `content`: non-whitespace string, 1–200000 characters. `why`: 1–2000;
   `evidence`: 1–4000, also non-whitespace strings.
+- `q`: non-blank search string, 1–1000 Unicode characters, URL-encoded as one
+  query value. It never supplies another query parameter or caller actor.
 - `enabled_only`, `unread_only`, `overdue`, `grandfathered`: JSON booleans.
 - `ids`: array of 1–500 positive integers; every element is checked.
 - `outcome`: `pass`, `fail`, `cannot_evaluate`, or `skipped`. Only the gateway
@@ -115,15 +123,18 @@ omitted fields are omitted upstream unless a default is stated.
 
 ## Closed routes and gateway evidence
 
-This schema is deliberately narrower than the gateway's request models. Evidence
-is pinned to gateway commit
-`657e7e9aed0b3d8c14589da8b5192041ed5f9f0f`, not the older bundled CLI gateway.
-Every link below points to the real handler/model at that commit. There is no
-generic gateway passthrough.
+This closed verb list is the per-cell proxy contract. It is deliberately narrower
+than the gateway's request models. Existing route evidence remains pinned to
+`657e7e9aed0b3d8c14589da8b5192041ed5f9f0f`; the two board-list additions below
+are pinned to the deployed gateway
+`d9b386530dc0203172e0196cc76d0f10fcf71c64`. Links name the actual source, not the
+older bundled CLI gateway. There is no generic gateway passthrough.
 
 | Verb | Complete args schema | Fixed gateway operation and evidence |
 | --- | --- | --- |
 | `whoami` | `{}` | `GET /whoami`; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L4661) |
+| `board.projects.list` | `{}` | `GET /board/projects?actor=<cell>`; [deployed handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/d9b386530dc0203172e0196cc76d0f10fcf71c64/server.py#L13460). No caller filters. |
+| `board.cards.list` | `project?`, `stage?`, `assignee?:name`, `label?:name`, `q?` | `GET /board/cards?actor=<cell>` plus the supplied typed filters; [deployed handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/d9b386530dc0203172e0196cc76d0f10fcf71c64/server.py#L16618), [stage CHECK](https://github.com/BrainSurfing-tech/mesh-gateway/blob/d9b386530dc0203172e0196cc76d0f10fcf71c64/server.py#L1085). No `since` or other filter. |
 | `board.card.get` | `id` | `GET /board/cards/{id}?actor=<cell>`; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L16641) |
 | `board.cards.graph` | `id` | `GET /board/cards/{id}/graph?actor=<cell>`; [read-granted handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L17808). The actor is pinned, not caller-selectable. |
 | `board.obligations.list` | `id?`, `card_id?`, `status?`, `holder?:name`, `created_by?:name`, `limit?`, `overdue?`, `grandfathered?` | `GET /board/obligations`, pinned `actor=<cell>`; `id` becomes the gateway's `obligation_id` query key; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L17571). `SELF` for holder/creator is resolved by the gateway. |
@@ -141,6 +152,12 @@ generic gateway passthrough.
 | `board.obligations.decline` | `id`, `expect_status`, `why` | `POST /board/obligations/{id}/decline`; [model](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L17872), [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L18065) |
 | `board.obligations.close` | `id`, `expect_status`, `expect_accept_sha256`, `outcome`, `evidence?`, `evidence_json?` (one evidence field required) | `POST /board/obligations/{id}/close`; [model](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L18531), [map validation](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L13963), [optional-only skipped rule](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L20461), [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L20547) |
 | `board.cards.move` | `id`, `stage`, `expect_stage`, `expect_stage_version` | `PATCH /board/cards/{id}` with pinned `actor=<cell>`; [model](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L13653), [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L20667) |
+
+Each board-list verb performs exactly one GET. Actor is always the configured
+cell, never a caller argument. The gateway applies project readability; the
+proxy neither filters the result nor reconstructs its body. All gateway fields,
+including `projects`, `cards`, `due` and search `searched` metadata, pass through
+unchanged. Missing filters remain omitted; there is no implicit project or stage.
 
 For `board.cards.say`, the proxy first reads the card through the fixed card-read
 route and takes `thread_uuid` from that authenticated reply. Caller `thread_id`
