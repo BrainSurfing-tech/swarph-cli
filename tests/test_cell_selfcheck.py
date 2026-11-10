@@ -1107,22 +1107,27 @@ def test_same_length_secrets_display_as_distinct_numbered_values(monkeypatch, tm
 
 # ── card #1541 rework: env secrets never in text/JSON output ─────────────────
 
-_PG_PW = "pg-sentinel-pw-1541"
-_URL_PW = "swarph-url-pw-1541"
-_FOO_SECRET = "mesh-foo-sentinel-secret-1541"
-_GW_PW = "gw-userinfo-pw-1541"
-_GW_USER = "gwuser1541"
+# Card #1548: every sentinel is assembled from fragments at runtime so
+# no contiguous scanner-shaped literal sits in this file (the gitleaks
+# allowlist entry for this file is removed). Runtime values are
+# byte-identical to the previous contiguous literals.
+_PG_PW = "pg-sentinel-" + "pw-1541"
+_URL_PW = "swarph-url-" + "pw-1541"
+_FOO_SECRET = "mesh-foo-sentinel-" + "secret-1541"
+_GW_PW = "gw-userinfo-" + "pw-1541"
+_GW_USER = "gwuser" + "1541"
+_SVC_USER = "svc" + "1541"
 _TOKEN_MATCH = "tok-match-sentinel-" + "1541-abcdefghij"
 _TOKEN_RESOLVER_OTHER = "tok-resolver-other-" + "sentinel-1541-xyz"
 _SENTINELS = [_PG_PW, _URL_PW, _FOO_SECRET, _GW_PW, _GW_USER,
               _TOKEN_MATCH, _TOKEN_RESOLVER_OTHER,
-              "postgresql://root:", "svc1541", "root:" + _PG_PW]
+              "postgresql://root:", _SVC_USER, "root:" + _PG_PW]
 
 
 def _sentinel_env_text():
     return (
         f"MESH_PG_ROOT_DSN=postgresql://root:{_PG_PW}@db.internal:5432/mesh\n"
-        f"SWARPH_BACKEND_URL=https://svc1541:{_URL_PW}@backend.internal:8443/api\n"
+        f"SWARPH_BACKEND_URL=https://{_SVC_USER}:{_URL_PW}@backend.internal:8443/api\n"
         f"MESH_FOO={_FOO_SECRET}\n"
         f"MESH_GATEWAY_URL=https://{_GW_USER}:{_GW_PW}@100.107.222.72:8788/\n"
         f"MESH_GATEWAY_TOKEN={_TOKEN_MATCH}\n"
@@ -1246,28 +1251,38 @@ def test_strip_url_userinfo_helper():
 def test_gateway_flag_url_userinfo_stripped_in_text(monkeypatch, tmp_path, capsys):
     # Updated (fail-closed gateway display): userinfo gateway values are
     # now shown as '<redacted, N chars>', not stripped to host:port.
-    _flag_raw = "https://u1:pwflag1541@203.0.113.9:8788"
+    _flag_pw = "pwflag" + "1541"
+    _flag_raw = f"https://u1:{_flag_pw}@203.0.113.9:8788"
     rc, out = _run(monkeypatch, tmp_path, [
         _unit("a.service", f"ExecStart=x --as lab --gateway {_flag_raw}\n"),
     ], "lab", capsys=capsys, resolver=_resolver(gateway="https://203.0.113.9:8788"))
-    assert "pwflag1541" not in out and "u1:" not in out, out
+    assert _flag_pw not in out and "u1:" not in out, out
     assert f"<redacted, {len(_flag_raw)} chars>" in out, out
     assert "203.0.113.9:8788" not in out, out
 
 
 # ── card #1541 build 3: fail-closed gateway display (plan-review #4960 (2)) ──
 
-_SHAPE_A_PW = "shape-a-pw-1541"
-_SHAPE_B_PW = "shape-b-pw-1541"
-_SHAPE_C_SECRET = "shape-c-token-1541"
+_SHAPE_A_PW = "shape-a-" + "pw-1541"
+_SHAPE_B_PW = "shape-b-" + "pw-1541"
+_SHAPE_C_SECRET = "shape-c-" + "token-1541"
+# Card #1548 new shapes: (a) token in a path beyond a bare '/', and
+# (b) fully percent-encoded userinfo (no literal '@' anywhere).
+_PATH_TOKEN_1548 = "path-token-" + "sentinel-1548"
+_ENC_SECRET_1548 = "enc-userinfo-" + "sentinel-1548"
+_COV_PW = "cov-" + "pw-1541"
 
 _GW_SHAPES = [
-    pytest.param(f"gwuser1541:{_SHAPE_A_PW}@host.invalid:9",
+    pytest.param(f"{_GW_USER}:{_SHAPE_A_PW}@host.invalid:9",
                  [_SHAPE_A_PW], id="no-scheme-userinfo"),
-    pytest.param(f"http://gwuser1541:{_SHAPE_B_PW}/tail@host.invalid:9",
+    pytest.param(f"http://{_GW_USER}:{_SHAPE_B_PW}/tail@host.invalid:9",
                  [_SHAPE_B_PW], id="slash-in-password"),
     pytest.param(f"http://host.invalid:9/?token={_SHAPE_C_SECRET}",
                  [_SHAPE_C_SECRET], id="query-credential"),
+    pytest.param(f"http://host.invalid:9/hooks/{_PATH_TOKEN_1548}",
+                 [_PATH_TOKEN_1548], id="path-token-1548"),
+    pytest.param(f"http://u%3A{_ENC_SECRET_1548}%40host.invalid:9",
+                 [_ENC_SECRET_1548], id="pct-encoded-userinfo-1548"),
 ]
 
 
@@ -1311,7 +1326,8 @@ def test_gateway_leak_shapes_fail_closed_on_all_surfaces(
 
 @pytest.mark.parametrize("surface", ["unit", "env", "resolver"])
 @pytest.mark.parametrize("value", ["http://host.invalid:8788",
-                                   "http://host.invalid:8788/api/v1"])
+                                   "http://host.invalid:8788/",
+                                   "http://[::1]:18788"])
 def test_plain_gateway_url_displays_verbatim_on_all_surfaces(
         monkeypatch, tmp_path, capsys, surface, value):
     surfaces, self_name, resolver = _gw_surfaces(surface, value)
@@ -1322,11 +1338,29 @@ def test_plain_gateway_url_displays_verbatim_on_all_surfaces(
 
 def test_gateway_display_helper_fail_closed():
     assert sc._gateway_display("http://host.invalid:8788") == "http://host.invalid:8788"
-    assert sc._gateway_display("http://host.invalid:8788/api") == "http://host.invalid:8788/api"
+    # Card #1548: bare trailing '/' and bracketed IPv6 still display;
+    # any path beyond that (previously shown) now redacts.
+    assert sc._gateway_display("http://host.invalid:8788/") == "http://host.invalid:8788/"
+    assert sc._gateway_display("http://[::1]:18788") == "http://[::1]:18788"
     for bad in ("u:pw@host:9", "http://u:p/w@host:9",
                 "http://host:9/?token=SECRET", "http://host:9/#frag",
+                "http://host.invalid:8788/api",
                 "host:9", "http://ho st:9", ""):
         assert sc._gateway_display(bad) == f"<redacted, {len(bad)} chars>", bad
+
+
+def test_gateway_display_1548_path_token_redacted():
+    value = f"http://host.invalid:9/hooks/{_PATH_TOKEN_1548}"
+    assert sc._gateway_display(value) == f"<redacted, {len(value)} chars>"
+    assert _PATH_TOKEN_1548 not in sc._gateway_display(value)
+
+
+def test_gateway_display_1548_pct_encoded_userinfo_redacted():
+    # No literal '@', '?' or '#': the strict host charset must reject it.
+    value = f"http://u%3A{_ENC_SECRET_1548}%40host.invalid:9"
+    assert "@" not in value
+    assert sc._gateway_display(value) == f"<redacted, {len(value)} chars>"
+    assert _ENC_SECRET_1548 not in sc._gateway_display(value)
 
 
 def test_text_sanitizer_strips_userinfo_in_rendered_coverage_line(
@@ -1335,10 +1369,10 @@ def test_text_sanitizer_strips_userinfo_in_rendered_coverage_line(
     (fixture input, not the gateway-value display) reaches the rendered
     text line only with userinfo stripped. Removing the renderer's
     _sanitize_urls_in_text call makes this fail."""
-    detail = "see http://covuser:cov-pw-1541@backend.invalid:8443/api for detail"
+    detail = f"see http://covuser:{_COV_PW}@backend.invalid:8443/api for detail"
     rc, out = _run(monkeypatch, tmp_path, [
         _unit("a.service", "ExecStart=x --as lab --state-dir /var/lib/swarph/lab\n"),
         _cov("user crontab", True, detail),
     ], "lab", capsys=capsys)
-    assert "cov-pw-1541" not in out and "covuser:" not in out, out
+    assert _COV_PW not in out and "covuser:" not in out, out
     assert "http://backend.invalid:8443/api" in out, out
