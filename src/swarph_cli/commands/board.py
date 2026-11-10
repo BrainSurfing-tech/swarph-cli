@@ -1080,6 +1080,80 @@ def _move_line(x) -> str:
     return line
 
 
+_USAGE_READING_UNITS = ("window_pct", "weekly_pct", "monthly_pct", "usd")
+
+
+def _parse_usage_reading(text) -> dict:
+    """Card #1519: 'lane:unit=value[@resets]' -> one usage reading dict.
+
+    read_at is stamped here (client-side, UTC ISO). Anything malformed
+    raises ValueError; the caller exits 2 and sends no request."""
+    if not isinstance(text, str) or ":" not in text:
+        raise ValueError("--usage must be 'lane:unit=value[@resets]'")
+    lane, rest = text.split(":", 1)
+    lane = lane.strip()
+    unit_value, at, resets = rest.partition("@")
+    unit, eq, value_text = unit_value.partition("=")
+    unit = unit.strip()
+    value_text = value_text.strip()
+    if not lane or not eq or unit not in _USAGE_READING_UNITS or not value_text:
+        raise ValueError("--usage must be 'lane:unit=value[@resets]' with unit "
+                         "one of " + ", ".join(_USAGE_READING_UNITS))
+    if at and not resets.strip():
+        raise ValueError("--usage '@' must be followed by a reset timestamp")
+    try:
+        value = int(value_text)
+    except ValueError:
+        try:
+            value = float(value_text)
+        except ValueError:
+            raise ValueError(f"--usage value {value_text!r} is not a number") from None
+    reading = {"lane": lane, "unit": unit, "value": value,
+               "read_at": datetime.now(timezone.utc).isoformat()}
+    if at:
+        reading["window_resets_at"] = resets.strip()
+    return reading
+
+
+def _num(value) -> str:
+    """A reading value for display: 0 is a real reading, not an absence."""
+    if isinstance(value, bool) or value is None:
+        return _s(value)
+    if isinstance(value, (int, float)):
+        return str(value)
+    return _s(value)
+
+
+def _format_board_usage(data: dict) -> str:
+    """Card #1519: human render of GET /board/usage. A lane with no
+    readings prints 'no reading'; a real zero delta prints 0."""
+    lanes = data.get("lanes") or {}
+    if not lanes:
+        return "(no lanes)"
+    lines = []
+    for name in sorted(lanes):
+        slot = lanes[name] or {}
+        latest = slot.get("latest")
+        if slot.get("state") == "no reading" or not isinstance(latest, dict):
+            lines.append(f"{name}: no reading")
+            continue
+        line = (f"{name}: latest {_num(latest.get('value'))} {_s(latest.get('unit'))} "
+                f"at {_s(latest.get('read_at'))}")
+        if latest.get("window_resets_at"):
+            line += f" (resets {_s(latest.get('window_resets_at'))})"
+        lines.append(line)
+        for d in slot.get("deltas") or []:
+            lines.append(f"  delta #{d.get('obligation_id')}: "
+                         f"{_num(d.get('delta'))} {_s(d.get('unit'))} "
+                         f"({_num(d.get('take_value'))} -> {_num(d.get('close_value'))})")
+        for t in slot.get("trend") or []:
+            by_unit = ", ".join(f"{_s(u)}={_num(v)}" for u, v in
+                                sorted((t.get("delta_by_unit") or {}).items()))
+            lines.append(f"  trend {_s(t.get('date'))}: readings={t.get('reading_count')}"
+                         + (f" delta {by_unit}" if by_unit else ""))
+    return "\n".join(lines)
+
+
 def _close_payload(outcome, evidence=None, evidence_json=None, *, opt_out=False,
                    usage=None) -> dict:
     """POST /board/obligations/{id}/close body (#1068): --evidence and/or
@@ -1440,6 +1514,9 @@ def _build_parser() -> argparse.ArgumentParser:
                          "\"...\", ...}' keyed by the row's condition ids. "
                          "Pass --evidence and/or --evidence-json; the gateway "
                          "requires what the row's stored accept demands")
+    oc.add_argument("--usage", default=None, metavar="'lane:unit=value[@resets]'",
+                    help="one structured usage reading (#1519), stored as "
+                         "usage_at_close, e.g. 'claude-max:weekly_pct=42@2026-11-15T00:00:00Z'")
     oc.add_argument("--json", action="store_true"); _add_common(oc)
 
     ol = obl.add_parser(
@@ -1461,6 +1538,9 @@ def _build_parser() -> argparse.ArgumentParser:
                                      "that you read it; starts the clock")
     ot.add_argument("id", type=int, help="the obligation id")
     ot.add_argument("--expect-status", help="compare persisted status; does not distinguish offered from taken")
+    ot.add_argument("--usage", default=None, metavar="'lane:unit=value[@resets]'",
+                    help="one structured usage reading (#1519), stored as "
+                         "usage_at_take, e.g. 'claude-max:weekly_pct=42@2026-11-15T00:00:00Z'")
     ot.add_argument("--json", action="store_true"); _add_common(ot)
     od = obl.add_parser("decline", help="DECLINE an offer: removes you from the row's "
                                         "eligible set and prints who remains")
@@ -1518,6 +1598,15 @@ def _build_parser() -> argparse.ArgumentParser:
     cost.add_argument("--since", default=None, metavar="DATE")
     cost.add_argument("--json", action="store_true")
     _add_common(cost)
+    usage_cmd = top.add_parser(
+        "usage",
+        help="structured usage readings per lane (#1519): latest reading, "
+             "per-row deltas, and the trend over the last days")
+    usage_cmd.add_argument("--lane", default=None, help="only this lane")
+    usage_cmd.add_argument("--days", type=int, default=7,
+                           help="trend window in days (default 7)")
+    usage_cmd.add_argument("--json", action="store_true")
+    _add_common(usage_cmd)
     return p
 
 
@@ -1584,6 +1673,13 @@ def run_board(argv: list[str]) -> int:
                 rates = None
         return _out(st, d, lambda body: format_cost(body, rates), aj)
 
+    if args.group == "usage":
+        query = [f"days={args.days}"]
+        if getattr(args, "lane", None):
+            query.append("lane=" + urllib.parse.quote(args.lane, safe=""))
+        st, d = _http_get_json(f"{gw}/board/usage?" + "&".join(query), token)
+        return _out(st, d, _format_board_usage, aj)
+
     if args.group == "obligations":
         expected = ({"expect_status": args.expect_status}
                     if getattr(args, "expect_status", None) is not None else {})
@@ -1600,6 +1696,12 @@ def run_board(argv: list[str]) -> int:
                       "OBSERVED, and nothing was observed", file=sys.stderr)
                 return 2
             try:
+                usage_reading = (_parse_usage_reading(args.usage)
+                                 if getattr(args, "usage", None) is not None else None)
+            except ValueError as exc:
+                print(f"swarph board obligations close: {exc}", file=sys.stderr)
+                return 2
+            try:
                 evidence_json = (_json_flag("--evidence-json", args.evidence_json)
                                  if args.evidence_json is not None else None)
                 taken_at = _obligation_taken_at(gw, token, args.id)
@@ -1608,6 +1710,8 @@ def run_board(argv: list[str]) -> int:
                 payload = _close_payload(args.outcome, evidence, evidence_json,
                                          opt_out=getattr(args, "no_redact", False),
                                          usage=usage)
+                if usage_reading is not None:
+                    payload["usage"] = usage_reading
                 payload.update(expected)
                 if args.expect_accept_sha is not None:
                     payload["expect_accept_sha256"] = args.expect_accept_sha
@@ -1635,7 +1739,14 @@ def run_board(argv: list[str]) -> int:
                 token)
             return _out(st, d, _format_obligations, aj)
         if args.command == "take":
-            st, d = _post_json(f"{gw}/board/obligations/{args.id}/take", expected, token)
+            try:
+                reading = (_parse_usage_reading(args.usage)
+                           if getattr(args, "usage", None) is not None else None)
+            except ValueError as exc:
+                print(f"swarph board obligations take: {exc}", file=sys.stderr)
+                return 2
+            body = {**expected, **({"usage": reading} if reading is not None else {})}
+            st, d = _post_json(f"{gw}/board/obligations/{args.id}/take", body, token)
             return _out(st, d, _obligation_act_line, aj)
         if args.command == "decline":
             why = redact_text(args.why, opt_out=getattr(args, "no_redact", False), caller="board.obligations")
