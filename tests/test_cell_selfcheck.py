@@ -1158,7 +1158,10 @@ def test_env_secrets_never_in_text_output_token_match(monkeypatch, tmp_path, cap
     rc, out = _run(monkeypatch, tmp_path, [surface], "lab-ovh",
                    capsys=capsys, resolver=_sentinel_resolver(_TOKEN_MATCH))
     _assert_no_sentinels(out)
-    assert "https://100.107.222.72:8788/" in out, out
+    # Updated (fail-closed gateway display): a MESH_GATEWAY_URL carrying
+    # userinfo is now shown as '<redacted, N chars>', not userinfo-stripped.
+    _gw_raw = f"https://{_GW_USER}:{_GW_PW}@100.107.222.72:8788/"
+    assert f"<redacted, {len(_gw_raw)} chars>" in out, out
     assert "matches resolved credential" in out, out
     assert "TOKEN MISMATCH" not in out, out
 
@@ -1170,7 +1173,9 @@ def test_env_secrets_never_in_text_output_token_mismatch(monkeypatch, tmp_path, 
     rc, out = _run(monkeypatch, tmp_path, [surface], "lab-ovh",
                    capsys=capsys, resolver=_sentinel_resolver(_TOKEN_RESOLVER_OTHER))
     _assert_no_sentinels(out)
-    assert "https://100.107.222.72:8788/" in out, out
+    # Updated (fail-closed gateway display): see token-match partner above.
+    _gw_raw = f"https://{_GW_USER}:{_GW_PW}@100.107.222.72:8788/"
+    assert f"<redacted, {len(_gw_raw)} chars>" in out, out
     assert "TOKEN MISMATCH" in out, out
     assert rc == 1, out
 
@@ -1239,8 +1244,101 @@ def test_strip_url_userinfo_helper():
 
 
 def test_gateway_flag_url_userinfo_stripped_in_text(monkeypatch, tmp_path, capsys):
+    # Updated (fail-closed gateway display): userinfo gateway values are
+    # now shown as '<redacted, N chars>', not stripped to host:port.
+    _flag_raw = "https://u1:pwflag1541@203.0.113.9:8788"
     rc, out = _run(monkeypatch, tmp_path, [
-        _unit("a.service", "ExecStart=x --as lab --gateway https://u1:pwflag1541@203.0.113.9:8788\n"),
+        _unit("a.service", f"ExecStart=x --as lab --gateway {_flag_raw}\n"),
     ], "lab", capsys=capsys, resolver=_resolver(gateway="https://203.0.113.9:8788"))
     assert "pwflag1541" not in out and "u1:" not in out, out
-    assert "203.0.113.9:8788" in out, out
+    assert f"<redacted, {len(_flag_raw)} chars>" in out, out
+    assert "203.0.113.9:8788" not in out, out
+
+
+# ── card #1541 build 3: fail-closed gateway display (plan-review #4960 (2)) ──
+
+_SHAPE_A_PW = "shape-a-pw-1541"
+_SHAPE_B_PW = "shape-b-pw-1541"
+_SHAPE_C_SECRET = "shape-c-token-1541"
+
+_GW_SHAPES = [
+    pytest.param(f"gwuser1541:{_SHAPE_A_PW}@host.invalid:9",
+                 [_SHAPE_A_PW], id="no-scheme-userinfo"),
+    pytest.param(f"http://gwuser1541:{_SHAPE_B_PW}/tail@host.invalid:9",
+                 [_SHAPE_B_PW], id="slash-in-password"),
+    pytest.param(f"http://host.invalid:9/?token={_SHAPE_C_SECRET}",
+                 [_SHAPE_C_SECRET], id="query-credential"),
+]
+
+
+def _gw_resolver(gateway):
+    return {"gateway": gateway, "token": (None, "no token resolvable"),
+            "listeners": set(), "socket_table": "read"}
+
+
+def _gw_surfaces(surface, value):
+    if surface == "unit":
+        return ([_unit("a.service",
+                       f"ExecStart=x --as lab --gateway {value}\n")],
+                "lab", _INERT_RESOLVER)
+    if surface == "env":
+        return ([_envfile(f"MESH_GATEWAY_URL={value}\n", owner="lab")],
+                "lab", _INERT_RESOLVER)
+    # resolver: a differing plain surface forces the resolver display
+    # onto the RESOLVER DRIFT line, where it must be the placeholder.
+    return ([_unit("a.service",
+                   "ExecStart=x --as lab --gateway http://plain.invalid:1234\n")],
+            "lab", _gw_resolver(value))
+
+
+@pytest.mark.parametrize("surface", ["unit", "env", "resolver"])
+@pytest.mark.parametrize("value,sentinels", _GW_SHAPES)
+def test_gateway_leak_shapes_fail_closed_on_all_surfaces(
+        monkeypatch, tmp_path, capsys, surface, value, sentinels):
+    surfaces, self_name, resolver = _gw_surfaces(surface, value)
+    placeholder = f"<redacted, {len(value)} chars>"
+    _, out = _run(monkeypatch, tmp_path, surfaces, self_name,
+                  capsys=capsys, resolver=resolver)
+    for s in sentinels:
+        assert s not in out, (surface, value, out)
+    assert placeholder in out, (surface, value, out)
+    _, jout = _run_json(monkeypatch, tmp_path, surfaces, self_name,
+                        resolver, capsys)
+    for s in sentinels:
+        assert s not in jout, (surface, value, jout)
+    json.loads(jout)
+
+
+@pytest.mark.parametrize("surface", ["unit", "env", "resolver"])
+@pytest.mark.parametrize("value", ["http://host.invalid:8788",
+                                   "http://host.invalid:8788/api/v1"])
+def test_plain_gateway_url_displays_verbatim_on_all_surfaces(
+        monkeypatch, tmp_path, capsys, surface, value):
+    surfaces, self_name, resolver = _gw_surfaces(surface, value)
+    _, out = _run(monkeypatch, tmp_path, surfaces, self_name,
+                  capsys=capsys, resolver=resolver)
+    assert value in out, (surface, value, out)
+
+
+def test_gateway_display_helper_fail_closed():
+    assert sc._gateway_display("http://host.invalid:8788") == "http://host.invalid:8788"
+    assert sc._gateway_display("http://host.invalid:8788/api") == "http://host.invalid:8788/api"
+    for bad in ("u:pw@host:9", "http://u:p/w@host:9",
+                "http://host:9/?token=SECRET", "http://host:9/#frag",
+                "host:9", "http://ho st:9", ""):
+        assert sc._gateway_display(bad) == f"<redacted, {len(bad)} chars>", bad
+
+
+def test_text_sanitizer_strips_userinfo_in_rendered_coverage_line(
+        monkeypatch, tmp_path, capsys):
+    """Sanitizer pin: a URL with userinfo embedded in a coverage detail
+    (fixture input, not the gateway-value display) reaches the rendered
+    text line only with userinfo stripped. Removing the renderer's
+    _sanitize_urls_in_text call makes this fail."""
+    detail = "see http://covuser:cov-pw-1541@backend.invalid:8443/api for detail"
+    rc, out = _run(monkeypatch, tmp_path, [
+        _unit("a.service", "ExecStart=x --as lab --state-dir /var/lib/swarph/lab\n"),
+        _cov("user crontab", True, detail),
+    ], "lab", capsys=capsys)
+    assert "cov-pw-1541" not in out and "covuser:" not in out, out
+    assert "http://backend.invalid:8443/api" in out, out

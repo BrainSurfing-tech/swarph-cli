@@ -119,6 +119,7 @@ class Row:
     secret: bool = False
     digest: Optional[str] = None
     value_len: Optional[int] = None
+    gateway_redacted: bool = False
 
 
 def _sha256_hex(value: str) -> str:
@@ -161,10 +162,42 @@ def _row_len(row: "Row") -> int:
     return row.value_len if row.value_len is not None else len(row.value)
 
 
+_GATEWAY_KEYS = ("gateway", "env:MESH_GATEWAY_URL")
+_GATEWAY_SHOW_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9+.-]*://[^\s/@?#:]+(:[0-9]+)?(/[^\s@?#]*)?$")
+
+
+def _gateway_display(value: str, length: Optional[int] = None) -> str:
+    """Fail-closed display for a gateway value.
+
+    The '@'/'?'/'#' check comes FIRST and alone decides redaction: any
+    value containing one anywhere is never parsed or partially stripped.
+    Only a value matching scheme://host[:port][/path] with none of those
+    characters is shown as-is; anything else also fails closed.
+    """
+    text = str(value)
+    n = len(text) if length is None else length
+    if any(ch in text for ch in "@?#"):
+        return f"<redacted, {n} chars>"
+    if _GATEWAY_SHOW_RE.match(text):
+        return text
+    return f"<redacted, {n} chars>"
+
+
+def _row_gateway_display(row: "Row") -> str:
+    if row.value == "<EMPTY>":
+        return "<EMPTY>"
+    if row.gateway_redacted:
+        return f"<redacted, {_row_len(row)} chars>"
+    return _gateway_display(row.value, _row_len(row))
+
+
 def display_value(row: "Row") -> str:
     """The value as printable. Secrets render as class+length, never content."""
     if row.secret:
         return f"<redacted, {_row_len(row)} chars>" if row.value != "<EMPTY>" else "<EMPTY>"
+    if row.key in _GATEWAY_KEYS:
+        return _row_gateway_display(row)
     return _strip_url_userinfo(row.value)
 
 
@@ -254,7 +287,8 @@ _ENV_PAIR_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*
 def _sanitized_envfile_text(text: str) -> str:
     """Env-file text with every KEY=VALUE value removed for safe storage.
 
-    MESH_GATEWAY_URL keeps its stripped (userinfo-free) form; every other
+    MESH_GATEWAY_URL keeps its fail-closed display form (plain
+    scheme://host[:port][/path] only; see _gateway_display); every other
     value becomes a length-only placeholder. Raw values never survive
     into a returned surface structure.
     """
@@ -269,7 +303,7 @@ def _sanitized_envfile_text(text: str) -> str:
         if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
             raw = raw[1:-1]
         if key == "MESH_GATEWAY_URL" and raw:
-            out_lines.append(f"{key}={_strip_url_userinfo(raw)}")
+            out_lines.append(f"{key}={_gateway_display(raw)}")
         elif not raw:
             out_lines.append(f"{key}=<EMPTY>")
         else:
@@ -282,7 +316,9 @@ def extract_envfile(surface: dict) -> list[Row]:
 
     Every env-file row is secret: its raw value is never stored on the
     returned Row and never displayed. Sole exception: MESH_GATEWAY_URL
-    is stored/displayed with userinfo stripped. Other rows store only
+    is stored with userinfo stripped for comparison, but displayed
+    fail-closed (see _gateway_display; gateway_redacted records that
+    the raw value may not be shown). Other rows store only
     a sha256 digest plus the original length, which preserves drift
     distinctness and length reporting without retaining the secret.
     Raw values exist only as local variables in this function.
@@ -315,7 +351,8 @@ def extract_envfile(surface: dict) -> list[Row]:
             stripped = _strip_url_userinfo(val)
             rows.append(Row(key=f"env:{key}", value=stripped, owner=owner,
                             live=live, surface=name, secret=False,
-                            digest=_sha256_hex(val), value_len=len(val)))
+                            digest=_sha256_hex(val), value_len=len(val),
+                            gateway_redacted=(_gateway_display(val) != val)))
         else:
             digest = _sha256_hex(val)
             rows.append(Row(key=f"env:{key}", value=digest, owner=owner,
@@ -1016,6 +1053,11 @@ def run_selfcheck(*, self_name: str, declaration: Path,
         if _r.secret:
             _secret_len_by_val[_r.value] = _row_len(_r)
 
+    _gw_display_by_val: dict[str, str] = {}
+    for _r in rows:
+        if _r.key in _GATEWAY_KEYS:
+            _gw_display_by_val[_r.value] = _row_gateway_display(_r)
+
     def _show(key: str, vals: set[str]) -> list[str]:
         if key in secret_keys:
             ordered = sorted(vals)
@@ -1023,6 +1065,8 @@ def run_selfcheck(*, self_name: str, declaration: Path,
                 return [f"<redacted, {_secret_len_by_val.get(ordered[0], len(ordered[0]))} chars>"]
             return [f"<redacted #{i}, {_secret_len_by_val.get(v, len(v))} chars>"
                     for i, v in enumerate(ordered, 1)]
+        if key in _GATEWAY_KEYS:
+            return [_gw_display_by_val.get(v, _gateway_display(v)) for v in sorted(vals)]
         return [_strip_url_userinfo(v) for v in sorted(vals)]
 
     for key, vals in sorted(by_key.items()):
@@ -1121,7 +1165,7 @@ def run_selfcheck(*, self_name: str, declaration: Path,
             "check": "coverage:resolver comparison",
             "verdict": "read",
             "reason": "gateway and token compared against resolver",
-            "value": str(_strip_url_userinfo(resolved_gw) if resolved_gw else ""),
+            "value": str(_gateway_display(resolved_gw) if resolved_gw else ""),
             "surface": "resolver",
         }))
     else:
@@ -1146,30 +1190,37 @@ def run_selfcheck(*, self_name: str, declaration: Path,
 
     gw_rows = [r for r in mine if r.live and r.value != "<EMPTY>"
                and r.key in ("gateway", "env:MESH_GATEWAY_URL")]
+    # Comparison uses the canonical (userinfo-stripped) form; DISPLAY of
+    # every gateway value is fail-closed via _gateway_display/_row_gateway_display.
     gw_literals = sorted({_strip_url_userinfo(r.value) for r in gw_rows})
-    resolved_gw_display = _strip_url_userinfo(resolved_gw) if resolved_gw else resolved_gw
+    _gw_display_by_lit: dict[str, str] = {}
+    for _r in gw_rows:
+        _gw_display_by_lit[_strip_url_userinfo(_r.value)] = _row_gateway_display(_r)
+    resolved_gw_canonical = _strip_url_userinfo(resolved_gw) if resolved_gw else resolved_gw
+    resolved_gw_display = _gateway_display(resolved_gw) if resolved_gw else resolved_gw
     allowed_gw = declared.get("gateway")
     allowed_gw_set = {_strip_url_userinfo(str(v)) for v in (allowed_gw if isinstance(allowed_gw, list) else [allowed_gw])} if allowed_gw else set()
     if resolved_gw is not None:
         for lit in gw_literals:
-            if lit != resolved_gw_display and lit not in allowed_gw_set:
-                _emit_text(f"  RESOLVER DRIFT --gateway {lit} != resolver {resolved_gw_display}   "
+            lit_display = _gw_display_by_lit.get(lit, _gateway_display(lit))
+            if lit != resolved_gw_canonical and lit not in allowed_gw_set:
+                _emit_text(f"  RESOLVER DRIFT --gateway {lit_display} != resolver {resolved_gw_display}   "
                            f"({', '.join(sorted({r.surface for r in gw_rows if _strip_url_userinfo(r.value) == lit}))})")
                 json_rows.append(_selfcheck_json_row({
                     "check": "resolver:gateway",
                     "verdict": "RESOLVER DRIFT",
                     "reason": "surface gateway differs from resolver",
-                    "value": [lit, resolved_gw_display],
+                    "value": [lit_display, resolved_gw_display],
                     "surface": "gateway",
                 }))
                 drift = True
-            elif lit != resolved_gw_display:
-                _emit_text(f"  DECLARED  --gateway {lit} != resolver {resolved_gw_display} — a stated choice")
+            elif lit != resolved_gw_canonical:
+                _emit_text(f"  DECLARED  --gateway {lit_display} != resolver {resolved_gw_display} — a stated choice")
                 json_rows.append(_selfcheck_json_row({
                     "check": "resolver:gateway",
                     "verdict": "DECLARED",
                     "reason": "surface gateway divergence declared",
-                    "value": [lit, resolved_gw_display],
+                    "value": [lit_display, resolved_gw_display],
                     "surface": "gateway",
                 }))
     # Reachability of every distinct value in play, resolver's included —
@@ -1178,38 +1229,42 @@ def run_selfcheck(*, self_name: str, declaration: Path,
     # false-calm lie inverted: false alarm. local-silent on the RESOLVED
     # value means the cell's own CLI cannot reach the mesh either.
     if socket_state == "read":
-        for val in sorted(set(gw_literals) | ({resolved_gw_display} if resolved_gw_display else set())):
+        for val in sorted(set(gw_literals) | ({resolved_gw_canonical} if resolved_gw_canonical else set())):
             state = gateway_reachability(val, listeners)
+            val_display = _gw_display_by_lit.get(val)
+            if val_display is None:
+                val_display = (resolved_gw_display if val == resolved_gw_canonical
+                               else _gateway_display(val))
             if state == "local-silent":
-                _emit_text(f"  UNREACHABLE gateway {val} — no listener on this box; "
+                _emit_text(f"  UNREACHABLE gateway {val_display} — no listener on this box; "
                            "if that host is remote this line does not apply, if it is "
                            "local the gateway is DOWN for anything pointing there")
                 json_rows.append(_selfcheck_json_row({
                     "check": "reachability:gateway",
                     "verdict": "UNREACHABLE",
                     "reason": "no local listener on gateway port",
-                    "value": val,
+                    "value": val_display,
                     "surface": "gateway",
                 }))
                 drift = True
             elif state == "wildcard-target":
-                _emit_text(f"  MALFORMED gateway {val} — 0.0.0.0/:: is a wildcard BIND "
+                _emit_text(f"  MALFORMED gateway {val_display} — 0.0.0.0/:: is a wildcard BIND "
                            "address, not a target; nothing can dial it")
                 json_rows.append(_selfcheck_json_row({
                     "check": "reachability:gateway",
                     "verdict": "MALFORMED",
                     "reason": "wildcard bind address is not a dialable target",
-                    "value": val,
+                    "value": val_display,
                     "surface": "gateway",
                 }))
                 drift = True
             elif state == "unparseable":
-                _emit_text(f"  MALFORMED gateway value {val!r} does not parse as host:port")
+                _emit_text(f"  MALFORMED gateway value {val_display!r} does not parse as host:port")
                 json_rows.append(_selfcheck_json_row({
                     "check": "reachability:gateway",
                     "verdict": "MALFORMED",
                     "reason": "gateway value does not parse as host:port",
-                    "value": val,
+                    "value": val_display,
                     "surface": "gateway",
                 }))
                 drift = True
