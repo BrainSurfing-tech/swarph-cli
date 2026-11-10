@@ -23,6 +23,7 @@ id = "generic-api-key"
 [rules.allowlist]
 paths = [
   '''tests/test_token_file_one_parser\.py''',
+  '''tests/test_cell_selfcheck\.py''',
 ]
 
 [[rules]]
