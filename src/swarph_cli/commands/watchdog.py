@@ -2298,6 +2298,28 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# Exit status (--check), documented in _USAGE lines 195-203. The ledger
+# write below runs only after run_check, so this is that list and not the
+# install-service codes later in _USAGE. rc 3 is an input error (the check
+# could not run), so it is not alerted. rc 5 is the A1.5 model-swap firing,
+# so it is not error. A code the list does not name maps to error.
+_CHECK_EXIT_LEDGER_OUTCOME = {
+    0: "ok",
+    1: "alerted",
+    2: "alerted",
+    3: "error",
+    4: "error",
+    5: "alerted",
+    6: "error",
+    7: "error",
+}
+
+
+def _check_ledger_outcome(rc: int) -> str:
+    """Map one documented --check exit code to a shim-ledger outcome."""
+    return _CHECK_EXIT_LEDGER_OUTCOME.get(rc, "error")
+
+
 def run_watchdog(argv: Optional[list[str]] = None) -> int:
     if argv is None:
         argv = sys.argv[2:]  # skip "swarph watchdog"
@@ -2333,7 +2355,7 @@ def run_watchdog(argv: Optional[list[str]] = None) -> int:
     record_shim_firing(
         "swarph-watchdog",
         cell=getattr(args, "cell", None) or None,
-        outcome="error" if rc >= 4 else ("alerted" if rc in (1, 2, 3) else "ok"),
+        outcome=_check_ledger_outcome(rc),
     )
     return rc
 
