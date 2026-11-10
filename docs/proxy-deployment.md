@@ -27,6 +27,14 @@ query/fragment/base paths, unsafe ownership, or a non-private token store refuse
 startup. There is no URL or token environment override. `serve --config` selects
 an operator-owned configuration file; `call --socket` selects the local socket.
 
+The optional `read_only` setting is a **JSON boolean** in this protected file,
+not a caller option or environment variable. Omitted means true on Darwin and
+false on Linux; the systemd templates keep their current write-capable behavior.
+A present non-boolean (`"false"`, `0`, `null`, etc.) refuses startup. Startup
+logs the effective value and `source=default` or `source=config`, not the file
+contents. See the explicit allowed READ verbs in `proxy-protocol.md`; writes
+are refused before any gateway request, not merely before their final POST.
+
 Required Linux filesystem layout (`<cell>` is a validated cell name; macOS uses
 the canonical `/private/var` paths described below):
 
@@ -121,6 +129,19 @@ name the same instance. Run the fake-gateway/security tests before a rollout;
 SIGSEGV/no-core validation belongs in the target host acceptance check too.
 
 ## macOS: commander-installed LaunchDaemons
+
+The launchd proxy ships **read-only by default**, enforced by the Darwin
+configuration loader even if the key is absent. Provision an explicit setting
+in the protected Mac config, for example (with operator-selected uid and paths):
+
+```json
+{"cell_uid":12345,"gateway_url":"http://127.0.0.1:8080","read_only":true,"socket_path":"/private/var/run/swarph-proxy/alice/proxy.sock","audit_path":"/private/var/log/swarph-proxy/alice.jsonl"}
+```
+
+A-I-D's Mac must stay read-only until per-act confirmation (#1539 (a)) or
+per-agent uids exist. Only then may the operator explicitly set `read_only:false`
+in the protected config and restart through a separately authorized rollout.
+This build does not supply a per-act confirmation mechanism or install anything.
 
 `launchd/swarph-proxy.plist` and `launchd/swarph-proxy-monitor.plist` are separate
 root-managed LaunchDaemon templates. Julien provisions the separate account,

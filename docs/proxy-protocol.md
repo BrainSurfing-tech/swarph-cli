@@ -43,6 +43,29 @@ integers. Inputs are never coerced. Query parameters are URL-encoded, not append
 as raw strings. The gateway URL and token come only from the proxy's protected
 configuration/store; callers cannot set a path, method, headers, token, or URL.
 
+## Read-only mode (card #1539)
+
+The proxy-owned protected `config.json` accepts a strict JSON boolean
+`read_only`. If omitted, it defaults to **true on Darwin (launchd)** and false
+on Linux (systemd's existing behavior). A present non-boolean, including
+`"false"`, `0` or `null`, refuses startup. An explicit protected `false` is
+honored on Darwin; neither caller arguments nor environment variables can
+switch it off. Startup reports only the effective boolean and its source
+(`default` or `config`), never configuration contents or credentials.
+
+With `read_only:true`, the explicit READ set is `whoami`,
+`board.projects.list`, `board.cards.list`, `board.card.get`, `board.cards.graph`,
+`board.cards.thread`, `board.obligations.list`, `mesh.peers`, `rights`,
+`mesh.inbox`, `memory.get` and `memory.list`. Their routes and replies are
+unchanged (memory reads still use POST). Every other verb, including all writes
+and future verbs not explicitly admitted, returns `verb_not_allowed` before
+any upstream request, including preparatory card reads. Reading the inbox does
+not mark it read: `mesh.mark_read` is a write and is refused too.
+
+A-I-D's Mac stays read-only until trusted per-act confirmation (#1539 (a)) or
+per-agent uids exist. This switch does not implement per-act confirmation or
+change the separately privileged monitor's internal gateway transport.
+
 ## Replies, deadlines, and retry safety
 
 A success is emitted only for a 2xx gateway response containing complete valid

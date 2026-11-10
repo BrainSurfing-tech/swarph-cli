@@ -255,7 +255,12 @@ def render_proxy_template(plist_name: str) -> str:
         "KeepAlive": service["Restart"] in {"always", "on-failure"},
         "ThrottleInterval": _seconds(service["RestartSec"]),
     }
-    return plistlib.dumps(rendered, sort_keys=False).decode("utf-8")
+    text = plistlib.dumps(rendered, sort_keys=False).decode("utf-8")
+    if plist_name == "swarph-proxy.plist":
+        text = text.replace('<plist version="1.0">',
+                            '<!-- Darwin defaults read_only=true; only protected config.json can override. -->\n'
+                            '<plist version="1.0">', 1)
+    return text
 
 
 def substitute(template: str, values: dict[str, str]) -> str:
