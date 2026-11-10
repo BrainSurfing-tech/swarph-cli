@@ -35,7 +35,12 @@ jobs:
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           /tmp/gitleaks --version
-          /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml
+          if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+            /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml \
+              --log-opts="origin/${GITHUB_BASE_REF}..HEAD"
+          else
+            /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml
+          fi
 
       - name: Scan for sensitive identifiers
         run: python3 scripts/check_sensitive_content.py --all
