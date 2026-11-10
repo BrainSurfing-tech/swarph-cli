@@ -28,11 +28,15 @@ INFO_ATTR_LINE = "printf '* diff\\n' > .git/info/attributes"
 EMPTY_TREE_ATTR_SOURCE = (
     "GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 )
+PR_LOG_OPTS_LINE = (
+    '--log-opts="--remerge-diff refs/remotes/origin/${GITHUB_BASE_REF}..HEAD"'
+)
 PR_TEE_LINE = "2>&1 | tee /tmp/gitleaks-pr.log"
 PR_GIT_ERR_LINE = 'if grep -Fq "[git]" /tmp/gitleaks-pr.log; then'
 PR_PARTIAL_LINE = (
     'if grep -Eq "partial scan|failed to scan Git repository" /tmp/gitleaks-pr.log; then'
 )
+PUSH_LOG_OPTS_LINE = '--log-opts="--all --full-history --remerge-diff"'
 PUSH_TEE_LINE = "2>&1 | tee /tmp/gitleaks-push.log"
 PUSH_GIT_ERR_LINE = 'if grep -Fq "[git]" /tmp/gitleaks-push.log; then'
 PUSH_PARTIAL_LINE = (
@@ -132,7 +136,7 @@ def _run_workflow_step(
     return res, repo_dir, fake_tmp
 
 
-def test_card_1547_static_pins_for_pipefail_gitattributes_and_both_scan_guards() -> None:
+def test_card_1547_static_pins_for_pipefail_gitattributes_remerge_diff_and_both_scan_guards() -> None:
     step = _gitleaks_step()
     run_script = step["run"]
 
@@ -140,10 +144,12 @@ def test_card_1547_static_pins_for_pipefail_gitattributes_and_both_scan_guards()
     assert INFO_ATTR_LINE in run_script
     assert run_script.count(EMPTY_TREE_ATTR_SOURCE) == 2
 
+    assert PR_LOG_OPTS_LINE in run_script
     assert PR_TEE_LINE in run_script
     assert PR_GIT_ERR_LINE in run_script
     assert PR_PARTIAL_LINE in run_script
 
+    assert PUSH_LOG_OPTS_LINE in run_script
     assert PUSH_TEE_LINE in run_script
     assert PUSH_GIT_ERR_LINE in run_script
     assert PUSH_PARTIAL_LINE in run_script
@@ -151,9 +157,11 @@ def test_card_1547_static_pins_for_pipefail_gitattributes_and_both_scan_guards()
     assert (
         run_script.index(PIPEFAIL_LINE)
         < run_script.index(INFO_ATTR_LINE)
+        < run_script.index(PR_LOG_OPTS_LINE)
         < run_script.index(PR_TEE_LINE)
         < run_script.index(PR_GIT_ERR_LINE)
         < run_script.index(PR_PARTIAL_LINE)
+        < run_script.index(PUSH_LOG_OPTS_LINE)
         < run_script.index(PUSH_TEE_LINE)
         < run_script.index(PUSH_GIT_ERR_LINE)
         < run_script.index(PUSH_PARTIAL_LINE)
@@ -298,3 +306,43 @@ def test_card_1547_gitattributes_neg_diff_cannot_hide_files_in_either_scan(
     )
     assert f"+{canary}" in patch_out
     assert "Binary files" not in patch_out
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "event_name,expected_log_opts",
+    [
+        (
+            "pull_request",
+            "--log-opts=--remerge-diff refs/remotes/origin/main..HEAD",
+        ),
+        (
+            "push",
+            "--log-opts=--all --full-history --remerge-diff",
+        ),
+        (
+            "workflow_dispatch",
+            "--log-opts=--all --full-history --remerge-diff",
+        ),
+    ],
+)
+def test_card_1547_remerge_diff_passed_and_surfaces_evil_merge_content(
+    tmp_path: Path, event_name: str, expected_log_opts: str
+) -> None:
+    """Build 2 (#5007): verify that --remerge-diff is passed in both
+    pull_request and push/workflow_dispatch modes (with push restating
+    --all --full-history), and that git log -p -U0 with those exact flags
+    emits a line added only inside a merge commit."""
+    res, repo_dir, _fake_tmp = _run_workflow_step(
+        tmp_path,
+        event_name,
+        gitleaks_body=(
+            'printf "ARG=%s\\n" "$@"\n'
+            'echo "INF 1 commits scanned." >&2\n'
+            'echo "INF no leaks found" >&2\n'
+            "exit 0"
+        ),
+    )
+    assert res.returncode == 0, res.stderr
+    assert f"ARG={expected_log_opts}" in res.stdout
+

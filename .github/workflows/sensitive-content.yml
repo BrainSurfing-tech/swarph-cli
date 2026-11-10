@@ -44,7 +44,7 @@ jobs:
             fi
             GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904 \
               /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml \
-              --log-opts="refs/remotes/origin/${GITHUB_BASE_REF}..HEAD" 2>&1 | tee /tmp/gitleaks-pr.log
+              --log-opts="--remerge-diff refs/remotes/origin/${GITHUB_BASE_REF}..HEAD" 2>&1 | tee /tmp/gitleaks-pr.log
             if grep -Fq "[git]" /tmp/gitleaks-pr.log; then
               echo "error: git stderr detected during gitleaks pull_request scan" >&2
               exit 1
@@ -56,7 +56,7 @@ jobs:
           else
             GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904 \
               /tmp/gitleaks detect --source . --redact --no-banner --config .gitleaks.toml \
-              2>&1 | tee /tmp/gitleaks-push.log
+              --log-opts="--all --full-history --remerge-diff" 2>&1 | tee /tmp/gitleaks-push.log
             if grep -Fq "[git]" /tmp/gitleaks-push.log; then
               echo "error: git stderr detected during gitleaks push scan" >&2
               exit 1
