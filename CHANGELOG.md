@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.78.0 -- 2026-11-11
+
+- spawn (card #1573, PR #722): a cell.yaml may name `os_user`, the Linux user the cell runs as. When the caller is a different uid, `swarph spawn <role>` hands the cell to that user with `sudo -iu <os_user>`: it checks for the session in that user's tmux server, starts it there detached if absent (`swarph spawn <role> --os-user-handoff`), then attaches. It never starts the cell as the caller. sudo and tmux are run by absolute path, the caller is compared by uid (not LOGNAME), each sudo call gets only PATH, TERM and LANG, a second hand-off is refused, `--dry-run` and `--print-resolved` run nothing, and spawn flags and passthrough are forwarded. An `os_user` that is not a user on the machine is refused, and on a system without a POSIX passwd database (Windows) a yaml with `os_user` is refused. Unset `os_user` keeps the previous behaviour. Install this release for the user who runs spawn before setting `os_user`: older releases ignore the key and start the cell as the caller.
+
 ## 0.77.0 -- 2026-11-11
 
 - dreaming v2 (card #1570, PR #719): `swarph dreaming propose` runs one cell's corpus through an isolated, tool-less harness and saves a reviewed JSON edit list (`--token-cap` is a soft budget estimated as UTF-8 bytes / 4; `--questions` pins a frozen recall set). `swarph dreaming apply` writes that list live with a whole-corpus backup, per-file sha guards and a corpus lock, and refuses when memory was written inside `--idle-minutes` (default 15). `swarph dreaming restore --backup` returns a backup, and `recall-score` scores the frozen set before and after. Edits to an index file or to a note typed feedback or user (filename prefix or frontmatter `metadata.type`) are held as propose-only unless `--allow-owner-notes`. `run` still never writes live. Templates are not installed and nothing is scheduled.
