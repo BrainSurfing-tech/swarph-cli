@@ -27,12 +27,19 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Callable, Optional
+
+try:
+    import pwd
+except ImportError:  # Windows has no passwd database
+    pwd = None  # type: ignore[assignment]
 from urllib.parse import quote
 
 from swarph_cli import __version__
@@ -134,6 +141,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Print the resolved claude command + cell summary; do not exec.",
+    )
+    p.add_argument(
+        "--os-user-handoff",
+        action="store_true",
+        help="Internal. This spawn was already handed across sudo to os_user. "
+        "A second hand-off is refused so two cell yamls cannot sudo each other.",
     )
     p.add_argument(
         "--no-starter",
@@ -1374,6 +1387,286 @@ def _tmux_has_session(tmux: str, name: str) -> bool:
     return result.returncode == 0
 
 
+# A Linux username is one argv element: letter or underscore, then letters,
+# digits, underscore, or hyphen, optional trailing `$`, at most 32 characters.
+# Empty is not a username (the caller treats it as unset). Whitespace, a
+# slash, a leading dash, or anything shlex would split is rejected so the
+# value can never become a second sudo argument.
+_OS_USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,31}\$?$")
+
+# Carried on the inner `swarph spawn` argv. An env var would not survive
+# `sudo -i`, which resets the environment. A second hand-off is refused.
+_OS_USER_HANDOFF = "--os-user-handoff"
+
+# What may cross into the sudo process. Nothing else: not HOME, not a token.
+_SUDO_ENV_KEYS = ("PATH", "TERM", "LANG")
+
+
+def _os_user_reject_reason(raw: object) -> Optional[str]:
+    """Why ``raw`` cannot cross sudo as one username, or None if it can.
+
+    ``""`` is not rejected here; the caller treats it as unset.
+    """
+    if not isinstance(raw, str):
+        return "not a string"
+    if any(ch.isspace() for ch in raw):
+        return "whitespace"
+    if "/" in raw:
+        return "slash"
+    if raw.startswith("-"):
+        return "leading dash"
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        return "not a single argv token"
+    if parts != [raw]:
+        return "would add an argv element"
+    if _OS_USER_RE.fullmatch(raw) is None:
+        return "not a username"
+    return None
+
+
+def _foreign_os_user(cell: Cell) -> Optional[str]:
+    """Linux user to reach via ``sudo -iu``, or None to stay on today's path.
+
+    The caller is ``os.geteuid()``, compared with ``pwd.getpwnam(os_user).pw_uid``.
+    ``LOGNAME`` and ``USER`` are not read. The same uid under another name is
+    today's path. An unknown name is refused. Anything that is not one
+    username token raises :class:`CellError`.
+    """
+    extra = getattr(cell, "extra", None)
+    if not isinstance(extra, dict) or "os_user" not in extra:
+        return None
+    raw = extra.get("os_user")
+    if raw is None or raw == "":
+        return None
+    reason = _os_user_reject_reason(raw)
+    if reason is not None:
+        raise CellError(
+            f"os_user is not a single Linux username token ({reason})"
+        )
+    if pwd is None or not hasattr(os, "geteuid"):
+        raise CellError("os_user hand-off requires a POSIX passwd database")
+    try:
+        record = pwd.getpwnam(raw)
+    except KeyError as exc:
+        raise CellError(
+            f"os_user {raw!r} is not a user on this machine"
+        ) from exc
+    if record.pw_uid == os.geteuid():
+        return None
+    return raw
+
+
+def _single_sudo_token(value: object, what: str) -> str:
+    """One argv element safe to place after ``sudo -iu``. Not a shell string."""
+    if not isinstance(value, str) or value == "":
+        raise CellError(f"{what} is empty; refusing to pass it across sudo")
+    if any(ch.isspace() for ch in value) or value.startswith("-") or "/" in value:
+        raise CellError(
+            f"{what} is not a single token; refusing to pass it across sudo"
+        )
+    try:
+        parts = shlex.split(value)
+    except ValueError as exc:
+        raise CellError(
+            f"{what} is not a single token; refusing to pass it across sudo"
+        ) from exc
+    if parts != [value]:
+        raise CellError(
+            f"{what} is not a single token; refusing to pass it across sudo"
+        )
+    return value
+
+
+def _os_user_session_name(cell: Cell, requested_role: Optional[str]) -> str:
+    """Session on the target user's tmux server.
+
+    ``cell.tmux_session`` when set, otherwise the role being spawned. The
+    caller's tmux session name is not consulted.
+    """
+    pinned = getattr(cell, "tmux_session", None)
+    if isinstance(pinned, str) and pinned.strip():
+        return _single_sudo_token(pinned.strip(), "tmux session name")
+    role = requested_role or getattr(cell, "role", None)
+    return _single_sudo_token(role, "tmux session name")
+
+
+def _sudo_env() -> dict[str, str]:
+    """PATH, TERM, and LANG only. Never the caller's HOME or a token."""
+    env: dict[str, str] = {}
+    for key in _SUDO_ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    return env
+
+
+def _resolved_on_path(name: str) -> str:
+    """Absolute ``sudo`` or ``tmux`` from PATH, never a copy in the cwd.
+
+    ``shutil.which`` is given a PATH with the cwd, ``"."``, and relative
+    entries removed, so a planted ``./sudo`` is not the binary we exec.
+    A relative result is refused rather than passed to exec.
+    """
+    try:
+        cwd = Path.cwd().resolve()
+    except OSError as exc:
+        raise CellError(f"cannot resolve the working directory: {exc}") from exc
+    kept: list[str] = []
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if entry == "" or entry == ".":
+            continue
+        directory = Path(entry)
+        if not directory.is_absolute():
+            continue
+        try:
+            if directory.resolve() == cwd:
+                continue
+        except OSError:
+            continue
+        kept.append(entry)
+    found = shutil.which(name, path=os.pathsep.join(kept))
+    if not found:
+        raise CellError(
+            f"{name!r} was not found on PATH; refusing a bare name"
+        )
+    path = Path(found)
+    if not path.is_absolute():
+        raise CellError(
+            f"{name!r} resolved to a relative path {found!r}; refusing"
+        )
+    try:
+        if path.resolve().parent == cwd:
+            raise CellError(
+                f"refusing {name!r} from the current directory ({found})"
+            )
+    except OSError as exc:
+        raise CellError(f"could not resolve {name!r} ({found}): {exc}") from exc
+    return str(path)
+
+
+def _sudo_has_session_argv(
+    sudo: str, tmux: str, os_user: str, session: str,
+) -> list[str]:
+    # `=session` is tmux's exact-match target, one element. Not an env assignment.
+    return [sudo, "-iu", os_user, tmux, "has-session", "-t", f"={session}"]
+
+
+def _sudo_attach_argv(
+    sudo: str, tmux: str, os_user: str, session: str,
+) -> list[str]:
+    return [sudo, "-iu", os_user, tmux, "attach", "-t", session]
+
+
+def _sudo_start_argv(
+    sudo: str,
+    os_user: str,
+    role: str,
+    *,
+    new_instance: bool = False,
+    no_starter: bool = False,
+    passthrough: Optional[list[str]] = None,
+) -> list[str]:
+    # Bare `swarph`, not a path under the caller's HOME. `sudo -i` resolves
+    # it on the target user's PATH, and the cell yaml under that user's HOME.
+    # Own flags sit before the hand-off marker. Passthrough stays behind `--`
+    # so it reaches the provider and cannot become another sudo option.
+    argv = [sudo, "-iu", os_user, "swarph", "spawn", role]
+    if new_instance:
+        argv.append("--new-instance")
+    if no_starter:
+        argv.append("--no-starter")
+    argv.append(_OS_USER_HANDOFF)
+    if passthrough:
+        argv.append("--")
+        argv.extend(passthrough)
+    return argv
+
+
+def _target_user_has_tmux_session(
+    sudo: str, tmux: str, os_user: str, session: str, env: dict[str, str],
+) -> bool:
+    """Ask that user's tmux server, never the caller's, and never ``sudo -n``.
+
+    A launch error is "no session": the caller then starts the cell as
+    ``os_user``. It does not fall through to creating one as itself.
+    """
+    try:
+        result = subprocess.run(
+            _sudo_has_session_argv(sudo, tmux, os_user, session),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def _spawn_as_os_user(
+    os_user: str,
+    role: str,
+    session: str,
+    *,
+    dry_run: bool,
+    new_instance: bool = False,
+    no_starter: bool = False,
+    passthrough: Optional[list[str]] = None,
+) -> int:
+    """Attach to ``os_user``'s tmux session, starting the cell as that user first.
+
+    ``sudo`` and ``tmux`` are absolute paths from PATH, not bare names.
+    The env passed to sudo is PATH, TERM, and LANG only. When the session
+    is absent the cell is started with ``sudo -iu <os_user> swarph spawn
+    <role>`` so the yaml resolves under that user's HOME, then the same
+    attach runs. ``--dry-run`` and ``--print-resolved`` print those commands
+    and do not spawn sudo or tmux. This function never starts the cell as
+    the caller.
+    """
+    role = _single_sudo_token(role, "role")
+    session = _single_sudo_token(session, "tmux session name")
+    try:
+        sudo = _resolved_on_path("sudo")
+        tmux = _resolved_on_path("tmux")
+    except CellError as exc:
+        print(f"swarph spawn: {exc}", file=sys.stderr)
+        return 1
+    env = _sudo_env()
+    attach = _sudo_attach_argv(sudo, tmux, os_user, session)
+    start = _sudo_start_argv(
+        sudo,
+        os_user,
+        role,
+        new_instance=new_instance,
+        no_starter=no_starter,
+        passthrough=passthrough,
+    )
+    # No probe. A has-session call is a sudo, and these flags must not spawn one.
+    if dry_run:
+        print(shlex.join(start))
+        print(shlex.join(attach))
+        return 0
+    if not _target_user_has_tmux_session(sudo, tmux, os_user, session, env):
+        try:
+            started = subprocess.run(start, env=env)
+        except OSError as exc:
+            print(
+                f"swarph spawn: could not start the cell as {os_user}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        if started.returncode != 0:
+            return int(started.returncode)
+    try:
+        # execve with the minimal env. execv would inherit HOME and tokens.
+        os.execve(attach[0], attach, env)
+    except OSError as exc:
+        print(f"swarph spawn: sudo attach failed ({exc})", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _swarph_reentry_binary() -> str:
     """Return this installation's console script when it is available.
 
@@ -1408,7 +1701,14 @@ def _reentry_env_assignments() -> list[tuple[str, str]]:
     return pairs
 
 
-def _tmux_session_command(tmux: str, name: str, cwd: Path) -> list[str]:
+def _tmux_session_command(
+    tmux: str,
+    name: str,
+    cwd: Path,
+    *,
+    extra_args: Optional[list[str]] = None,
+    spawn_role: Optional[str] = None,
+) -> list[str]:
     """Build the create command for real tmux or Windows psmux.
 
     psmux accepts ``-- <cmd> [args]`` but not tmux's ``-c`` and ``-e`` flags.
@@ -1416,14 +1716,17 @@ def _tmux_session_command(tmux: str, name: str, cwd: Path) -> list[str]:
     """
     reentry = _swarph_reentry_binary()
     env_pairs = _reentry_env_assignments()
+    spawn_arg = name if spawn_role is None else spawn_role
+    tail = [spawn_arg, *(extra_args or [])]
     if sys.platform == "win32":
         assigns = "; ".join(
             f"$env:{key}={_powershell_quote(value)}" for key, value in env_pairs
         )
+        quoted_tail = " ".join(_powershell_quote(part) for part in tail)
         command = (
             f"{assigns}; "
             f"Set-Location -LiteralPath {_powershell_quote(str(cwd))}; "
-            f"& {_powershell_quote(reentry)} spawn {_powershell_quote(name)}"
+            f"& {_powershell_quote(reentry)} spawn {quoted_tail}"
         )
         return [
             tmux, "new-session", "-d", "-s", name, "--",
@@ -1433,11 +1736,18 @@ def _tmux_session_command(tmux: str, name: str, cwd: Path) -> list[str]:
     cmd = [tmux, "new-session", "-d", "-s", name, "-c", str(cwd)]
     for key, value in env_pairs:
         cmd.extend(["-e", f"{key}={value}"])
-    cmd.extend([reentry, "spawn", name])
+    cmd.extend([reentry, "spawn", *tail])
     return cmd
 
 
-def _tmux_create_session(tmux: str, name: str, cwd: Path) -> bool:
+def _tmux_create_session(
+    tmux: str,
+    name: str,
+    cwd: Path,
+    *,
+    extra_args: Optional[list[str]] = None,
+    spawn_role: Optional[str] = None,
+) -> bool:
     """Create the durable detached session that runs ``swarph spawn <name>``.
 
     Robust against a STALE session registration. When a multiplexer server dies
@@ -1456,7 +1766,9 @@ def _tmux_create_session(tmux: str, name: str, cwd: Path) -> bool:
     the silent no-op): VERIFY with ``has-session`` and retry until it actually
     materialises. Returns True once the session exists, False if it never appears.
     """
-    create_cmd = _tmux_session_command(tmux, name, cwd)
+    create_cmd = _tmux_session_command(
+        tmux, name, cwd, extra_args=extra_args, spawn_role=spawn_role,
+    )
     # Clear a stale (server-less) registration; harmless if the name is truly absent.
     try:
         subprocess.run(
@@ -3394,6 +3706,80 @@ if _unmembraned:
     )
 
 
+def _pane_spawn_args(
+    *,
+    new_instance: bool,
+    no_starter: bool,
+    passthrough: Optional[list[str]],
+) -> list[str]:
+    """Flags the pane's ``swarph spawn`` must see. No hand-off marker.
+
+    The pane is the process that launches the provider. The marker stays on
+    the sudo child, which only creates the session and returns.
+    """
+    args: list[str] = []
+    if new_instance:
+        args.append("--new-instance")
+    if no_starter:
+        args.append("--no-starter")
+    if passthrough:
+        args.append("--")
+        args.extend(passthrough)
+    return args
+
+
+def _detached_handoff_start(
+    cell: Cell,
+    requested_role: Optional[str],
+    *,
+    new_instance: bool,
+    no_starter: bool,
+    passthrough: Optional[list[str]],
+) -> int:
+    """Create the session the outer sudo attach will use, and do not attach.
+
+    This process is already ``os_user``. On a tty, today's path would
+    ``execv`` ``tmux attach`` and the outer process would attach again
+    after this child exits. The pane command carries the operator's flags
+    and launches the provider; this process is not a viewport.
+    """
+    try:
+        role = _single_sudo_token(requested_role or cell.role, "role")
+        session = _os_user_session_name(cell, requested_role)
+    except CellError as exc:
+        print(f"swarph spawn: {exc}", file=sys.stderr)
+        return 1
+    tmux = shutil.which("tmux")
+    if not tmux:
+        print(
+            "swarph spawn: tmux was not found on PATH; "
+            "refusing to launch the hand-off in this terminal",
+            file=sys.stderr,
+        )
+        return 1
+    extra = _pane_spawn_args(
+        new_instance=new_instance,
+        no_starter=no_starter,
+        passthrough=passthrough,
+    )
+    if _tmux_has_session(tmux, session):
+        return 0
+    if not _tmux_create_session(
+        tmux,
+        session,
+        Path(cell.cwd),
+        extra_args=extra or None,
+        spawn_role=role,
+    ):
+        print(
+            "swarph spawn: could not start the detached session "
+            f"for os_user hand-off ({session})",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def run_spawn(argv: Optional[list[str]] = None) -> int:
     if argv is None:
         argv = sys.argv[2:]  # skip "swarph spawn"
@@ -3435,6 +3821,57 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
     except CellError as exc:
         print(f"swarph spawn: {exc}", file=sys.stderr)
         return 1
+
+    # os_user is an untyped cell.yaml key (Cell.extra). Absent, empty, or
+    # the same uid as the caller: fall through to today's path. A different
+    # uid is handed off with sudo -iu BEFORE session minting or membrane
+    # launch, so this process never creates the session on the caller's
+    # tmux. The inner spawn carries --os-user-handoff and refuses a second
+    # hand-off, so two yamls that name each other cannot recurse.
+    try:
+        foreign_user = _foreign_os_user(cell)
+    except CellError as exc:
+        print(f"swarph spawn: {exc}", file=sys.stderr)
+        return 1
+    if foreign_user is not None:
+        if args.os_user_handoff:
+            print(
+                "swarph spawn: refusing a second os_user hand-off "
+                f"(os_user {foreign_user!r} is not this uid)",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            role = _single_sudo_token(
+                requested_role or cell.role, "role"
+            )
+            session = _os_user_session_name(cell, requested_role)
+        except CellError as exc:
+            print(f"swarph spawn: {exc}", file=sys.stderr)
+            return 1
+        return _spawn_as_os_user(
+            foreign_user,
+            role,
+            session,
+            # Neither flag may spawn sudo or tmux. They only print.
+            dry_run=bool(args.dry_run or args.print_resolved),
+            new_instance=bool(args.new_instance),
+            no_starter=bool(args.no_starter),
+            passthrough=list(passthrough),
+        )
+
+    if args.os_user_handoff:
+        # Same uid as os_user. A capture flag still spawns nothing. Otherwise
+        # start the session detached; the outer sudo attach is the viewport.
+        if args.dry_run or args.print_resolved:
+            return 0
+        return _detached_handoff_start(
+            cell,
+            requested_role,
+            new_instance=bool(args.new_instance),
+            no_starter=bool(args.no_starter),
+            passthrough=list(passthrough),
+        )
 
     membrane = MEMBRANES.get(cell.provider)
     if membrane is None:
