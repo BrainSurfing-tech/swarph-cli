@@ -44,8 +44,13 @@ entries stay untouched. Retire and non-target merge sources are copied durably
 to the archive before removal. Archives are outside the corpus glob and are
 never pruned. This preserves exact old text even if a rewrite loses a fact.
 
-`user_*`, `feedback_*`, and frontmatter `type: user` / `type: feedback` are
-propose-only unless the owner deliberately supplies `--allow-owner-notes`.
+`user_*`, `feedback_*`, and frontmatter `type` or nested `metadata.type` set
+to `user` / `feedback` are propose-only unless the owner deliberately supplies
+`--allow-owner-notes`. The same safe YAML detector supplies report counts;
+quoted/commented types count too, and ambiguous frontmatter is held for consent.
+Index participation also requires that flag, even when the index is not the
+edit's target: `MEMORY*`, `index_*`, `index.md` and `_index.md` (case-insensitive).
+Otherwise the whole edit stays propose-only and its files stay byte-identical.
 Default apply/restore idle window: 15 min (`--idle-minutes`); every corpus has
 one crash-released nonblocking lock, shared even across different cell names.
 Live writers do not take this lock: the idle/SHA checks detect their changes,
@@ -82,12 +87,15 @@ not a hard billing ceiling. No single-call mode is implied.
 With no `--out`, a unique run is created under per-cell state `proposals/`.
 `report.json` and optional `--notify-card 1570` carry **only counts, basenames
 and operation types**, never note text, diff/changelog prose or error bodies.
-Counts include file/index byte/feedback file totals and unresolved index links
+Counts include file/index byte totals, separate `feedback_files` and `user_files`
+(prefix OR top-level OR nested type), and unresolved index links
 before/after. An unresolved-link count is a finding for review, not an automatic
 repair or a claim the proposed memories are correct. `--gateway`/`--token-file`
 use the existing cell identity; a failed report refuses the run without cursor
 advance. Apply/restore may already have written safely backed-up changes before
 a report failure: inspect the private apply receipt before any retry.
+Apply also reports `index_edits_held` separately; index consent is not counted
+as user or feedback typing.
 
 ## Frozen paired recall instrument (no live pilot)
 

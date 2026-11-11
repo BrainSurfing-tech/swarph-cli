@@ -281,7 +281,7 @@ def test_index_operations_only_change_explicit_target(dream, op):
     dream["reply"].write_text(json.dumps([{"op": op, "files": ["MEMORY.md", "lesson.md"],
                                           "target": "MEMORY.md", "text": "# Reviewed index\n"}]))
     assert propose(dream) == 0
-    assert apply(dream) == 0
+    assert apply(dream, "--allow-owner-notes") == 0
     assert (dream["corpus"] / "MEMORY.md").read_text() == "# Reviewed index\n"
     assert (dream["corpus"] / "lesson.md").read_bytes() == note_before
 

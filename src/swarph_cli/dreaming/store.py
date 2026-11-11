@@ -172,10 +172,14 @@ def matches(corpus, manifest, name):
             and digest(path.read_bytes()) == manifest["files"][name]["sha256"])
 
 
-def protected(path):
-    if path.name.lower().startswith(("user_", "feedback_")):
-        return True
-    text = path.read_text(encoding="utf-8")
+def is_index(name):
+    name = Path(name).name.lower()
+    return name.startswith(("memory", "index_")) or name in {"_index.md", "index.md"}
+
+
+def note_types(name, text):
+    kinds = {kind for kind in ("user", "feedback")
+             if Path(name).name.lower().startswith(kind + "_")}
     text = text.lstrip("\ufeff")
     lines = text.splitlines()
     if lines and lines[0].strip() == "---":
@@ -183,25 +187,36 @@ def protected(path):
         try:
             end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
             header = yaml.safe_load("\n".join(lines[1:end])) or {}
-            kind = header.get("type", "")
-            return not isinstance(kind, str) or kind.lower() in {"user", "feedback"}
+            metadata = header.get("metadata", {})
+            for kind in (header.get("type", ""),
+                         metadata.get("type", "") if isinstance(metadata, dict) else ""):
+                if not isinstance(kind, str):
+                    kinds.add("ambiguous")
+                elif kind.lower() in {"user", "feedback"}:
+                    kinds.add(kind.lower())
         except (yaml.YAMLError, StopIteration, AttributeError):
-            return True  # Ambiguous frontmatter needs the owner's explicit opt-in.
-    return False
+            kinds.add("ambiguous")  # Ambiguous frontmatter needs the owner's explicit opt-in.
+    return kinds
+
+
+def protected(path):
+    return bool(note_types(path.name, path.read_text(encoding="utf-8")))
 
 
 def apply_edits(corpus, out, manifest, edits, state, minutes, keep, owner):
     idle(corpus, minutes)
     path = backup(corpus, state, keep)
     archive = private_dir(state / "archive" / uuid.uuid4().hex)
-    result = {"backup": str(path), "applied": [], "skipped": [], "propose_only": []}
+    result = {"backup": str(path), "applied": [], "skipped": [], "propose_only": [], "index_edits_held": 0}
     for edit in edits:
         files = edit["files"]
         if not all(matches(corpus, manifest, name) for name in files):
             result["skipped"].append({"op": edit["op"], "files": files})
             continue
-        if not owner and any(protected(corpus / name) for name in files):
+        index_edit = any(is_index(name) for name in files)
+        if not owner and (index_edit or any(protected(corpus / name) for name in files)):
             result["propose_only"].append({"op": edit["op"], "files": files})
+            result["index_edits_held"] += int(index_edit)
             continue
         target = edit.get("target")
         changed = files if edit["op"] in {"merge", "retire"} else [target]

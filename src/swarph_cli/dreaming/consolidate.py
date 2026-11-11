@@ -116,6 +116,7 @@ def execute(args):
                 result = store.apply_edits(corpus, out, manifest, edits, state,
                                           args.idle_minutes, args.keep_backups, args.allow_owner_notes)
                 report = public_summary(edits, {key: len(result[key]) for key in ("applied", "skipped", "propose_only")})
+                report["counts"]["index_edits_held"] = result["index_edits_held"]
                 store.atomic_write(out / "report.json", json.dumps(report).encode())
                 notify(args, report)
                 print(json.dumps(report))

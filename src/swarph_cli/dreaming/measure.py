@@ -65,12 +65,14 @@ def score(args, state):
 
 
 def counts(notes):
-    indexes = {n: t for n, t in notes.items() if n.startswith(("MEMORY", "index_")) or n == "_index.md"}
+    indexes = {n: t for n, t in notes.items() if store.is_index(n)}
+    kinds = [store.note_types(name, text) for name, text in notes.items()]
     targets = []
     for text in indexes.values():
         for markdown, wiki in re.findall(r"\]\(([\w.-]+\.md)\)|\[\[([\w.-]+)\]\]", text):
             name = markdown or wiki
             targets.append(name if name.endswith(".md") else name + ".md")
     return {"files": len(notes), "index_bytes": sum(len(t.encode()) for t in indexes.values()),
-            "feedback_files": sum(n.startswith("feedback_") for n in notes),
+            "feedback_files": sum("feedback" in value for value in kinds),
+            "user_files": sum("user" in value for value in kinds),
             "unresolved_index_links": sum(n not in notes for n in targets)}
