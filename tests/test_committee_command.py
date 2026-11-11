@@ -316,17 +316,26 @@ _FAKE_GATEWAY = "http://127.0.0.1:9"
 _CHARTER = 'fractal-dreaming charter\n"quoted" second line  '
 
 
-def test_rooms_show_prints_the_charter_verbatim(monkeypatch, capsys):
-    # Keys are committee.read_room's return (mesh-gateway committee.py:610-616),
-    # which GET /committee/rooms/{channel} returns unchanged (server.py:22888).
-    # No ballot column is in that dict.
-    payload = {
+def _room_payload():
+    # Keys are committee.read_room's return (mesh-gateway committee.py:611-621).
+    # GET /committee/rooms/{channel} returns that dict (server.py:22889).
+    # Seat objects are peer, role, family only (committee.py:618). No ballot column.
+    return {
         "channel": "fractal-dreaming",
         "card_id": 1571,
         "charter": _CHARTER,
         "created_by": "lab-ovh",
         "created_at": "2026-11-11T00:00:00+00:00",
+        "seats": [
+            {"peer": "lab-ovh", "role": "chair", "family": "orch"},
+            {"peer": "c1220-drop", "role": "seat", "family": "claude"},
+            {"peer": "c1220-base", "role": "baseline", "family": "gemini"},
+        ],
     }
+
+
+def test_rooms_show_prints_the_charter_verbatim(monkeypatch, capsys):
+    payload = _room_payload()
     seen = _spy(monkeypatch, "get_json", payload=payload)
     rc = cm.run_committee([
         "rooms", "show", "fractal-dreaming", "--gateway", _FAKE_GATEWAY])
@@ -335,20 +344,41 @@ def test_rooms_show_prints_the_charter_verbatim(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert out == _CHARTER
     assert "lab-ovh" not in out
+    assert "c1220-drop" not in out
     assert "2026-11-11" not in out
 
 
-def test_rooms_show_refuses_a_non_member(monkeypatch, capsys):
-    seen = _spy(monkeypatch, "get_json", status=403, payload={
-        "detail": "c1 is not a member of channel fractal-dreaming"})
+def test_rooms_show_json_prints_the_gateway_payload(monkeypatch, capsys):
+    payload = _room_payload()
+    seen = _spy(monkeypatch, "get_json", payload=payload)
     rc = cm.run_committee([
-        "rooms", "show", "fractal-dreaming", "--gateway", _FAKE_GATEWAY])
-    assert rc == 1
+        "rooms", "show", "fractal-dreaming", "--json", "--gateway", _FAKE_GATEWAY])
+    assert rc == 0
     assert seen["url"] == f"{_FAKE_GATEWAY}/committee/rooms/fractal-dreaming"
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed == payload
+    assert parsed["charter"] == _CHARTER
+    assert parsed["seats"] == payload["seats"]
+
+
+@pytest.mark.parametrize("status,detail,extra", [
+    (403, "c1 is not a member of channel fractal-dreaming", []),
+    (403, "c1 is not a member of channel fractal-dreaming", ["--json"]),
+    (404, "committee room 'no-such-room' not found", []),
+    (404, "committee room 'no-such-room' not found", ["--json"]),
+])
+def test_rooms_show_refusal_exits_nonzero_without_the_charter(
+        monkeypatch, capsys, status, detail, extra):
+    channel = "no-such-room" if status == 404 else "fractal-dreaming"
+    _spy(monkeypatch, "get_json", status=status, payload={"detail": detail})
+    rc = cm.run_committee([
+        "rooms", "show", channel, *extra, "--gateway", _FAKE_GATEWAY])
+    assert rc != 0
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "not a member of channel fractal-dreaming" in captured.err
+    assert _CHARTER not in captured.out
     assert _CHARTER not in captured.err
+    assert detail in captured.err
 
 
 def test_rooms_open_json_parses(monkeypatch, tmp_path, capsys):

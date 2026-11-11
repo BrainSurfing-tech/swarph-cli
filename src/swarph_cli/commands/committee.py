@@ -4,8 +4,10 @@ A seat posts a sealed position with ``post``; the motion id is discovered from
 the room via ``motion <channel>`` (a GET list, added in the card-#1323 gateway
 PR) so a harness that blocks raw HTTP can still ballot. Chair-only verbs:
 ``rooms open``, ``motion <channel> --open``, ``recast``, ``baseline-absent``.
-A live seat or the chair reads the room charter with ``rooms show <channel>``.
-That command prints ``committee_rooms.charter`` verbatim and nothing else.
+A live seat or the chair reads the room with ``rooms show <channel>``.
+Without ``--json`` that command prints ``committee_rooms.charter`` verbatim
+and nothing else. ``rooms show <channel> --json`` prints the gateway JSON,
+including the charter and the live seats.
 Uses the shared token resolver and NEVER prints the token.
 
 Card #1516 adds ``results <channel> [--motion ID] --json`` and ``--json`` on
@@ -92,6 +94,9 @@ def _build_parser() -> argparse.ArgumentParser:
     rshow = rsub.add_parser(
         "show", help="print the room charter verbatim (a live seat or the chair)")
     rshow.add_argument("channel", help="committee channel name")
+    rshow.add_argument("--json", action="store_true",
+                       help="print the gateway's response JSON on stdout, "
+                            "including the charter and the live seats")
     add_common_args(rshow)
 
     recast = sub.add_parser("recast", help="recast a seat (chair only)")
@@ -258,13 +263,20 @@ def _run_results(args: argparse.Namespace) -> int:
 
 
 def _run_rooms_show(args: argparse.Namespace) -> int:
-    """Print the room charter verbatim. Ballot fields on the payload are not printed."""
+    """Print the room charter verbatim, or the gateway JSON with --json.
+
+    The plain path writes ``charter`` and nothing else. ``--json`` writes the
+    gateway payload, which carries the charter and the live seats.
+    """
     _, token = _auth(args)
     base = args.gateway.rstrip("/")
     status, payload = get_json(
         f"{base}/committee/rooms/{_quote(args.channel)}", token)
     if not _ok(status):
         return _fail("rooms show", status, payload)
+    if args.json:
+        _print_json(payload)
+        return 0
     charter = payload.get("charter") if isinstance(payload, dict) else None
     if not isinstance(charter, str):
         print("swarph committee rooms show: gateway response has no charter",
