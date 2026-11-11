@@ -23,6 +23,40 @@ import argparse
 import sys
 
 
+def _add_consolidation_parsers(sub):
+    p = sub.add_parser("propose", help="propose consolidation with an isolated subscription harness")
+    reporting = [p]
+    p.add_argument("--corpus", required=True)
+    p.add_argument("--out", help="empty private proposal directory; default: a new run under per-cell state")
+    p.add_argument("--cell", required=True)
+    p.add_argument("--state-root", default=None)
+    p.add_argument("--harness", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--token-cap", type=int, default=32000)
+    p.add_argument("--questions", help="optional frozen pilot question set, pinned before first propose")
+    for action in ("apply", "restore"):
+        p = sub.add_parser(action, help=action + " with whole-corpus backup and a corpus lock")
+        reporting.append(p)
+        p.add_argument("--cell", required=True)
+        p.add_argument("--corpus", required=True)
+        p.add_argument("--state-root", default=None)
+        p.add_argument("--idle-minutes", type=float, default=15)
+        p.add_argument("--keep-backups", type=int, default=5)
+        if action == "apply":
+            p.add_argument("--proposal", required=True)
+            p.add_argument("--allow-owner-notes", action="store_true")
+        else:
+            p.add_argument("--backup", required=True)
+    for p in reporting:
+        p.add_argument("--notify-card", type=int, help="post counts/basenames/op types only to a fleet card")
+        p.add_argument("--gateway", default=None)
+        p.add_argument("--token-file", default=None)
+    p = sub.add_parser("recall-score", help="score externally supplied paired answers against frozen questions")
+    for option in ("cell", "corpus", "questions", "before", "after"):
+        p.add_argument("--" + option, required=True)
+    p.add_argument("--state-root", default=None)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="swarph dreaming",
@@ -46,8 +80,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = p.add_subparsers(dest="action", required=True)
-    from swarph_cli.dreaming.consolidate import add_parsers
-    add_parsers(sub)
+    _add_consolidation_parsers(sub)
 
     run = sub.add_parser(
         "run",
