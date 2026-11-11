@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly memory proposals for cell %i, outside weekday trading hours
+
+[Timer]
+OnCalendar=*-*-* 01:00:00 UTC
+RandomizedDelaySec=30min
+# No Persistent catch-up: a daytime boot must not start a missed dream.
+Unit=swarph-dreaming@%i.service
+
+[Install]
+WantedBy=timers.target
