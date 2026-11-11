@@ -22,7 +22,9 @@
 #    agent supplies code-under-test, never the runner spec.
 #  - NO `continue-on-error` / `|| true` anywhere — a real failure stays red.
 #  - REQUIRED-NODE-ID FLOOR (§5.3c): the win32 ctypes walk + the cwd-repin + the
-#    spawn->tmux tests MUST appear in the executed set; pytest exits 5 on
+#    spawn->tmux tests + the native-windows mesh-mint refusal
+#    (tests/test_1577_mesh_mint_windows.py::test_mesh_mint_refuses_native_windows_before_register)
+#    MUST appear in the executed set; pytest exits 5 on
 #    no-tests-collected, so a conftest that deselects them turns the floor step
 #    red (collect-FORGED), never silent-green.
 #  - LEAST-PRIVILEGE TOKEN (§5.4): contents:read only; id-token never write; no
@@ -96,13 +98,16 @@ jobs:
       # merged its file to main). The junit re-derivation below catches all THREE
       # hollowing modes: deselect (exit 5), rename/missing file (exit 4), AND
       # all-skipped (exit 0) — the last via the non-skipped-count + the explicit
-      # marquee-test-ran assertion (drop seat-A #68 LOW + MEDIUM).
+      # marquee-test-ran assertion (drop seat-A #68 LOW + MEDIUM). A skip of the
+      # native-windows mint refusal is a fail the same way: that test must not
+      # live behind an importorskip the Windows install does not satisfy.
       - name: Node-id floor (win32 paths that must actually run)
         run: |
           pytest -v --no-header --junit-xml=floor.xml \
             tests/test_spawn_windows_relaunch.py \
             tests/test_spawn_tmux_session.py \
-            "tests/test_cell_loader.py::test_session_sidecar_different_cwd_mints_fresh_and_repins"
+            "tests/test_cell_loader.py::test_session_sidecar_different_cwd_mints_fresh_and_repins" \
+            "tests/test_1577_mesh_mint_windows.py::test_mesh_mint_refuses_native_windows_before_register"
           python - <<'PY'
           import xml.etree.ElementTree as ET
           root = ET.parse("floor.xml").getroot()
@@ -115,6 +120,10 @@ jobs:
           # the unmocked real-ctypes walk MUST have executed on win32 (#68 MEDIUM)
           assert "test_console_is_genuine_wt_real_ctypes_walk_returns_bool" in ran_names, \
               "the real-ctypes-walk test was skipped/absent — ctypes path NOT exercised"
+          # native Windows must refuse mesh mint before any register POST (#1577).
+          # A skip here means the Windows leg never executed the refusal.
+          assert "test_mesh_mint_refuses_native_windows_before_register" in ran_names, \
+              "the native-windows mint refusal was skipped/absent — Windows path NOT exercised"
           PY
 
       # v0.20.0 — REAL psmux fetch on this Windows VM. The unit tests mock the

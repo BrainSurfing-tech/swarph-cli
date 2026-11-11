@@ -208,19 +208,26 @@ def _whoami(base: str, token: str) -> dict:
         return json.loads(resp.read().decode())
 
 
-def test_mint_writer_is_exclusive_and_does_not_truncate():
-    from swarph_cli.commands.mesh import _run_mint, _write_minted_token_exclusive
-
-    writer = inspect.getsource(_write_minted_token_exclusive)
-    assert "os.O_CREAT | os.O_EXCL | os.O_WRONLY" in writer
-    assert "O_TRUNC" not in writer
-    assert "write_secret_file(" not in writer
-    assert writer.index("os.fchmod") < writer.index("fp.write")
+def test_mint_opens_exclusive_file_before_register():
+    from swarph_cli.commands.mesh import _run_mint
 
     src = inspect.getsource(_run_mint)
     for banned in ("SWARPH_SELF", "LOGNAME", "getpass", "write_secret_file(", "O_TRUNC"):
         assert banned not in src
     assert '"defer_token_mint": False' in src
+    assert "os.unlink" in src
+
+    preamble, sep, rest = src.partition("os.open")
+    assert sep == "os.open"
+    assert 'os.name == "nt"' in preamble
+    assert 'sys.platform == "win32"' in preamble
+    assert "_post_json(" not in preamble
+    assert "os.O_CREAT | os.O_EXCL | os.O_WRONLY" in rest
+    fchmod_at = rest.index("os.fchmod")
+    post_at = rest.index("_post_json(")
+    write_at = rest.index("fp.write")
+    assert fchmod_at < post_at < write_at
+    assert rest.index("os.fsync") > write_at
 
 
 def test_mesh_mint_operator_verb(monkeypatch, tmp_path, capsys, scratch_gateway):
@@ -254,6 +261,20 @@ def test_mesh_mint_operator_verb(monkeypatch, tmp_path, capsys, scratch_gateway)
     second = tmp_path / "second.token"
     other = tmp_path / "other.token"
 
+    real_post = mesh._post_json
+    watch: dict = {"path": None, "shots": []}
+
+    def watching_post(url, body, token, *, timeout=10.0, encoded=None):
+        path = watch["path"]
+        if path is not None:
+            st = path.stat()
+            watch["shots"].append(
+                (st.st_size, stat.S_IMODE(st.st_mode), path.read_bytes())
+            )
+        return real_post(url, body, token, timeout=timeout, encoded=encoded)
+
+    monkeypatch.setattr(mesh, "_post_json", watching_post)
+
     old_umask = os.umask(0)
     secrets: list[str] = []
     try:
@@ -264,6 +285,21 @@ def test_mesh_mint_operator_verb(monkeypatch, tmp_path, capsys, scratch_gateway)
             captured = capsys.readouterr()
             return rc, captured.out, captured.err
 
+        blocked = tmp_path / "unwritable"
+        blocked.mkdir()
+        os.chmod(blocked, 0o500)
+        blocked_out = blocked / "cell.peer_token"
+        try:
+            rc, out, err = invoke([
+                "mint", name, "--out", str(blocked_out), "--gateway", base,
+            ])
+            assert rc != 0
+            assert posts == []
+            assert not blocked_out.exists()
+            assert list(blocked.iterdir()) == []
+        finally:
+            os.chmod(blocked, 0o700)
+
         rc, out, err = invoke([
             "mint", name, "--out", str(preexisting), "--gateway", base,
         ])
@@ -273,6 +309,22 @@ def test_mesh_mint_operator_verb(monkeypatch, tmp_path, capsys, scratch_gateway)
         assert "already exists" in err
         blob = out + err
 
+        link_target = tmp_path / "symlink-target.token"
+        link_target.write_bytes(b"sentinel-symlink\n")
+        link = tmp_path / "via-symlink.token"
+        link.symlink_to(link_target)
+        rc, out, err = invoke([
+            "mint", name, "--out", str(link), "--gateway", base,
+        ])
+        assert rc != 0
+        assert posts == []
+        assert link_target.read_bytes() == b"sentinel-symlink\n"
+        assert link.is_symlink()
+        assert "already exists" in err
+        blob += out + err
+
+        watch["path"] = out_path
+        watch["shots"].clear()
         rc, out, err = invoke([
             "mint", name, "--out", str(out_path), "--gateway", base,
         ])
@@ -280,6 +332,7 @@ def test_mesh_mint_operator_verb(monkeypatch, tmp_path, capsys, scratch_gateway)
         if rc != 0:
             raise AssertionError("mint failed")
         assert len(posts) == 1
+        assert watch["shots"] == [(0, 0o600, b"")]
         # A minted token does not prove defer_token_mint: a fresh mesh mints
         # anyway while nobody is ratified. The POST body is the proof.
         assert posts[0]["defer_token_mint"] is False
@@ -307,11 +360,14 @@ def test_mesh_mint_operator_verb(monkeypatch, tmp_path, capsys, scratch_gateway)
         before = out_path.read_bytes()
         blob += text
 
+        watch["path"] = second
+        watch["shots"].clear()
         rc, out, err = invoke([
             "mint", name, "--out", str(second), "--gateway", base,
         ])
         text = out + err
         assert rc != 0
+        assert watch["shots"] == [(0, 0o600, b"")]
         assert not second.exists()
         if out_path.read_bytes() != before:
             raise AssertionError("first token file changed")
@@ -324,15 +380,19 @@ def test_mesh_mint_operator_verb(monkeypatch, tmp_path, capsys, scratch_gateway)
         _assert_silent(text, secret)
         blob += text
 
+        watch["path"] = other
+        watch["shots"].clear()
         rc, out, err = invoke([
             "mint", "other-cell", "--out", str(other), "--gateway", base,
             "--token-file", str(out_path),
         ])
         text = out + err
         assert rc != 0
+        assert watch["shots"] == [(0, 0o600, b"")]
         assert not other.exists()
-        assert "per-peer token" in text
-        assert "operator credential" in text
+        assert "this credential is a per-peer token" in text
+        assert "SSO identity" not in text
+        assert "operator credential is required" in text
         assert "--token-file <operator-token>" in text
         assert "not a cell's own peer token" in text
         _assert_silent(text, secret)
@@ -346,3 +406,289 @@ def test_mesh_mint_operator_verb(monkeypatch, tmp_path, capsys, scratch_gateway)
         for path, existed in suspect_existed.items():
             if path.exists() != existed:
                 raise AssertionError(f"mint wrote outside --out: {path}")
+
+
+def _operator_token(directory: Path, name: str = "operator.token") -> Path:
+    path = directory / name
+    path.write_text("operator-credential\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    return path
+
+
+def test_sso_caller_binding_names_sso_and_unlinks(monkeypatch, tmp_path, capsys):
+    """403 detail matches the live gateway's SSO refusal, not a per-peer token.
+
+    mesh-gateway raises "caller-binding: SSO identity {node!r} may not act as
+    {field}={actor!r}". The file is created empty at mode 0600 before that
+    POST and removed when the mint does not happen.
+    """
+    from swarph_cli.commands import mesh
+
+    out_path = tmp_path / "sso-out" / "cell.peer_token"
+    token_file = _operator_token(tmp_path)
+    monkeypatch.setenv("SWARPH_SELF", "decoy-self")
+    seen: dict = {}
+
+    def stub(url, body, token, *, timeout=10.0, encoded=None):
+        st = out_path.stat()
+        seen["exists"] = out_path.is_file()
+        seen["size"] = st.st_size
+        seen["mode"] = stat.S_IMODE(st.st_mode)
+        seen["data"] = out_path.read_bytes()
+        seen["name"] = body.get("name")
+        seen["defer"] = body.get("defer_token_mint")
+        assert str(url).endswith("/peers/register")
+        return 403, {
+            "detail": (
+                "caller-binding: SSO identity 'alex' may not act as "
+                "register_mint_target='other-cell'"
+            ),
+        }
+
+    monkeypatch.setattr(mesh, "_post_json", stub)
+    rc = mesh.run_mesh([
+        "mint", "other-cell",
+        "--out", str(out_path),
+        "--gateway", "http://127.0.0.1:9",
+        "--token-file", str(token_file),
+    ])
+    captured = capsys.readouterr()
+    err = captured.err
+    assert rc != 0
+    assert seen["exists"] is True
+    assert seen["size"] == 0
+    assert seen["data"] == b""
+    assert seen["mode"] == 0o600
+    assert seen["name"] == "other-cell"
+    assert seen["defer"] is False
+    assert "this credential is an SSO identity" in err
+    assert "operator credential is required" in err
+    assert "--token-file <operator-token>" in err
+    assert "per-peer token" not in err
+    assert "operator-credential" not in captured.out + err
+    assert not out_path.exists()
+    assert stat.S_IMODE(out_path.parent.stat().st_mode) == 0o700
+
+
+def test_cell_join_binding_is_not_called_a_per_peer_token(monkeypatch, tmp_path, capsys):
+    from swarph_cli.commands import mesh
+
+    out_path = tmp_path / "join.token"
+    token_file = _operator_token(tmp_path)
+    seen: dict = {}
+
+    def stub(url, body, token, *, timeout=10.0, encoded=None):
+        st = out_path.stat()
+        seen["size"] = st.st_size
+        seen["mode"] = stat.S_IMODE(st.st_mode)
+        seen["data"] = out_path.read_bytes()
+        return 403, {
+            "detail": (
+                "caller-binding: a cell-join credential carries no peer identity "
+                "and may not act as register_mint_target='other-cell'"
+            ),
+        }
+
+    monkeypatch.setattr(mesh, "_post_json", stub)
+    rc = mesh.run_mesh([
+        "mint", "other-cell",
+        "--out", str(out_path),
+        "--gateway", "http://127.0.0.1:9",
+        "--token-file", str(token_file),
+    ])
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert seen["size"] == 0 and seen["data"] == b"" and seen["mode"] == 0o600
+    assert "cell-join credential" in err
+    assert "per-peer token" not in err
+    assert "operator credential is required" in err
+    assert "--token-file <operator-token>" in err
+    assert not out_path.exists()
+
+
+def test_whoami_failure_keeps_the_minted_file(monkeypatch, tmp_path, capsys):
+    from swarph_cli.commands import mesh
+
+    out_path = tmp_path / "kept.token"
+    token_file = _operator_token(tmp_path)
+    secret = "minted-peer-secret"
+    seen: dict = {}
+
+    def stub_post(url, body, token, *, timeout=10.0, encoded=None):
+        st = out_path.stat()
+        seen["size"] = st.st_size
+        seen["mode"] = stat.S_IMODE(st.st_mode)
+        return 200, {
+            "peer_token": secret,
+            "token_status": "minted",
+            "name": "kept-cell",
+        }
+
+    def stub_get(url, token, *, timeout=10.0):
+        raise OSError("whoami unavailable")
+
+    monkeypatch.setattr(mesh, "_post_json", stub_post)
+    monkeypatch.setattr(mesh, "_http_get_json", stub_get)
+    rc = mesh.run_mesh([
+        "mint", "kept-cell",
+        "--out", str(out_path),
+        "--gateway", "http://127.0.0.1:9",
+        "--token-file", str(token_file),
+    ])
+    captured = capsys.readouterr()
+    blob = captured.out + captured.err
+    assert rc != 0
+    assert seen["size"] == 0 and seen["mode"] == 0o600
+    assert out_path.read_text(encoding="utf-8") == secret + "\n"
+    assert stat.S_IMODE(out_path.stat().st_mode) == 0o600
+    assert secret not in blob
+    assert "operator-credential" not in blob
+    assert "key generation could not be read" in captured.err
+
+
+def test_gateway_not_configured_unlinks_empty_file(monkeypatch, tmp_path, capsys):
+    from swarph_cli.commands import mesh
+
+    out_path = tmp_path / "nested" / "cell.token"
+    token_file = _operator_token(tmp_path)
+    seen: dict = {}
+    real_post = mesh._post_json
+
+    def wrapping(url, body, token, *, timeout=10.0, encoded=None):
+        st = out_path.stat()
+        seen["size"] = st.st_size
+        seen["mode"] = stat.S_IMODE(st.st_mode)
+        seen["data"] = out_path.read_bytes()
+        return real_post(url, body, token, timeout=timeout, encoded=encoded)
+
+    monkeypatch.setattr(mesh, "_post_json", wrapping)
+    rc = mesh.run_mesh([
+        "mint", "cell",
+        "--out", str(out_path),
+        "--gateway", "not-a-url",
+        "--token-file", str(token_file),
+    ])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert seen["size"] == 0 and seen["data"] == b"" and seen["mode"] == 0o600
+    assert "MESH_GATEWAY_URL" in err
+    assert "operator-credential" not in err
+    assert not out_path.exists()
+    assert stat.S_IMODE(out_path.parent.stat().st_mode) == 0o700
+
+
+def test_failed_register_unlinks_empty_file(monkeypatch, tmp_path, capsys):
+    from swarph_cli.commands import mesh
+
+    token_file = _operator_token(tmp_path)
+
+    def _run(out_name: str, poster) -> tuple[int, str, str, dict]:
+        out_path = tmp_path / out_name
+        seen: dict = {}
+
+        def wrapping(url, body, token, *, timeout=10.0, encoded=None):
+            st = out_path.stat()
+            seen["size"] = st.st_size
+            seen["mode"] = stat.S_IMODE(st.st_mode)
+            seen["data"] = out_path.read_bytes()
+            return poster(url, body, token)
+
+        monkeypatch.setattr(mesh, "_post_json", wrapping)
+        rc = mesh.run_mesh([
+            "mint", "cell",
+            "--out", str(out_path),
+            "--gateway", "http://127.0.0.1:9",
+            "--token-file", str(token_file),
+        ])
+        captured = capsys.readouterr()
+        assert not out_path.exists()
+        assert seen["size"] == 0 and seen["data"] == b"" and seen["mode"] == 0o600
+        assert "operator-credential" not in captured.out + captured.err
+        return rc, captured.out, captured.err, seen
+
+    def explode(url, body, token):
+        raise RuntimeError("boom")
+
+    rc, _out, err, _seen = _run("explode.token", explode)
+    assert rc != 0
+    assert "gateway register request failed" in err
+
+    def http_500(url, body, token):
+        return 500, {"detail": "leaked peer_token=abcsecret"}
+
+    rc, _out, err, _seen = _run("http.token", http_500)
+    assert rc != 0
+    assert "gateway 500" in err
+    assert "abcsecret" not in err
+    assert "gateway error" in err
+
+    def no_token(url, body, token):
+        return 200, {"token_status": "minted", "peer_token": None, "name": "cell"}
+
+    rc, _out, err, _seen = _run("empty.token", no_token)
+    assert rc != 0
+    assert "minted no token" in err
+
+    def existing_with_secret(url, body, token):
+        return 200, {
+            "token_status": "existing",
+            "peer_token": "should-not-leak",
+            "name": "cell",
+        }
+
+    rc, _out, err, _seen = _run("existing.token", existing_with_secret)
+    assert rc != 0
+    assert "should-not-leak" not in err
+    assert "DELETE /peers/cell" in err
+
+
+def test_network_error_unlinks_empty_file(monkeypatch, tmp_path, capsys):
+    from swarph_cli.commands import mesh
+
+    out_path = tmp_path / "net.token"
+    token_file = _operator_token(tmp_path)
+    seen: dict = {}
+    real_post = mesh._post_json
+
+    def wrapping(url, body, token, *, timeout=10.0, encoded=None):
+        st = out_path.stat()
+        seen["size"] = st.st_size
+        seen["mode"] = stat.S_IMODE(st.st_mode)
+        seen["data"] = out_path.read_bytes()
+        return real_post(url, body, token, timeout=1.0, encoded=encoded)
+
+    monkeypatch.setattr(mesh, "_post_json", wrapping)
+    rc = mesh.run_mesh([
+        "mint", "cell",
+        "--out", str(out_path),
+        "--gateway", "http://127.0.0.1:1",
+        "--token-file", str(token_file),
+    ])
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert seen["size"] == 0 and seen["data"] == b"" and seen["mode"] == 0o600
+    assert not out_path.exists()
+    assert "operator-credential" not in err
+
+
+def test_missing_credential_creates_no_file_and_does_not_post(monkeypatch, tmp_path, capsys):
+    from swarph_cli.commands import mesh
+
+    posted: list = []
+
+    def boom(*args, **kwargs):
+        posted.append(args)
+        raise AssertionError("register POST must not run without a credential")
+
+    monkeypatch.setattr(mesh, "_post_json", boom)
+    out_path = tmp_path / "no-cred.token"
+    rc = mesh.run_mesh([
+        "mint", "cell",
+        "--out", str(out_path),
+        "--gateway", "http://127.0.0.1:9",
+    ])
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert posted == []
+    assert not out_path.exists()
+    assert "no operator credential" in err
