@@ -73,6 +73,7 @@ swarph subscribe <sub>   targeted event subscriptions — add/list/cancel (add: 
 swarph proxy serve      serve the per-cell credential-isolating local proxy (operator setup required)
 swarph proxy call       call a closed proxy verb through the local Unix socket, never with a token
 swarph mesh peers --json allowlisted peer JSON (projected rows only; never the raw /peers row)
+swarph mesh mint <name> --out FILE   operator: mint a cell's peer token into a new 0600 file (never printed)
 swarph cell selfcheck --json   allowlisted selfcheck JSON rows (verdicts only, no paths/tokens)
 swarph cell probe --json       allowlisted probe JSON rows (verdicts only, no paths/tokens)
 swarph lane <sub>        $0-lane orchestration — list/create/scale/delete/enqueue
@@ -449,7 +450,7 @@ Useful flags:
 | `--no-banner` | Suppress the swarph banner on stderr |
 | `-- <claude-args>` | Pass remaining args through to claude unchanged |
 
-**A cell that runs as its own Linux user (#1573).** Set `os_user: <user>` in its cell.yaml. When you are a different user, `swarph spawn <role>` attaches with `sudo -iu <user> tmux attach -t <session>`, starting the cell as that user first if it is not running; it never starts it as you, and sudo may ask for your password. Releases before 0.78.0 ignore `os_user`, so install 0.78.0 first. Not available on Windows.
+**A cell that runs as its own Linux user (#1573).** Set `os_user: <user>` in its cell.yaml. When you are a different user, `swarph spawn <role>` attaches with `sudo -iu <user> tmux attach -t <session>`, starting the cell as that user first if it is not running; it never starts it as you, and sudo may ask for your password. Releases before 0.78 ignore `os_user`, so install 0.78 or later first. Not available on Windows.
 
 cell.yaml schema is **frozen at `schema_version: "v1"`**. v0.7 migrates the parser to `swarph-shared` as a symbol-relocation only — v0.6 cell.yaml files keep working unchanged. Breaking changes require a `schema_version: "v2"` bump and parallel-supported-version window per `swarph-mesh` DEPRECATIONS discipline.
 
@@ -739,6 +740,13 @@ $ SWARPH_WITNESS=alice swarph ratify newpeer \
 [4/6] PATCH .../peers/newpeer                ok
 [5/6] verify peer_ratifications audit row       ok (id=N reason='...')
 [6/6] invalidate local TTL cache                ok
+```
+
+On an established mesh, an operator running `swarph onboard <name>` registers the row but defers the mint (#564). The operator then mints the once-only token with the operator credential and hands the file to the cell out of band; the cell keeps it as `~/.config/swarph/<name>.peer_token`, mode 600:
+
+```bash
+$ swarph mesh mint newpeer --token-file <operator-token> --out ./newpeer.peer_token
+swarph mesh mint: newpeer.peer_token key_generation=<n>
 ```
 
 Server-side gating (mesh-gateway PR A): unratified peers can read inbox + send DMs (so the handshake itself works) but `task_claim` returns 403. Witness must itself be ratified — no self-ratification, no unratified-witnesses-ratifying-others. Audit log (`peer_ratifications`) is append-only.
