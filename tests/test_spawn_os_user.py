@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -806,3 +807,173 @@ def test_two_yamls_that_name_each_other_refuse_the_second_handoff(monkeypatch, t
     assert HANDOFF in spawns[0]
     assert execs == []
     assert "second" in captured.err
+
+
+def _real_bin_path(monkeypatch, tmp_path, *names):
+    """Put real executables on PATH and leave shutil.which unpatched."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in names:
+        path = bindir / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    assert spawn.shutil.which is shutil.which
+    return bindir
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX which resolution")
+@pytest.mark.parametrize("flag", ["--dry-run", "--print-resolved"])
+def test_os_user_forwards_spawn_flags_without_spawning(flag, monkeypatch, tmp_path, capsys):
+    """--new-instance, --no-starter, and passthrough survive onto the sudo argv.
+
+    shutil.which is the real one. The printed sudo path is that result.
+    """
+    _real_bin_path(monkeypatch, tmp_path, "sudo", "tmux")
+    _write_cell("opencode", role="opencode", os_user=OS_USER, tmux_session="opencode")
+    _install_ids(monkeypatch, CALLER_UID, {CALLER: CALLER_UID, OS_USER: OS_USER_UID})
+    calls = []
+
+    def _run(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError(f"capture flag spawned: {args!r}")
+
+    monkeypatch.setattr(spawn.subprocess, "run", _run)
+    monkeypatch.setattr(spawn.os, "execve", _run)
+    monkeypatch.setattr(spawn.os, "execv", _run)
+
+    rc = run_spawn([
+        "opencode", flag, "--new-instance", "--no-starter", "--no-banner",
+        "--", "--resume",
+    ])
+    captured = capsys.readouterr()
+    assert rc == 0, captured.err
+    assert calls == []
+    sudo = shutil.which("sudo")
+    tmux = shutil.which("tmux")
+    assert sudo and Path(sudo).is_absolute() and Path(sudo).name == "sudo"
+    assert tmux and Path(tmux).is_absolute()
+    start, attach = captured.out.splitlines()
+    assert start == (
+        f"{sudo} -iu {OS_USER} swarph spawn opencode "
+        f"--new-instance --no-starter {HANDOFF} -- --resume"
+    )
+    assert attach == f"{sudo} -iu {OS_USER} {tmux} attach -t opencode"
+    assert start.split()[0] != "sudo"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX which resolution")
+def test_handoff_inner_does_not_attach_and_outer_attaches_once(monkeypatch, tmp_path):
+    """A tty with no session starts detached. Only the outer sudo attach runs.
+
+    Real shutil.which. The recorded exec path is that absolute sudo, not the
+    bare name.
+    """
+    _real_bin_path(monkeypatch, tmp_path, "sudo", "tmux", "opencode")
+    _write_cell("opencode", role="opencode", os_user=OS_USER, tmux_session="opencode")
+    euid = {"v": CALLER_UID}
+    users = {CALLER: CALLER_UID, OS_USER: OS_USER_UID}
+
+    class _Pw:
+        def __init__(self, name, uid):
+            self.pw_name = name
+            self.pw_uid = uid
+
+    def getpwnam(name):
+        try:
+            uid = users[name]
+        except KeyError:
+            raise KeyError(name) from None
+        return _Pw(name, uid)
+
+    monkeypatch.setattr(spawn.os, "geteuid", lambda: euid["v"], raising=False)
+    pwd_mod = getattr(spawn, "pwd", None)
+    if pwd_mod is None:
+        monkeypatch.setattr(
+            spawn, "pwd", types.SimpleNamespace(getpwnam=getpwnam), raising=False,
+        )
+    else:
+        monkeypatch.setattr(pwd_mod, "getpwnam", getpwnam)
+    monkeypatch.setattr(spawn.sys, "platform", "linux")
+    monkeypatch.setattr(spawn.sys, "stdout", _TTY())
+    monkeypatch.setattr(spawn.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setenv("LOGNAME", OS_USER)
+    monkeypatch.setenv("USER", OS_USER)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", TOKEN)
+
+    sudo = shutil.which("sudo")
+    tmux = shutil.which("tmux")
+    assert Path(sudo).is_absolute() and sudo != "sudo"
+    created = []
+    attaches = []
+
+    def _run(cmd, **kwargs):
+        argv = [str(part) for part in cmd]
+        base = Path(argv[0]).name
+        if base == "sudo" and "has-session" in argv:
+            assert Path(argv[0]).resolve() == Path(sudo).resolve()
+            _assert_minimal_env(kwargs.get("env"))
+            return spawn.subprocess.CompletedProcess(argv, 1, "", "")
+        if base == "sudo" and "spawn" in argv:
+            assert Path(argv[0]).resolve() == Path(sudo).resolve()
+            assert argv[0] != "sudo"
+            _assert_minimal_env(kwargs.get("env"))
+            euid["v"] = OS_USER_UID
+            inner = argv[argv.index("spawn") + 1:]
+            try:
+                rc = run_spawn(inner)
+            except _ExecReplaced:
+                rc = 0
+            return spawn.subprocess.CompletedProcess(argv, rc, "", "")
+        if base == "tmux" and "new-session" in argv:
+            created.append(argv)
+            return spawn.subprocess.CompletedProcess(argv, 0, "", "")
+        if base == "tmux" and "has-session" in argv:
+            code = 0 if created else 1
+            return spawn.subprocess.CompletedProcess(argv, code, "", "")
+        if base == "tmux" and "kill-session" in argv:
+            return spawn.subprocess.CompletedProcess(argv, 0, "", "")
+        if "attach" in argv:
+            attaches.append(("run", argv))
+            return spawn.subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(argv)
+
+    def _execv(file, argv):
+        attaches.append(("execv", file, list(argv)))
+        raise _ExecReplaced
+
+    def _execve(file, argv, env):
+        attaches.append(("execve", file, list(argv), env))
+        raise _ExecReplaced
+
+    monkeypatch.setattr(spawn.subprocess, "run", _run)
+    monkeypatch.setattr(spawn.os, "execv", _execv)
+    monkeypatch.setattr(spawn.os, "execve", _execve)
+
+    with pytest.raises(_ExecReplaced):
+        run_spawn([
+            "opencode", "--new-instance", "--no-starter", "--no-banner",
+            "--", "--resume",
+        ])
+
+    execvs = [item for item in attaches if item[0] == "execv"]
+    execves = [item for item in attaches if item[0] == "execve"]
+    assert execvs == []
+    assert [item[0] for item in attaches if item[0] == "run"] == []
+    assert len(execves) == 1
+    _kind, _file, argv, env = execves[0]
+    assert Path(argv[0]).is_absolute()
+    assert Path(argv[0]).resolve() == Path(sudo).resolve()
+    assert argv[0] != "sudo"
+    assert argv[3] == tmux
+    assert "attach" in argv
+    _assert_minimal_env(env)
+    assert len(created) == 1
+    pane = created[0]
+    assert Path(pane[0]).resolve() == Path(tmux).resolve()
+    assert "--new-instance" in pane
+    assert "--no-starter" in pane
+    assert "--resume" in pane
+    assert HANDOFF not in pane
+    spawn_at = pane.index("spawn")
+    assert pane[spawn_at + 1] == "opencode"
