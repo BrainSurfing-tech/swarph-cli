@@ -24,9 +24,12 @@ for users (alpha #891 D2).
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1372,6 +1375,177 @@ def _tmux_has_session(tmux: str, name: str) -> bool:
     except OSError:
         return False
     return result.returncode == 0
+
+
+# A Linux username is one argv element: letter or underscore, then letters,
+# digits, underscore, or hyphen, optional trailing `$`, at most 32 characters.
+# Empty is not a username (the caller treats it as unset). Whitespace, a
+# slash, a leading dash, or anything shlex would split is rejected so the
+# value can never become a second sudo argument.
+_OS_USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,31}\$?$")
+
+
+def _os_user_reject_reason(raw: object) -> Optional[str]:
+    """Why ``raw`` cannot cross sudo as one username, or None if it can.
+
+    ``""`` is not rejected here; the caller treats it as unset.
+    """
+    if not isinstance(raw, str):
+        return "not a string"
+    if any(ch.isspace() for ch in raw):
+        return "whitespace"
+    if "/" in raw:
+        return "slash"
+    if raw.startswith("-"):
+        return "leading dash"
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        return "not a single argv token"
+    if parts != [raw]:
+        return "would add an argv element"
+    if _OS_USER_RE.fullmatch(raw) is None:
+        return "not a username"
+    return None
+
+
+def _foreign_os_user(cell: Cell) -> Optional[str]:
+    """Linux user to reach via ``sudo -iu``, or None to stay on today's path.
+
+    Absent, empty, or equal to :func:`getpass.getuser` is today's path: the
+    caller already is that user, and sudo-ing would loop. Anything that is
+    not one username token raises :class:`CellError` — the spawn fails rather
+    than starting the cell as the caller.
+    """
+    extra = getattr(cell, "extra", None)
+    if not isinstance(extra, dict) or "os_user" not in extra:
+        return None
+    raw = extra.get("os_user")
+    if raw is None or raw == "":
+        return None
+    reason = _os_user_reject_reason(raw)
+    if reason is not None:
+        raise CellError(
+            f"os_user is not a single Linux username token ({reason})"
+        )
+    try:
+        caller = getpass.getuser()
+    except OSError:
+        caller = ""
+    if raw == caller:
+        return None
+    return raw
+
+
+def _single_sudo_token(value: object, what: str) -> str:
+    """One argv element safe to place after ``sudo -iu``. Not a shell string."""
+    if not isinstance(value, str) or value == "":
+        raise CellError(f"{what} is empty; refusing to pass it across sudo")
+    if any(ch.isspace() for ch in value) or value.startswith("-") or "/" in value:
+        raise CellError(
+            f"{what} is not a single token; refusing to pass it across sudo"
+        )
+    try:
+        parts = shlex.split(value)
+    except ValueError as exc:
+        raise CellError(
+            f"{what} is not a single token; refusing to pass it across sudo"
+        ) from exc
+    if parts != [value]:
+        raise CellError(
+            f"{what} is not a single token; refusing to pass it across sudo"
+        )
+    return value
+
+
+def _os_user_session_name(cell: Cell, requested_role: Optional[str]) -> str:
+    """Session on the target user's tmux server.
+
+    ``cell.tmux_session`` when set, otherwise the role being spawned. The
+    caller's tmux session name is not consulted.
+    """
+    pinned = getattr(cell, "tmux_session", None)
+    if isinstance(pinned, str) and pinned.strip():
+        return _single_sudo_token(pinned.strip(), "tmux session name")
+    role = requested_role or getattr(cell, "role", None)
+    return _single_sudo_token(role, "tmux session name")
+
+
+def _sudo_has_session_argv(os_user: str, session: str) -> list[str]:
+    # `=session` is tmux's exact-match target, one element. Not an env assignment.
+    return ["sudo", "-iu", os_user, "tmux", "has-session", "-t", f"={session}"]
+
+
+def _sudo_attach_argv(os_user: str, session: str) -> list[str]:
+    return ["sudo", "-iu", os_user, "tmux", "attach", "-t", session]
+
+
+def _sudo_start_argv(os_user: str, role: str) -> list[str]:
+    # Bare `swarph`, not a path under the caller's HOME. `sudo -i` resolves
+    # it on the target user's PATH, and the cell yaml under that user's HOME.
+    return ["sudo", "-iu", os_user, "swarph", "spawn", role]
+
+
+def _target_user_has_tmux_session(os_user: str, session: str) -> bool:
+    """Ask that user's tmux server, never the caller's, and never ``sudo -n``.
+
+    A launch error is "no session": the caller then starts the cell as
+    ``os_user``. It does not fall through to creating one as itself.
+    """
+    try:
+        result = subprocess.run(
+            _sudo_has_session_argv(os_user, session),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def _spawn_as_os_user(
+    os_user: str,
+    role: str,
+    session: str,
+    *,
+    dry_run: bool,
+) -> int:
+    """Attach to ``os_user``'s tmux session, starting the cell as that user first.
+
+    The exec argv is exactly ``sudo -iu <os_user> tmux attach -t <session>``.
+    No env dict, no token, no caller HOME, no ``-n``. When the session is
+    absent the cell is started with ``sudo -iu <os_user> swarph spawn <role>``
+    so the yaml resolves under that user's HOME, then the same attach runs.
+    This function always returns or execs; it never starts the cell as the caller.
+    """
+    role = _single_sudo_token(role, "role")
+    session = _single_sudo_token(session, "tmux session name")
+    present = _target_user_has_tmux_session(os_user, session)
+    attach = _sudo_attach_argv(os_user, session)
+    start = _sudo_start_argv(os_user, role)
+    if dry_run:
+        if not present:
+            print(shlex.join(start))
+        print(shlex.join(attach))
+        return 0
+    if not present:
+        try:
+            started = subprocess.run(start)
+        except OSError as exc:
+            print(
+                f"swarph spawn: could not start the cell as {os_user}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        if started.returncode != 0:
+            return int(started.returncode)
+    try:
+        # os.execv, not execve: there is no env dict to carry a token or HOME.
+        os.execv(attach[0], attach)
+    except OSError as exc:
+        print(f"swarph spawn: sudo attach failed ({exc})", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _swarph_reentry_binary() -> str:
@@ -3435,6 +3609,35 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
     except CellError as exc:
         print(f"swarph spawn: {exc}", file=sys.stderr)
         return 1
+
+    # os_user is an untyped cell.yaml key (Cell.extra). Absent, empty, or
+    # equal to the caller: fall through to today's path, byte-identical.
+    # Set and different: the cell's tmux server belongs to that uid. Hand
+    # off with sudo -iu BEFORE session minting or membrane launch, so this
+    # process never creates the session on the caller's tmux. The inner
+    # `swarph spawn` runs as os_user, sees os_user == getuser(), and takes
+    # today's path — no sudo loop.
+    try:
+        foreign_user = _foreign_os_user(cell)
+    except CellError as exc:
+        print(f"swarph spawn: {exc}", file=sys.stderr)
+        return 1
+    if foreign_user is not None:
+        try:
+            role = _single_sudo_token(
+                requested_role or cell.role, "role"
+            )
+            session = _os_user_session_name(cell, requested_role)
+        except CellError as exc:
+            print(f"swarph spawn: {exc}", file=sys.stderr)
+            return 1
+        return _spawn_as_os_user(
+            foreign_user,
+            role,
+            session,
+            # --print-resolved is also a no-exec capture. Do not sudo-exec it.
+            dry_run=bool(args.dry_run or args.print_resolved),
+        )
 
     membrane = MEMBRANES.get(cell.provider)
     if membrane is None:
