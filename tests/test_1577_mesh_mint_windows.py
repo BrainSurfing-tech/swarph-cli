@@ -30,7 +30,10 @@ def test_mesh_mint_refuses_native_windows_before_register(monkeypatch, tmp_path,
         raise AssertionError("os.fchmod must not be called on native Windows")
 
     monkeypatch.setattr(mesh, "_post_json", _post)
-    monkeypatch.setattr(os, "fchmod", _fchmod)
+    # Windows Python 3.11/3.12 has no os.fchmod. raising=False installs the
+    # guard anyway, so a mint that reaches the call fails here instead of
+    # dying in setattr before the command runs.
+    monkeypatch.setattr(os, "fchmod", _fchmod, raising=False)
 
     out = tmp_path / "win-cell.peer_token"
     rc = mesh.run_mesh([
