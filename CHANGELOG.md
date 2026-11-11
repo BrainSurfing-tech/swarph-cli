@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.77.0 -- 2026-11-11
+
+- dreaming v2 (card #1570, PR #719): `swarph dreaming propose` runs one cell's corpus through an isolated, tool-less harness and saves a reviewed JSON edit list (`--token-cap` is a soft budget estimated as UTF-8 bytes / 4; `--questions` pins a frozen recall set). `swarph dreaming apply` writes that list live with a whole-corpus backup, per-file sha guards and a corpus lock, and refuses when memory was written inside `--idle-minutes` (default 15). `swarph dreaming restore --backup` returns a backup, and `recall-score` scores the frozen set before and after. Edits to an index file or to a note typed feedback or user (filename prefix or frontmatter `metadata.type`) are held as propose-only unless `--allow-owner-notes`. `run` still never writes live. Templates are not installed and nothing is scheduled.
+- committee (card #1571, PR #720): `swarph committee rooms show <channel>` prints the room charter verbatim, as bytes so Windows does not rewrite line endings, for a live seat or the chair; `--json` prints the gateway payload with the live seats. A refusal exits non-zero and prints no charter. Needs a gateway with `GET /committee/rooms/{channel}` (mesh-gateway PR 325).
+- gh-route (card #1555, PR #716): one bash-aware tokenizer is shared by `targets_gh`, `already_explicit` and the token stripper; heredoc bodies, write-then-run heredocs, nested ANSI-C quotes and comments are parsed, and an unclosed heredoc gets its own deny reason.
+
 ## 0.76.0 -- 2026-11-10
 
 - board usage readings (card #1519, PR #700): `swarph board obligations take/close --usage lane:unit=value[@resets]` records a lane reading (units `window_pct`, `weekly_pct`, `monthly_pct`, `usd`), and the new `swarph board usage [--lane] [--days] [--json]` lists them from the gateway's `GET /board/usage`.
