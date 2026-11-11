@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import sys
 import types
@@ -523,9 +524,11 @@ def test_capture_flags_print_commands_and_spawn_nothing(
     rc = run_spawn([role, flag, "--no-banner"])
     captured = capsys.readouterr()
     assert rc == 0, captured.err
-    start = f"{SUDO} -iu {OS_USER} swarph spawn {role} {HANDOFF}"
-    attach = f"{SUDO} -iu {OS_USER} {TMUX} attach -t {role}"
-    assert captured.out.splitlines() == [start, attach]
+    # shlex.join quotes a Windows path that contains a backslash. That quoted
+    # line is the command the operator would run; compare argv, not a raw join.
+    start = [SUDO, "-iu", OS_USER, "swarph", "spawn", role, HANDOFF]
+    attach = [SUDO, "-iu", OS_USER, TMUX, "attach", "-t", role]
+    assert [shlex.split(line) for line in captured.out.splitlines()] == [start, attach]
     assert calls == []
     assert seen == []
     assert TOKEN not in captured.out
@@ -746,8 +749,26 @@ def test_two_yamls_that_name_each_other_refuse_the_second_handoff(monkeypatch, t
         }
         (cells / "opencode.yaml").write_text(yaml.safe_dump(payload), encoding="utf-8")
 
+    if not hasattr(os, "geteuid"):
+        # Windows has no geteuid. Do not install one. The hand-off refuses.
+        monkeypatch.setenv("HOME", str(alice_home))
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        calls = []
+
+        def _run(*args, **kwargs):
+            calls.append(args)
+            return spawn.subprocess.CompletedProcess([], 0, "", "")
+
+        monkeypatch.setattr(spawn.subprocess, "run", _run)
+        rc = run_spawn(["opencode", "--no-banner"])
+        captured = capsys.readouterr()
+        assert rc != 0
+        assert calls == []
+        assert "POSIX" in captured.err
+        return
+
     euid = {"v": 10}
-    monkeypatch.setattr(spawn.os, "geteuid", lambda: euid["v"])
+    monkeypatch.setattr(spawn.os, "geteuid", lambda: euid["v"], raising=False)
 
     class _Pw:
         def __init__(self, name, uid):
