@@ -60,7 +60,7 @@ This is one of three repos in the v0.3.x architecture:
 swarph "prompt"          one-shot against any provider (claude/openai/gemini/deepseek/grok)
 swarph chat              interactive REPL — multi-turn, slash commands, live provider switch
 swarph brain-ask "<q>"   search the swarph-brain (gbrain) memory — $0 cited answer or raw chunks
-swarph dreaming run ...  between-sessions memory verify/organize/enrich (clone only; never default)
+swarph dreaming <sub>    between-sessions memory: run (clone only), propose/apply/restore (reviewed edits written live with a backup), recall-score
 swarph codegraph "<q>"   structural code search — find where a symbol is defined / what calls it
 swarph brain serve       run the gbrain HTTP brain server (the $0 semantic memory)
 swarph gateway serve     run the bundled mesh-gateway server (the mesh's coordination/DM hub)
@@ -68,7 +68,7 @@ swarph service serve     stand up a $0 subscription-LLM HTTP lane (claude/codex/
 swarph channel <sub>     mesh channels — create/join/leave/list/members/post/read
 swarph schedule <sub>    scheduled events — create/list/get/enable/disable/delete/fire-now
 swarph board <sub>       mesh board — projects/cards kanban (list/show/add/move/link/assign)
-swarph committee <sub>   committee rooms — motion/post/results; `results <channel> [--motion ID] --json` prints gateway JSON verbatim (--json also on rooms open/motion/post)
+swarph committee <sub>   committee rooms — motion/post/results; `rooms show <channel>` prints the charter verbatim; `results <channel> [--motion ID] --json` prints gateway JSON verbatim (--json also on rooms open/show/motion/post)
 swarph subscribe <sub>   targeted event subscriptions — add/list/cancel (add: --trigger/--target; each verb --as/--json)
 swarph proxy serve      serve the per-cell credential-isolating local proxy (operator setup required)
 swarph proxy call       call a closed proxy verb through the local Unix socket, never with a token
@@ -260,7 +260,15 @@ Same token model as `swarph brain-ask` (`GBRAIN_MCP_URL`/`SWARPH_BRAIN_MCP` endp
 
 ### `swarph dreaming` (#684)
 
-Between-sessions memory pass: **VERIFY · ORGANIZE · ENRICH** against a **CLONE** of your corpus. The live store is never written. Nothing is scheduled by install — the verb exists; enabling it is your deliberate act (and your wrapper must propagate the exit code).
+Between-sessions memory pass: **VERIFY · ORGANIZE · ENRICH** against a **CLONE** of your corpus. `run` never writes the live store. Nothing is scheduled by install — the verb exists; enabling it is your deliberate act (and your wrapper must propagate the exit code).
+
+**v2 (#1570): reviewed edits, applied on an explicit call.** `propose` sends one cell's corpus through an isolated, tool-less harness and saves a JSON edit list; `apply` writes it live with a whole-corpus backup, per-file sha guards and a corpus lock, and refuses if memory was written inside `--idle-minutes` (default 15); `restore --backup <dir>` puts a backup back; `recall-score` scores a frozen question set before and after. Edits to an index file or an owner note (typed feedback or user, by filename prefix or frontmatter `metadata.type`) stay propose-only unless you pass `--allow-owner-notes`.
+
+```
+$ swarph dreaming propose --corpus <dir> --cell <cell> --harness <h> --model <m>
+$ swarph dreaming apply --corpus <dir> --cell <cell> --proposal <dir>
+$ swarph dreaming restore --corpus <dir> --cell <cell> --backup <dir>
+```
 
 ```
 $ swarph dreaming run --corpus ~/.claude/projects/.../memory --out /tmp/dreaming-out
