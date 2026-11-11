@@ -7,7 +7,9 @@ through the GET list route, never scanned.
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 
 import pytest
 
@@ -332,6 +334,59 @@ def _room_payload():
             {"peer": "c1220-base", "role": "baseline", "family": "gemini"},
         ],
     }
+
+
+class _LfRewritingStdout:
+    """Text writes rewrite LF to CRLF, the way a Windows console does.
+
+    ``buffer.write`` records the bytes unchanged. A rooms-show path that
+    still calls ``sys.stdout.write`` therefore cannot match the stored
+    charter.
+    """
+
+    def __init__(self):
+        self.raw = io.BytesIO()
+        self.buffer = _RawBuffer(self.raw)
+        self.encoding = "utf-8"
+
+    def write(self, text):
+        if not isinstance(text, str):
+            raise TypeError("text-mode write expects str")
+        self.raw.write(text.replace("\n", "\r\n").encode("utf-8"))
+        return len(text)
+
+    def flush(self):
+        return None
+
+
+class _RawBuffer:
+    def __init__(self, raw):
+        self._raw = raw
+
+    def write(self, data):
+        if isinstance(data, str):
+            raise TypeError("buffer write expects bytes")
+        return self._raw.write(data)
+
+    def flush(self):
+        return None
+
+
+def test_rooms_show_writes_the_stored_charter_bytes(monkeypatch):
+    stored = "café comité\ndeuxième ligne — exact  \n"
+    payload = _room_payload()
+    payload["charter"] = stored
+    seen = _spy(monkeypatch, "get_json", payload=payload)
+    out = _LfRewritingStdout()
+    monkeypatch.setattr(sys, "stdout", out)
+    rc = cm.run_committee([
+        "rooms", "show", "fractal-dreaming", "--gateway", _FAKE_GATEWAY])
+    assert rc == 0
+    assert seen["url"] == f"{_FAKE_GATEWAY}/committee/rooms/fractal-dreaming"
+    written = out.raw.getvalue()
+    assert written == stored.encode("utf-8")
+    assert b"\r\n" not in written
+    assert written != stored.replace("\n", "\r\n").encode("utf-8")
 
 
 def test_rooms_show_prints_the_charter_verbatim(monkeypatch, capsys):

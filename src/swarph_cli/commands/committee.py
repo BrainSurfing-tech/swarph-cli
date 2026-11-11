@@ -5,9 +5,10 @@ the room via ``motion <channel>`` (a GET list, added in the card-#1323 gateway
 PR) so a harness that blocks raw HTTP can still ballot. Chair-only verbs:
 ``rooms open``, ``motion <channel> --open``, ``recast``, ``baseline-absent``.
 A live seat or the chair reads the room with ``rooms show <channel>``.
-Without ``--json`` that command prints ``committee_rooms.charter`` verbatim
-and nothing else. ``rooms show <channel> --json`` prints the gateway JSON,
-including the charter and the live seats.
+Without ``--json`` that command writes ``committee_rooms.charter`` as UTF-8
+bytes and nothing else, so LF is not rewritten to CRLF. ``rooms show
+<channel> --json`` prints the gateway JSON, including the charter and the
+live seats.
 Uses the shared token resolver and NEVER prints the token.
 
 Card #1516 adds ``results <channel> [--motion ID] --json`` and ``--json`` on
@@ -265,7 +266,8 @@ def _run_results(args: argparse.Namespace) -> int:
 def _run_rooms_show(args: argparse.Namespace) -> int:
     """Print the room charter verbatim, or the gateway JSON with --json.
 
-    The plain path writes ``charter`` and nothing else. ``--json`` writes the
+    The plain path writes ``charter`` as UTF-8 bytes and nothing else, so a
+    Windows text-mode stdout cannot rewrite LF to CRLF. ``--json`` writes the
     gateway payload, which carries the charter and the live seats.
     """
     _, token = _auth(args)
@@ -282,7 +284,8 @@ def _run_rooms_show(args: argparse.Namespace) -> int:
         print("swarph committee rooms show: gateway response has no charter",
               file=sys.stderr)
         return 1
-    sys.stdout.write(charter)
+    sys.stdout.buffer.write(charter.encode("utf-8"))
+    sys.stdout.buffer.flush()
     return 0
 
 
