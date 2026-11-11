@@ -89,86 +89,109 @@ def _install_test_whoami(server) -> None:
         return {"peer": auth.peer, "key_generation": auth.key_generation}
 
 
+def _logger_snapshot(names: tuple[str, ...]) -> list[tuple[logging.Logger, int, bool]]:
+    snap = []
+    for name in names:
+        logger = logging.getLogger(name)
+        snap.append((logger, logger.level, logger.disabled))
+    return snap
+
+
+def _logger_restore(snap: list[tuple[logging.Logger, int, bool]]) -> None:
+    for logger, level, disabled in snap:
+        logger.setLevel(level)
+        logger.disabled = disabled
+
+
 @pytest.fixture
 def scratch_gateway(monkeypatch, tmp_path):
     import uvicorn
 
-    for name in ("mesh-gateway", "uvicorn", "uvicorn.error", "uvicorn.access"):
+    # Quiet uvicorn only. The mesh-gateway logger must stay as the suite
+    # found it: test_non_utf8_key_file_warns_and_disables_not_escapes captures
+    # a WARNING on that logger, and caplog.at_level() moves the root logger,
+    # not this one. A leftover CRITICAL level drops the line before capture.
+    quiet = ("uvicorn", "uvicorn.error", "uvicorn.access")
+    log_snap = _logger_snapshot(("mesh-gateway",) + quiet)
+    for name in quiet:
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
-    db_path = tmp_path / "gw" / "mesh.db"
-    server = _load_server(monkeypatch, db_path)
-    _install_test_whoami(server)
-    posts: list[dict] = []
-    _CaptureRegister.posts = posts
-    server.app.add_middleware(_CaptureRegister)
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", 0))
-    sock.listen(128)
-    port = sock.getsockname()[1]
-    config = uvicorn.Config(
-        server.app,
-        host="127.0.0.1",
-        port=port,
-        log_level="error",
-        access_log=False,
-    )
-
-    class _ThreadServer(uvicorn.Server):
-        @contextlib.contextmanager
-        def capture_signals(self):
-            yield
-
-    uv = _ThreadServer(config)
-    boom: list[BaseException] = []
-
-    def _serve() -> None:
-        try:
-            uv.run(sockets=[sock])
-        except BaseException as exc:  # noqa: BLE001 — surface startup death to the test
-            boom.append(exc)
-
-    thread = threading.Thread(target=_serve, name="mint-1577-gateway", daemon=True)
-    thread.start()
-    base = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 10
-    last_error = ""
-    while time.time() < deadline:
-        if boom:
-            break
-        try:
-            with urllib.request.urlopen(base + "/health", timeout=0.3) as resp:
-                if resp.status == 200:
-                    last_error = ""
-                    break
-        except Exception as exc:  # noqa: BLE001 — poll until the socket accepts
-            last_error = f"{type(exc).__name__}"
-        time.sleep(0.05)
-    else:
-        uv.should_exit = True
-        thread.join(timeout=3)
-        raise RuntimeError(
-            f"scratch gateway did not accept connections ({last_error or 'timeout'})"
-        )
-    if boom or last_error:
-        uv.should_exit = True
-        thread.join(timeout=3)
-        kind = type(boom[0]).__name__ if boom else last_error
-        raise RuntimeError(f"scratch gateway failed to start ({kind})")
-
-    # Never inherit a live gateway URL. The CLI is pointed at this socket.
-    monkeypatch.setenv("MESH_GATEWAY_URL", base)
+    uv = None
+    thread = None
+    sock = None
     try:
+        db_path = tmp_path / "gw" / "mesh.db"
+        server = _load_server(monkeypatch, db_path)
+        _install_test_whoami(server)
+        posts: list[dict] = []
+        _CaptureRegister.posts = posts
+        server.app.add_middleware(_CaptureRegister)
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(128)
+        port = sock.getsockname()[1]
+        config = uvicorn.Config(
+            server.app,
+            host="127.0.0.1",
+            port=port,
+            log_level="error",
+            access_log=False,
+        )
+
+        class _ThreadServer(uvicorn.Server):
+            @contextlib.contextmanager
+            def capture_signals(self):
+                yield
+
+        uv = _ThreadServer(config)
+        boom: list[BaseException] = []
+
+        def _serve() -> None:
+            try:
+                uv.run(sockets=[sock])
+            except BaseException as exc:  # noqa: BLE001 — surface startup death to the test
+                boom.append(exc)
+
+        thread = threading.Thread(target=_serve, name="mint-1577-gateway", daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{port}"
+        deadline = time.time() + 10
+        last_error = ""
+        while time.time() < deadline:
+            if boom:
+                break
+            try:
+                with urllib.request.urlopen(base + "/health", timeout=0.3) as resp:
+                    if resp.status == 200:
+                        last_error = ""
+                        break
+            except Exception as exc:  # noqa: BLE001 — poll until the socket accepts
+                last_error = f"{type(exc).__name__}"
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(
+                f"scratch gateway did not accept connections ({last_error or 'timeout'})"
+            )
+        if boom or last_error:
+            kind = type(boom[0]).__name__ if boom else last_error
+            raise RuntimeError(f"scratch gateway failed to start ({kind})")
+
+        # Never inherit a live gateway URL. The CLI is pointed at this socket.
+        monkeypatch.setenv("MESH_GATEWAY_URL", base)
         yield {"base": base, "posts": posts}
     finally:
-        uv.should_exit = True
-        thread.join(timeout=5)
-        try:
-            sock.close()
-        except OSError:
-            pass
+        if uv is not None:
+            uv.should_exit = True
+        if thread is not None:
+            thread.join(timeout=5)
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        _logger_restore(log_snap)
 
 
 def _assert_silent(text: str, secret: str) -> None:
