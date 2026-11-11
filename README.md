@@ -450,7 +450,7 @@ Useful flags:
 | `--no-banner` | Suppress the swarph banner on stderr |
 | `-- <claude-args>` | Pass remaining args through to claude unchanged |
 
-**A cell that runs as its own Linux user (#1573).** Set `os_user: <user>` in its cell.yaml. When you are a different user, `swarph spawn <role>` attaches with `sudo -iu <user> tmux attach -t <session>`, starting the cell as that user first if it is not running; it never starts it as you, and sudo may ask for your password. Releases before 0.78.0 ignore `os_user`, so install 0.78.0 first. Not available on Windows.
+**A cell that runs as its own Linux user (#1573).** Set `os_user: <user>` in its cell.yaml. When you are a different user, `swarph spawn <role>` attaches with `sudo -iu <user> tmux attach -t <session>`, starting the cell as that user first if it is not running; it never starts it as you, and sudo may ask for your password. Releases before 0.78 ignore `os_user`, so install 0.78 or later first. Not available on Windows.
 
 cell.yaml schema is **frozen at `schema_version: "v1"`**. v0.7 migrates the parser to `swarph-shared` as a symbol-relocation only — v0.6 cell.yaml files keep working unchanged. Breaking changes require a `schema_version: "v2"` bump and parallel-supported-version window per `swarph-mesh` DEPRECATIONS discipline.
 
