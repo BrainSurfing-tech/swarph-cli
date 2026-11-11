@@ -1,17 +1,21 @@
 """spawn honours cell.yaml ``os_user`` without changing today's argv.
 
 Card #1573. ``os_user`` is an untyped key (``Cell.extra``). Absent, empty, or
-equal to ``getpass.getuser()`` keeps the caller path: the provider argv and
-the POSIX tmux attach/create argv stay what main builds for every membrane.
-A different user is reached with ``sudo -iu`` against THAT user's tmux server.
-The cell is never started as the caller, and the sudo argv carries no token,
-no env assignment, no caller HOME, and never ``-n``.
+the same uid as the caller keeps today's path: the provider argv and the
+POSIX tmux attach/create argv stay what main builds for every membrane.
+A different uid is reached with an absolute ``sudo -iu`` against THAT user's
+tmux server. The env passed to sudo is PATH, TERM, and LANG only. A second
+hand-off is refused. ``--dry-run`` and ``--print-resolved`` spawn nothing.
 
-subprocess and os.execv are mocked. These tests do not run sudo.
+Identity tests do not mock getpass. The planted-sudo test does not point
+shutil.which at the cwd copy. These tests do not run sudo.
 """
 from __future__ import annotations
 
+import os
 import re
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -22,10 +26,16 @@ from swarph_cli.commands import spawn
 from swarph_cli.commands.spawn import run_spawn
 
 FIXED_SESSION = "11111111-1111-4111-8111-111111111111"
-TMUX = "/usr/bin/tmux"
+# Absolute on Linux and Windows. which() is mocked to these in the matrix;
+# the planted-sudo test uses the real shutil.which and must not.
+SUDO = os.path.join(os.path.abspath(os.sep), "usr", "bin", "sudo")
+TMUX = os.path.join(os.path.abspath(os.sep), "usr", "bin", "tmux")
+HANDOFF = "--os-user-handoff"
 TOKEN = "TOKEN_SENTINEL_VALUE"
 CALLER = "ubuntu"
 OS_USER = "cell-opencode"
+CALLER_UID = 1000
+OS_USER_UID = 991
 
 _OMIT = object()
 
@@ -120,10 +130,48 @@ def _pin_session_mint(monkeypatch):
     )
 
 
-def _which(name):
+def _which(name, path=None):
+    if name == "sudo":
+        return SUDO
     if name == "tmux":
         return TMUX
-    return f"/usr/bin/{name}"
+    return os.path.join(os.path.abspath(os.sep), "usr", "bin", name)
+
+
+def _sudo_argv(argv):
+    return bool(argv) and Path(argv[0]).name in {"sudo", "sudo.exe"}
+
+
+def _install_ids(monkeypatch, euid, users):
+    """Caller is os.geteuid(); os_user is pwd.getpwnam. getpass is not touched."""
+
+    class _Pw:
+        def __init__(self, name, uid):
+            self.pw_name = name
+            self.pw_uid = uid
+
+    def getpwnam(name):
+        try:
+            uid = users[name]
+        except KeyError:
+            raise KeyError(name) from None
+        return _Pw(name, uid)
+
+    monkeypatch.setattr(spawn.os, "geteuid", lambda: euid, raising=False)
+    pwd_mod = getattr(spawn, "pwd", None)
+    if pwd_mod is None:
+        monkeypatch.setattr(
+            spawn, "pwd", types.SimpleNamespace(getpwnam=getpwnam), raising=False,
+        )
+    else:
+        monkeypatch.setattr(pwd_mod, "getpwnam", getpwnam)
+
+
+def _ids_for_variant(monkeypatch, variant):
+    if variant == "inner":
+        _install_ids(monkeypatch, OS_USER_UID, {CALLER: CALLER_UID, OS_USER: OS_USER_UID})
+    else:
+        _install_ids(monkeypatch, CALLER_UID, {CALLER: CALLER_UID, OS_USER: OS_USER_UID})
 
 
 def _arm_posix_tmux(monkeypatch, *, session_exists):
@@ -136,12 +184,11 @@ def _arm_posix_tmux(monkeypatch, *, session_exists):
     monkeypatch.setattr(spawn.sys, "stdout", _TTY())
     monkeypatch.setattr(spawn.shutil, "which", _which)
     monkeypatch.setattr(spawn.time, "sleep", lambda *_a, **_k: None)
-    monkeypatch.setattr(spawn.getpass, "getuser", lambda: CALLER)
 
     def _run(cmd, **kwargs):
         argv = [str(part) for part in cmd]
         calls.append(argv)
-        if argv and argv[0] == "sudo":
+        if _sudo_argv(argv):
             raise AssertionError(f"sudo on today's path: {argv}")
         if "has-session" in argv:
             exists = session_exists or state["created"]
@@ -167,32 +214,38 @@ def _arm_posix_tmux(monkeypatch, *, session_exists):
 
 def _assert_no_sudo(calls, execs):
     for argv in calls:
-        assert not argv or argv[0] != "sudo", argv
+        assert not _sudo_argv(argv), argv
         assert "-n" not in argv
     for file, argv in execs:
-        assert file != "sudo"
-        assert not argv or argv[0] != "sudo"
+        assert Path(str(file)).name not in {"sudo", "sudo.exe"}
+        assert not _sudo_argv(argv)
         assert "-n" not in argv
 
 
-def _arm_foreign(monkeypatch, *, present, start_rc=0, caller=CALLER):
-    """Mock sudo. Any caller-tmux or caller-exec path is a test failure.
+def _arm_foreign(monkeypatch, *, present, start_rc=0):
+    """Mock sudo. Any caller-tmux path is a test failure.
 
-    os.execv is mocked here, before the test body runs, so a missed override
-    cannot exec a real sudo.
+    os.execve is recorded here, before the test body runs, so a missed
+    override cannot exec a real sudo. os.execv is a failure: it would
+    inherit the caller environment. getpass is not mocked. LOGNAME and
+    USER are the os_user name, which is what getpass would believe.
     """
     calls = []
     seen = []
-    monkeypatch.setattr(spawn.getpass, "getuser", lambda: caller)
+    monkeypatch.setenv("LOGNAME", OS_USER)
+    monkeypatch.setenv("USER", OS_USER)
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", TOKEN)
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", TOKEN)
+    monkeypatch.setattr(spawn.shutil, "which", _which)
+    _install_ids(
+        monkeypatch, CALLER_UID, {CALLER: CALLER_UID, OS_USER: OS_USER_UID},
+    )
 
     def _no_caller(*args, **kwargs):
         raise AssertionError(f"started the cell as the caller: {args!r} {kwargs!r}")
 
     for name in ("_launch_via_tmux", "_tmux_has_session", "_tmux_create_session"):
         monkeypatch.setattr(spawn, name, _no_caller)
-    monkeypatch.setattr(spawn.os, "execve", _no_caller)
     monkeypatch.setattr(spawn.subprocess, "Popen", _no_caller)
 
     def _run(cmd, **kwargs):
@@ -206,18 +259,42 @@ def _arm_foreign(monkeypatch, *, present, start_rc=0, caller=CALLER):
     monkeypatch.setattr(spawn.subprocess, "run", _run)
 
     def _execv(file, argv):
-        seen.append((file, list(argv)))
+        raise AssertionError(
+            f"execv inherits the caller environment: {file} {argv}"
+        )
+
+    def _execve(file, argv, env):
+        seen.append((file, list(argv), env))
         raise _ExecReplaced
 
     monkeypatch.setattr(spawn.os, "execv", _execv)
+    monkeypatch.setattr(spawn.os, "execve", _execve)
     return calls, seen
 
 
-def _assert_sudo_boundary(argv, kwargs):
-    """A sudo argv that contains -n, a token, or the caller HOME is a failure."""
+def _assert_minimal_env(env):
+    home = str(Path.home())
+    assert isinstance(env, dict)
+    assert set(env) <= {"PATH", "TERM", "LANG"}
+    assert "HOME" not in env
+    joined = "\n".join(f"{key}={value}" for key, value in env.items())
+    assert TOKEN not in joined
+    assert "ANTHROPIC" not in joined
+    assert "API_KEY" not in joined
+    assert home not in env.get("HOME", "")
+    for key in env:
+        assert "TOKEN" not in key
+        assert "SECRET" not in key
+        assert not key.endswith("_KEY")
+
+
+def _assert_sudo_boundary(argv, env):
+    """Absolute sudo, no -n, no token, no HOME, and a minimal env."""
     home = str(Path.home())
     assert isinstance(argv, list)
-    assert argv[0] == "sudo"
+    assert Path(argv[0]).is_absolute()
+    assert Path(argv[0]).name == "sudo"
+    assert argv[0] == SUDO
     assert "-iu" in argv
     assert "-n" not in argv
     blob = "\n".join(argv)
@@ -226,11 +303,17 @@ def _assert_sudo_boundary(argv, kwargs):
     assert "ANTHROPIC" not in blob
     assert "API_KEY" not in blob
     assert "HOME=" not in blob
+    assert "HOME" not in argv
     for element in argv:
         # tmux's exact-match target is `=session`, which is not NAME=value.
         assert re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", element) is None, element
-    assert "env" not in kwargs
-    assert kwargs.get("shell", False) is False
+    if "has-session" in argv or "attach" in argv:
+        assert argv[3] == TMUX
+        assert Path(argv[3]).is_absolute()
+    if "spawn" in argv:
+        assert argv[3] == "swarph"
+        assert HANDOFF in argv
+    _assert_minimal_env(env)
 
 
 # --- (1) unset / empty / self: byte-identical to today's argv ---------------
@@ -251,7 +334,7 @@ def test_matrix_covers_every_membrane():
 def test_os_user_unset_dry_run_argv_matches_main(provider, variant, monkeypatch, capsys):
     _pin_session_mint(monkeypatch)
     caller = OS_USER if variant == "inner" else CALLER
-    monkeypatch.setattr(spawn.getpass, "getuser", lambda: caller)
+    _ids_for_variant(monkeypatch, variant)
     os_user = {
         "absent": _OMIT,
         "empty": "",
@@ -286,7 +369,7 @@ def test_os_user_unset_posix_attach_argv_matches_main(provider, variant, monkeyp
     }[variant]
     _path, role = _write_cell(provider, os_user=os_user)
     calls, execs = _arm_posix_tmux(monkeypatch, session_exists=True)
-    monkeypatch.setattr(spawn.getpass, "getuser", lambda: caller)
+    _ids_for_variant(monkeypatch, variant)
 
     with pytest.raises(_ExecReplaced):
         run_spawn([role, "--no-banner"])
@@ -305,7 +388,7 @@ def test_os_user_unset_posix_create_argv_matches_main(provider, variant, monkeyp
     _path, role = _write_cell(provider, os_user=os_user)
     cell = load_cell(_path)
     calls, execs = _arm_posix_tmux(monkeypatch, session_exists=False)
-    monkeypatch.setattr(spawn.getpass, "getuser", lambda: caller)
+    _ids_for_variant(monkeypatch, variant)
 
     with pytest.raises(_ExecReplaced):
         run_spawn([role, "--no-banner"])
@@ -330,13 +413,13 @@ def test_foreign_session_present_execs_exact_sudo_attach(provider, tty, monkeypa
     with pytest.raises(_ExecReplaced):
         run_spawn([role, "--no-banner"])
 
-    attach = ["sudo", "-iu", OS_USER, "tmux", "attach", "-t", role]
-    probe = ["sudo", "-iu", OS_USER, "tmux", "has-session", "-t", f"={role}"]
-    assert seen == [("sudo", attach)]
+    attach = [SUDO, "-iu", OS_USER, TMUX, "attach", "-t", role]
+    probe = [SUDO, "-iu", OS_USER, TMUX, "has-session", "-t", f"={role}"]
+    assert [(file, argv) for file, argv, _env in seen] == [(SUDO, attach)]
     assert [argv for argv, _kwargs in calls] == [probe]
-    _assert_sudo_boundary(attach, {})
-    _assert_sudo_boundary(probe, calls[0][1])
-    assert all(argv[0] == "sudo" for argv, _kwargs in calls)
+    _assert_sudo_boundary(attach, seen[0][2])
+    _assert_sudo_boundary(probe, calls[0][1]["env"])
+    assert all(argv[0] == SUDO for argv, _kwargs in calls)
     assert not any("new-session" in argv for argv, _kwargs in calls)
     assert not any("swarph" in argv for argv, _kwargs in calls)
 
@@ -349,18 +432,18 @@ def test_foreign_session_absent_starts_as_that_user_then_attaches(provider, monk
     with pytest.raises(_ExecReplaced):
         run_spawn([role, "--no-banner"])
 
-    probe = ["sudo", "-iu", OS_USER, "tmux", "has-session", "-t", f"={role}"]
-    start = ["sudo", "-iu", OS_USER, "swarph", "spawn", role]
-    attach = ["sudo", "-iu", OS_USER, "tmux", "attach", "-t", role]
+    probe = [SUDO, "-iu", OS_USER, TMUX, "has-session", "-t", f"={role}"]
+    start = [SUDO, "-iu", OS_USER, "swarph", "spawn", role, HANDOFF]
+    attach = [SUDO, "-iu", OS_USER, TMUX, "attach", "-t", role]
     assert [argv for argv, _kwargs in calls] == [probe, start]
-    assert seen == [("sudo", attach)]
+    assert [(file, argv) for file, argv, _env in seen] == [(SUDO, attach)]
     for argv, kwargs in calls:
-        _assert_sudo_boundary(argv, kwargs)
-    _assert_sudo_boundary(attach, {})
-    # The start is not a swarph spawn in the caller's uid: sudo -iu is in front,
-    # and nothing in the argv is the caller's tmux or a bare swarph.
-    assert start[:4] == ["sudo", "-iu", OS_USER, "swarph"]
-    assert all(argv[0] == "sudo" for argv in (probe, start, attach))
+        _assert_sudo_boundary(argv, kwargs["env"])
+    _assert_sudo_boundary(attach, seen[0][2])
+    # The start is not a swarph spawn in the caller's uid: sudo -iu is in front.
+    # swarph stays a bare name. The hand-off flag rides on the argv.
+    assert start[:4] == [SUDO, "-iu", OS_USER, "swarph"]
+    assert all(Path(argv[0]).is_absolute() for argv in (probe, start, attach))
 
 
 def test_measured_opencode_session_present(monkeypatch):
@@ -373,13 +456,15 @@ def test_measured_opencode_session_present(monkeypatch):
     with pytest.raises(_ExecReplaced):
         run_spawn(["opencode", "--no-banner"])
 
-    assert seen == [(
-        "sudo",
-        ["sudo", "-iu", "cell-opencode", "tmux", "attach", "-t", "opencode"],
+    assert [(file, argv) for file, argv, _env in seen] == [(
+        SUDO,
+        [SUDO, "-iu", "cell-opencode", TMUX, "attach", "-t", "opencode"],
     )]
     assert calls[0][0] == [
-        "sudo", "-iu", "cell-opencode", "tmux", "has-session", "-t", "=opencode",
+        SUDO, "-iu", "cell-opencode", TMUX, "has-session", "-t", "=opencode",
     ]
+    _assert_minimal_env(seen[0][2])
+    _assert_minimal_env(calls[0][1]["env"])
 
 
 def test_tmux_session_pin_is_the_attach_target_and_role_is_the_start(monkeypatch):
@@ -391,20 +476,27 @@ def test_tmux_session_pin_is_the_attach_target_and_role_is_the_start(monkeypatch
         run_spawn(["opencode", "--no-banner"])
 
     assert calls[0][0] == [
-        "sudo", "-iu", OS_USER, "tmux", "has-session", "-t", "=pilot",
+        SUDO, "-iu", OS_USER, TMUX, "has-session", "-t", "=pilot",
     ]
-    assert calls[1][0] == ["sudo", "-iu", OS_USER, "swarph", "spawn", "opencode"]
-    assert seen == [(
-        "sudo",
-        ["sudo", "-iu", OS_USER, "tmux", "attach", "-t", "pilot"],
+    assert calls[1][0] == [
+        SUDO, "-iu", OS_USER, "swarph", "spawn", "opencode", HANDOFF,
+    ]
+    assert [(file, argv) for file, argv, _env in seen] == [(
+        SUDO,
+        [SUDO, "-iu", OS_USER, TMUX, "attach", "-t", "pilot"],
     )]
 
 
 def test_inner_spawn_as_os_user_does_not_sudo_again(monkeypatch):
-    """Inside the target user, os_user equals the caller, so today's path runs."""
+    """Inside the target uid, os_user's pw_uid matches. Today's path runs.
+
+    getpass is not mocked. LOGNAME is a decoy so a name comparison would sudo.
+    """
     _path, role = _write_cell("opencode", role="opencode", os_user=OS_USER)
     calls, execs = _arm_posix_tmux(monkeypatch, session_exists=True)
-    monkeypatch.setattr(spawn.getpass, "getuser", lambda: OS_USER)
+    _install_ids(monkeypatch, OS_USER_UID, {CALLER: CALLER_UID, OS_USER: OS_USER_UID})
+    monkeypatch.setenv("LOGNAME", "decoy-logname")
+    monkeypatch.setenv("USER", "decoy-logname")
 
     with pytest.raises(_ExecReplaced):
         run_spawn([role, "--no-banner"])
@@ -413,32 +505,28 @@ def test_inner_spawn_as_os_user_does_not_sudo_again(monkeypatch):
     assert execs == [(TMUX, [TMUX, "attach", "-t", role])]
 
 
+@pytest.mark.parametrize("flag", ["--dry-run", "--print-resolved"])
 @pytest.mark.parametrize("present", [True, False])
 @pytest.mark.parametrize("provider", _providers())
-def test_foreign_dry_run_prints_the_exact_sudo_command_and_does_not_exec(
-    provider, present, monkeypatch, capsys,
+def test_capture_flags_print_commands_and_spawn_nothing(
+    provider, present, flag, monkeypatch, capsys,
 ):
     _path, role = _write_cell(provider, os_user=OS_USER)
     calls, seen = _arm_foreign(monkeypatch, present=present)
 
-    def _execv(*args, **kwargs):
-        raise AssertionError(f"dry-run exec'd: {args!r}")
+    def _exec(*args, **kwargs):
+        raise AssertionError(f"capture flag exec'd: {args!r}")
 
-    monkeypatch.setattr(spawn.os, "execv", _execv)
-    assert seen == []
-    rc = run_spawn([role, "--dry-run", "--no-banner"])
+    monkeypatch.setattr(spawn.os, "execv", _exec)
+    monkeypatch.setattr(spawn.os, "execve", _exec)
+    rc = run_spawn([role, flag, "--no-banner"])
     captured = capsys.readouterr()
     assert rc == 0, captured.err
-    start = f"sudo -iu {OS_USER} swarph spawn {role}"
-    attach = f"sudo -iu {OS_USER} tmux attach -t {role}"
-    if present:
-        assert captured.out.splitlines() == [attach]
-    else:
-        assert captured.out.splitlines() == [start, attach]
-    assert [argv for argv, _kwargs in calls] == [[
-        "sudo", "-iu", OS_USER, "tmux", "has-session", "-t", f"={role}",
-    ]]
-    _assert_sudo_boundary(calls[0][0], calls[0][1])
+    start = f"{SUDO} -iu {OS_USER} swarph spawn {role} {HANDOFF}"
+    attach = f"{SUDO} -iu {OS_USER} {TMUX} attach -t {role}"
+    assert captured.out.splitlines() == [start, attach]
+    assert calls == []
+    assert seen == []
     assert TOKEN not in captured.out
     assert str(Path.home()) not in captured.out
     assert "-n" not in captured.out.split()
@@ -448,15 +536,18 @@ def test_start_failure_does_not_attach_or_fall_through(monkeypatch):
     _write_cell("opencode", role="opencode", os_user=OS_USER)
     calls, seen = _arm_foreign(monkeypatch, present=False, start_rc=7)
 
-    def _execv(*args, **kwargs):
+    def _exec(*args, **kwargs):
         raise AssertionError(f"attached after a failed start: {args!r}")
 
-    monkeypatch.setattr(spawn.os, "execv", _execv)
+    monkeypatch.setattr(spawn.os, "execv", _exec)
+    monkeypatch.setattr(spawn.os, "execve", _exec)
     rc = run_spawn(["opencode", "--no-banner"])
     assert rc == 7
     assert [argv for argv, _kwargs in calls][1] == [
-        "sudo", "-iu", OS_USER, "swarph", "spawn", "opencode",
+        SUDO, "-iu", OS_USER, "swarph", "spawn", "opencode", HANDOFF,
     ]
+    _assert_minimal_env(calls[0][1]["env"])
+    _assert_minimal_env(calls[1][1]["env"])
     assert seen == []
     assert len(calls) == 2
 
@@ -465,10 +556,10 @@ def test_sudo_exec_oserror_does_not_fall_through_to_the_caller(monkeypatch):
     _write_cell("opencode", role="opencode", os_user=OS_USER)
     _calls, seen = _arm_foreign(monkeypatch, present=True)
 
-    def _execv(*args, **kwargs):
+    def _execve(*args, **kwargs):
         raise OSError("sudo not found")
 
-    monkeypatch.setattr(spawn.os, "execv", _execv)
+    monkeypatch.setattr(spawn.os, "execve", _execve)
     rc = run_spawn(["opencode", "--no-banner"])
     assert rc == 1
     assert seen == []
@@ -497,10 +588,11 @@ def test_invalid_os_user_fails_without_sudo_or_a_caller_spawn(
     _write_cell("opencode", role="opencode", os_user=value)
     calls, _seen = _arm_foreign(monkeypatch, present=True)
 
-    def _execv(*args, **kwargs):
+    def _exec(*args, **kwargs):
         raise AssertionError(f"invalid os_user exec'd: {args!r}")
 
-    monkeypatch.setattr(spawn.os, "execv", _execv)
+    monkeypatch.setattr(spawn.os, "execv", _exec)
+    monkeypatch.setattr(spawn.os, "execve", _exec)
     for extra in ([],):
         rc = run_spawn(["opencode", "--dry-run", "--no-banner", *extra])
         captured = capsys.readouterr()
@@ -512,3 +604,205 @@ def test_invalid_os_user_fails_without_sudo_or_a_caller_spawn(
     assert rc == 1
     assert reason in captured.err
     assert calls == []
+
+
+def test_logname_set_to_os_user_still_takes_the_sudo_branch(monkeypatch):
+    """LOGNAME and USER name the os_user. The uid does not. getpass is not mocked."""
+    _write_cell("opencode", role="opencode", os_user=OS_USER)
+    monkeypatch.setenv("LOGNAME", OS_USER)
+    monkeypatch.setenv("USER", OS_USER)
+    calls, seen = _arm_foreign(monkeypatch, present=True)
+
+    with pytest.raises(_ExecReplaced):
+        run_spawn(["opencode", "--no-banner"])
+
+    attach = [SUDO, "-iu", OS_USER, TMUX, "attach", "-t", "opencode"]
+    assert [(file, argv) for file, argv, _env in seen] == [(SUDO, attach)]
+    assert calls and calls[0][0][0] == SUDO
+    _assert_minimal_env(seen[0][2])
+    _assert_minimal_env(calls[0][1]["env"])
+    assert TOKEN not in calls[0][1]["env"]
+    assert "HOME" not in calls[0][1]["env"]
+
+
+def test_same_uid_alias_takes_todays_path(monkeypatch):
+    """A different name with the same pw_uid is today's path. getpass is not mocked."""
+    _path, role = _write_cell("opencode", role="opencode", os_user=OS_USER)
+    calls, execs = _arm_posix_tmux(monkeypatch, session_exists=True)
+    _install_ids(
+        monkeypatch, CALLER_UID, {CALLER: CALLER_UID, OS_USER: CALLER_UID},
+    )
+    monkeypatch.setenv("LOGNAME", CALLER)
+    monkeypatch.setenv("USER", CALLER)
+
+    with pytest.raises(_ExecReplaced):
+        run_spawn([role, "--no-banner"])
+
+    _assert_no_sudo(calls, execs)
+    assert execs == [(TMUX, [TMUX, "attach", "-t", role])]
+
+
+def test_unknown_os_user_is_refused(monkeypatch, capsys):
+    _write_cell("opencode", role="opencode", os_user="swarph-nosuch-user")
+    calls, _seen = _arm_foreign(monkeypatch, present=True)
+    rc = run_spawn(["opencode", "--no-banner"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "not a user" in captured.err
+    assert calls == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX which and a planted ./sudo")
+def test_planted_sudo_in_cwd_is_not_the_path_that_is_execd(monkeypatch, tmp_path):
+    """A cwd ./sudo that which() would find first is not exec'd or spawned.
+
+    shutil.which is the real one. It is not pointed at the planted copy.
+    """
+    work = tmp_path / "work"
+    bindir = tmp_path / "bin"
+    work.mkdir()
+    bindir.mkdir()
+    planted = work / "sudo"
+    planted_tmux = work / "tmux"
+    real_sudo = bindir / "sudo"
+    real_tmux = bindir / "tmux"
+    for path in (planted, planted_tmux, real_sudo, real_tmux):
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+
+    _write_cell("opencode", role="opencode", os_user=OS_USER)
+    _install_ids(
+        monkeypatch, CALLER_UID, {CALLER: CALLER_UID, OS_USER: OS_USER_UID},
+    )
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("PATH", os.pathsep.join([".", str(work), str(bindir)]))
+    monkeypatch.setenv("LOGNAME", CALLER)
+    monkeypatch.setenv("USER", CALLER)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", TOKEN)
+
+    import shutil
+    assert spawn.shutil.which is shutil.which
+    naive = shutil.which("sudo")
+    assert naive is not None
+    assert Path(naive).resolve() == planted.resolve()
+
+    spawned = []
+
+    def _run(cmd, **kwargs):
+        argv = [str(part) for part in cmd]
+        spawned.append((argv, kwargs.get("env")))
+        if "has-session" in argv:
+            return spawn.subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(f"unexpected subprocess: {argv}")
+
+    def _execve(file, argv, env):
+        spawned.append((list(argv), env))
+        raise _ExecReplaced
+
+    def _execv(file, argv):
+        spawned.append((list(argv), None))
+        raise _ExecReplaced
+
+    monkeypatch.setattr(spawn.subprocess, "run", _run)
+    monkeypatch.setattr(spawn.os, "execve", _execve)
+    monkeypatch.setattr(spawn.os, "execv", _execv)
+
+    with pytest.raises(_ExecReplaced):
+        run_spawn(["opencode", "--no-banner"])
+
+    assert len(spawned) == 2
+    for argv, env in spawned:
+        assert Path(argv[0]).is_absolute()
+        assert Path(argv[0]).resolve() == real_sudo.resolve()
+        assert Path(argv[0]).resolve() != planted.resolve()
+        assert str(planted) not in argv
+        if "attach" in argv or "has-session" in argv:
+            assert Path(argv[3]).resolve() == real_tmux.resolve()
+            assert Path(argv[3]).resolve() != planted_tmux.resolve()
+        _assert_minimal_env(env)
+        assert "HOME" not in env
+        assert all(TOKEN not in value for value in env.values())
+
+
+def test_two_yamls_that_name_each_other_refuse_the_second_handoff(monkeypatch, tmp_path, capsys):
+    alice_home = tmp_path / "alice"
+    bob_home = tmp_path / "bob"
+    homes = {"alice": alice_home, "bob": bob_home}
+    users = {"alice": 10, "bob": 20}
+    for name, other in (("alice", "bob"), ("bob", "alice")):
+        cells = homes[name] / ".config" / "swarph" / "cells"
+        cells.mkdir(parents=True)
+        cwd = homes[name] / "work"
+        cwd.mkdir()
+        payload = {
+            "schema_version": "v1",
+            "name": "opencode",
+            "role": "opencode",
+            "cwd": str(cwd),
+            "provider": "opencode",
+            "os_user": other,
+            "tmux_session": "opencode",
+        }
+        (cells / "opencode.yaml").write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    euid = {"v": 10}
+    monkeypatch.setattr(spawn.os, "geteuid", lambda: euid["v"])
+
+    class _Pw:
+        def __init__(self, name, uid):
+            self.pw_name = name
+            self.pw_uid = uid
+
+    def _getpwnam(name):
+        return _Pw(name, users[name])
+
+    pwd_mod = getattr(spawn, "pwd", None)
+    if pwd_mod is None:
+        monkeypatch.setattr(
+            spawn, "pwd", types.SimpleNamespace(getpwnam=_getpwnam), raising=False,
+        )
+    else:
+        monkeypatch.setattr(pwd_mod, "getpwnam", _getpwnam)
+    monkeypatch.setattr(spawn.shutil, "which", _which)
+    monkeypatch.setenv("HOME", str(alice_home))
+    monkeypatch.setenv("LOGNAME", "alice")
+    monkeypatch.setenv("USER", "alice")
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    spawns = []
+    execs = []
+
+    def _run(cmd, **kwargs):
+        argv = [str(part) for part in cmd]
+        _assert_sudo_boundary(argv, kwargs.get("env"))
+        if "has-session" in argv:
+            return spawn.subprocess.CompletedProcess(argv, 1, "", "")
+        if "spawn" in argv:
+            spawns.append(argv)
+            if len(spawns) > 1:
+                return spawn.subprocess.CompletedProcess(argv, 99, "", "")
+            target = argv[2]
+            euid["v"] = users[target]
+            monkeypatch.setenv("HOME", str(homes[target]))
+            monkeypatch.setenv("LOGNAME", target)
+            monkeypatch.setenv("USER", target)
+            inner = argv[argv.index("spawn") + 1:]
+            rc = run_spawn(inner)
+            return spawn.subprocess.CompletedProcess(argv, rc, "", "")
+        raise AssertionError(argv)
+
+    def _exec(*args, **kwargs):
+        execs.append(args)
+        raise AssertionError(f"exec during a refused hand-off: {args!r}")
+
+    monkeypatch.setattr(spawn.subprocess, "run", _run)
+    monkeypatch.setattr(spawn.os, "execve", _exec)
+    monkeypatch.setattr(spawn.os, "execv", _exec)
+
+    rc = run_spawn(["opencode", "--no-banner"])
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert len(spawns) == 1
+    assert HANDOFF in spawns[0]
+    assert execs == []
+    assert "second" in captured.err
