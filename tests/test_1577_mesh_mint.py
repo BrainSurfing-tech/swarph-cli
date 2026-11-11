@@ -323,6 +323,24 @@ def test_mesh_mint_operator_verb(monkeypatch, tmp_path, capsys, scratch_gateway)
         assert "already exists" in err
         blob += out + err
 
+        # A dangling symlink is still an existing path. Refuse before register,
+        # leave the link in place, and do not create the missing target.
+        dangling_target = tmp_path / "missing-target.token"
+        dangling = tmp_path / "dangling.token"
+        dangling.symlink_to(dangling_target)
+        assert not dangling_target.exists()
+        rc, out, err = invoke([
+            "mint", name, "--out", str(dangling), "--gateway", base,
+        ])
+        assert rc != 0
+        assert posts == []
+        assert dangling.is_symlink()
+        assert os.readlink(dangling) == str(dangling_target)
+        assert not dangling_target.exists()
+        assert not dangling_target.is_symlink()
+        assert "already exists" in err
+        blob += out + err
+
         watch["path"] = out_path
         watch["shots"].clear()
         rc, out, err = invoke([
@@ -396,6 +414,43 @@ def test_mesh_mint_operator_verb(monkeypatch, tmp_path, capsys, scratch_gateway)
         assert "--token-file <operator-token>" in text
         assert "not a cell's own peer token" in text
         _assert_silent(text, secret)
+        blob += text
+
+        # Deregister writes a revocation row and purges the live token. The
+        # next register mints one past that high-water mark, so this fresh
+        # mesh's second mint is generation 2 — not a constant printed as 1.
+        op = os.environ["MESH_GATEWAY_TOKEN"]
+        delete = urllib.request.Request(
+            f"{base}/peers/{name}",
+            method="DELETE",
+            headers={"Authorization": f"Bearer {op}"},
+        )
+        with urllib.request.urlopen(delete, timeout=5) as resp:
+            assert resp.status == 200
+        gen2 = tmp_path / "gen2.token"
+        watch["path"] = gen2
+        watch["shots"].clear()
+        rc, out, err = invoke([
+            "mint", name, "--out", str(gen2), "--gateway", base,
+        ])
+        text = out + err
+        if rc != 0:
+            raise AssertionError(f"generation-2 mint failed\n{text}")
+        assert any(line.endswith("key_generation=2") for line in out.splitlines())
+        raw2 = gen2.read_text(encoding="utf-8")
+        if not raw2.endswith("\n") or "\n" in raw2[:-1]:
+            raise AssertionError("token file must be the token plus one trailing newline")
+        secret2 = raw2[:-1]
+        assert secret2 != secret
+        who2 = _whoami(base, secret2)
+        assert who2["peer"] == name
+        assert type(who2["key_generation"]) is int
+        assert who2["key_generation"] == 2
+        assert stat.S_IMODE(gen2.stat().st_mode) == 0o600
+        if out_path.read_bytes() != before:
+            raise AssertionError("first token file changed")
+        _assert_silent(text, secret)
+        _assert_silent(text, secret2)
         blob += text
 
         for post in posts:
@@ -620,6 +675,15 @@ def test_failed_register_unlinks_empty_file(monkeypatch, tmp_path, capsys):
     assert rc != 0
     assert "gateway 500" in err
     assert "abcsecret" not in err
+    assert "gateway error" in err
+
+    def bearer_detail(url, body, token):
+        return 502, {"detail": "upstream said Bearer not-a-credential"}
+
+    rc, out, err, _seen = _run("bearer.token", bearer_detail)
+    assert rc != 0
+    assert "not-a-credential" not in out
+    assert "not-a-credential" not in err
     assert "gateway error" in err
 
     def no_token(url, body, token):
