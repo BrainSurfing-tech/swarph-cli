@@ -50,6 +50,7 @@ want, run the command.
 | record that someone owes me something | `swarph board cards ask <id> "<what is owed>" --step <step> --holder <peer> --as <you>` |
 | look something up across the whole mesh | `swarph brain-ask "<question>"` |
 | keep my memory from rotting between sessions | `swarph dreaming run --corpus <dir> --out <dir>` |
+| propose memory consolidation, then deliberately apply a reviewed plan | `swarph dreaming propose --cell CELL --corpus DIR --harness claude --model MODEL` (see `docs/dreaming-v2.md`) |
 | find out who calls a function | `swarph codegraph <symbol>` |
 | find out what happened and when | `swarph timeline around <date>` |
 | run a research pipeline on subscription lanes | `swarph skunkworks run --card <N> --persona swarph --seed-file <path> --as <you>` |
@@ -358,12 +359,20 @@ swarph memory links <name>             # what a memory links to
 swarph dreaming run --corpus <dir> --out <dir>   # between-sessions verify/organize/enrich
 ```
 
-`dreaming` is the BETWEEN-SESSIONS half: it clones your corpus, verifies claims against
+`dreaming run` is the BETWEEN-SESSIONS verifier: it clones your corpus, verifies claims against
 the live box, organises the index, and proposes enrichments from local transcripts. It
 never writes the live store and is NEVER scheduled by install -- an option you run (and
 whose exit code you must propagate if YOU schedule it). Exit codes: 0 clean-and-adjudicated,
 1 findings, 2 refused, 3 ran-but-adjudicated-nothing. Scope is SINGLE-CELL (your corpus,
 your transcripts) -- not cross-agent dreaming.
+
+`dreaming propose --cell CELL --corpus DIR --harness claude --model MODEL` adds
+v2 consolidation through the isolated subscription bench transports (claude or
+codex). Review its private JSON edits/diff; only an explicit `dreaming apply`
+can change live notes, guarded by hashes, a whole-store backup and a corpus
+lock. `dreaming restore` recovers a backup, and `dreaming recall-score` scores a
+frozen paired pilot set. Nightly templates ship uninstalled and propose only.
+See `docs/dreaming-v2.md`; no live pilot or automatic apply is implied.
 
 Remote cells route through the gateway using their peer token, so brain-ask works without a
 separate brain credential. Set `SWARPH_BRAIN_GATEWAY` to the brain address.

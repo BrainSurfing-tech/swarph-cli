@@ -1,0 +1,16 @@
+[Unit]
+Description=Propose memory consolidation for cell %i (card #1570)
+
+[Service]
+Type=oneshot
+User=ubuntu
+Environment=HOME=/home/ubuntu
+Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Owner supplies paths, harness and model only; never billing/token values.
+EnvironmentFile=/etc/swarph/dreaming/%i.conf
+UnsetEnvironment=OPENAI_API_KEY CODEX_API_KEY ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+StateDirectory=swarph-dreaming/%i
+StateDirectoryMode=0700
+ExecStart=/home/ubuntu/.local/bin/swarph dreaming propose --cell %i --corpus ${DREAMING_CORPUS} --harness ${DREAMING_HARNESS} --model ${DREAMING_MODEL} --questions ${DREAMING_QUESTIONS} --state-root /var/lib/swarph-dreaming --token-cap 32000 --notify-card 1570 --gateway ${DREAMING_GATEWAY} --token-file ${DREAMING_TOKEN_FILE}
+TimeoutStartSec=30min
+UMask=0077

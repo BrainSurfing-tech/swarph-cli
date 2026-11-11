@@ -2,7 +2,9 @@
 
 Distribution surface for the dreaming pass that lives as plain modules under
 ``swarph_cli.dreaming``. This verb does NOT schedule anything and does NOT
-write the live corpus: it clones, reports, and exits with the GC4i contract.
+write the live corpus through `run`: that legacy verb clones/reports with GC4i.
+Separate `propose`, `apply`, `restore` and `recall-score` verbs implement v2
+consolidation; only explicit apply/restore can write live memory.
 
 Exit codes (unchanged from #656 — do not collapse to 0/1):
   0  adjudicated >0 claims AND no disagreements
@@ -21,13 +23,48 @@ import argparse
 import sys
 
 
+def _add_consolidation_parsers(sub):
+    p = sub.add_parser("propose", help="propose consolidation with an isolated subscription harness")
+    reporting = [p]
+    p.add_argument("--corpus", required=True)
+    p.add_argument("--out", help="empty private proposal directory; default: a new run under per-cell state")
+    p.add_argument("--cell", required=True)
+    p.add_argument("--state-root", default=None)
+    p.add_argument("--harness", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--token-cap", type=int, default=32000)
+    p.add_argument("--questions", help="optional frozen pilot question set, pinned before first propose")
+    for action in ("apply", "restore"):
+        p = sub.add_parser(action, help=action + " with whole-corpus backup and a corpus lock")
+        reporting.append(p)
+        p.add_argument("--cell", required=True)
+        p.add_argument("--corpus", required=True)
+        p.add_argument("--state-root", default=None)
+        p.add_argument("--idle-minutes", type=float, default=15)
+        p.add_argument("--keep-backups", type=int, default=5)
+        if action == "apply":
+            p.add_argument("--proposal", required=True)
+            p.add_argument("--allow-owner-notes", action="store_true")
+        else:
+            p.add_argument("--backup", required=True)
+    for p in reporting:
+        p.add_argument("--notify-card", type=int, help="post counts/basenames/op types only to a fleet card")
+        p.add_argument("--gateway", default=None)
+        p.add_argument("--token-file", default=None)
+    p = sub.add_parser("recall-score", help="score externally supplied paired answers against frozen questions")
+    for option in ("cell", "corpus", "questions", "before", "after"):
+        p.add_argument("--" + option, required=True)
+    p.add_argument("--state-root", default=None)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="swarph dreaming",
         description=(
             "Periodic memory dreaming pass: VERIFY, ORGANIZE, ENRICH against a "
-            "CLONE of your corpus. Never writes the live store. Never scheduled "
-            "by install — an option you run deliberately.\n\n"
+            "CLONE of your corpus with `run`; it never writes live.\n"
+            "V2: propose creates reviewed JSON edits; apply/restore explicitly write live\n"
+            "with a backup, per-file guards and a corpus lock. Templates are NOT installed.\n\n"
             "SINGLE-CELL SCOPE: operates on one cell's own memory + local "
             "transcripts. Not cross-agent dreaming.\n\n"
             "Exit codes:\n"
@@ -43,6 +80,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = p.add_subparsers(dest="action", required=True)
+    _add_consolidation_parsers(sub)
 
     run = sub.add_parser(
         "run",
@@ -84,8 +122,8 @@ def run_dreaming(argv: list[str] | None = None) -> int:
         return 0
     args = _build_parser().parse_args(argv)
     if args.action != "run":
-        _build_parser().print_help()
-        return 2
+        from swarph_cli.dreaming.consolidate import execute
+        return execute(args)
 
     from pathlib import Path
     from swarph_cli.dreaming import run as dreaming_run
