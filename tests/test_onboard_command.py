@@ -288,7 +288,8 @@ def _stub_subscription(monkeypatch):
 def test_operator_context_DEFERS_the_mint(monkeypatch, tmp_path, capsys):
     """SWARPH_SELF names a DIFFERENT cell (or nothing): the register asserts
     operator context — defer_token_mint=True — and a 'deferred' response
-    prints the cell-side next step. The trap from the card is unreachable."""
+    points at `swarph mesh mint <name> --out <file>`. The trap from the card
+    is unreachable."""
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "tok")
     monkeypatch.setenv("SWARPH_SELF", "workstation-lc")
     deferred_body = {
@@ -309,7 +310,7 @@ def test_operator_context_DEFERS_the_mint(monkeypatch, tmp_path, capsys):
     assert reg["body"]["defer_token_mint"] is True
     out = capsys.readouterr().out
     assert "mint DEFERRED" in out
-    assert "swarph onboard test-peer" in out
+    assert "swarph mesh mint test-peer --out <file>" in out
     (Path(tempfile.gettempdir()) / "test-peer-handshake.md").unlink(missing_ok=True)
 
 
@@ -450,7 +451,9 @@ def test_established_mesh_operator_still_DEFERS(monkeypatch, tmp_path, capsys):
     assert rc == 0
     reg = [c for c in captured if c["url"].endswith("/peers/register")][0]
     assert reg["body"]["defer_token_mint"] is True
-    assert "mint DEFERRED" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "mint DEFERRED" in out
+    assert "swarph mesh mint remote-cell --out <file>" in out
     (Path(tempfile.gettempdir()) / "remote-cell-handshake.md").unlink(missing_ok=True)
 
 

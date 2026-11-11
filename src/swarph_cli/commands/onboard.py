@@ -968,7 +968,8 @@ def run_onboard(argv: list[str]) -> int:
 
     # >>> #564: THE MINTED TOKEN'S THREE FATES, EACH NAMED. <<<
     # deferred  — operator-context register on an established mesh: nothing
-    #             was minted; the cell mints on its own first register.
+    #             was minted. The supported mint is
+    #             `swarph mesh mint <name> --out <file>` (#1577).
     # captured  — cell-context OR first-peer-on-a-fresh-mesh: the token is
     #             written to the target's peer-token file (mode 600) HERE.
     #             A new mesh has no "other box" yet — the person running
@@ -981,9 +982,8 @@ def run_onboard(argv: list[str]) -> int:
         print_safe(
             "      mint DEFERRED (#564): an operator-context register mints "
             "nothing.\n"
-            f"      The once-only token mints on the cell's own first register"
-            f" — on {canonical}'s box:\n"
-            f"          swarph onboard {canonical}")
+            f"      Mint the once-only token with an operator credential:\n"
+            f"          swarph mesh mint {canonical} --out <file>")
     minted_token = body.get("peer_token")
     first_peer_mint = bool(
         bootstrap_window or body.get("bootstrap_mint")

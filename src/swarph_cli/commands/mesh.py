@@ -194,6 +194,38 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_common(register)
 
+    # #1577: operator mint. The cell name is the positional argument — this
+    # parser deliberately has no --as, so $SWARPH_SELF cannot choose the peer.
+    mint = sub.add_parser(
+        "mint",
+        help="operator: mint a peer token for NAME and write it to --out",
+    )
+    mint.add_argument(
+        "name",
+        help="peer to mint; taken from this argument, never from the environment",
+    )
+    mint.add_argument(
+        "--out",
+        required=True,
+        metavar="FILE",
+        help="exclusive create for the once-only peer token (mode 0600)",
+    )
+    mint.add_argument(
+        "--url",
+        default=None,
+        help="peer service URL (default: http://<name>:8787)",
+    )
+    mint.add_argument(
+        "--gateway",
+        default=env_gateway(),
+        help="mesh-gateway base URL",
+    )
+    mint.add_argument(
+        "--token-file",
+        default=None,
+        help="operator credential file (not a cell's own peer token)",
+    )
+
     peers = sub.add_parser(
         "peers",
         help="list registered peers with their reported swarph_cli_version; "
@@ -1181,6 +1213,199 @@ def _run_register(args: argparse.Namespace) -> int:
         f"registered {payload.get('name', self_name)} "
         f"token_status={token_status or 'existing'}; no new token returned"
     )
+    return 0
+
+
+def _ensure_dir_0700(directory: Path) -> None:
+    """Create directory and any missing parents at mode 0700.
+
+    mkdir's mode is masked by umask, so chmod after the create. Directories
+    that already exist are left alone — chmodding a shared parent (the home
+    directory, /tmp) is not this command's job.
+    """
+    if directory.exists():
+        return
+    parent = directory.parent
+    if parent != directory:
+        _ensure_dir_0700(parent)
+    try:
+        os.mkdir(directory, 0o700)
+    except FileExistsError:
+        return
+    os.chmod(directory, 0o700)
+
+
+def _write_minted_token_exclusive(path: Path, token: str) -> None:
+    """Create path with O_EXCL and mode 0600, then write the token.
+
+    fchmod happens before any write so the secret is never stored, even
+    briefly, at a umask-widened mode. An existing file is a failure, not
+    an overwrite. This is not tokens.write_secret_file — that helper
+    truncates and chmods only after the bytes are written.
+    """
+    parent = path.parent
+    if parent and str(parent) not in ("", "."):
+        _ensure_dir_0700(parent)
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fp = os.fdopen(fd, "w", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
+    try:
+        fp.write(token)
+        fp.write("\n")
+        fp.flush()
+        os.fsync(fp.fileno())
+    finally:
+        fp.close()
+
+
+def _mint_public_detail(payload: object) -> str:
+    """A gateway error string that cannot be a credential dump."""
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if not isinstance(detail, str) or not detail:
+        return "gateway error"
+    if "peer_token" in detail or "Bearer " in detail:
+        return "gateway error"
+    return detail
+
+
+def _run_mint(args: argparse.Namespace) -> int:
+    """``swarph mesh mint <name> --out FILE`` — operator mint (#1577).
+
+    The peer name is args.name. defer_token_mint is always false: this verb
+    exists to mint, including on an established mesh where ``swarph onboard``
+    defers. The operator credential is --token-file or $MESH_GATEWAY_TOKEN,
+    never the named cell's own peer-token file.
+    """
+    name = args.name
+    out_path = Path(args.out).expanduser()
+    # Refuse before any HTTP call. A register that succeeds and then finds
+    # the file taken has already burned the once-only mint.
+    if out_path.exists() or out_path.is_symlink():
+        print(
+            f"swarph mesh mint: refusing to write {out_path}: file already exists",
+            file=sys.stderr,
+        )
+        return 1
+
+    res = tokens.resolve_token(
+        None,
+        args.token_file,
+        env_keys=("MESH_GATEWAY_TOKEN",),
+        identity_is_explicit=False,
+        allow_peer_token=False,
+        secrets_path=None,
+    )
+    if res is None or not res.token:
+        print(
+            "swarph mesh mint: no operator credential.\n"
+            "  Pass --token-file <operator-token> or set MESH_GATEWAY_TOKEN "
+            "to the operator token, not a cell's own peer token.",
+            file=sys.stderr,
+        )
+        return 1
+    operator_token = res.token
+
+    gateway = str(args.gateway or "").rstrip("/")
+    body = {
+        "name": name,
+        "url": args.url or f"http://{name}:8787",
+        "capabilities": {"can_claim_tasks": True},
+        "defer_token_mint": False,
+    }
+    try:
+        status, payload = _post_json(
+            f"{gateway}/peers/register",
+            body,
+            operator_token,
+        )
+    except GatewayNotConfigured:
+        raise
+    except Exception:
+        print("swarph mesh mint: gateway register request failed", file=sys.stderr)
+        return 1
+    if not isinstance(payload, dict):
+        payload = {}
+
+    detail = payload.get("detail")
+    if status == 403 and isinstance(detail, str) and "caller-binding" in detail:
+        print(
+            "swarph mesh mint: this credential is a per-peer token; "
+            "an operator credential is required.\n"
+            f"  Minting {name} is an operator action. Use the operator token, "
+            "not a cell's own peer token.\n"
+            f"      swarph mesh mint {name} --token-file <operator-token> "
+            f"--out {out_path}",
+            file=sys.stderr,
+        )
+        return 1
+    if status < 200 or status >= 300:
+        print(
+            f"swarph mesh mint: gateway {status}: {_mint_public_detail(payload)}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # token_status=existing wins even if a token field is unexpectedly set:
+    # nothing is written, and the body (which can carry a secret) is not printed.
+    if payload.get("token_status") == "existing":
+        print(
+            f"swarph mesh mint: token_status=existing for {name}; nothing was written.\n"
+            f"An operator must DELETE /peers/{name} first, which purges the old "
+            f"token and writes a revocation row; the next register then mints a "
+            f"fresh generation.",
+            file=sys.stderr,
+        )
+        return 1
+
+    peer_token = payload.get("peer_token")
+    if (
+        not isinstance(peer_token, str)
+        or not peer_token
+        or "\n" in peer_token
+        or "\r" in peer_token
+    ):
+        shown = payload.get("token_status")
+        print(
+            f"swarph mesh mint: gateway minted no token for {name} "
+            f"(token_status={shown!r}); nothing was written.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        _write_minted_token_exclusive(out_path, peer_token)
+    except FileExistsError:
+        print(
+            f"swarph mesh mint: {out_path} already exists; exclusive create failed. "
+            "The token was not written and is not shown.",
+            file=sys.stderr,
+        )
+        return 1
+    except OSError:
+        print(
+            f"swarph mesh mint: could not write {out_path}. The token is not shown.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # key_generation is not in the register JSON. Read it back as the new
+    # peer. Never log the Authorization header or the token.
+    try:
+        wstatus, who = _http_get_json(f"{gateway}/whoami", peer_token)
+    except Exception:
+        wstatus, who = 0, {}
+    gen = who.get("key_generation") if isinstance(who, dict) else None
+    if wstatus != 200 or type(gen) is not int:
+        print(
+            f"swarph mesh mint: wrote {out_path} but key generation could not be read",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"swarph mesh mint: {out_path} key_generation={gen}")
     return 0
 
 
@@ -4821,6 +5046,8 @@ def run_mesh(argv: list[str]) -> int:
             return _run_threads(args)
         if args.command == "register":
             return _run_register(args)
+        if args.command == "mint":
+            return _run_mint(args)
         if args.command == "peers":
             return _run_peers(args)
         if args.command == "sidecar":
