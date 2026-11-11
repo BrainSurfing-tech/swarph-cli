@@ -750,9 +750,13 @@ def test_two_yamls_that_name_each_other_refuse_the_second_handoff(monkeypatch, t
         (cells / "opencode.yaml").write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     if not hasattr(os, "geteuid"):
-        # Windows has no geteuid. Do not install one. The hand-off refuses.
+        # Windows has no geteuid. Do not install one. Path.home() is
+        # USERPROFILE, and cells_dir() uses XDG_CONFIG_HOME when it is set.
+        # The hermetic fixture deletes XDG and points USERPROFILE at its own
+        # home, so both have to name alice or the yaml is never loaded.
+        monkeypatch.setenv("USERPROFILE", str(alice_home))
         monkeypatch.setenv("HOME", str(alice_home))
-        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(alice_home / ".config"))
         calls = []
 
         def _run(*args, **kwargs):
@@ -764,7 +768,7 @@ def test_two_yamls_that_name_each_other_refuse_the_second_handoff(monkeypatch, t
         captured = capsys.readouterr()
         assert rc != 0
         assert calls == []
-        assert "POSIX" in captured.err
+        assert "POSIX passwd database" in captured.err
         return
 
     euid = {"v": 10}
