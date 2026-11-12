@@ -9,6 +9,7 @@ READ_VERBS = frozenset({
     "whoami", "board.projects.list", "board.cards.list", "board.card.get",
     "board.cards.graph", "board.cards.thread", "board.obligations.list",
     "mesh.peers", "rights", "mesh.inbox", "memory.get", "memory.list",
+    "committee.motions.list", "committee.motion.get",
 })
 
 
@@ -24,6 +25,10 @@ def _name(value):
 
 def _id(value):
     return type(value) is int and value > 0
+
+
+def _committee_channel(value):
+    return isinstance(value, str) and re.fullmatch(r"[a-z0-9_-]{1,64}", value) is not None
 
 
 def _limit(value):
@@ -69,6 +74,8 @@ def _evidence_map(value):
 
 _SCHEMAS = {
     "whoami": ({}, {}),
+    "committee.motions.list": ({"channel": _committee_channel}, {}),
+    "committee.motion.get": ({"channel": _committee_channel, "id": _id}, {}),
     "board.projects.list": ({}, {}),
     "board.cards.list": ({}, {"project": _id, "stage": _stage, "assignee": _name,
                              "label": _name, "q": _text(1000)}),
@@ -116,6 +123,9 @@ def route_for(verb: str, args: dict, cell: str) -> tuple[str, str, dict | None]:
         raise ProxyError("bad_args")
     if verb == "board.obligations.close" and not {"evidence", "evidence_json"} & args.keys():
         raise ProxyError("bad_args")
+    if verb in ("committee.motions.list", "committee.motion.get"):
+        suffix = f"/{args['id']}" if verb == "committee.motion.get" else ""
+        return "GET", f"/committee/{args['channel']}/motions" + suffix, None
     if verb == "board.cards.move":
         if args["stage"] == "done":
             raise ProxyError("verb_not_allowed")
