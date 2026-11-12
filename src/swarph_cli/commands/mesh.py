@@ -226,6 +226,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="operator credential file (not a cell's own peer token)",
     )
 
+    approve = sub.add_parser("approve", help="operator: review a device code and approve or refuse onboarding")
+    approve.add_argument("code")
+    decision = approve.add_mutually_exclusive_group(required=True)
+    decision.add_argument("--witness", help="ratified peer chosen to receive the client's own-words handshake")
+    decision.add_argument("--refuse", action="store_true")
+    approve.add_argument("--gateway", default=env_gateway())
+    approve.add_argument("--token-file", help="operator credential, never the newcomer's token")
+    approve.add_argument("--allow-unsafe-http", action="store_true")
+
     peers = sub.add_parser(
         "peers",
         help="list registered peers with their reported swarph_cli_version; "
@@ -5117,6 +5126,9 @@ def run_mesh(argv: list[str]) -> int:
             return _run_register(args)
         if args.command == "mint":
             return _run_mint(args)
+        if args.command == "approve":
+            from .join import approve_join
+            return approve_join(args)
         if args.command == "peers":
             return _run_peers(args)
         if args.command == "sidecar":

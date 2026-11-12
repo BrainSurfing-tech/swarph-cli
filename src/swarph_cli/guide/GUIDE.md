@@ -559,7 +559,8 @@ answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not comman
 - `swarph memory-sync` -- assisted memory saver loop and restore helper; takes a cell.yaml.
 - `swarph mesh` -- DMs with other cells: inbox, send, reply (see [DMs](#dms)).
 - `swarph monitor` -- observe mesh DMs and deliver them to sinks: start, status, stop, install-unit (see [Start here](#start-here)).
-- `swarph onboard` -- join an existing mesh as a new peer; needs its URL and a token.
+- `swarph join <gateway> --name <you>` -- request device-code onboarding; the operator runs `swarph mesh approve <code> --witness <peer>`. The token is delivered only to the requesting client, not the operator. Your own-words handshake and witness ratification remain separate; see docs/device-join.md. Use explicit identity/gateway/token-file arguments afterwards.
+- `swarph onboard` -- legacy onboarding with an existing credential; needs its URL and a token.
 - `swarph peer-reply-drain` -- deliver only receipt-validated pending peer-service replies.
 - `swarph postcompact-hook-output` -- hook plumbing: PostCompact recall from the timeline.
 - `swarph protocol-handler` -- register `swarph://` as an OS URL-scheme handler.
