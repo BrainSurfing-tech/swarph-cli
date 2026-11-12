@@ -1,5 +1,6 @@
 """Proxy route fixtures from gateway 5a567e1/server.py:4639,16619,6472."""
 import json
+from dataclasses import replace
 import os
 import subprocess
 import sys
@@ -278,6 +279,18 @@ def wire_gateway(tmp_path):
     from swarph_cli.local_proxy import Config, Proxy
 
     routes = {
+        # mesh-gateway@d0c5dcca/server.py:22995; committee.py:624-652.
+        ("GET", "/committee/room-one/motions"): {"motions": []},
+        # server.py:22977; committee.py:655-708. Visibility stays gateway-side.
+        ("GET", "/committee/room-one/motions/7"): {
+            "id": 7, "channel": "room-one", "card_id": 1581,
+            "text": "Fixture motion", "options": ["ADOPT", "AMEND"], "phase": "positions",
+            "positions_deadline": "2026-11-12T16:00:00Z",
+            "rebuttal_deadline": "2026-11-12T17:00:00Z", "vote_deadline": "2026-11-12T18:00:00Z",
+            "baseline_absent": None, "positions_absent": [], "seats": [],
+            "ballots": [{"peer": "peer-two", "round": "positions", "created_at": "2026-11-12T15:00:00Z",
+                         "voided": False, "placeholder": "sealed: peer-two, 2026-11-12T15:00:00Z",
+                         "message_id": 1}]},
         ("GET", "/board/projects?actor=cell-one"): _WIRE_PROJECTS,
         ("GET", "/board/cards?actor=cell-one"): _WIRE_CARDS,
         ("GET", "/board/cards?actor=cell-one&project=1&stage=plan&assignee=peer-two&label=proxy&q=cl%C3%A9+%26actor%3Droot%3F"):
@@ -355,6 +368,80 @@ def wire_gateway(tmp_path):
         server.server_close()
         worker.join(timeout=2)
         assert not worker.is_alive()
+
+
+def test_committee_motions_list_round_trips_in_read_only_mode(wire_gateway):
+    proxy, seen, authenticated, routes = wire_gateway
+    proxy.config = replace(proxy.config, read_only=True)
+    reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                           "verb": "committee.motions.list", "args": {"channel": "room-one"}})
+    assert reply == {"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c", "ok": True,
+                     "status": 200, "body": {"motions": []}}
+    assert seen == [("GET", "/committee/room-one/motions", None)]
+    assert authenticated == [True]
+
+
+def test_committee_motion_get_preserves_gateway_visibility_in_read_only_mode(wire_gateway):
+    proxy, seen, authenticated, routes = wire_gateway
+    proxy.config = replace(proxy.config, read_only=True)
+    reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                           "verb": "committee.motion.get", "args": {"channel": "room-one", "id": 7}})
+    assert reply == {"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c", "ok": True,
+                     "status": 200, "body": routes[("GET", "/committee/room-one/motions/7")]}
+    assert "body" not in reply["body"]["ballots"][0]
+    assert "outcome" not in reply["body"]["ballots"][0]
+    assert seen == [("GET", "/committee/room-one/motions/7", None)]
+    assert authenticated == [True]
+
+
+@pytest.mark.parametrize("verb", ["committee.motions.list", "committee.motion.get"])
+@pytest.mark.parametrize("channel", ["", "A", "a.b", "a/b", "../room", "room?actor=root",
+                                      "room#fragment", "room%2Fother", "a b", "a\n", "é",
+                                      "a" * 65, True, 1, None, [], {}])
+def test_bad_committee_channel_is_refused_before_gateway(wire_gateway, verb, channel):
+    proxy, seen, _, _ = wire_gateway
+    args = {"channel": channel, **({"id": 7} if verb == "committee.motion.get" else {})}
+    reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                           "verb": verb, "args": args})
+    assert reply["error"] == "bad_args"
+    assert seen == []
+
+
+@pytest.mark.parametrize("motion_id", [0, -1, True, False, "7", 1.5, None, [], {}, "7/posts"])
+def test_bad_committee_motion_id_is_refused_before_gateway(wire_gateway, motion_id):
+    proxy, seen, _, _ = wire_gateway
+    reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                           "verb": "committee.motion.get", "args": {"channel": "room-one", "id": motion_id}})
+    assert reply["error"] == "bad_args"
+    assert seen == []
+
+
+@pytest.mark.parametrize("verb", ["committee.motions.list", "committee.motion.get"])
+@pytest.mark.parametrize("extra", ["actor", "from_node", "path", "method", "headers", "token", "limit"])
+def test_committee_unknown_arguments_never_reach_gateway(wire_gateway, verb, extra):
+    proxy, seen, _, _ = wire_gateway
+    args = {"channel": "room-one", **({"id": 7} if verb == "committee.motion.get" else {}), extra: "fixture"}
+    reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                           "verb": verb, "args": args})
+    assert reply["error"] == "bad_args"
+    assert seen == []
+
+
+@pytest.mark.parametrize("channel", ["a", "0", "-", "_", "a" * 64, "room_0-one"])
+@pytest.mark.parametrize("verb", ["committee.motions.list", "committee.motion.get"])
+def test_committee_channel_grammar_matches_gateway(channel, verb):
+    args = {"channel": channel, **({"id": 7} if verb == "committee.motion.get" else {})}
+    suffix = "/7" if verb == "committee.motion.get" else ""
+    assert route_for(verb, args, "cell-one") == ("GET", f"/committee/{channel}/motions" + suffix, None)
+
+
+@pytest.mark.parametrize("verb", ["committee.rooms.open", "committee.motion.open", "committee.post",
+                                   "committee.motion.posts", "committee.recast", "committee.baseline.absent"])
+def test_committee_writes_are_not_available(wire_gateway, verb):
+    proxy, seen, _, _ = wire_gateway
+    reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c", "verb": verb, "args": {}})
+    assert reply["error"] == "verb_not_allowed"
+    assert seen == []
 
 
 @pytest.mark.parametrize("verb,args,expected_wire,expected_body", [

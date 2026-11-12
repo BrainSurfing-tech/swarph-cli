@@ -110,6 +110,8 @@ WRITES = [
                          "expect_stage_version": 1}),
 ]
 READS = [
+    ("committee.motions.list", {"channel": "room-one"}),
+    ("committee.motion.get", {"channel": "room-one", "id": 7}),
     ("whoami", {}), ("board.projects.list", {}),
     ("board.cards.list", {"project": 7, "stage": "ready", "assignee": "peer-two",
                           "label": "fixture", "q": "é &actor=other"}),

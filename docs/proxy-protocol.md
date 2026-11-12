@@ -66,7 +66,8 @@ switch it off. Startup reports only the effective boolean and its source
 With `read_only:true`, the explicit READ set is `whoami`,
 `board.projects.list`, `board.cards.list`, `board.card.get`, `board.cards.graph`,
 `board.cards.thread`, `board.obligations.list`, `mesh.peers`, `rights`,
-`mesh.inbox`, `memory.get` and `memory.list`. Their routes and replies are
+`mesh.inbox`, `memory.get`, `memory.list`, `committee.motions.list` and
+`committee.motion.get`. Their routes and replies are
 unchanged (memory reads still use POST). Every other verb, including all writes
 and future verbs not explicitly admitted, returns `verb_not_allowed` before
 any upstream request, including preparatory card reads. Reading the inbox does
@@ -177,6 +178,8 @@ older bundled CLI gateway. There is no generic gateway passthrough.
 | `mesh.inbox` | `limit?`, `unread_only?`, `since?`, `kind?` | `GET /messages?to_node=<cell>`, own inbox only; [handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L7381). Does not mark read. |
 | `memory.get` | `slug` | `POST /memory` with `{"op":"get","arguments":{"slug":...}}`; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L12124) |
 | `memory.list` | `type?:name`, `tag?:name`, `limit?` | `POST /memory` with fixed `op:"list"`, validated fields under `arguments`; [argument forwarding](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L12091) |
+| `committee.motions.list` | `channel` | `GET /committee/{channel}/motions`; [gateway handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/d0c5dcca7ace610178d2dca20ca910ee8931977a/server.py#L22995). Open motions only. |
+| `committee.motion.get` | `channel`, `id` | `GET /committee/{channel}/motions/{id}`; [gateway handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/d0c5dcca7ace610178d2dca20ca910ee8931977a/server.py#L22977). Gateway membership and sealed-ballot visibility are unchanged. |
 | `board.cards.say` | `id`, `content`, `kind?`, `to_node?:name` | `POST /messages` with pinned `from_node=<cell>` and server-derived card thread; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L6493) |
 | `mesh.send` | `to_node:name`, `content`, `kind?`, `reply_to?` | `POST /messages` with pinned `from_node=<cell>`; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L6493) |
 | `channel.post` | `channel:name`, `content`, `kind?` | `POST /messages` with pinned `from_node=<cell>`, no DM recipient; [exclusive destination check](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L6545) |
@@ -218,6 +221,13 @@ The close schema accepts bounded text and/or condition evidence and passes
 `usage` or `author` fields: the proxy token remains the only acting identity.
 
 ## Operations boundary
+
+Committee channels contain 1–64 lowercase ASCII letters, digits, hyphens or
+underscores (`[a-z0-9_-]{1,64}`); `id` is a positive JSON integer, never a boolean
+or coerced string. Both schemas are closed: no actor, path, headers or other
+caller fields. The gateway derives the reader from the proxy's peer token, not
+an asserted actor. Replies pass through unchanged. No committee write verb is
+available through this proxy (card #1581).
 
 This change is a build contract, not a cutover procedure. Root-owned isolated
 installation, separate uid, protected token/config, socket activation, no-core
