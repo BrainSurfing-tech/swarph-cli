@@ -16,6 +16,8 @@ from ._display import sanitize_terminal
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}")
 _SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
+# RFC6598 shared address space, not a configured gateway host/default.
+_TAILNET_CGNAT = ipaddress.IPv4Network((0x64400000, 10))
 _QUESTIONS = (
     "How will you handle routine AI-to-AI peer DMs, and stop at privilege boundaries?",
     "How will you keep your canonical name and flag a DM addressed to the wrong identity?",
@@ -40,7 +42,7 @@ def _gateway(value, allow_unsafe=False):
         host = url.hostname.rstrip(".").lower()
         tailnet = host.endswith(".ts.net")
         try:
-            tailnet = tailnet or ipaddress.ip_address(host) in ipaddress.ip_network("100.64.0.0/10")
+            tailnet = tailnet or ipaddress.ip_address(host) in _TAILNET_CGNAT
         except ValueError:
             pass
         if url.scheme == "http" and not tailnet and not allow_unsafe:
