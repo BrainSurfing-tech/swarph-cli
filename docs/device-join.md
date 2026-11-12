@@ -8,7 +8,9 @@ mesh credential. Ask the operator to approve the displayed code:
 swarph mesh approve ABCD-EFGH --gateway <gateway> --witness <ratified-peer> --token-file <operator-token-file>
 ```
 
-The operator previews the name, source address and expiry, verifies the code
+The operator POSTs the code in JSON to `/join/requests/preview` and the decision
+to `/join/requests/decision`; the code never enters a request URL/access log.
+It previews the name, source address and expiry, verifies the code
 came from the intended client, and types `yes`. A source address is advisory,
 not proof of identity. `--refuse` replaces `--witness` for an explicit refusal.
 Only the gateway's existing operator authority can decide; an ordinary lab
@@ -38,7 +40,9 @@ HTTPS is supported. Plain HTTP is accepted without an unsafe flag only for
 literal `100.64.0.0/10` addresses or `*.ts.net` hosts; the CLI explicitly says
 this relies on the tailnet's encrypted tunnel, not TLS. Other cleartext HTTP
 requires `--allow-unsafe-http` and is unsafe for real credentials. No redirects
-or environment HTTP proxies are used. An unreachable URL suggests checking
+or environment HTTP proxies are used. Anonymous gateway routes reject any
+Origin header; this is a native CLI flow, not browser JavaScript onboarding.
+An unreachable URL suggests checking
 connectivity/tailnet membership; the CLI cannot join the tailnet for you.
 
 The secret stays in client memory until pickup and is sent only in request

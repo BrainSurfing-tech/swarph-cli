@@ -227,7 +227,7 @@ def approve_join(args):
                                         identity_is_explicit=False, allow_peer_token=False, secrets_path=None)
         if resolved is None or not resolved.token:
             raise JoinError("operator credential required; use --token-file")
-        status, preview, _ = _request(url, "GET", f"/join/requests/{code}", token=resolved.token)
+        status, preview, _ = _request(url, "POST", "/join/requests/preview", {"user_code": code}, resolved.token)
         if status != 200 or preview.get("state") != "pending":
             raise JoinError("approval preview refused or request is no longer pending")
         if (not isinstance(preview.get("name"), str) or not _NEW_PEER.fullmatch(preview["name"])
@@ -240,10 +240,10 @@ def approve_join(args):
         decision = "refuse" if args.refuse else "approve"
         if input("Confirm this code came from the intended client; type yes to " + decision + ": ").strip() != "yes":
             raise JoinError("decision cancelled; nothing changed")
-        body = {"decision": decision}
+        body = {"user_code": code, "decision": decision}
         if not args.refuse:
             body["witness"] = args.witness
-        status, result, _ = _request(url, "POST", f"/join/requests/{code}/decision", body, resolved.token)
+        status, result, _ = _request(url, "POST", "/join/requests/decision", body, resolved.token)
         expected = "refused" if args.refuse else "approved"
         if status != 200 or result.get("state") != expected:
             raise JoinError("decision refused; re-read the request before retrying")

@@ -34,9 +34,9 @@ def gateway():
                                  "witness": "fixture-witness", "registered_unratified": True},
                 "/whoami": {"peer": "new-peer"},
                 "/messages": {"id": 1},
-                "/join/requests/ABCD-EFGH": {"name": "new-peer", "source": "local socket",
+                "/join/requests/preview": {"name": "new-peer", "source": "local socket",
                                             "expires_at": 1800000900, "state": "pending"},
-                "/join/requests/ABCD-EFGH/decision": {"state": "approved"},
+                "/join/requests/decision": {"state": "approved"},
             }.get(self.path)
             if isinstance(body, deque):
                 body = body.popleft()
@@ -105,9 +105,9 @@ def test_approve_previews_then_decides_without_receiving_new_token(tmp_path, gat
                      "--gateway", url, "--token-file", str(operator_file), "--allow-unsafe-http",
                      input_text="yes\n")
     assert result.returncode == 0, result.stderr
-    assert calls == [("GET", "/join/requests/ABCD-EFGH", None, "Bearer fixture-root-credential"),
-                     ("POST", "/join/requests/ABCD-EFGH/decision",
-                      {"decision": "approve", "witness": "fixture-witness"}, "Bearer fixture-root-credential")]
+    assert calls == [("POST", "/join/requests/preview", {"user_code": "ABCD-EFGH"}, "Bearer fixture-root-credential"),
+                     ("POST", "/join/requests/decision",
+                      {"user_code": "ABCD-EFGH", "decision": "approve", "witness": "fixture-witness"}, "Bearer fixture-root-credential")]
     assert TOKEN not in result.stdout + result.stderr
     assert DEVICE not in result.stdout + result.stderr
     assert "fixture-root-credential" not in result.stdout + result.stderr
@@ -240,7 +240,7 @@ def test_join_does_not_change_operator_config_or_environment(tmp_path, gateway, 
 
 def test_operator_refuses_incomplete_preview_before_decision(tmp_path, gateway):
     url, calls, responses = gateway
-    responses["/join/requests/ABCD-EFGH"] = {"state": "pending"}
+    responses["/join/requests/preview"] = {"state": "pending"}
     path = tmp_path / "operator-fixture"
     path.write_text("fixture-root-credential")
     result = run_cli(tmp_path, "mesh", "approve", "ABCD-EFGH", "--witness", "fixture-witness",
