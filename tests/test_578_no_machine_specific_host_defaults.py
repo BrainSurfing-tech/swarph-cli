@@ -68,7 +68,9 @@ def _sweep(root: Path) -> list[str]:
         # read this way.
         text = path.read_text(encoding="utf-8", errors="replace")
         for lineno, line in enumerate(text.splitlines(), 1):
-            found = _MACHINE_SPECIFIC.search(line)
+            # Exactly this delimited allocation is a range, not a host URL.
+            scan = re.sub(r"""(["'`])100\.64\.0\.0/10\1""", "", line)
+            found = _MACHINE_SPECIFIC.search(scan)
             if found:
                 offenders.append(
                     f"{path.name}:{lineno}: {found.group(0)}  |  {line.strip()[:90]}"
@@ -99,6 +101,19 @@ def test_loopback_is_deliberately_allowed(tmp_path: Path) -> None:
     """127.0.0.1 must NOT trip the guard — wrong here, harmless anywhere."""
     (tmp_path / "ok.py").write_text('GATEWAY = "http://127.0.0.1:8788"  # local dev\n')
     assert not _sweep(tmp_path)
+
+
+def test_rfc6598_range_literal_is_not_a_machine_default(tmp_path: Path) -> None:
+    (tmp_path / "range.py").write_text('SPACE = ipaddress.ip_network("100.64.0.0/10")\n')
+    assert not _sweep(tmp_path)
+
+
+def test_rfc6598_exception_never_hides_hosts_or_other_cidrs(tmp_path: Path) -> None:
+    for value in ("100.64.0.0", "100.64.0.0/32", "100.64.0.1/10", "http://100.64.0.0/10"):
+        (tmp_path / "host.py").write_text(f'GATEWAY = "{value}"\n')
+        assert _sweep(tmp_path), value
+    (tmp_path / "host.py").write_text('SPACE = "100.64.0.0/10"; GATEWAY = "http://100.65.1.2"\n')
+    assert _sweep(tmp_path), "a range on the same line must not hide a machine host"
 
 
 def test_public_urls_are_not_flagged(tmp_path: Path) -> None:

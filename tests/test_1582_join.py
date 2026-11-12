@@ -273,3 +273,13 @@ def test_native_windows_refuses_before_storage_or_http(tmp_path, gateway):
     assert "native Windows" in result.stderr
     assert calls == []
     assert not (tmp_path / ".config/swarph/new-peer.peer_token").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX credential storage; Windows is refused first")
+@pytest.mark.parametrize("name", ["ALL", "Lab-ovh", "a.b", "a_b", "1abc", "abc-"])
+def test_invalid_new_peer_names_are_refused_before_http(tmp_path, gateway, name):
+    url, calls, _ = gateway
+    result = run_cli(tmp_path, "join", url, "--name", name, "--allow-unsafe-http")
+    assert result.returncode == 1
+    assert "invalid peer name" in result.stderr
+    assert calls == []

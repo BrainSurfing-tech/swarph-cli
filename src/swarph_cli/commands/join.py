@@ -14,10 +14,12 @@ from urllib.parse import urlsplit
 from ._display import sanitize_terminal
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+# Gateway server.PEER_NAME_RE; legacy witness names are validated separately.
+_NEW_PEER = re.compile(r"[a-z][a-z0-9-]{0,62}[a-z0-9]")
 _CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}")
 _SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
 # RFC6598 shared address space, not a configured gateway host/default.
-_TAILNET_CGNAT = ipaddress.IPv4Network((0x64400000, 10))
+_TAILNET_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 _QUESTIONS = (
     "How will you handle routine AI-to-AI peer DMs, and stop at privilege boundaries?",
     "How will you keep your canonical name and flag a DM addressed to the wrong identity?",
@@ -121,7 +123,7 @@ def run_join(argv):
     try:
         if os.name == "nt":
             raise JoinError("native Windows credential storage is unsupported; use Linux or WSL")
-        if not _NAME.fullmatch(args.name):
+        if not _NEW_PEER.fullmatch(args.name):
             raise JoinError("invalid peer name")
         url, tailnet = _gateway(args.gateway, args.allow_unsafe_http)
         if tailnet:
@@ -228,7 +230,7 @@ def approve_join(args):
         status, preview, _ = _request(url, "GET", f"/join/requests/{code}", token=resolved.token)
         if status != 200 or preview.get("state") != "pending":
             raise JoinError("approval preview refused or request is no longer pending")
-        if (not isinstance(preview.get("name"), str) or not _NAME.fullmatch(preview["name"])
+        if (not isinstance(preview.get("name"), str) or not _NEW_PEER.fullmatch(preview["name"])
                 or not isinstance(preview.get("source"), str) or not 1 <= len(preview["source"]) <= 256
                 or type(preview.get("expires_at")) not in (int, float)
                 or not 0 < preview["expires_at"] < 1e12):
