@@ -251,13 +251,20 @@ def test_heredoc_parentheses_follow_bash_execution(
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
     raw, marker = _bash_with_fake_gh(command, raw_dir)
+    if body == "# )" and wrapper == "standalone":
+        version = subprocess.run(["bash", "--version"], check=True,
+                                 capture_output=True, text=True).stdout.splitlines()[0]
+        with capsys.disabled():
+            print(f"Card1588 Bash oracle: {shutil.which('bash')}: {version}", flush=True)
     if marker.exists():
         assert marker.read_text().splitlines() == ["called"]
         routed_dir = tmp_path / "routed"
         routed_dir.mkdir()
         test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
             command, routed_dir, monkeypatch, capsys)
-    # Bash versions differ on no-gh exit status; execution is the routing oracle.
+    else:
+        # Bash versions differ on no-gh exit status; execution is the oracle.
+        assert not marker.exists()
 
 
 @pytest.mark.parametrize("limit", [
