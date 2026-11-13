@@ -1,4 +1,5 @@
 """Card #1588 follow-ups: compare routing with real Bash and a fixture gh."""
+import json
 import os
 import shutil
 import subprocess
@@ -6,6 +7,23 @@ import subprocess
 import pytest
 
 from swarph_cli import gh_identity
+from swarph_cli.commands import gh_route
+
+
+def _bash_with_fake_gh(command, tmp_path):
+    marker = tmp_path / "calls"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text('#!/bin/sh\nprintf "called\\n" >> "$GH_PROBE"\n', encoding="utf-8")
+    fake_gh.chmod(0o700)
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc"], input=command,
+        text=True, capture_output=True, timeout=3, cwd=tmp_path,
+        env={"PATH": str(fake_bin) + os.pathsep + os.defpath,
+             "GH_PROBE": str(marker)},
+    )
+    return result, marker
 
 
 @pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
@@ -28,18 +46,7 @@ from swarph_cli import gh_identity
     pytest.param('eval "gh pr list"', id="eval-control"),
 ])
 def test_bash_gh_execution_always_requires_routing(command, tmp_path):
-    marker = tmp_path / "calls"
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_gh = fake_bin / "gh"
-    fake_gh.write_text('#!/bin/sh\nprintf "called\\n" >> "$GH_PROBE"\n', encoding="utf-8")
-    fake_gh.chmod(0o700)
-    result = subprocess.run(
-        ["bash", "--noprofile", "--norc"], input=command,
-        text=True, capture_output=True, timeout=3, cwd=tmp_path,
-        env={"PATH": str(fake_bin) + os.pathsep + os.defpath,
-             "GH_PROBE": str(marker)},
-    )
+    result, marker = _bash_with_fake_gh(command, tmp_path)
     assert result.returncode == 0, result.stderr
     assert marker.read_text() == "called\n"
     assert gh_identity.targets_gh(command) is True
@@ -48,9 +55,18 @@ def test_bash_gh_execution_always_requires_routing(command, tmp_path):
 @pytest.mark.parametrize("command", [
     "echo $((1 << 2))", "x=$((1<<3)); echo $x", 'echo "$((1 << 2))"',
 ])
-def test_arithmetic_shift_is_not_a_heredoc_or_gh_call(command):
+def test_arithmetic_shift_is_not_a_heredoc_or_gh_call(command, tmp_path, capsys):
     assert gh_identity.has_unterminated_heredoc(command) is False
     assert gh_identity.targets_gh(command) is False
+    assert gh_route.run_hook(json.dumps({
+        "tool_name": "Bash", "tool_input": {"command": command},
+    })) == 0
+    assert capsys.readouterr().out == ""
+    if os.name == "posix" and shutil.which("bash"):
+        result, marker = _bash_with_fake_gh(command, tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == ("8" if "1<<3" in command else "4")
+        assert not marker.exists()
 
 
 @pytest.mark.parametrize("command", [
