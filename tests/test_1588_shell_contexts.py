@@ -169,6 +169,99 @@ def test_quoted_substitution_matching_is_not_depth_one_only(
         'X="$(' + inner + ')" gh pr list', tmp_path, monkeypatch, capsys)
 
 
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+@pytest.mark.parametrize("command", [
+    pytest.param("echo $((cat <<'EOF'\nit's\nEOF\ngh pr list # that's\n) | (cat))", id="drop_round2_01"),
+    pytest.param("echo $((cat <<EOF\n'\nEOF\ngh pr list # '\n); (true))", id="drop_round2_02"),
+    pytest.param("echo $((cat <<EOF\n'\nEOF\ngh pr list # '\n); echo $((1+1)))", id="drop_round2_03"),
+    pytest.param("echo $((cat <<EOF\n'\nEOF\ngh pr list # '\n); echo $(echo x))", id="drop_round2_04"),
+    pytest.param("echo $((cat <<EOF\n\"\nEOF\ngh pr list # \"\n) | (cat))", id="drop_round2_05"),
+    pytest.param("x=$((cat <<EOF\n'\nEOF\ngh pr list # '\n) && (true)); echo \"$x\"", id="drop_round2_06"),
+    pytest.param("echo $((bash <<< 'gh pr list') | (cat))", id="drop_round2_07"),
+    pytest.param("echo $((bash <<< 'gh pr list'); (true))", id="drop_round2_08"),
+    pytest.param("x=$((sh <<< \"gh pr list\") | (cat)); echo \"$x\"", id="drop_round2_09"),
+    pytest.param("echo $((bash <<< 'gh pr list'); echo $(echo x))", id="drop_round2_10"),
+    pytest.param("bash -c \"echo \\$((bash <<< 'gh pr list') | (cat))\"", id="drop_round2_11"),
+    pytest.param("X=$((bash <<< 'gh pr list') | (cat)) true", id="drop_round2_12"),
+    pytest.param("((bash <<< 'gh pr list') | (cat))", id="drop_round2_13"),
+    pytest.param("((bash <<< 'gh pr list'); (true))", id="drop_round2_14"),
+    pytest.param("true && ((bash <<< 'gh pr list') | (cat))", id="drop_round2_15"),
+    pytest.param("x=1; ((bash <<< 'gh pr list') | (cat)); echo done", id="drop_round2_16"),
+    'X=$[ 1 + 2 ] gh pr list',
+    "echo $(( 1 + $((bash <<< 'gh pr list') | (cat)) ))",
+])
+def test_round3_subshells_and_legacy_assignment_are_rewritten(
+        command, tmp_path, monkeypatch, capsys):
+    test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
+        command, tmp_path, monkeypatch, capsys)
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+@pytest.mark.parametrize("command", [
+    pytest.param("echo $((bash <<< 'gh pr list') | (cat))", id="single_construct_01"),
+    pytest.param("echo $(( (bash <<< 'gh pr list') ))", id="single_construct_02"),
+    pytest.param("echo $(((bash <<< 'gh pr list')))", id="single_construct_03"),
+    pytest.param("echo $((bash <<< 'gh pr list'))", id="single_construct_04"),
+    pytest.param("echo $((bash <<< 'gh pr list') )", id="single_construct_05"),
+    pytest.param("echo $((true) && (bash <<< 'gh pr list'))", id="single_construct_06"),
+    pytest.param("echo $(( (true) && (bash <<< 'gh pr list') ))", id="single_construct_07"),
+    pytest.param("echo $((bash <<< 'gh pr list'); (true))", id="single_construct_08"),
+    pytest.param("echo $((bash <<< 'gh pr list'); echo $((1+1)))", id="single_construct_09"),
+    pytest.param("echo $((bash <<< 'gh pr list'); echo $(echo x))", id="single_construct_10"),
+    pytest.param("echo $((bash <<< 'gh pr list') | (cat) )", id="single_construct_11"),
+    pytest.param("((bash <<< 'gh pr list') | (cat))", id="single_construct_12"),
+    pytest.param("(( (bash <<< 'gh pr list') ))", id="single_construct_13"),
+    pytest.param("(((bash <<< 'gh pr list')))", id="single_construct_14"),
+    pytest.param("((bash <<< 'gh pr list'))", id="single_construct_15"),
+    pytest.param("((bash <<< 'gh pr list') )", id="single_construct_16"),
+    pytest.param("((true) && (bash <<< 'gh pr list'))", id="single_construct_17"),
+    pytest.param("(( (true) && (bash <<< 'gh pr list') ))", id="single_construct_18"),
+    pytest.param("((bash <<< 'gh pr list'); (true))", id="single_construct_19"),
+    pytest.param("((bash <<< 'gh pr list') | (cat) )", id="single_construct_20"),
+    pytest.param("true; ((bash <<< 'gh pr list') | (cat)); true", id="single_construct_21"),
+    pytest.param("if ((true) && (bash <<< 'gh pr list')); then :; fi", id="single_construct_22"),
+    pytest.param("((true); (bash <<< 'gh pr list') | (cat))", id="single_construct_23"),
+    pytest.param("echo $((true); (bash <<< 'gh pr list') | (cat))", id="single_construct_24"),
+])
+def test_arithmetic_classification_agrees_with_bash(command, tmp_path):
+    result, marker = _bash_with_fake_gh(command, tmp_path)
+    outer = command.index("((")
+    end = gh_identity._subst_end(command, outer)
+    # Only the command interpretation runs gh in these single-construct fixtures.
+    assert gh_identity._is_arithmetic(command, outer, end) == (not marker.exists())
+    if marker.exists():
+        assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+@pytest.mark.parametrize("body", ["(", ")", "))", "((", "( )", "')(", '\"(()\"', "$(", "`(", "# )", "EOF)"])
+@pytest.mark.parametrize("wrapper", ["substitution", "standalone", "assignment"])
+def test_heredoc_parentheses_follow_bash_execution(
+        body, wrapper, tmp_path, monkeypatch, capsys):
+    inner = "cat <<'HD'\n" + body + "\nHD\ngh pr list\n"
+    if wrapper == "substitution":
+        command = "echo $((" + inner + ") | (cat))"
+    elif wrapper == "standalone":
+        command = "((" + inner + "); (true))"
+    else:
+        command = 'x=$(( ' + inner + ') && (true)); echo "$x"'
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    raw, marker = _bash_with_fake_gh(command, raw_dir)
+    if marker.exists():
+        assert marker.read_text().splitlines() == ["called"]
+        routed_dir = tmp_path / "routed"
+        routed_dir.mkdir()
+        test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
+            command, routed_dir, monkeypatch, capsys)
+    else:
+        # Bash rejects some ambiguous constructs before executing any gh.
+        assert raw.returncode != 0, raw.stdout
+
+
 @pytest.mark.parametrize("limit", [
     "printf", "echo -e", "echo -n", "bash -x", "bash -e", "bash -",
     "env bash", "sh -s --", "tee", "here-string", "xargs",

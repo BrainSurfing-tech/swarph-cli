@@ -601,7 +601,7 @@ def _quote_end(command: str, start: int, *, mask_comments: Optional[bool] = None
 
 def _is_arithmetic(command: str, open_paren: int, end: int) -> bool:
     return (command.startswith("((", open_paren) and end < len(command)
-            and command[end - 1:end + 1] == "))")
+            and _subst_end(command, open_paren + 1) == end - 1)
 
 
 def _subst_end(command: str, open_paren: int) -> int:
