@@ -464,6 +464,7 @@ def test_bounded_fallback_context_resets_after_exception(monkeypatch):
     assert gh_identity._COMMANDS_READING.get() is False
     assert gh_identity._BOUNDED_COMMANDS.get() is False
     assert gh_identity._ARITHMETIC_SEEN.get() is None
+    assert gh_identity._STANDALONE_BODIES.get() is None
 
 
 @pytest.mark.parametrize("command,body,arithmetic", [
@@ -558,6 +559,81 @@ def test_parenthesis_pairing_skips_ansi_c_escapes(word):
 def test_unclosed_ansi_c_word_cannot_supply_a_closing_parenthesis():
     command = "(echo $'it\\'s)"
     assert gh_identity._subst_end(command, 0) == len(command)
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+@pytest.mark.parametrize("command", [
+    pytest.param('((cat <<EOF\na b\nEOF; sh <<< "gh pr list"; echo $(case x in x) :;; esac)) | (cat))', id="round8_h1"),
+    pytest.param("((cat <<EOF\na b\nEOF; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round8_h2"),
+    pytest.param("((cat <<'EOF'\na b\nEOF; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round8_h3"),
+    pytest.param("((cat <<EOF\na b\nEOF; cat <<< x; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round8_h4"),
+    pytest.param("((cat <<-EOF\n\ta b\n\tEOF; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round8_h5"),
+    pytest.param("((cat <<EOF\na $((1 << 2)) b\nEOF; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round8_h6"),
+    pytest.param("((cat <<EOF\na b\nEOF; true\nbash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round8_h8"),
+])
+def test_standalone_heredoc_cannot_hide_the_rest_of_its_body(
+        command, tmp_path, monkeypatch, capsys):
+    test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
+        command, tmp_path, monkeypatch, capsys,
+        require_execution=sys.platform != "darwin", expected_decision=None)
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+@pytest.mark.parametrize("command", [
+    "gh pr list", "bash -c 'gh pr list'", 'eval "gh pr list"',
+    'sh <<< "gh pr list"', "echo $(gh pr list)", '"gh" pr list',
+    "X=1 gh pr list", "echo `gh pr list`",
+])
+def test_standalone_heredoc_payload_controls_stay_rewritten(
+        command, tmp_path, monkeypatch, capsys):
+    test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
+        command, tmp_path, monkeypatch, capsys)
+
+
+@pytest.mark.parametrize("command", [
+    "(( y = 2 << 1 ))", "echo $((1 << 2))", "x=$((1<<3))",
+    "for ((i=1; i<4; i<<=1)); do :; done", "echo $[1 << 2]",
+    "if (( 1 << 2 )); then :; fi", "(( y = 2 << 1 )); echo hi",
+    'echo "$((1 << 2))"', ": $((1 << 2))", "while (( 0 << 1 )); do :; done",
+])
+def test_standalone_heredoc_fallback_does_not_route_shift_controls(command, capsys):
+    assert not gh_identity.targets_gh(command)
+    assert not gh_identity.has_unterminated_heredoc(command)
+    assert gh_route.run_hook(json.dumps({
+        "tool_name": "Bash", "tool_input": {"command": command},
+    })) == 0
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("operator", ["<<EOF", "<< EOF", "<<-EOF", "<<'EOF'", '<<"EOF"'])
+def test_inner_heredoc_operator_removal_keeps_here_strings_and_numeric_shifts(operator):
+    body = "cat " + operator + "; bash <<< 'gh pr list'; echo $((1 << 2))"
+    assert gh_identity._INNER_HEREDOC_OP.sub("", body) == (
+        "cat ; bash <<< 'gh pr list'; echo $((1 << 2))")
+
+
+def test_inner_heredoc_fallback_is_context_local_and_additive(monkeypatch):
+    command = "((cat <<EOF\na b\nEOF; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))"
+    original = gh_identity._targets_gh
+    seen = []
+
+    def record(text, depth):
+        seen.append((text, gh_identity._COMMANDS_READING.get(), gh_identity._BOUNDED_COMMANDS.get()))
+        return original(text, depth)
+
+    monkeypatch.setattr(gh_identity, "_targets_gh", record)
+    assert gh_identity.targets_gh(command)
+    assert seen[0] == (command, False, False)
+    assert any("<<EOF" not in text and "bash <<<" in text and cmds and bounded
+               for text, cmds, bounded in seen)
+    assert gh_identity._STANDALONE_BODIES.get() is None
+    assert gh_identity._COMMANDS_READING.get() is False
+    assert gh_identity._BOUNDED_COMMANDS.get() is False
+    seen.clear()
+    assert gh_identity.targets_gh("gh pr list")
+    assert seen == [("gh pr list", False, False)]
 
 
 @pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,

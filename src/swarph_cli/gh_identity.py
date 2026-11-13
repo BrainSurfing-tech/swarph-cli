@@ -603,6 +603,8 @@ def _quote_end(command: str, start: int, *, mask_comments: Optional[bool] = None
 _COMMANDS_READING = ContextVar("gh_commands_reading", default=False)
 _BOUNDED_COMMANDS = ContextVar("gh_bounded_commands", default=False)
 _ARITHMETIC_SEEN = ContextVar("gh_arithmetic_seen", default=None)
+_STANDALONE_BODIES = ContextVar("gh_standalone_bodies", default=None)
+_INNER_HEREDOC_OP = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(['\"]?)[A-Za-z_][A-Za-z0-9_]*\1")
 
 
 def _is_arithmetic(command: str, open_paren: int, end: int) -> bool:
@@ -611,6 +613,11 @@ def _is_arithmetic(command: str, open_paren: int, end: int) -> bool:
                   and _subst_end(command, open_paren + 1) == end - 1)
     if arithmetic and _ARITHMETIC_SEEN.get() is not None:
         _ARITHMETIC_SEEN.set(True)
+        bodies = _STANDALONE_BODIES.get()
+        if bodies is not None and (open_paren == 0 or command[open_paren - 1] != "$"):
+            body = command[open_paren + 2:end - 1]
+            if "<<" in body:
+                bodies.add(body)
     return arithmetic
 
 
@@ -2171,6 +2178,7 @@ def targets_gh(command: str) -> bool:
     """True when the command actually invokes `gh`, not when a quote or comment mentions it."""
     command = command or ""
     seen_token = _ARITHMETIC_SEEN.set(False)
+    bodies_token = _STANDALONE_BODIES.set(set())
     try:
         if _targets_gh(command, 0):
             return True
@@ -2185,12 +2193,17 @@ def targets_gh(command: str) -> bool:
             # Keep old targets; a bounded fallback cannot let a shift consume later commands.
             bounded_token = _BOUNDED_COMMANDS.set(True)
             try:
-                return _targets_gh(command, 0)
+                if _targets_gh(command, 0):
+                    return True
+                # Only add targets: an inner heredoc must not hide the construct's remainder.
+                return any(_targets_gh(_INNER_HEREDOC_OP.sub("", body), 0)
+                           for body in _STANDALONE_BODIES.get())
             finally:
                 _BOUNDED_COMMANDS.reset(bounded_token)
         finally:
             _COMMANDS_READING.reset(token)
     finally:
+        _STANDALONE_BODIES.reset(bodies_token)
         _ARITHMETIC_SEEN.reset(seen_token)
 
 
