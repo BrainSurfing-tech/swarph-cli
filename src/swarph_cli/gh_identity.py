@@ -601,6 +601,7 @@ def _quote_end(command: str, start: int, *, mask_comments: Optional[bool] = None
 
 
 _COMMANDS_READING = ContextVar("gh_commands_reading", default=False)
+_BOUNDED_COMMANDS = ContextVar("gh_bounded_commands", default=False)
 _ARITHMETIC_SEEN = ContextVar("gh_arithmetic_seen", default=None)
 
 
@@ -818,6 +819,10 @@ def _arithmetic_span(command: str, pos: int, *, mask_comments: bool) -> Optional
     """Body-end and stop of a standalone ((...)) or legacy $[...] expression."""
     n = len(command)
     if command.startswith("((", pos):
+        if _BOUNDED_COMMANDS.get() and (pos == 0 or command[pos - 1] != "$"):
+            end = _subst_end(command, pos)
+            if end < n and _subst_end(command, pos + 1) == end - 1:
+                return end - 1, end + 1
         end = _subst_end_hd(command, pos, mask_comments=mask_comments)
         return (end - 1, end + 1) if _is_arithmetic(command, pos, end) else None
     if not command.startswith("$[", pos):
@@ -961,7 +966,7 @@ def _fold_bash_continuations(
             inner = _fold_bash_continuations(
                 command[i + 2:body_end], mask_comments=mask_comments,
                 fold_continuations_in_comments=fold_continuations_in_comments,
-                arithmetic=True,
+                arithmetic=not (_BOUNDED_COMMANDS.get() and command.startswith("((", i)),
             )
             out.append(command[i:i + 2] + inner + command[body_end:stop])
             i = stop
@@ -1576,7 +1581,8 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
         if math is not None:
             body_end, stop = math
             sub = _scan_folded(text[i + 2:body_end], base + i + 2,
-                               mask_comments=mask_comments, arithmetic=True)
+                               mask_comments=mask_comments,
+                               arithmetic=not (_BOUNDED_COMMANDS.get() and text.startswith("((", i)))
             unterminated |= sub.unterminated_quote
             unterminated_hd |= sub.unterminated_heredoc
             has_tick |= sub.has_backtick
@@ -2171,7 +2177,14 @@ def targets_gh(command: str) -> bool:
         # A speculative commands reading finds calls, never supplies denial flags.
         token = _COMMANDS_READING.set(True)
         try:
-            return _targets_gh(command, 0)
+            if _targets_gh(command, 0):
+                return True
+            # Keep old targets; a bounded fallback cannot let a shift consume later commands.
+            bounded_token = _BOUNDED_COMMANDS.set(True)
+            try:
+                return _targets_gh(command, 0)
+            finally:
+                _BOUNDED_COMMANDS.reset(bounded_token)
         finally:
             _COMMANDS_READING.reset(token)
     finally:
