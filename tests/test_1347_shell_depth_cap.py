@@ -34,8 +34,7 @@ def test_thirty_two_still_matches_by_reaching_gh():
     "bash -c 'echo it'\\''s done; gh pr view 1'",
     "bash -c 'echo 1;'\"gh pr view 1\"",
     'cat <<< "gh pr view 1"',
-    'echo "gh pr view 1" | bash',
-    'echo "gh pr view 1" | sh -s',
+    'echo "$CMD" | bash',
     "\\ghx pr list",
     "$(which gh) pr list",
     'g"x"h pr list',
@@ -53,7 +52,7 @@ def test_the_router_docstring_names_the_known_limits():
     for phrase in (
         "KNOWN LIMITS",
         "$(which gh)",
-        "sh -s",
+        "dynamic pipe",
         'CMD="gh pr view 1"',
         "apostrophe idiom",
         "adjacent quoted pieces",

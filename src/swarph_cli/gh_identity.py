@@ -49,7 +49,7 @@ and #1346 did not introduce them:
 - gh after the apostrophe idiom inside a -c string:
   bash -c 'echo it'\\''s done; gh pr view 1'
 - adjacent quoted pieces: bash -c 'echo 1;'"gh pr view 1"
-- a pipe into a shell: echo "gh pr view 1" | bash, and the same with | sh -s
+- a dynamic pipe into a shell: echo "$CMD" | bash
 - $(which gh) pr list
 - bash -c "$(echo gh) pr view 1"
 - a variable: CMD="gh pr view 1"; bash -c "$CMD"
@@ -615,6 +615,8 @@ def _subst_end_hd(command: str, open_paren: int, *,
     ending an unparenthesized ``case`` arm pattern ``pat)`` does not close
     the enclosing ``$(...)``.
     """
+    if command.startswith("((", open_paren):
+        return _subst_end(command, open_paren)
     mc = _MASK_COMMENTS if mask_comments is None else mask_comments
     depth = 1
     brace_depth = 0
@@ -788,6 +790,7 @@ class BashScan:
     has_heredoc: bool
     subst_spans: tuple[tuple[int, int], ...]
     unterminated_heredoc: bool = False
+    heredoc_shell_texts: tuple[str, ...] = ()
 
 
 def _fold_bash_continuations(
@@ -795,6 +798,7 @@ def _fold_bash_continuations(
     *,
     mask_comments: bool,
     fold_continuations_in_comments: bool,
+    arithmetic: bool = False,
 ) -> str:
     """Fold ``\\<LF>`` as bash does: outside comments, single quotes, and heredocs.
 
@@ -873,7 +877,18 @@ def _fold_bash_continuations(
             i += 1
             at_word_start = False
             continue
-        if c == "<":
+        if command.startswith("$((", i):
+            end = _subst_end_hd(command, i + 1, mask_comments=mask_comments)
+            inner = _fold_bash_continuations(
+                command[i + 2:end], mask_comments=mask_comments,
+                fold_continuations_in_comments=fold_continuations_in_comments,
+                arithmetic=True,
+            )
+            out.append("$(" + inner + (")" if end < n else ""))
+            i = end + 1 if end < n else n
+            at_word_start = False
+            continue
+        if c == "<" and not arithmetic:
             if command.startswith("<<<", i):
                 out.append("<<<")
                 i += 3
@@ -946,6 +961,7 @@ def _fold_bash_continuations(
                         command[i + 2:end],
                         mask_comments=mask_comments,
                         fold_continuations_in_comments=fold_continuations_in_comments,
+                        arithmetic=command.startswith("$((", i),
                     )
                     out.append("$(" + inner + (")" if end < n else ""))
                     i = end + 1 if end < n else n
@@ -1006,28 +1022,29 @@ def _closed_assignment_value_end(text: str, i: int, *,
                 return None
             i = j + 1
             continue
-        if text.startswith('$"', i):
-            j = i + 2
-            while j < n and text[j] != '"':
-                if text[j] == "\\" and j + 1 < n:
-                    j += 2
-                    continue
-                j += 1
-            if j >= n:
-                return None
-            i = j + 1
-            continue
         if c == "'":
             j = text.find("'", i + 1)
             if j < 0:
                 return None
             i = j + 1
             continue
-        if c == '"':
-            j = i + 1
+        if c == '"' or text.startswith('$"', i):
+            j = i + (2 if c == "$" else 1)
             while j < n and text[j] != '"':
                 if text[j] == "\\" and j + 1 < n:
                     j += 2
+                    continue
+                if text.startswith("$(", j):
+                    end = _subst_end_hd(text, j + 1, mask_comments=mask_comments)
+                    if end >= n:
+                        return None
+                    j = end + 1
+                    continue
+                if text[j] == "`":
+                    end = text.find("`", j + 1)
+                    if end < 0:
+                        return None
+                    j = end + 1
                     continue
                 j += 1
             if j >= n:
@@ -1069,7 +1086,10 @@ def _normalize_assignment_values(
                         folded, vstart, mask_comments=mask_comments)
                     if vend is not None and vend > vstart:
                         span_vis = "".join(chars[vstart:vend])
-                        if not gh_inv.search(span_vis):
+                        if not (gh_inv.search(span_vis) or any(
+                            pattern.search(span_vis)
+                            for pattern in (_SHELL_AT, _EVAL_AT, _WATCH_AT, _XARGS_AT)
+                        ) or ("|" in span_vis and _ECHO_AT.search(span_vis))):
                             for k in range(vstart, vend):
                                 chars[k] = "x"
                         i = vend
@@ -1354,7 +1374,8 @@ def _heredoc_feeds_shell(text: str, op_start: int) -> bool:
     return False
 
 
-def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> BashScan:
+def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
+                 arithmetic: bool = False) -> BashScan:
     """Single-pass bash scanner on continuation-folded text."""
     out: list[str] = []
     out_targets: list[str] = []
@@ -1369,6 +1390,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
     has_hd = False
     spans: list[tuple[int, int]] = []
     quoted_gh_words: list[tuple[int, int]] = []
+    heredoc_shell_texts: list[str] = []
 
     while i < n:
         c = text[i]
@@ -1414,24 +1436,26 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
                     unterminated_hd |= sub.unterminated_heredoc
                     has_tick |= sub.has_backtick
                     has_hd |= sub.has_heredoc
+                    heredoc_shell_texts.extend(sub.heredoc_shell_texts)
+                    # Parse against this body's own folded offsets, not its parent's.
+                    heredoc_shell_texts.extend(_shell_texts(body_folded, sub.targets_visible))
                     out.append(_blanks(body_raw))
-                    out_targets.append(sub.targets_visible)
+                    # Folding inside this body must not shift later source offsets.
+                    out_targets.append(sub.targets_visible.ljust(len(body_raw)))
                     if term_line is not None or body_lines:
                         out.append("\n")
                         out_targets.append("\n")
                 else:
-                    for idx_l, line in enumerate(body_lines):
-                        blank_line = _blanks(line)
-                        out.append(blank_line)
-                        if quoted_delim:
-                            out_targets.append(blank_line)
-                        else:
-                            out_targets.append(
-                                _scan_subst_only_for_targets(line, mask_comments=mask_comments)
-                            )
-                        if idx_l + 1 < len(body_lines) or term_line is not None:
-                            out.append("\n")
-                            out_targets.append("\n")
+                    # Substitutions can span lines; ordinary heredoc text stays masked.
+                    body_raw = "\n".join(body_lines)
+                    out.append(_blanks(body_raw))
+                    out_targets.append(
+                        _blanks(body_raw) if quoted_delim else
+                        _scan_subst_only_for_targets(body_raw, mask_comments=mask_comments)
+                    )
+                    if body_lines and term_line is not None:
+                        out.append("\n")
+                        out_targets.append("\n")
                 if term_line is not None:
                     out.append(term_line)
                     out_targets.append(term_line)
@@ -1478,7 +1502,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
             i += 1
             at_word_start = False
             continue
-        if c == "<":
+        if c == "<" and not arithmetic:
             if text.startswith("<<<", i):
                 has_hd = True
                 feeds_sh = _SCAN_SHELL_HEREDOC and _heredoc_feeds_shell(text, i)
@@ -1501,6 +1525,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
                             0,
                             mask_comments=mask_comments,
                         )
+                        heredoc_shell_texts.extend(sub.heredoc_shell_texts)
                         out.append(_blanks(text[i:wend]))
                         out_targets.append("(" + sub.targets_visible + ")")
                         i = wend
@@ -1601,12 +1626,14 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
                     stop = end + 1 if end < n else n
                     spans.append((base + i, base + stop))
                     sub = _scan_folded(
-                        text[i + 2:end], base + i + 2, mask_comments=mask_comments)
+                        text[i + 2:end], base + i + 2, mask_comments=mask_comments,
+                        arithmetic=text.startswith("$((", i))
                     unterminated |= sub.unterminated_quote
                     unterminated_hd |= sub.unterminated_heredoc
                     has_tick |= sub.has_backtick
                     has_hd |= sub.has_heredoc
                     spans.extend(sub.subst_spans)
+                    heredoc_shell_texts.extend(sub.heredoc_shell_texts)
                     close_p = ")" if end < n else ""
                     out.append("$(" + sub.visible + close_p)
                     out_targets.append("$(" + sub.targets_visible + close_p)
@@ -1629,6 +1656,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
                     unterminated_hd |= sub.unterminated_heredoc
                     has_hd |= sub.has_heredoc
                     spans.extend(sub.subst_spans)
+                    heredoc_shell_texts.extend(sub.heredoc_shell_texts)
                     out.append("`" + sub.visible + "`")
                     out_targets.append("`" + sub.targets_visible + "`")
                     i = j + 1
@@ -1654,12 +1682,14 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
             stop = end + 1 if end < n else n
             spans.append((base + i, base + stop))
             sub = _scan_folded(
-                text[i + 2:end], base + i + 2, mask_comments=mask_comments)
+                text[i + 2:end], base + i + 2, mask_comments=mask_comments,
+                arithmetic=text.startswith("$((", i))
             unterminated |= sub.unterminated_quote
             unterminated_hd |= sub.unterminated_heredoc
             has_tick |= sub.has_backtick
             has_hd |= sub.has_heredoc
             spans.extend(sub.subst_spans)
+            heredoc_shell_texts.extend(sub.heredoc_shell_texts)
             close_p = ")" if end < n else ""
             out.append("$(" + sub.visible + close_p)
             out_targets.append("$(" + sub.targets_visible + close_p)
@@ -1676,6 +1706,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
                 unterminated_hd |= sub.unterminated_heredoc
                 has_hd |= sub.has_heredoc
                 spans.extend(sub.subst_spans)
+                heredoc_shell_texts.extend(sub.heredoc_shell_texts)
                 out.append("`" + sub.visible)
                 out_targets.append("`" + sub.targets_visible)
                 i = n
@@ -1686,6 +1717,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
             unterminated_hd |= sub.unterminated_heredoc
             has_hd |= sub.has_heredoc
             spans.extend(sub.subst_spans)
+            heredoc_shell_texts.extend(sub.heredoc_shell_texts)
             out.append("`" + sub.visible + "`")
             out_targets.append("`" + sub.targets_visible + "`")
             i = j + 1
@@ -1713,6 +1745,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True) -> Bas
         has_heredoc=has_hd,
         subst_spans=tuple(spans),
         unterminated_heredoc=unterminated_hd,
+        heredoc_shell_texts=tuple(heredoc_shell_texts),
     )
 
 
@@ -1781,6 +1814,7 @@ _WATCH_AT = re.compile(
 _XARGS_AT = re.compile(
     rf"{_START}{_LEAD}{_CMD_PREFIX}(?:(?:/[\w.-]+)*/)?xargs(?=[ \t]|$)",
     re.MULTILINE)
+_ECHO_AT = re.compile(rf"{_START}{_LEAD}{_CMD_PREFIX}echo(?=[ \t]|$)", re.MULTILINE)
 _BASH_TAKES_ARG = frozenset({"-o", "--rcfile", "--init-file"})
 _WATCH_TAKES_ARG = frozenset({"-n", "--interval", "-e", "--errexit"})
 _XARGS_TAKES_ARG = frozenset({
@@ -1944,6 +1978,39 @@ def _xargs_shell(command: str, i: int) -> Optional[str]:
         return None
 
 
+def _echo_pipeline_text(command: str, i: int) -> Optional[str]:
+    """Only constant echo words into a shell on stdin, never dynamic expansion."""
+    parts: list[str] = []
+    n = len(command)
+    while i < n:
+        while i < n and command[i] in " \t":
+            i += 1
+        if i < n and command[i] == "|":
+            break
+        word, end, _ = _unquote_word_at(command, i)
+        if word is None or end <= i or (not parts and word.startswith("-")):
+            return None
+        parts.append(word)
+        i = end
+    if not parts or i >= n or command.startswith("||", i):
+        return None
+    i += 1
+    while i < n and command[i] in " \t":
+        i += 1
+    shell, i, _ = _unquote_word_at(command, i)
+    if shell is None or not _is_shell_word(shell):
+        return None
+    while i < n and command[i] in " \t":
+        i += 1
+    if command.startswith("-s", i):
+        i += 2
+        while i < n and command[i] in " \t":
+            i += 1
+    if i < n and command[i] not in ";\n&|)":
+        return None
+    return " ".join(parts)
+
+
 def _shell_texts(command: str, visible: str) -> list[str]:
     """String arguments of the shell forms card #1346 names, outside quotes."""
     found: list[str] = []
@@ -1961,6 +2028,10 @@ def _shell_texts(command: str, visible: str) -> list[str]:
             found.append(inner)
     for match in _XARGS_AT.finditer(visible):
         inner = _xargs_shell(command, match.end())
+        if inner:
+            found.append(inner)
+    for match in _ECHO_AT.finditer(visible):
+        inner = _echo_pipeline_text(command, match.end())
         if inner:
             found.append(inner)
     return found
@@ -2004,7 +2075,7 @@ def _targets_gh(command: str, depth: int) -> bool:
         return True
     if _quoted_gh_command_word(scan.folded, scan.targets_visible):
         return True
-    for inner in _shell_texts(scan.folded, scan.targets_visible):
+    for inner in (*scan.heredoc_shell_texts, *_shell_texts(scan.folded, scan.targets_visible)):
         if inner != command and _targets_gh(inner, depth + 1):
             return True
     return False
