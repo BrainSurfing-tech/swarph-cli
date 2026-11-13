@@ -66,7 +66,11 @@ def _run_hook(stdin_text: Optional[str] = None) -> int:
     payload = json.loads(raw or "{}")
 
     command = (payload.get("tool_input") or {}).get("command") or ""
-    if not ghid.targets_gh(command):
+    try:
+        targeted = ghid.targets_gh(command)
+    except ghid.RouterRefusal as exc:
+        return _deny(str(exc))
+    if not targeted:
         return _allow_unchanged()
     if ghid.has_disallowed_gh_token_assignment(command):
         return _deny("text still contains GH_TOKEN; put that text in "

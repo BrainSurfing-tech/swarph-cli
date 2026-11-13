@@ -139,6 +139,26 @@ class RouterRefusal(Exception):
     """Raised instead of falling back. Carries the operator-facing reason."""
 
 
+@dataclass
+class _RoutingWork:
+    limit: int
+    steps: int = 0
+
+
+_ROUTING_WORK = ContextVar("gh_routing_work", default=None)
+_WORK_PER_CHARACTER = 128
+_WORK_FIXED_ALLOWANCE = 65536
+
+
+def _charge_scan(characters: int) -> None:
+    """Precharge each visited scanner span; repeated scans must stay linear in input size."""
+    work = _ROUTING_WORK.get()
+    if work is not None:
+        work.steps += characters + 1
+        if work.steps > work.limit:
+            raise RouterRefusal("command too complex to route; split the command and retry")
+
+
 @dataclass(frozen=True)
 class Resolution:
     peer: str
@@ -579,6 +599,7 @@ def _is_terminator(line: str, delim: str, strip_tabs: bool) -> bool:
 def _quote_end(command: str, start: int, *, mask_comments: Optional[bool] = None,
                heredocs: bool = True) -> int:
     """Match a quote while keeping nested substitutions in their own quote scope."""
+    _charge_scan(len(command) - start)
     quote = command[start]
     n = len(command)
     if quote == "'":
@@ -620,12 +641,13 @@ def _is_arithmetic(command: str, open_paren: int, end: int) -> bool:
         if bodies is not None:
             body = command[open_paren + 2:end - 1]
             if "<<" in body:
-                bodies.add(body)
+                bodies.setdefault(body, None)
     return arithmetic
 
 
 def _subst_end(command: str, open_paren: int) -> int:
     """Index of the ``)`` matching ``command[open_paren] == '('``."""
+    _charge_scan(len(command) - open_paren)
     depth = 1
     i = open_paren + 1
     n = len(command)
@@ -668,6 +690,7 @@ def _subst_end_hd(command: str, open_paren: int, *,
     ending an unparenthesized ``case`` arm pattern ``pat)`` does not close
     the enclosing ``$(...)``.
     """
+    _charge_scan(len(command) - open_paren)
     if command.startswith("((", open_paren):
         candidate = _subst_end(command, open_paren)
         if _is_arithmetic(command, open_paren, candidate):
@@ -830,6 +853,7 @@ def _subst_end_hd(command: str, open_paren: int, *,
 
 def _arithmetic_span(command: str, pos: int, *, mask_comments: bool) -> Optional[tuple[int, int]]:
     """Body-end and stop of a standalone ((...)) or legacy $[...] expression."""
+    _charge_scan(len(command) - pos)
     n = len(command)
     if command.startswith("((", pos):
         if _BOUNDED_COMMANDS.get() and (pos == 0 or command[pos - 1] != "$"):
@@ -894,6 +918,7 @@ def _fold_bash_continuations(
       removed without changing word-start state. ``\\<CR><LF>`` is not a
       continuation and is kept in place.
     """
+    _charge_scan(len(command))
     out: list[str] = []
     i = 0
     n = len(command)
@@ -1192,6 +1217,7 @@ def _normalize_assignment_values(
 
 def _scan_subst_only_for_targets(segment: str, *, mask_comments: bool) -> str:
     """Blank ``segment`` while preserving any ``$(...)`` or `` `...` `` inside it."""
+    _charge_scan(len(segment))
     if "$(" not in segment and "`" not in segment:
         return _blanks(segment)
     res: list[str] = []
@@ -1460,6 +1486,7 @@ def _heredoc_feeds_shell(text: str, op_start: int) -> bool:
 def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                  arithmetic: bool = False) -> BashScan:
     """Single-pass bash scanner on continuation-folded text."""
+    _charge_scan(len(text))
     out: list[str] = []
     out_targets: list[str] = []
     i = 0
@@ -1878,6 +1905,7 @@ def _tokenize_bash(
     """
     mc = _MASK_COMMENTS if mask_comments is None else mask_comments
     command = command or ""
+    _charge_scan(len(command))
     # Without syntax there is no folding, masking, or substitution metadata to collect.
     if _PLAIN_BASH.fullmatch(command):
         return BashScan(
@@ -2180,8 +2208,11 @@ def _quoted_gh_command_word(command: str, visible: str) -> bool:
 def targets_gh(command: str) -> bool:
     """True when the command actually invokes `gh`, not when a quote or comment mentions it."""
     command = command or ""
+    work_token = _ROUTING_WORK.set(_RoutingWork(
+        _WORK_PER_CHARACTER * len(command) + _WORK_FIXED_ALLOWANCE))
     seen_token = _ARITHMETIC_SEEN.set(False)
-    bodies_token = _STANDALONE_BODIES.set(set())
+    # Visit distinct bodies in discovery order so the work budget is hash-seed independent.
+    bodies_token = _STANDALONE_BODIES.set({})
     try:
         if _targets_gh(command, 0):
             return True
@@ -2208,6 +2239,7 @@ def targets_gh(command: str) -> bool:
     finally:
         _STANDALONE_BODIES.reset(bodies_token)
         _ARITHMETIC_SEEN.reset(seen_token)
+        _ROUTING_WORK.reset(work_token)
 
 
 def _targets_gh(command: str, depth: int) -> bool:
