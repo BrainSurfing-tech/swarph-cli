@@ -156,11 +156,12 @@ _HOOK_STATE = ContextVar("gh_hook_state", default=None)
 _PARSER_NESTING = ContextVar("gh_parser_nesting", default=0)
 _WORK_PER_CHARACTER = 1280
 _WORK_FIXED_ALLOWANCE = 65536
-_WORK_ABSOLUTE_LIMIT = 132000000
+_WORK_ABSOLUTE_LIMIT = 120000000
 # A completed memo hit avoids the work of constructing a new cached match.
 _CACHE_WORK = 128
 _CACHE_HIT_WORK = 32
 _CURSOR_WORK = 16
+_SEARCH_WORK = 8
 
 
 def _bounded_parser(parse):
@@ -190,6 +191,12 @@ def _scan_find(text: str, needle: str, start: int) -> int:
     end = text.find(needle, start)
     _charge_scan(max(0, (len(text) if end < 0 else end + len(needle)) - start))
     return end
+
+
+def _target_search(pattern, text: str):
+    match = pattern.search(text)
+    _charge_scan(_SEARCH_WORK * (match.end() if match else len(text)))
+    return match
 
 
 def _span_origin(text: str) -> tuple[str, int]:
@@ -274,6 +281,7 @@ def _match_return(key: tuple, offset: int, text: str, end: int) -> int:
 
 
 _QUOTE_SPECIAL = re.compile(r'["\\$`]')
+_QUOTED_COMMAND_AT = re.compile(r"\$['\"]|['\"]")
 
 
 def _quote_run_end(text: str, start: int) -> int:
@@ -473,6 +481,7 @@ _HEREDOC_OP_ID_ONLY = re.compile(
     r"<<(-)?(?!<)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?=[ \t\n;|&()<>]|$)"
 )
 _ASSIGN_NAME_AT = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=")
+_ASSIGN_AT = re.compile(r"(?<![^ \t\n;|&({])([A-Za-z_][A-Za-z0-9_]*)=")
 _OUTPUT_REDIRECT_AT = re.compile(r"(?:[0-9]*>>?\|?|&>>?)(?!&)")
 _FD_REDIRECT_AT = re.compile(r"[0-9]*(?:>&[0-9-]+|<&?[0-9-]*)")
 _WORD_AT = re.compile(r"([A-Za-z]+)(?=[ \t]|$)")
@@ -1109,6 +1118,9 @@ def _fold_bash_continuations(
     """
     out: list[str] = []
     i = 0
+    if (arithmetic and _scan_find(command, "$", 0) < 0
+            and _scan_find(command, "\\\n", 0) < 0):
+        return command
     if _plain_bash(command):
         return command
     n = len(command)
@@ -1225,8 +1237,10 @@ def _fold_bash_continuations(
             at_word_start = True
             continue
         if c in " \t":
-            out.append(c)
-            i += 1
+            end = _SPACES_RUN.match(command, i).end()
+            out.append(command[i:end])
+            _charge_scan(2 * (end - i))
+            i = end
             at_word_start = True
             continue
         if c in ";|&()>":
@@ -1294,6 +1308,14 @@ def _fold_bash_continuations(
             if i < n and command[i] == '"':
                 out.append('"')
                 i += 1
+            continue
+        literal = _PLAIN_BASH.match(command, i)
+        if literal is not None and literal.end() > i:
+            end = literal.end()
+            out.append(command[i:end])
+            _charge_scan(2 * (end - i))
+            i = end
+            at_word_start = command[end - 1] == " "
             continue
         out.append(c)
         i += 1
@@ -1398,25 +1420,26 @@ def _normalize_assignment_values(
         i = 0
         while i < n:
             _charge_scan()
-            if i == 0 or visible[i - 1] in " \t\n;|&({":
-                am = _ASSIGN_NAME_AT.match(visible, i)
-                if am is not None:
-                    vstart = am.end()
-                    vend = _closed_assignment_value_end(
-                        folded, vstart, mask_comments=mask_comments)
-                    if vend is not None and vend > vstart:
-                        span_vis = "".join(chars[vstart:vend])
-                        _charge_scan(len(span_vis))
-                        if not (gh_inv.search(span_vis) or any(
-                            pattern.search(span_vis)
-                            for pattern in (_SHELL_AT, _EVAL_AT, _WATCH_AT, _XARGS_AT)
-                        ) or ("|" in span_vis and _ECHO_AT.search(span_vis))):
-                            for k in range(vstart, vend):
-                                _charge_scan()
-                                chars[k] = "x"
-                        i = vend
-                        continue
-            i += 1
+            am = _ASSIGN_AT.search(visible, i)
+            _charge_scan((am.end() if am else n) - i)
+            if am is None:
+                break
+            vstart = am.end()
+            vend = _closed_assignment_value_end(
+                folded, vstart, mask_comments=mask_comments)
+            if vend is not None and vend > vstart:
+                span_vis = "".join(chars[vstart:vend])
+                _charge_scan(len(span_vis))
+                if not (("gh" in span_vis and gh_inv.search(span_vis)) or any(
+                    literal in span_vis and pattern.search(span_vis)
+                    for literal, pattern in (("sh", _SHELL_AT), ("eval", _EVAL_AT),
+                                             ("watch", _WATCH_AT), ("xargs", _XARGS_AT))
+                ) or ("|" in span_vis and "echo" in span_vis and _ECHO_AT.search(span_vis))):
+                    chars[vstart:vend] = "x" * (vend - vstart)
+                    _charge_scan(3 * (vend - vstart))
+                i = vend
+                continue
+            i = am.start() + 1
     if quoted_gh_words:
         at_word = _AT_WORD if _ENABLE_BANG_AND_ENV_ASSIGN else _AT_WORD_LEGACY
         cur = "".join(chars)
@@ -1657,14 +1680,15 @@ def _later_executes_paths(text: str, start: int, paths: set[str]) -> bool:
         _span_origin(text)
         key = ("executions", id(text), _MASK_COMMENTS,
                _COMMANDS_READING.get(), _BOUNDED_COMMANDS.get())
-        saved = work.cache.get(key)
-        if saved is not None and start in saved[0]:
-            for path in sorted(paths):
-                executed = saved[1].get(path, -1) >= start
-                _charge_scan(_CACHE_WORK)
-                if executed:
-                    return True
-            return False
+        for boundaries, last_use in work.cache.get(key, ()):
+            _charge_scan(_CACHE_WORK)
+            if start in boundaries:
+                for path in sorted(paths):
+                    executed = last_use.get(path, -1) >= start
+                    _charge_scan(_CACHE_WORK)
+                    if executed:
+                        return True
+                return False
     boundaries = {start, len(text)}
     last_use: dict[str, int] = {}
     for begin, end, segment in _iter_top_level_segments(text, start):
@@ -1678,7 +1702,8 @@ def _later_executes_paths(text: str, start: int, paths: set[str]) -> bool:
                 return True
             last_use[path] = begin
     if work is not None:
-        work.cache[key] = boundaries, last_use
+        # Alternating quote states need separate indexes, not repeated replacement.
+        work.cache.setdefault(key, []).append((boundaries, last_use))
     return False
 
 
@@ -1764,6 +1789,19 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
     """Single-pass bash scanner on continuation-folded text."""
     if _plain_bash(text):
         return _tokenize_bash(text)
+    work = _ROUTING_WORK.get()
+    leaf_key = None
+    if (work is not None and "$" not in text and "`" not in text and "((" not in text):
+        leaf_key = ("offset-free-leaf", text, arithmetic, mask_comments, _COMMANDS_READING.get(),
+                    _BOUNDED_COMMANDS.get(), _SCAN_COMMENTS_FOR_TARGETS,
+                    _ENABLE_BANG_AND_ENV_ASSIGN, _RESOLVE_ANSI_C)
+        leaf = work.cache.get(leaf_key)
+        _charge_scan(_CACHE_HIT_WORK if leaf is not None else _CACHE_WORK)
+        if leaf is not None:
+            return leaf
+    quote_syntax = _WORD_QUOTING.search(text)
+    _charge_scan(quote_syntax.end() if quote_syntax else len(text))
+    literal_pattern = _LITERAL_WORD_RUN if quote_syntax else _PLAIN_BASH
     out: list[str] = []
     out_targets: list[str] = []
     i = 0
@@ -1870,7 +1908,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                 out_targets.append(blank_seg)
             i = end
             continue
-        if at_word_start and brace_depth == 0 and c not in " \t\n;|&()<>#":
+        if quote_syntax and at_word_start and brace_depth == 0 and c not in " \t\n;|&()<>#":
             unq, wend, had_qe = _unquote_word_at(text, i)
             if had_qe and unq is not None and _GH_EXACT.match(unq):
                 quoted_gh_words.append((i, wend))
@@ -1968,9 +2006,12 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
             at_word_start = True
             continue
         if c in " \t":
-            out.append(c)
-            out_targets.append(c)
-            i += 1
+            end = _SPACES_RUN.match(text, i).end()
+            space = text[i:end]
+            out.append(space)
+            out_targets.append(space)
+            _charge_scan(2 * (end - i))
+            i = end
             at_word_start = True
             continue
         if c in ";|&()>":
@@ -2144,6 +2185,16 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
             out_targets.append("`" + sub.targets_visible + "`")
             i = j + 1
             continue
+        literal = literal_pattern.match(text, i)
+        if literal is not None and literal.end() > i:
+            end = literal.end()
+            word = text[i:end]
+            out.append(word)
+            out_targets.append(word)
+            _charge_scan(2 * (end - i))
+            i = end
+            at_word_start = text[end - 1] == " "
+            continue
         out.append(c)
         out_targets.append(c)
         i += 1
@@ -2158,7 +2209,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
         mask_comments=mask_comments,
         quoted_gh_words=tuple(quoted_gh_words),
     )
-    return BashScan(
+    result = BashScan(
         folded=text,
         visible=visible,
         targets_visible=targets_visible,
@@ -2169,9 +2220,17 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
         unterminated_heredoc=unterminated_hd,
         heredoc_shell_texts=tuple(heredoc_shell_texts),
     )
+    if leaf_key is not None and not (spans or has_hd or has_tick):
+        # These completed leaves have neither discovery effects nor base-relative metadata.
+        work.cache[leaf_key] = result
+        _charge_scan(_CACHE_WORK)
+    return result
 
 
 _PLAIN_BASH = re.compile(r"[A-Za-z0-9 _./:,@+-]*")
+_LITERAL_WORD_RUN = re.compile(r"[A-Za-z0-9_./:,@+-]+")
+_SPACES_RUN = re.compile(r"[ \t]+")
+_WORD_QUOTING = re.compile(r"['\"\\]")
 
 
 def _plain_bash(command: str) -> bool:
@@ -2534,6 +2593,11 @@ def _quoted_gh_command_word(command: str, visible: str) -> bool:
     n = len(command)
     while i < n:
         _charge_scan()
+        quoted = _QUOTED_COMMAND_AT.search(command, i)
+        _charge_scan((quoted.end() if quoted else n) - i)
+        if quoted is None:
+            break
+        i = quoted.start()
         if (_RESOLVE_ANSI_C and command.startswith("$'", i)) or command.startswith('$"', i):
             body, end = _quoted_body(command, i)
             if _GH_EXACT.match(body) and at_word.search(_subspan(visible, 0, i)) is not None:
@@ -2598,7 +2662,9 @@ def _targets_gh(command: str, depth: int) -> bool:
     if scan.unterminated_heredoc and not _COMMANDS_READING.get():
         return True
     gh_inv = _GH_INVOCATION if _ENABLE_BANG_AND_ENV_ASSIGN else _GH_INVOCATION_LEGACY
-    if gh_inv.search(scan.visible) or gh_inv.search(scan.targets_visible):
+    if _target_search(gh_inv, scan.visible):
+        return True
+    if scan.targets_visible is not scan.visible and _target_search(gh_inv, scan.targets_visible):
         return True
     if depth >= _MAX_SHELL_DEPTH:
         return True

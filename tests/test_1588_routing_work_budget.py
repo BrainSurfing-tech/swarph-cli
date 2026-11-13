@@ -395,7 +395,7 @@ def test_work_is_deterministic_and_resets_after_refusal(monkeypatch):
         assert gh_identity._ROUTING_WORK.get() is None
         assert gh_identity._STANDALONE_BODIES.get() is None
     assert observed[0].steps == observed[1].steps
-    assert observed[0].limit == min(1280 * len(command) + 65536, 132000000)
+    assert observed[0].limit == min(1280 * len(command) + 65536, 120000000)
     assert observed[0].steps > observed[0].limit
     assert gh_identity.targets_gh("gh pr list")
     assert observed[-1].steps < observed[-1].limit
@@ -693,3 +693,204 @@ def test_plain_joined_words_match_the_original_token_reader():
     for command in commands:
         for start in (0, min(1, len(command)), len(command)):
             assert gh_identity._joined_words(command, start) == slow(command, start)
+
+
+def _quoted_body_fragment(variant):
+    header = {
+        "apostrophe": "cat > p.txt", "double-quote": "cat > p.txt",
+        "quoted-target": 'cat > "$P"', "append": "cat >> p.txt",
+        "brace": "{ cat > p.txt", "pipe": "true | cat > p.txt",
+        "plain-control": "cat > p.txt",
+    }[variant]
+    body = ('it is a note' if variant == "plain-control" else
+            'say "hi' if variant == "double-quote" else "it's a note")
+    return header + " <<'EOF'\n" + body + "\nEOF" + ("\n}" if variant == "brace" else "")
+
+
+@pytest.mark.parametrize("copies", [96, 192, 768, 3072])
+@pytest.mark.parametrize("position", ["none", "first", "last"])
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux fresh-hook five-second bound")
+def test_apostrophe_heredocs_keep_the_base_fresh_hook_decision(copies, position, tmp_path):
+    command = "\n".join([_quoted_body_fragment("apostrophe")] * copies)
+    if position != "none":
+        command = "gh pr list\n" + command if position == "first" else command + "\ngh pr list"
+    run, elapsed = _fresh_hook(command, tmp_path, 5)
+    assert run.returncode == 0, run.stderr
+    assert elapsed < 5
+    if position == "none":
+        assert not run.stdout
+    else:
+        assert json.loads(run.stdout)["hookSpecificOutput"]["updatedInput"]["command"] != command
+
+
+@pytest.mark.parametrize("variant", ["apostrophe", "double-quote", "quoted-target", "append", "brace", "pipe", "plain-control"])
+def test_quoted_body_lookahead_keeps_every_boundary_index_and_linear_work(variant, monkeypatch):
+    factory = gh_identity._RoutingWork
+    works = []
+    def capture(limit):
+        work = factory(10 ** 12)
+        works.append(work)
+        return work
+    monkeypatch.setattr(gh_identity, "_RoutingWork", capture)
+    ratios = []
+    for copies in (3, 12, 48, 192, 768, 3072):
+        command = "\n".join([_quoted_body_fragment(variant)] * copies)
+        assert not gh_identity.targets_gh(command)
+        ratios.append(works[-1].steps / len(command))
+        assert ratios[-1] < 3 * ratios[0]
+    print(variant, "copies3..3072 weighted units/char", ratios)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Bash/POSIX token replay")
+@pytest.mark.parametrize("variant", ["apostrophe", "double-quote", "quoted-target", "append", "brace", "pipe", "plain-control"])
+def test_quoted_body_variants_still_deliver_the_token(variant, tmp_path, monkeypatch, capsys):
+    from test_1588_shell_contexts import (
+        test_nested_quoted_value_is_rewritten_and_token_reaches_gh as replay,
+    )
+    command = "\n".join([_quoted_body_fragment(variant)] * 192)
+    replay("P=p.txt\n" + command + "\ngh pr list", tmp_path, monkeypatch, capsys)
+
+
+def test_suffix_index_queries_match_fresh_parsing_across_quote_states():
+    text = "\n".join([_quoted_body_fragment(v) for v in (
+        "apostrophe", "double-quote", "quoted-target", "brace", "append", "pipe")]) + "\nbash p.txt"
+    starts = [0] + [i + 1 for i, c in enumerate(text) if c == "\n"]
+    expected = {(start, path): gh_identity._later_executes_paths(text, start, {path})
+                for start in starts for path in ("p.txt", "absent", "cat")}
+    work = gh_identity._RoutingWork(10 ** 12)
+    token = gh_identity._ROUTING_WORK.set(work)
+    try:
+        for start in starts[::2] + starts[1::2] + list(reversed(starts)):
+            for path in ("p.txt", "absent", "cat"):
+                assert gh_identity._later_executes_paths(text, start, {path}) == expected[start, path]
+    finally:
+        gh_identity._ROUTING_WORK.reset(token)
+
+
+def test_literal_runs_and_native_candidates_preserve_the_complete_scan(monkeypatch):
+    import re
+    commands = [
+        "then g'h' pr list", 'then g"h" pr list', "then g\\h pr list",
+        "  a=\"$(gh pr list)\" gh pr list", "x=${a:-b} gh pr list",
+        "x=one y='two three' gh pr list", "cat <<EOF\ntext\nEOF\ngh pr list",
+        "(( y=1+2 )); bash -c 'gh pr list'", "a=(1 2); echo $((1<<2))",
+        _quoted_body_fragment("apostrophe"), "echo ${x:-a # b}; gh pr list",
+    ]
+    excluded = "\n\t$`[]{}<>|&;*?!~#'\"\\é"
+    commands += ["then word" + c + "gh pr list" for c in excluded]
+    commands += ["x=a" + c + " y=b; gh pr list" for c in excluded]
+    contexts = [(cmd, mc, fcc, reading, bounded) for cmd in commands
+                for mc in (False, True) for fcc in (False, True)
+                for reading in (False, True) for bounded in (False, True)]
+    def scan(entry):
+        command, mc, fcc, reading, bounded = entry
+        a = gh_identity._COMMANDS_READING.set(reading)
+        b = gh_identity._BOUNDED_COMMANDS.set(bounded)
+        try:
+            return gh_identity._tokenize_bash(command, mask_comments=mc,
+                fold_continuations_in_comments=fcc)
+        finally:
+            gh_identity._BOUNDED_COMMANDS.reset(b)
+            gh_identity._COMMANDS_READING.reset(a)
+    fast = [scan(entry) for entry in contexts]
+    def old_candidate(text, start):
+        for i in range(start, len(text)):
+            if i == 0 or text[i - 1] in " \t\n;|&({":
+                match = gh_identity._ASSIGN_NAME_AT.match(text, i)
+                if match is not None:
+                    return match
+        return None
+    from types import SimpleNamespace
+    monkeypatch.setattr(gh_identity, "_ASSIGN_AT", SimpleNamespace(search=old_candidate))
+    monkeypatch.setattr(gh_identity, "_WORD_QUOTING", re.compile(""))
+    monkeypatch.setattr(gh_identity, "_PLAIN_BASH", re.compile(r"(?!)"))
+    monkeypatch.setattr(gh_identity, "_LITERAL_WORD_RUN", re.compile(r"(?!)"))
+    monkeypatch.setattr(gh_identity, "_SPACES_RUN", re.compile(r"[ \t]"))
+    assert [scan(entry) for entry in contexts] == fast
+
+
+def test_native_target_search_charges_only_completed_ranges():
+    import re
+    work = gh_identity._RoutingWork(10 ** 9)
+    token = gh_identity._ROUTING_WORK.set(work)
+    try:
+        assert gh_identity._target_search(re.compile("gh"), "gh" + "x" * 100000)
+        assert work.steps == 2 * gh_identity._SEARCH_WORK
+        assert gh_identity._target_search(re.compile("gh"), "no match") is None
+        assert work.steps == 10 * gh_identity._SEARCH_WORK
+    finally:
+        gh_identity._ROUTING_WORK.reset(token)
+
+
+@pytest.mark.parametrize("arithmetic", [False, True])
+def test_repeated_arithmetic_leaves_reuse_only_offset_free_results(arithmetic):
+    text = "(x+1)"
+    expected = gh_identity._scan_folded(text, base=900, arithmetic=arithmetic)
+    work = gh_identity._RoutingWork(10 ** 9)
+    token = gh_identity._ROUTING_WORK.set(work)
+    try:
+        assert gh_identity._scan_folded(text, base=0, arithmetic=arithmetic) == expected
+        before = work.steps
+        assert gh_identity._scan_folded(text, base=900, arithmetic=arithmetic) == expected
+        assert work.steps - before == gh_identity._CACHE_HIT_WORK
+        with_substitution = "$(gh pr list)"
+        gh_identity._scan_folded(with_substitution, arithmetic=True)
+        assert not any(key[0] == "offset-free-leaf" and key[1] == with_substitution
+                       for key in work.cache)
+    finally:
+        gh_identity._ROUTING_WORK.reset(token)
+
+
+def test_native_quote_search_matches_the_original_character_walk(monkeypatch):
+    def slow(command, visible):
+        if "'" not in command and '"' not in command:
+            return False
+        at_word = gh_identity._AT_WORD if gh_identity._ENABLE_BANG_AND_ENV_ASSIGN else gh_identity._AT_WORD_LEGACY
+        i = 0
+        while i < len(command):
+            if ((gh_identity._RESOLVE_ANSI_C and command.startswith("$'", i))
+                    or command.startswith('$"', i)):
+                body, end = gh_identity._quoted_body(command, i)
+                if gh_identity._GH_EXACT.match(body) and at_word.search(visible[:i]) is not None:
+                    return True
+                i = end if end > i else i + 2
+                continue
+            if command[i] not in "'\"":
+                i += 1
+                continue
+            body, end = gh_identity._quoted_body(command, i)
+            if gh_identity._GH_EXACT.match(body) and at_word.search(visible[:i]) is not None:
+                return True
+            i = end if end > i else i + 1
+        return False
+    commands = ["'gh' pr list", '"gh" pr list', "$'gh' pr list", '$"gh" pr list',
+                'echo "gh"', "then g'h' pr list", "echo \\" + '"gh"',
+                "echo $'\\x67h' pr list", "x='literal' gh pr list",
+                _quoted_body_fragment("apostrophe")]
+    for resolve in (False, True):
+        for modern in (False, True):
+            monkeypatch.setattr(gh_identity, "_RESOLVE_ANSI_C", resolve)
+            monkeypatch.setattr(gh_identity, "_ENABLE_BANG_AND_ENV_ASSIGN", modern)
+            for command in commands:
+                visible = gh_identity._tokenize_bash(command).targets_visible
+                assert gh_identity._quoted_gh_command_word(command, visible) == slow(command, visible)
+
+
+def test_leaf_memo_never_hides_arithmetic_reading_discovery():
+    work = gh_identity._RoutingWork(10 ** 9)
+    work_token = gh_identity._ROUTING_WORK.set(work)
+    seen_token = gh_identity._ARITHMETIC_SEEN.set(False)
+    body_token = gh_identity._STANDALONE_BODIES.set({})
+    try:
+        for _ in range(2):
+            gh_identity._ARITHMETIC_SEEN.set(False)
+            gh_identity._STANDALONE_BODIES.get().clear()
+            gh_identity._scan_folded("((1<<2))")
+            assert gh_identity._ARITHMETIC_SEEN.get()
+            assert gh_identity._STANDALONE_BODIES.get()
+        assert not any(key[0] == "offset-free-leaf" and key[1] == "((1<<2))"
+                       for key in work.cache)
+    finally:
+        gh_identity._STANDALONE_BODIES.reset(body_token)
+        gh_identity._ARITHMETIC_SEEN.reset(seen_token)
+        gh_identity._ROUTING_WORK.reset(work_token)
