@@ -634,11 +634,19 @@ def test_standalone_heredoc_fallback_does_not_route_shift_controls(command, caps
     assert capsys.readouterr().out == ""
 
 
-@pytest.mark.parametrize("operator", ["<<EOF", "<< EOF", "<<-EOF", "<<'EOF'", '<<"EOF"'])
-def test_inner_heredoc_operator_removal_keeps_here_strings_and_numeric_shifts(operator):
+@pytest.mark.parametrize("operator,delimiter", [
+    ("<<EOF", "EOF"), ("<< EOF", " EOF"), ("<<-EOF", "EOF"),
+    ("<<'EOF'", "'EOF'"), ('<<"EOF"', '"EOF"'),
+])
+def test_inner_heredoc_operator_removal_keeps_delimiters_and_here_strings(operator, delimiter):
     body = "cat " + operator + "; bash <<< 'gh pr list'; echo $((1 << 2))"
     assert gh_identity._INNER_HEREDOC_OP.sub("", body) == (
-        "cat ; bash <<< 'gh pr list'; echo $((1 << 2))")
+        "cat " + delimiter + "; bash <<< 'gh pr list'; echo $((1  2))")
+
+
+def test_operator_removal_has_no_delimiter_grammar_and_never_strips_a_here_string():
+    body = "<<1 <<-y <<\\EOF <<'E F' <<<x <<<<y"
+    assert gh_identity._INNER_HEREDOC_OP.sub("", body) == "1 y \\EOF 'E F' <<<x <<<<y"
 
 
 @pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
@@ -678,6 +686,70 @@ def test_ansi_c_control_escape_boundaries_route_real_gh(
         command, tmp_path, monkeypatch, capsys):
     test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
         command, tmp_path, monkeypatch, capsys, require_execution=sys.platform != "darwin")
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+@pytest.mark.parametrize("command", [
+    pytest.param("((cat <<\\EOF\na b\nEOF; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_1"),
+    pytest.param("((cat <<'E F'\na b\nE F; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_2"),
+    pytest.param("((cat <<-\\EOF\na b\nEOF; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_3"),
+    pytest.param("((cat <<1\na b\n1; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_4"),
+    pytest.param("((cat <<1EOF\na b\n1EOF; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_5"),
+    pytest.param("((cat <<.\na b\n.; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_6"),
+    pytest.param("((cat <<@E\na b\n@E; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_7"),
+    pytest.param("((cat <<$'EOF'\na b\nEOF; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_8"),
+    pytest.param("((cat <<--\na b\n-; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_9"),
+    pytest.param("((cat <<:E\na b\n:E; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_10"),
+    pytest.param("((cat <<+\na b\n+; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_11"),
+    pytest.param("((cat <<ÉOF\na b\nÉOF; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_12"),
+    pytest.param("((cat <<$EOF\na b\n$EOF; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_13"),
+    pytest.param("((cat <<2nd\na b\n2nd; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_14"),
+    pytest.param("((cat <</E\na b\n/E; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_15"),
+    pytest.param("((cat <<,\na b\n,; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_16"),
+    pytest.param("((cat <<%\na b\n%; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_17"),
+    pytest.param("((cat <<!\na b\n!; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_18"),
+    pytest.param("((cat <<=\na b\n=; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_19"),
+    pytest.param("((cat <<{E}\na b\n{E}; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_20"),
+    pytest.param("((cat <<'1'\na b\n1; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_21"),
+    pytest.param("((cat <<'E-F'\na b\nE-F; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_22"),
+    pytest.param("((cat <<\"E.F\"\na b\nE.F; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_23"),
+    pytest.param("((cat <<\"E F\"\na b\nE F; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_24"),
+    pytest.param("((cat <<\\EOF\na b\nEOF; sh <<< \"gh pr list\"; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_25"),
+    pytest.param("((cat <<\\EOF\na b\nEOF; true\nbash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_26"),
+    pytest.param("((cat <<1\na b\n1; sh <<< \"gh pr list\"; echo $(case x in x) :;; esac)) | (cat))", id="round9_delimiter_27"),
+])
+def test_fallback_removes_operators_without_a_delimiter_grammar(
+        command, tmp_path, monkeypatch, capsys):
+    test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
+        command, tmp_path, monkeypatch, capsys, require_execution=sys.platform != "darwin")
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+@pytest.mark.parametrize("command", [
+    pytest.param("echo $((true; ((cat <<EOF\na b\nEOF; bash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))) | (cat))", id="round9_n11"),
+    pytest.param("cat <<EOF\n$(((cat <<\\EOF\na b\nEOF; bash <<'EOF'\necho $((bash <<< 'gh pr list'; echo $(case x in x) :;; esac)))\nEOF; for ((i=1; i<(1<<2); i<<=1)); do :; done; echo $(case x in x) :;; esac)) | (cat)))\nEOF\necho done", id="round9_f1"),
+    pytest.param("echo $(((cat <<\\EOF\na b\nEOF; bash <<'EOF'\necho $((bash <<< 'gh pr list'; echo $(case x in x) :;; esac)))\nEOF; echo $(case x in x) :;; esac)) | (cat)))", id="round9_f5"),
+    pytest.param("((cat <<1\na b\n1; echo $'\\c' ')'\nbash <<< 'gh pr list'; echo $(case x in x) :;; esac)) | (cat))", id="round9_cases38_21"),
+    pytest.param("((cat <<\"E.F\"\na b\nE.F; bash <<< 'gh pr list'; X=$'it\\'s' echo $'\\c\\''; echo $(case x in x) :;; esac)) | (cat))", id="round9_cases38_41"),
+    pytest.param("((cat <<\"E.F\"\na b\nE.F; X=\"$(echo \"a )\")\" echo $'\\c\\''; : '$(('\nX=\"))\" echo 'gh pr list' | bash; echo $(case x in x) :;; esac)) | (cat))", id="round9_cases38_67"),
+    pytest.param("((cat <<\\EOF\na b\nEOF; bash <<< 'gh pr list # )' && X=$(echo x) bash -c $'echo \\c\\'; gh pr list'; echo $(case x in x) :;; esac)) | (cat)) # that's", id="round9_cases38_70"),
+    pytest.param("((cat <<'E F'\na b\nE F; bash -c $'echo $(\\x28bash <<< \\'gh pr list\\'; echo $(case x in x) :;; esac)))'; echo $'\\c' ')'; echo $(case x in x) :;; esac)) | (cat))", id="round9_cases38_73"),
+    pytest.param("echo $(( 1 + $(((cat <<\\EOF\na b\nEOF; bash -c \"echo \\$((bash <<< 'gh pr list'; echo \\$(case x in x) :;; esac)))\"\nX=$'\\'(' echo $'\\c\\'' && X=$(( (1 << 2) )) echo \"it's\"; echo $(case x in x) :;; esac)) | (cat)) >/dev/null; echo 1) ))\n# \"", id="round9_cases38_85"),
+])
+def test_fallback_reaches_dollar_outer_forms_and_round8_lost_routes(
+        command, tmp_path, monkeypatch, capsys):
+    test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
+        command, tmp_path, monkeypatch, capsys, require_execution=sys.platform != "darwin")
+
+
+@pytest.mark.parametrize("command", ["(( x = 1 <<1 ))", "(( x = 1 <<y ))"])
+def test_operator_only_fallback_does_not_target_numeric_or_variable_shifts(command, capsys):
+    assert not gh_identity.targets_gh(command)
+    assert not gh_identity.has_unterminated_heredoc(command)
+    assert gh_route.run_hook(json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})) == 0
+    assert capsys.readouterr().out == ""
 
 
 def test_inner_heredoc_fallback_is_context_local_and_additive(monkeypatch):
@@ -761,7 +833,8 @@ def test_commands_reading_follows_classification_not_raw_text(monkeypatch):
     command = "echo $(\\\n(1 << 2))"
     assert "((" not in command
     assert not gh_identity.targets_gh(command)
-    assert modes == [False, True, True]
+    # #5356 also scans the recorded dollar-body after the three original readings miss.
+    assert modes == [False, True, True, True]
     assert gh_identity._ARITHMETIC_SEEN.get() is None
     gh_identity._tokenize_bash("echo $((1 << 2))")
     assert gh_identity._ARITHMETIC_SEEN.get() is None

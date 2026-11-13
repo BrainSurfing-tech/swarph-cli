@@ -607,7 +607,7 @@ _COMMANDS_READING = ContextVar("gh_commands_reading", default=False)
 _BOUNDED_COMMANDS = ContextVar("gh_bounded_commands", default=False)
 _ARITHMETIC_SEEN = ContextVar("gh_arithmetic_seen", default=None)
 _STANDALONE_BODIES = ContextVar("gh_standalone_bodies", default=None)
-_INNER_HEREDOC_OP = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(['\"]?)[A-Za-z_][A-Za-z0-9_]*\1")
+_INNER_HEREDOC_OP = re.compile(r"(?<!<)<<(?!<)-?")
 
 
 def _is_arithmetic(command: str, open_paren: int, end: int) -> bool:
@@ -617,7 +617,7 @@ def _is_arithmetic(command: str, open_paren: int, end: int) -> bool:
     if arithmetic and _ARITHMETIC_SEEN.get() is not None:
         _ARITHMETIC_SEEN.set(True)
         bodies = _STANDALONE_BODIES.get()
-        if bodies is not None and (open_paren == 0 or command[open_paren - 1] != "$"):
+        if bodies is not None:
             body = command[open_paren + 2:end - 1]
             if "<<" in body:
                 bodies.add(body)
