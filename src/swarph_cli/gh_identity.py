@@ -64,6 +64,7 @@ import json
 import os
 import re
 import shlex
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -599,8 +600,12 @@ def _quote_end(command: str, start: int, *, mask_comments: Optional[bool] = None
     return n
 
 
+_COMMANDS_READING = ContextVar("gh_commands_reading", default=False)
+
+
 def _is_arithmetic(command: str, open_paren: int, end: int) -> bool:
-    return (command.startswith("((", open_paren) and end < len(command)
+    return (not _COMMANDS_READING.get()
+            and command.startswith("((", open_paren) and end < len(command)
             and _subst_end(command, open_paren + 1) == end - 1)
 
 
@@ -988,7 +993,7 @@ def _fold_bash_continuations(
             i += 1
             at_word_start = True
             continue
-        if c == "$" and i + 1 < n and command[i + 1] == "'":
+        if not arithmetic and c == "$" and i + 1 < n and command[i + 1] == "'":
             at_word_start = False
             j = i + 2
             while j < n:
@@ -1002,7 +1007,7 @@ def _fold_bash_continuations(
             out.append(command[i:j])
             i = j
             continue
-        if c == "'":
+        if c == "'" and not arithmetic:
             at_word_start = False
             j = command.find("'", i + 1)
             end = n if j < 0 else j + 1
@@ -1640,7 +1645,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
             i += 1
             at_word_start = True
             continue
-        if c == "$" and i + 1 < n and text[i + 1] == "'":
+        if not arithmetic and c == "$" and i + 1 < n and text[i + 1] == "'":
             at_word_start = False
             j = i + 2
             while j < n:
@@ -1661,7 +1666,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
             out_targets.append(masked_q)
             i = j + 1
             continue
-        if c == "'":
+        if c == "'" and not arithmetic:
             at_word_start = False
             j = text.find("'", i + 1)
             if j < 0:
@@ -2135,12 +2140,22 @@ def _quoted_gh_command_word(command: str, visible: str) -> bool:
 
 def targets_gh(command: str) -> bool:
     """True when the command actually invokes `gh`, not when a quote or comment mentions it."""
-    return _targets_gh(command or "", 0)
+    command = command or ""
+    if _targets_gh(command, 0):
+        return True
+    if "((" not in command:
+        return False
+    # A speculative commands reading finds calls, never supplies denial flags.
+    token = _COMMANDS_READING.set(True)
+    try:
+        return _targets_gh(command, 0)
+    finally:
+        _COMMANDS_READING.reset(token)
 
 
 def _targets_gh(command: str, depth: int) -> bool:
     scan = _tokenize_bash(command)
-    if scan.unterminated_heredoc:
+    if scan.unterminated_heredoc and not _COMMANDS_READING.get():
         return True
     gh_inv = _GH_INVOCATION if _ENABLE_BANG_AND_ENV_ASSIGN else _GH_INVOCATION_LEGACY
     if gh_inv.search(scan.visible) or gh_inv.search(scan.targets_visible):

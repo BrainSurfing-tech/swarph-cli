@@ -273,3 +273,136 @@ def test_heredoc_parentheses_follow_bash_execution(
 ])
 def test_known_limits_names_unsupported_constant_pipeline_forms(limit):
     assert limit in gh_identity.__doc__
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+@pytest.mark.parametrize("command", [
+    pytest.param("echo $((bash <<< 'gh pr list'; echo $(case x in x) :;; esac)))", id="drop_round3_1"),
+    pytest.param("echo $((bash <<< 'gh pr list'; echo `case x in x) :;; esac`))", id="drop_round3_2"),
+    pytest.param("x=$((bash <<< 'gh pr list' >/dev/null; echo $(case x in x) echo 1;; esac))); echo $x", id="drop_round3_3"),
+    pytest.param("echo $((echo `case x in x) :;; esac`; bash <<< 'gh pr list'))", id="drop_round3_4"),
+    pytest.param("echo $((bash <<< 'gh pr list'; echo $(case x in (x) :;; esac)))", id="drop_round3_5"),
+    pytest.param("echo $((bash <<< 'gh pr list'; echo $(cat <<EOF\n)\nEOF\n)))", id="drop_round3_6"),
+    pytest.param("echo $((bash <<< 'gh pr list'; echo `cat <<EOF\n)\nEOF\n`))", id="drop_round3_7"),
+    pytest.param("((cat <<'EOF'\nit's\nEOF\n$(gh pr list) # '))", id="gpu_5317_1"),
+    pytest.param("((cat <<EOF\nit's\nEOF\n$(gh pr list) # '))", id="gpu_5317_2"),
+    pytest.param("echo $((cat <<'EOF'\nit's\nEOF\n$(gh pr list) # '))", id="gpu_5317_3"),
+    pytest.param("echo $(((cd /tmp) | cat <<'EOF'\nit's\nEOF\n) | ((echo $(gh pr list)) && gh pr list # '\n))", id="gpu_5317_4"),
+    pytest.param("echo $(( '$(gh pr list)' ))", id="gpu_5317_5"),
+    pytest.param("(( x = '$(gh pr list)' ))", id="gpu_5317_6"),
+    pytest.param("echo $[ '$(gh pr list)' ]", id="gpu_5317_7"),
+    "echo $(( 0 * '$(gh pr list)' ))",
+    "echo $(( 1 + ' `gh pr list | wc -l` ' ))",
+    "echo $(( 1 + '${x:-$(gh pr list)}' ))",
+    "echo $(( 1 + '$(g\\\nh pr list)' ))",
+])
+def test_arithmetic_union_and_apostrophe_expansions_reach_gh(
+        command, tmp_path, monkeypatch, capsys):
+    test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
+        command, tmp_path, monkeypatch, capsys)
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+@pytest.mark.parametrize("command,ran_gh,rewrites", [
+    pytest.param("((cat <<'EOF'\nits\nEOF\ngh pr list # '))", False, True, id="gpu_control_1"),
+    pytest.param("((cat <<'EOF'\nsay \"hi\nEOF\n$(gh pr list) # \"))", True, True, id="gpu_control_2"),
+    pytest.param("( (cat <<'EOF'\nit's\nEOF\ngh pr list # '))", False, True, id="gpu_control_3"),
+    pytest.param("((cat <<'EOF'\nit's\nEOF\ngh pr list # '))", False, None, id="gpu_control_4"),
+    pytest.param("((cat <<< \"it's\"\ngh pr list # '))", False, True, id="gpu_control_5"),
+])
+def test_arithmetic_union_controls(command, ran_gh, rewrites, tmp_path, monkeypatch, capsys):
+    _, marker = _bash_with_fake_gh(command, tmp_path)
+    assert marker.exists() is ran_gh
+    mapping = tmp_path / "gh-identities.json"
+    mapping.write_text(json.dumps({"mapped-fixture": "fixture-login"}), encoding="utf-8")
+    monkeypatch.setenv(gh_identity.MAPPING_ENV, str(mapping))
+    monkeypatch.setenv("SWARPH_SELF", "mapped-fixture")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    gh_route.run_hook(json.dumps({"tool_input": {"command": command}}))
+    output = capsys.readouterr().out
+    if output:
+        assert "updatedInput" in json.loads(output)["hookSpecificOutput"]
+    if rewrites is not None:
+        assert bool(output) is rewrites
+
+
+@pytest.mark.parametrize("prefix,expected", [
+    ("", "rewrite"),
+    ("GH_TOKEN=fixture-denied; ", "deny"),
+    ("export GH_TOKEN=$(gh auth token --user fixture-login); ", "rewrite"),
+    (None, "explicit"),
+])
+def test_speculative_target_keeps_normal_token_policy(prefix, expected, tmp_path, monkeypatch, capsys):
+    command = "echo $((bash <<< 'gh pr list'; echo $(case x in (x) :;; esac)))"
+    command = (prefix + command if prefix is not None else
+               "GH_TOKEN=$(gh auth token --user fixture-login) gh pr list")
+    mapping = tmp_path / "gh-identities.json"
+    mapping.write_text(json.dumps({"mapped-fixture": "fixture-login"}), encoding="utf-8")
+    monkeypatch.setenv(gh_identity.MAPPING_ENV, str(mapping))
+    monkeypatch.setenv("SWARPH_SELF", "mapped-fixture")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    modes = []
+    original_strip = gh_identity._strip_allowlisted_gh_token
+
+    def strip(command):
+        modes.append(gh_identity._COMMANDS_READING.get())
+        return original_strip(command)
+
+    monkeypatch.setattr(gh_identity, "_strip_allowlisted_gh_token", strip)
+    gh_route.run_hook(json.dumps({"tool_input": {"command": command}}))
+    output = capsys.readouterr().out
+    assert modes and not any(modes)
+    assert gh_identity._COMMANDS_READING.get() is False
+    if expected == "explicit":
+        assert not output
+    else:
+        body = json.loads(output)["hookSpecificOutput"]
+        if expected == "deny":
+            assert body["permissionDecision"] == "deny"
+            assert "updatedInput" not in body
+        else:
+            assert body["updatedInput"]["command"].startswith(
+                "export GH_TOKEN=$(gh auth token --user fixture-login); ")
+
+
+def test_speculative_reading_restores_context_after_exception(monkeypatch):
+    modes = []
+
+    def fail_in_commands_reading(command, depth):
+        modes.append(gh_identity._COMMANDS_READING.get())
+        if modes[-1]:
+            raise RuntimeError("fixture commands-reading failure")
+        return False
+
+    monkeypatch.setattr(gh_identity, "_targets_gh", fail_in_commands_reading)
+    with pytest.raises(RuntimeError, match="fixture commands-reading failure"):
+        gh_identity.targets_gh("echo $((1 << 2))")
+    assert modes == [False, True]
+    assert gh_identity._COMMANDS_READING.get() is False
+
+
+def test_speculative_reading_cannot_change_another_threads_denial_flags(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    entered, release = Event(), Event()
+    original = gh_identity._tokenize_bash
+
+    def pause_commands_reading(command, **kwargs):
+        if gh_identity._COMMANDS_READING.get():
+            entered.set()
+            assert release.wait(3)
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(gh_identity, "_tokenize_bash", pause_commands_reading)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(gh_identity.targets_gh, "echo $((1 << 2))")
+        try:
+            assert entered.wait(3)
+            assert gh_identity._COMMANDS_READING.get() is False
+            assert not gh_identity.has_unterminated_heredoc("echo $((1 << 2))")
+        finally:
+            release.set()
+        assert future.result(timeout=3) is False
