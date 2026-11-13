@@ -157,7 +157,9 @@ _PARSER_NESTING = ContextVar("gh_parser_nesting", default=0)
 _WORK_PER_CHARACTER = 1280
 _WORK_FIXED_ALLOWANCE = 65536
 _WORK_ABSOLUTE_LIMIT = 132000000
+# A completed memo hit avoids the work of constructing a new cached match.
 _CACHE_WORK = 128
+_CACHE_HIT_WORK = 32
 _CURSOR_WORK = 16
 
 
@@ -251,10 +253,10 @@ def _match_lookup(text: str, start: int, kind: tuple) -> tuple:
     key = ("match", kind, id(root), offset + start)
     found = work.cache.get(key)
     if found is not None:
-        _charge_scan(_CACHE_WORK)
+        _charge_scan(_CACHE_HIT_WORK)
         return key, offset, min(len(text), found - offset)
     if ("miss", key, offset + len(text)) in work.cache:
-        _charge_scan(_CACHE_WORK)
+        _charge_scan(_CACHE_HIT_WORK)
         return key, offset, len(text)
     _charge_scan(_CACHE_WORK)
     return key, offset, None
@@ -2384,6 +2386,18 @@ def _c_argument(command: str, i: int) -> Optional[str]:
 
 
 def _joined_words(command: str, i: int) -> Optional[str]:
+    if _PLAIN_BASH.fullmatch(command, i):
+        _charge_scan(len(command) - i)
+        tail = _subspan(command, i, len(command))
+        words = tail.split()
+        _charge_scan(len(tail))
+        first = 0
+        while first < len(words) and words[first] == "--":
+            _charge_scan()
+            first += 1
+        joined = " ".join(words[first:])
+        _charge_scan(len(joined))
+        return joined or None
     parts: list[str] = []
     while True:
         tok = _next_token(command, i)

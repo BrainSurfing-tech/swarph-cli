@@ -23,6 +23,18 @@ def _parenthesized_heredoc(size, mild=False, pattern=None):
     return "cat > fixture.py <<'EOF'\n" + "".join(lines) + "EOF\npython3 fixture.py | tail -n 3\n"
 
 
+def _uncommented_arithmetic_heredoc():
+    lines, length, i = [], 0, 0
+    while length < 250000:
+        line = f"    n=$(( {i} + 1 ))\n"
+        lines.append(line)
+        length += len(line)
+        i += 1
+    command = "cat > fixture.py <<'EOF'\n" + "".join(lines) + "EOF\npython3 fixture.py | tail -n 3\n"
+    assert len(command) == 250069
+    return command
+
+
 @pytest.mark.parametrize(("command", "calls_gh"), [
     pytest.param("\n".join(f"echo $(( {i} * 2 ))" for i in range(64)), False, id="64-arithmetic-echoes"),
     pytest.param("for f in *.txt; do\n" + "\n".join(
@@ -92,8 +104,9 @@ def test_nested_shift_budget_returns_a_real_hook_decision_within_two_seconds(dep
                  id="250kb-double-paren-heredoc"),
     pytest.param(_parenthesized_heredoc(250000, pattern="    n=$(( {i} + 1 ))"), False,
                  id="250kb-arithmetic-heredoc"),
-    pytest.param(_parenthesized_heredoc(300000, pattern="    n=$(( {i} + 1 ))"), True,
-                 id="300kb-arithmetic-heredoc-over-budget"),
+    pytest.param(_uncommented_arithmetic_heredoc(), False, id="exact-250069-arithmetic-heredoc"),
+    pytest.param(_parenthesized_heredoc(300000, pattern="    n=$(( {i} + 1 ))"), False,
+                 id="300kb-arithmetic-heredoc"),
     pytest.param(_parenthesized_heredoc(25000, mild=True), False, id="25kb-mild-heredoc"),
 ])
 def test_large_hook_inputs_decide_within_five_seconds(command, must_refuse, tmp_path):
@@ -168,9 +181,10 @@ def test_pathological_quote_nesting_has_an_explicit_complexity_refusal(depth, ca
     _parenthesized_heredoc(250000, pattern="    x = f((a, b))"),
     _parenthesized_heredoc(250000, pattern="    n=$(( {i} + 1 ))"),
     _parenthesized_heredoc(25000, mild=True),
+    _uncommented_arithmetic_heredoc(),
 ], ids=["515-flat-substitutions", "642-date-arguments", "1280-quoted-substitutions",
         "25kb-paren-heredoc", "250kb-paren-heredoc", "250kb-double-paren-heredoc",
-        "250kb-arithmetic-heredoc", "25kb-mild-heredoc"])
+        "250kb-arithmetic-heredoc", "25kb-mild-heredoc", "exact-250069-arithmetic-heredoc"])
 def test_valid_density_controls_still_deliver_the_token_when_gh_follows(
         command, tmp_path, monkeypatch, capsys):
     import shutil
@@ -229,7 +243,7 @@ def test_matching_a_registered_child_span_does_not_walk_it_again():
         child = gh_identity._subspan(text, 2, 5)
         before = work.steps
         assert gh_identity._subst_end(child, 0) == 2
-        assert work.steps - before == gh_identity._CACHE_WORK
+        assert work.steps - before == gh_identity._CACHE_HIT_WORK
         assert gh_identity._subst_end(gh_identity._subspan(text, 0, 4), 0) == 4
     finally:
         gh_identity._ROUTING_WORK.reset(token)
@@ -659,3 +673,23 @@ def test_relative_script_prefix_cleanup_does_not_copy_each_remaining_suffix():
         assert work.steps == 100000 * gh_identity._CURSOR_WORK
     finally:
         gh_identity._ROUTING_WORK.reset(token)
+
+
+def test_plain_joined_words_match_the_original_token_reader():
+    def slow(command, i):
+        parts = []
+        while True:
+            token = gh_identity._next_token(command, i)
+            if token is None or token[0] == "sep":
+                break
+            i = token[2]
+            if parts or token[3] != "--":
+                parts.append(token[3])
+        return " ".join(parts) if parts else None
+    excluded = "\n\t$`[]{}<>|&;*?!~#'\"\\é"
+    commands = ["", "  ", "-- --", "  -- -- gh pr list", "eval   gh pr list", "foo-- -- bar"]
+    commands += [prefix + char + suffix for char in excluded
+                 for prefix, suffix in [("", "gh pr list"), ("echo ", " gh pr list"), ("gh pr list", "")]]
+    for command in commands:
+        for start in (0, min(1, len(command)), len(command)):
+            assert gh_identity._joined_words(command, start) == slow(command, start)
