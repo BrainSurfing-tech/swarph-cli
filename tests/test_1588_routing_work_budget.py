@@ -12,10 +12,11 @@ from swarph_cli import gh_identity
 from swarph_cli.commands import gh_route
 
 
-def _parenthesized_heredoc(size, mild=False):
+def _parenthesized_heredoc(size, mild=False, pattern=None):
     lines, length, i = [], 0, 0
     while length < size:
-        line = ("    x = f(a, b)" if mild else "    y = g(f(a), h(b))") + f"  # {i}\n"
+        template = pattern or ("    x = f(a, b)" if mild else "    y = g(f(a), h(b))")
+        line = template.format(i=i) + f"  # {i}\n"
         lines.append(line)
         length += len(line)
         i += 1
@@ -86,6 +87,12 @@ def test_nested_shift_budget_returns_a_real_hook_decision_within_two_seconds(dep
     pytest.param("cat > f <<'EOF'\n" + "x" * 500_000 + "\nEOF\n", False, id="500kb-heredoc"),
     pytest.param(_parenthesized_heredoc(25000), False, id="25kb-parenthesized-heredoc"),
     pytest.param(_parenthesized_heredoc(250000), False, id="250kb-parenthesized-heredoc"),
+    pytest.param(_parenthesized_heredoc(250000, pattern="    x = f((a, b))"), False,
+                 id="250kb-double-paren-heredoc"),
+    pytest.param(_parenthesized_heredoc(250000, pattern="    n=$(( {i} + 1 ))"), False,
+                 id="250kb-arithmetic-heredoc"),
+    pytest.param(_parenthesized_heredoc(300000, pattern="    n=$(( {i} + 1 ))"), True,
+                 id="300kb-arithmetic-heredoc-over-budget"),
     pytest.param(_parenthesized_heredoc(25000, mild=True), False, id="25kb-mild-heredoc"),
 ])
 def test_large_hook_inputs_decide_within_five_seconds(command, must_refuse, tmp_path):
@@ -119,6 +126,20 @@ def test_nested_quoted_substitutions_keep_base_allow(depth, capsys):
     assert capsys.readouterr().out == ""
 
 
+@pytest.mark.parametrize("depth", [496, 512, 1024])
+def test_pathological_quote_nesting_has_an_explicit_complexity_refusal(depth, capsys):
+    command = "a"
+    for _ in range(depth):
+        command = '"$(echo ' + command + ')"'
+    assert gh_route.run_hook(json.dumps({"tool_input": {"command": "x=" + command}})) == 0
+    body = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert body["permissionDecision"] == "deny"
+    assert "command too complex to route" in body["permissionDecisionReason"]
+    assert "RecursionError" not in body["permissionDecisionReason"]
+    assert gh_identity._ROUTING_WORK.get() is None
+    assert gh_identity._QUOTE_NESTING.get() == 0
+
+
 @pytest.mark.skipif(os.name != "posix", reason="Bash/POSIX token replay")
 @pytest.mark.parametrize("command", [
     "echo " + "$(echo a) " * 515,
@@ -126,9 +147,12 @@ def test_nested_quoted_substitutions_keep_base_allow(depth, capsys):
     'echo ' + '"$(echo a)" ' * 1280,
     _parenthesized_heredoc(25000),
     _parenthesized_heredoc(250000),
+    _parenthesized_heredoc(250000, pattern="    x = f((a, b))"),
+    _parenthesized_heredoc(250000, pattern="    n=$(( {i} + 1 ))"),
     _parenthesized_heredoc(25000, mild=True),
 ], ids=["515-flat-substitutions", "642-date-arguments", "1280-quoted-substitutions",
-        "25kb-paren-heredoc", "250kb-paren-heredoc", "25kb-mild-heredoc"])
+        "25kb-paren-heredoc", "250kb-paren-heredoc", "250kb-double-paren-heredoc",
+        "250kb-arithmetic-heredoc", "25kb-mild-heredoc"])
 def test_valid_density_controls_still_deliver_the_token_when_gh_follows(
         command, tmp_path, monkeypatch, capsys):
     import shutil
@@ -137,7 +161,9 @@ def test_valid_density_controls_still_deliver_the_token_when_gh_follows(
     from test_1588_shell_contexts import (
         test_nested_quoted_value_is_rewritten_and_token_reaches_gh as assert_token_reaches_gh,
     )
-    assert_token_reaches_gh(command + "\ngh pr list", tmp_path, monkeypatch, capsys)
+    # Replay shell structure, not host date/Python startup (slow on macOS).
+    providers = "date() { printf '%s\\n' fixture-date; }\npython3() { :; }\n"
+    assert_token_reaches_gh(providers + command + "\ngh pr list", tmp_path, monkeypatch, capsys)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Bash/POSIX token replay")
@@ -274,7 +300,7 @@ def test_work_is_deterministic_and_resets_after_refusal(monkeypatch):
         assert gh_identity._ROUTING_WORK.get() is None
         assert gh_identity._STANDALONE_BODIES.get() is None
     assert observed[0].steps == observed[1].steps
-    assert observed[0].limit == min(512 * len(command) + 65536, 8000000)
+    assert observed[0].limit == min(512 * len(command) + 65536, 14000000)
     assert observed[0].steps > observed[0].limit
     assert gh_identity.targets_gh("gh pr list")
     assert observed[-1].steps < observed[-1].limit

@@ -150,9 +150,10 @@ class _RoutingWork:
 
 _ROUTING_WORK = ContextVar("gh_routing_work", default=None)
 _HOOK_STATE = ContextVar("gh_hook_state", default=None)
+_QUOTE_NESTING = ContextVar("gh_quote_nesting", default=0)
 _WORK_PER_CHARACTER = 512
 _WORK_FIXED_ALLOWANCE = 65536
-_WORK_ABSOLUTE_LIMIT = 8000000
+_WORK_ABSOLUTE_LIMIT = 14000000
 
 
 def _charge_scan(characters: int = 1) -> None:
@@ -694,6 +695,18 @@ def _is_terminator(line: str, delim: str, strip_tabs: bool) -> bool:
 def _quote_end(command: str, start: int, *, mask_comments: Optional[bool] = None,
                heredocs: bool = True) -> int:
     """Match a quote while keeping nested substitutions in their own quote scope."""
+    depth = _QUOTE_NESTING.get()
+    if depth >= 256:
+        raise RouterRefusal("command too complex to route; split the command and retry")
+    token = _QUOTE_NESTING.set(depth + 1)
+    try:
+        return _quote_end_at(command, start, mask_comments=mask_comments, heredocs=heredocs)
+    finally:
+        _QUOTE_NESTING.reset(token)
+
+
+def _quote_end_at(command: str, start: int, *, mask_comments: Optional[bool],
+                  heredocs: bool) -> int:
     kind = ("quote", mask_comments, heredocs, _COMMANDS_READING.get(), _BOUNDED_COMMANDS.get())
     key, offset, cached = _match_lookup(command, start, kind)
     if cached is not None:
