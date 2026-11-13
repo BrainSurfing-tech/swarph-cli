@@ -146,7 +146,7 @@ class _RoutingWork:
 
 
 _ROUTING_WORK = ContextVar("gh_routing_work", default=None)
-_WORK_PER_CHARACTER = 128
+_WORK_PER_CHARACTER = 1280
 _WORK_FIXED_ALLOWANCE = 65536
 
 

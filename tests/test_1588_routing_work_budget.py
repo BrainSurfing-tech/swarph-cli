@@ -78,7 +78,7 @@ def test_work_is_deterministic_and_resets_after_refusal(monkeypatch):
         assert gh_identity._ROUTING_WORK.get() is None
         assert gh_identity._STANDALONE_BODIES.get() is None
     assert observed[0].steps == observed[1].steps
-    assert observed[0].limit == 128 * len(command) + 65536
+    assert observed[0].limit == 1280 * len(command) + 65536
     assert observed[0].steps > observed[0].limit
     assert gh_identity.targets_gh("gh pr list")
     assert observed[-1].steps < observed[-1].limit
