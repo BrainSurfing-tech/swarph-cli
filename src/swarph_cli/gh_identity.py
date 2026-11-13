@@ -601,12 +601,16 @@ def _quote_end(command: str, start: int, *, mask_comments: Optional[bool] = None
 
 
 _COMMANDS_READING = ContextVar("gh_commands_reading", default=False)
+_ARITHMETIC_SEEN = ContextVar("gh_arithmetic_seen", default=None)
 
 
 def _is_arithmetic(command: str, open_paren: int, end: int) -> bool:
-    return (not _COMMANDS_READING.get()
-            and command.startswith("((", open_paren) and end < len(command)
-            and _subst_end(command, open_paren + 1) == end - 1)
+    arithmetic = (not _COMMANDS_READING.get()
+                  and command.startswith("((", open_paren) and end < len(command)
+                  and _subst_end(command, open_paren + 1) == end - 1)
+    if arithmetic and _ARITHMETIC_SEEN.get() is not None:
+        _ARITHMETIC_SEEN.set(True)
+    return arithmetic
 
 
 def _subst_end(command: str, open_paren: int) -> int:
@@ -1463,6 +1467,8 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
             while pending:
                 delim, strip_tabs, quoted_delim, feeds_shell, op_pos = pending.pop(0)
                 body_lines: list[str] = []
+                # Truncated inner heredocs must not invent a newline and shift later metadata.
+                body_has_nl = False
                 term_line: Optional[str] = None
                 term_has_nl = False
                 while i < n:
@@ -1475,6 +1481,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                         i = lend + 1 if nl >= 0 else n
                         break
                     body_lines.append(line)
+                    body_has_nl = nl >= 0
                     if nl < 0:
                         i = n
                         break
@@ -1503,7 +1510,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                     out.append(_blanks(body_raw))
                     # Folding inside this body must not shift later source offsets.
                     out_targets.append(sub.targets_visible.ljust(len(body_raw)))
-                    if term_line is not None or body_lines:
+                    if body_has_nl:
                         out.append("\n")
                         out_targets.append("\n")
                 else:
@@ -1514,7 +1521,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                         _blanks(body_raw) if quoted_delim else
                         _scan_subst_only_for_targets(body_raw, mask_comments=mask_comments)
                     )
-                    if body_lines and term_line is not None:
+                    if body_has_nl:
                         out.append("\n")
                         out_targets.append("\n")
                 if term_line is not None:
@@ -2154,16 +2161,21 @@ def _quoted_gh_command_word(command: str, visible: str) -> bool:
 def targets_gh(command: str) -> bool:
     """True when the command actually invokes `gh`, not when a quote or comment mentions it."""
     command = command or ""
-    if _targets_gh(command, 0):
-        return True
-    if "((" not in command:
-        return False
-    # A speculative commands reading finds calls, never supplies denial flags.
-    token = _COMMANDS_READING.set(True)
+    seen_token = _ARITHMETIC_SEEN.set(False)
     try:
-        return _targets_gh(command, 0)
+        if _targets_gh(command, 0):
+            return True
+        # Folding or decoding a nested script can create arithmetic absent from raw text.
+        if not _ARITHMETIC_SEEN.get():
+            return False
+        # A speculative commands reading finds calls, never supplies denial flags.
+        token = _COMMANDS_READING.set(True)
+        try:
+            return _targets_gh(command, 0)
+        finally:
+            _COMMANDS_READING.reset(token)
     finally:
-        _COMMANDS_READING.reset(token)
+        _ARITHMETIC_SEEN.reset(seen_token)
 
 
 def _targets_gh(command: str, depth: int) -> bool:

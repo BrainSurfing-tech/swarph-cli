@@ -320,6 +320,33 @@ def test_arithmetic_union_and_apostrophe_expansions_reach_gh(
         command, tmp_path, monkeypatch, capsys, require_execution=sys.platform != "darwin")
 
 
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+@pytest.mark.parametrize("command", [
+    pytest.param("echo $(\\\n(bash <<< 'gh pr list'; echo $(case x in x) :;; esac)))", id="drop_round4_A_1"),
+    pytest.param("x=$(\\\n(bash <<< 'gh pr list' >/dev/null; echo $(case x in x) echo 1;; esac))); echo $x", id="drop_round4_A_2"),
+    pytest.param("echo $(\\\n(bash <<< 'gh pr list'; echo `case x in x) :;; esac`))", id="drop_round4_A_3"),
+    pytest.param("echo $(\\\n(bash <<< 'gh pr list'; echo $(cat <<EOF\n)\nEOF\n)))", id="drop_round4_A_4"),
+    pytest.param("bash -c $'echo $(\\x28bash <<< \\'gh pr list\\'; echo $(case x in x) :;; esac)))'", id="drop_round4_A_5"),
+    pytest.param("bash -c $'echo $(\\050bash <<< \"gh pr list\"; echo $(case x in x) :;; esac)))'", id="drop_round4_A_6"),
+    pytest.param("bash <<EOF\necho \\$(\\\n(bash <<< 'gh pr list'; echo \\$(case x in x) :;; esac)))\nEOF", id="drop_round4_A_7"),
+    pytest.param("bash <<'EOF'\necho $(\\\n(bash <<< 'gh pr list'; echo $(case x in x) :;; esac)))\nEOF", id="drop_round4_A_8"),
+    pytest.param("cat <<EOF\n$(bash <<EOF\necho a\nEOF\nX=\"$(echo \"$(echo \")\")\")\" gh pr list\necho x)\nEOF", id="drop_round4_D_9"),
+    pytest.param("cat <<EOF\n$(bash <<EOF\necho a\nEOF\nX=\"$(echo \"$(echo \")\")\")\" gh pr comment 1 --body \"it's fine\"\necho x)\nEOF", id="drop_round4_D_10"),
+    pytest.param("cat <<EOF\n$(bash <<EOF\necho a\nEOF\n\"gh\" pr list\necho x)\nEOF", id="drop_round4_D_11"),
+    pytest.param("cat <<EOF\n$(bash <<EOF\necho a\nEOF\nX=')' gh pr list\necho x)\nEOF", id="drop_round4_D_12"),
+    pytest.param("cat <<EOF\n$(bash <<EOF\necho a\nEOF\nX=\"$(echo \"$(echo \")\")\")\" gh pr list\nEOF", id="drop_round4_D_13"),
+    pytest.param("cat <<EOF\n`bash <<EOF\necho a\nEOF\nX=\"$(echo \"$(echo \")\")\")\" gh pr list\necho x`\nEOF", id="drop_round4_D_14"),
+    pytest.param("echo $(( 0 * $'$(gh pr list | wc -l)' ))", id="gpu_Z4_1"),
+    pytest.param("(( x = $'$(gh pr list | wc -l)' ))", id="gpu_Z4_2"),
+    pytest.param("echo $[ $'$(gh pr list | wc -l)' ]", id="gpu_Z4_3"),
+])
+def test_processed_arithmetic_and_first_heredoc_delimiter_reach_gh(
+        command, tmp_path, monkeypatch, capsys):
+    test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
+        command, tmp_path, monkeypatch, capsys, require_execution=sys.platform != "darwin")
+
+
 def test_no_execution_still_requires_a_hook_rewrite(tmp_path, monkeypatch, capsys):
     if os.name != "posix" or shutil.which("bash") is None:
         pytest.skip("Bash/POSIX oracle")
@@ -328,6 +355,37 @@ def test_no_execution_still_requires_a_hook_rewrite(tmp_path, monkeypatch, capsy
         test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
             "((cat <<'EOF'\nit's\nEOF\ngh pr list # '))",
             tmp_path, monkeypatch, capsys, require_execution=False)
+
+
+@pytest.mark.parametrize("program", ["bash", "cat"])
+@pytest.mark.parametrize("body", ["", "a", "a\n", "a\nb", "a\nb\n", "a\nEOF"])
+def test_truncated_heredoc_preserves_source_offsets(program, body):
+    command = program + " <<EOF\n" + body
+    scan = gh_identity._tokenize_bash(command)
+    assert scan.folded == command
+    assert len(scan.visible) == len(command)
+    assert len(scan.targets_visible) == len(command)
+
+
+def test_commands_reading_follows_classification_not_raw_text(monkeypatch):
+    modes = []
+    original = gh_identity._targets_gh
+
+    def record(command, depth):
+        modes.append(gh_identity._COMMANDS_READING.get())
+        return original(command, depth)
+
+    monkeypatch.setattr(gh_identity, "_targets_gh", record)
+    assert not gh_identity.targets_gh("echo harmless")
+    assert modes == [False]
+    modes.clear()
+    command = "echo $(\\\n(1 << 2))"
+    assert "((" not in command
+    assert not gh_identity.targets_gh(command)
+    assert modes == [False, True]
+    assert gh_identity._ARITHMETIC_SEEN.get() is None
+    gh_identity._tokenize_bash("echo $((1 << 2))")
+    assert gh_identity._ARITHMETIC_SEEN.get() is None
 
 
 @pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
@@ -401,6 +459,7 @@ def test_speculative_reading_restores_context_after_exception(monkeypatch):
         modes.append(gh_identity._COMMANDS_READING.get())
         if modes[-1]:
             raise RuntimeError("fixture commands-reading failure")
+        assert gh_identity._is_arithmetic("((1 << 2))", 0, 9)
         return False
 
     monkeypatch.setattr(gh_identity, "_targets_gh", fail_in_commands_reading)
@@ -408,6 +467,7 @@ def test_speculative_reading_restores_context_after_exception(monkeypatch):
         gh_identity.targets_gh("echo $((1 << 2))")
     assert modes == [False, True]
     assert gh_identity._COMMANDS_READING.get() is False
+    assert gh_identity._ARITHMETIC_SEEN.get() is None
 
 
 def test_speculative_reading_cannot_change_another_threads_denial_flags(monkeypatch):
