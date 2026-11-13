@@ -346,13 +346,16 @@ _ANSI_C_SIMPLE = {
 
 def _unescape_ansi_c(text: str, start: int) -> tuple[str, int, bool]:
     """Parse ``$'...'`` starting after ``$'`` at ``start`` -> (unescaped, next_idx, closed)."""
-    n = len(text)
+    # Bash finds the word boundary before decoding escapes such as backslash-c.
+    end = start
+    while end < len(text) and text[end] != "'":
+        end += 2 if text[end] == "\\" and end + 1 < len(text) else 1
+    closed = end < len(text)
+    n = end
     j = start
     buf: list[str] = []
     while j < n:
         c = text[j]
-        if c == "'":
-            return "".join(buf), j + 1, True
         if c == "\\" and j + 1 < n:
             nxt = text[j + 1]
             if nxt in _ANSI_C_SIMPLE:
@@ -394,7 +397,7 @@ def _unescape_ansi_c(text: str, start: int) -> tuple[str, int, bool]:
             continue
         buf.append(c)
         j += 1
-    return "".join(buf), n, False
+    return "".join(buf), end + 1 if closed else end, closed
 
 
 def _parse_heredoc_op(

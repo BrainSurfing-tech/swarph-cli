@@ -548,7 +548,7 @@ def test_ansi_c_pairing_neighbours_keep_their_decision(
 
 @pytest.mark.parametrize("word", [
     "$'it\\'s))('", "$'a\\\\))('", "$'a\\x27))('", "$'a\\047))('",
-    "$'a\\u0027))('", "$'a\\U00000027))('", "$'a\\c'))('",
+    "$'a\\u0027))('", "$'a\\U00000027))('",
     "$'a)('", "$'it\\'s)\n('",
 ])
 def test_parenthesis_pairing_skips_ansi_c_escapes(word):
@@ -559,6 +559,26 @@ def test_parenthesis_pairing_skips_ansi_c_escapes(word):
 def test_unclosed_ansi_c_word_cannot_supply_a_closing_parenthesis():
     command = "(echo $'it\\'s)"
     assert gh_identity._subst_end(command, 0) == len(command)
+
+
+def test_control_escape_does_not_consume_the_word_closing_quote():
+    # #5352 corrects the old expectation that backslash-c consumes this quote.
+    word = "$'a\\c'))('"
+    command = "(echo " + word + "; echo after)tail"
+    assert gh_identity._subst_end(command, 0) == command.index("))(")
+    assert gh_identity._unescape_ansi_c(word, 2) == ("a\\c", 6, True)
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX ANSI-C word oracle")
+@pytest.mark.parametrize("word", [r"$'\c'", r"$'a\c'", r"$'\cx'", r"$'\c)'", r"$'\c\''", r"$'\cA'", r"$'\c\n'"])
+def test_control_escape_word_boundary_and_value_match_real_bash(word):
+    result = subprocess.run(["bash", "--noprofile", "--norc", "-c", "printf %s " + word + "__end__"],
+                            capture_output=True, timeout=3, env={"PATH": os.defpath})
+    value, end, closed = gh_identity._unescape_ansi_c(word + "__end__", 2)
+    assert result.returncode == 0, result.stderr
+    assert (end, closed) == (len(word), True)
+    assert result.stdout == value.encode() + b"__end__"
 
 
 @pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
@@ -612,6 +632,45 @@ def test_inner_heredoc_operator_removal_keeps_here_strings_and_numeric_shifts(op
     body = "cat " + operator + "; bash <<< 'gh pr list'; echo $((1 << 2))"
     assert gh_identity._INNER_HEREDOC_OP.sub("", body) == (
         "cat ; bash <<< 'gh pr list'; echo $((1 << 2))")
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+@pytest.mark.parametrize("command", [
+    pytest.param("X=\"$($'\\c')\" gh pr list", id="ansi_c_M1"),
+    pytest.param("(e=\"$($'\\c')\" gh pr list)", id="ansi_c_M2"),
+    pytest.param("X=\"$($'\\c\\'')\" gh pr list", id="ansi_c_M3"),
+    pytest.param("x=$(echo $'\\\\'; X=\"$(echo $'\\c'; echo \")\")\" gh pr list)", id="ansi_c_M4"),
+    pytest.param("echo $($'\\c'); gh pr list", id="ansi_c_K1"),
+    pytest.param("echo $(echo $'\\c')\ngh pr list", id="ansi_c_K2"),
+    pytest.param("X=\"$($'\\cx')\" gh pr list", id="ansi_c_K3"),
+    pytest.param("X=\"$($'a')\" gh pr list", id="ansi_c_K4"),
+    pytest.param("X=\"$(echo $'\\c)')\" gh pr list", id="ansi_c_K5"),
+    pytest.param("((echo $'\\c'; echo x) | (cat))\ngh pr list", id="ansi_c_K6"),
+    pytest.param("x=$(echo $'\\\\'; X=\"$(echo $'\\c\\\\'; \")\")\" gh pr list)", id="ansi_c_F1"),
+    pytest.param("x=$(echo $'\\\\'; X=\"$(echo echo $'\\c'; \")\")\" gh pr list)", id="ansi_c_F2"),
+    pytest.param("x=$(echo $'\\\\'; X=\"$(echo $'\\c'; echo \")\")\" gh pr list)", id="ansi_c_F3"),
+    pytest.param("x=$(echo $'\\\\'; X=\"$(echo $'\\c\\\\'; echo \")\")\" gh pr list)", id="ansi_c_F4"),
+    pytest.param("cat <<-EOF\nx\n`bash <<EOF\necho a\nEOF\nX=\"$($'\\c\\\\'; echo \"$(echo \")\")\")\" gh pr list\n; echo x)\nEOF", id="ansi_c_F5"),
+    pytest.param("cat <<-EOF\nx\n`bash <<EOF\necho a\nEOF\nX=\"$($'\\c\\''; echo \"$(echo \")\")\")\" gh pr list\n; echo x)\nEOF", id="ansi_c_F6"),
+    pytest.param("cat <<EOF >/dev/null\nx\n$(bash <<EOF\necho a\nEOF\nX=\"$($'\\c\\\\'; echo \"$(echo \")\")\")\" gh pr list\nEOF", id="ansi_c_F7"),
+    pytest.param("cat <<EOF >/dev/null\nx\n$(bash <<-EOF\ntrue\nEOF\nX=\"$(echo $'\\c\\''; \"$(echo \")\")\")\" gh pr list\n)\nEOF", id="ansi_c_F8"),
+    pytest.param("cat <<EOF >/dev/null\nx\n$(bash <<-EOF\ntrue\nEOF\nX=\"$(echo $'\\c\\\\'; \"$(echo \")\")\")\" gh pr list\n)\nEOF", id="ansi_c_F9"),
+    pytest.param("cat <<EOF >/dev/null\nx\n$(bash <<EOF\ntrue\nEOF\nX=\"$(echo $'\\c'; echo \"$(echo \")\")\")\" gh pr list\nEOF", id="ansi_c_F10"),
+    pytest.param("cat <<-EOF\nx\n`bash <<EOF\necho a\nEOF\nX=\"$(echo $'\\c'; echo \"$(echo \")\")\")\" gh pr list\n; echo x)\nEOF", id="ansi_c_F11"),
+    pytest.param("cat <<EOF >/dev/null\nx\n$(bash <<EOF\necho a\nEOF\nX=\"$(echo echo $'\\c'; \"$(echo \")\")\")\" gh pr list\nEOF", id="ansi_c_F12"),
+    pytest.param("cat <<EOF >/dev/null\nx\n$(bash <<EOF\ntrue\nEOF\nX=\"$(echo $'\\c\\''; echo \"$(echo \")\")\")\" gh pr list\nEOF", id="ansi_c_F13"),
+    pytest.param("cat <<EOF >/dev/null\nx\n$(bash <<EOF\necho a\nEOF\nX=\"$(echo $'\\c\\\\'; echo \"$(echo \")\")\")\" gh pr list\nEOF", id="ansi_c_F14"),
+    pytest.param("cat <<EOF >/dev/null\nx\n$(bash <<EOF\necho a\nEOF\nX=\"$(echo $'\\c\\''; echo \"$(echo \")\")\")\" gh pr list\nEOF", id="ansi_c_F15"),
+    pytest.param("cat <<EOF >/dev/null\nx\n$(bash <<-EOF\ntrue\nEOF\nX=\"$(echo echo $'\\c\\''; \"$(echo \")\")\")\" gh pr list\n)\nEOF", id="ansi_c_F16"),
+    pytest.param("true && ((echo $'\\c''; $(gh pr list)\ncat); (cat <<'EOF'\nit's\nEOF\n))", id="ansi_c_I1"),
+    pytest.param("echo $(( $(echo $'\\c'; $'\\08)'; \"gh\" pr list) ))", id="ansi_c_I2"),
+    pytest.param("echo $(( $($'\\c'; echo $'\\08)'; \"gh\" pr list) ))", id="ansi_c_I3"),
+])
+def test_ansi_c_control_escape_boundaries_route_real_gh(
+        command, tmp_path, monkeypatch, capsys):
+    test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
+        command, tmp_path, monkeypatch, capsys, require_execution=sys.platform != "darwin")
 
 
 def test_inner_heredoc_fallback_is_context_local_and_additive(monkeypatch):
