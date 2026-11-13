@@ -82,6 +82,7 @@ def test_nested_shift_budget_returns_a_real_hook_decision_within_two_seconds(dep
 @pytest.mark.parametrize(("command", "must_refuse"), [
     pytest.param("((" * 100000 + "))" * 100000, True, id="400kb-parentheses"),
     pytest.param("; ".join("x=$((x+1))" for _ in range(2048)), False, id="2048-assignments"),
+    pytest.param("; ".join("x=$((x+1))" for _ in range(120000)), True, id="120000-assignments"),
     pytest.param("echo " + "$(" * 20000 + "true" + ")" * 20000, True, id="20000-substitutions"),
     pytest.param('bash -c "' + "x" * 1_000_000 + '"', False, id="1m-quoted-data"),
     pytest.param("cat > f <<'EOF'\n" + "x" * 500_000 + "\nEOF\n", False, id="500kb-heredoc"),
@@ -105,6 +106,23 @@ def test_large_hook_inputs_decide_within_five_seconds(command, must_refuse, tmp_
         assert body["permissionDecision"] == "deny"
     else:
         assert not result.stdout, "base allows these valid, non-gh data commands unchanged"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux CI five-second hook bound")
+@pytest.mark.parametrize("command", [
+    pytest.param("\n".join('cat <<< "x"' for _ in range(102396)), id="102396-here-strings"),
+    pytest.param("\n".join(f"cat <<E{i}\nx\nE{i}" for i in range(62326)), id="62326-short-heredocs"),
+    pytest.param("cat " + " ".join(f"<<A{i}" for i in range(164705)) + "\n",
+                 id="164705-heredoc-operators"),
+])
+def test_heredoc_density_always_gets_a_fresh_hook_decision(command, tmp_path):
+    assert len(json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})) <= 1536000
+    result, elapsed = _fresh_hook(command, tmp_path, 5)
+    assert elapsed < 5
+    assert result.returncode == 0, result.stderr
+    if result.stdout:
+        body = json.loads(result.stdout)["hookSpecificOutput"]
+        assert body["permissionDecision"] == "deny"
 
 
 @pytest.mark.parametrize("command", [
@@ -137,7 +155,7 @@ def test_pathological_quote_nesting_has_an_explicit_complexity_refusal(depth, ca
     assert "command too complex to route" in body["permissionDecisionReason"]
     assert "RecursionError" not in body["permissionDecisionReason"]
     assert gh_identity._ROUTING_WORK.get() is None
-    assert gh_identity._QUOTE_NESTING.get() == 0
+    assert gh_identity._PARSER_NESTING.get() == 0
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Bash/POSIX token replay")
@@ -211,7 +229,7 @@ def test_matching_a_registered_child_span_does_not_walk_it_again():
         child = gh_identity._subspan(text, 2, 5)
         before = work.steps
         assert gh_identity._subst_end(child, 0) == 2
-        assert work.steps == before
+        assert work.steps - before == gh_identity._CACHE_WORK
         assert gh_identity._subst_end(gh_identity._subspan(text, 0, 4), 0) == 4
     finally:
         gh_identity._ROUTING_WORK.reset(token)
@@ -227,6 +245,69 @@ def test_completed_search_only_charges_the_consumed_range():
         assert work.steps == 5
     finally:
         gh_identity._ROUTING_WORK.reset(token)
+
+
+def test_separator_index_preserves_rfind_bounds_and_does_not_rescan_prefixes():
+    root = "before;" + "x" * 100000 + "\na(b)&tail\nend"
+    work = gh_identity._RoutingWork(10 ** 9)
+    token = gh_identity._ROUTING_WORK.set(work)
+    try:
+        for text in (root, gh_identity._subspan(root, 7, len(root) - 2)):
+            for chars in ("\n", ";\n&|(){}", ";\n&|({"):
+                for stop in (0, 1, len(text) // 2, len(text) - 1, len(text)):
+                    assert gh_identity._previous_separator(text, stop, chars) == max(
+                        text.rfind(c, 0, stop) for c in chars)
+                    assert gh_identity._next_separator(text, stop, chars) == min(
+                        (pos for c in chars if (pos := text.find(c, stop)) >= 0), default=-1)
+        before = work.steps
+        for _ in range(100):
+            gh_identity._previous_separator(root, len(root), ";\n&|(){}")
+        assert work.steps - before == 100 * gh_identity._CACHE_WORK
+    finally:
+        gh_identity._ROUTING_WORK.reset(token)
+
+
+@pytest.mark.parametrize("text", [
+    "(echo $(echo $(echo x)))",
+    "(${x:-$(echo ) x)})",
+    "(case x in (x) echo $(echo z);; esac)",
+    "(cat <<EOF\ntext )\nEOF\n$(echo x))",
+    "(cat <<EOF $(echo x)\na\nEOF\n)",
+    "((echo $(case x in x) :;; esac)))",
+    '(echo "$(echo "$(echo y)")")',
+])
+def test_nested_pair_memo_matches_uncached_parser_in_every_mode(text, monkeypatch):
+    for commands in (False, True):
+        for bounded in (False, True):
+            work = gh_identity._RoutingWork(10 ** 9)
+            tokens = [
+                (gh_identity._ROUTING_WORK, gh_identity._ROUTING_WORK.set(work)),
+                (gh_identity._COMMANDS_READING, gh_identity._COMMANDS_READING.set(commands)),
+                (gh_identity._BOUNDED_COMMANDS, gh_identity._BOUNDED_COMMANDS.set(bounded)),
+            ]
+            try:
+                positions = [i for i, c in enumerate(text) if c == "("]
+                expected = [gh_identity._subst_end_hd(text, i) for i in positions]
+                with monkeypatch.context() as patch:
+                    patch.setattr(gh_identity, "_match_lookup", lambda *args: (None, 0, None))
+                    assert [gh_identity._subst_end_hd(text, i) for i in positions] == expected
+            finally:
+                for variable, token in reversed(tokens):
+                    variable.reset(token)
+
+
+def test_write_then_execute_stops_lookahead_at_the_first_match(monkeypatch):
+    prefix = "cat > script <<'EOF'\necho fixture\nEOF\n"
+    text = prefix + "bash script\n" + "echo unrelated\n" * 10000
+    observed = []
+    original = gh_identity._iter_top_level_segments
+    def record(value, start=0):
+        for row in original(value, start):
+            observed.append(row[2])
+            yield row
+    monkeypatch.setattr(gh_identity, "_iter_top_level_segments", record)
+    assert gh_identity._heredoc_writes_executed_file(text, text.index("<<"), len(prefix))
+    assert observed == ["cat > script <<'EOF'", "bash script"]
 
 
 def test_hook_payload_size_boundary_is_inclusive(monkeypatch, capsys):
@@ -300,7 +381,7 @@ def test_work_is_deterministic_and_resets_after_refusal(monkeypatch):
         assert gh_identity._ROUTING_WORK.get() is None
         assert gh_identity._STANDALONE_BODIES.get() is None
     assert observed[0].steps == observed[1].steps
-    assert observed[0].limit == min(512 * len(command) + 65536, 14000000)
+    assert observed[0].limit == min(1280 * len(command) + 65536, 132000000)
     assert observed[0].steps > observed[0].limit
     assert gh_identity.targets_gh("gh pr list")
     assert observed[-1].steps < observed[-1].limit
@@ -404,3 +485,177 @@ def test_exact_default_payload_cap_decides_within_five_seconds(shape, tmp_path):
         assert json.loads(result.stdout)["hookSpecificOutput"]["updatedInput"]["command"] != command
     else:
         assert result.stdout == ""
+
+
+def _mixed_file_heredocs(size):
+    fragment = r"""grep -n "error" log.txt | sort -u | head -n 5; echo "at $(date -u +%H:%M)" >> 'run.log'
+cd /tmp/work && python3 - <<'PY'
+import json, sys
+rows = [{"id": i, "name": "row-%d" % i, 'tags': ["a", "b"]} for i in range(3)]
+for r in rows:
+    print((r["id"], r["name"]), len(str((r['tags'], 1))))
+PY
+echo "done: $(date -u +%H:%M)" | tee -a 'run.log'
+grep -n "error" log.txt | sort -u | head -n 5; echo "at $(date -u +%H:%M)" >> 'run.log'
+python3 - <<'PY'
+import json, sys
+rows = [{"id": i, "name": "row-%d" % i, 'tags': ["a", "b"]} for i in range(3)]
+for r in rows:
+    print(json.dumps(r), file=sys.stderr)
+PY
+grep -n "error" log.txt | sort -u | head -n 5; echo "at $(date -u +%H:%M)" >> 'run.log'
+cd /tmp/work && python3 - <<'PY'
+import json, sys
+rows = [{"id": i, "name": "row-%d" % i, 'tags': ["a", "b"]} for i in range(3)]
+for r in rows:
+    print((r["id"], r["name"]), len(str((r['tags'], 1))))
+PY
+gh pr list --json number,title | jq -r '.[] | "\(.number) \(.title)"'
+i=$((i+1)); total=$(( total + i * 2 )); (( i > 10 )) && echo "big"
+cat > notes.txt <<'EOF'
+first line of the note
+second line, with a "quote"
+EOF"""
+    return "\n".join([fragment] * max(1, -(-size // (len(fragment) + 1))))
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux CI five-second hook bound")
+def test_mixed_file_writing_heredocs_get_the_base_rewrite_within_five_seconds(tmp_path):
+    command = _mixed_file_heredocs(250000)
+    result, elapsed = _fresh_hook(command, tmp_path, 5)
+    assert elapsed < 5
+    assert result.returncode == 0, result.stderr
+    body = json.loads(result.stdout)["hookSpecificOutput"]
+    assert body["updatedInput"]["command"].endswith(command)
+    assert body["updatedInput"]["command"] != command
+
+
+def test_file_heredoc_suffix_work_is_linear(monkeypatch):
+    factory = gh_identity._RoutingWork
+    observed = []
+    def capture(limit):
+        work = factory(10 ** 12)
+        observed.append(work)
+        return work
+    monkeypatch.setattr(gh_identity, "_RoutingWork", capture)
+    fragment = "cat > notes.txt <<'EOF'\nfixture line\nEOF"
+    for count in (100, 400):
+        assert not gh_identity.targets_gh("\n".join([fragment] * count))
+    assert observed[1].steps < 6 * observed[0].steps
+
+
+def test_execution_index_only_reuses_known_parser_boundaries():
+    text = 'echo "first\nbash hidden\n"\nbash visible\npython3 second\n'
+    work = gh_identity._RoutingWork(10 ** 9)
+    token = gh_identity._ROUTING_WORK.set(work)
+    try:
+        assert not gh_identity._later_executes_paths(text, 0, {"absent"})
+        for start, paths in [(0, {"visible"}), (text.index("bash hidden"), {"hidden"}),
+                             (text.index("python3"), {"second"}), (len(text), {"visible"})]:
+            cached = gh_identity._later_executes_paths(text, start, paths)
+            nested = gh_identity._ROUTING_WORK.set(None)
+            try:
+                assert gh_identity._later_executes_paths(text, start, paths) == cached
+            finally:
+                gh_identity._ROUTING_WORK.reset(nested)
+    finally:
+        gh_identity._ROUTING_WORK.reset(token)
+
+
+def test_cached_heredoc_paths_do_not_cross_parser_modes(monkeypatch):
+    text = "cat > target <<'EOF'\nfixture\nEOF\nbash script\n"
+    after = text.index("bash script")
+    original = gh_identity._extract_simple_cmd_words_and_redirs
+    def mode_sensitive(segment):
+        if segment.startswith("cat"):
+            normal = not gh_identity._COMMANDS_READING.get() and not gh_identity._BOUNDED_COMMANDS.get()
+            return ["cat"], {"script" if normal else "other"}
+        return original(segment)
+    monkeypatch.setattr(gh_identity, "_extract_simple_cmd_words_and_redirs", mode_sensitive)
+    work_token = gh_identity._ROUTING_WORK.set(gh_identity._RoutingWork(10 ** 9))
+    try:
+        for commands in (False, True):
+            for bounded in (False, True):
+                command_token = gh_identity._COMMANDS_READING.set(commands)
+                bounded_token = gh_identity._BOUNDED_COMMANDS.set(bounded)
+                try:
+                    assert gh_identity._heredoc_writes_executed_file(text, text.index("<<"), after) == (
+                        not commands and not bounded)
+                finally:
+                    gh_identity._BOUNDED_COMMANDS.reset(bounded_token)
+                    gh_identity._COMMANDS_READING.reset(command_token)
+    finally:
+        gh_identity._ROUTING_WORK.reset(work_token)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux CI five-second hook bound")
+@pytest.mark.parametrize(("command", "must_target"), [
+    pytest.param("; ".join("x=$((x+1))" for _ in range(63995)), False, id="chain-half-cap"),
+    pytest.param("; ".join("x=$((x+1))" for _ in range(127995)), False, id="chain-cap"),
+    pytest.param("\n".join("x=$((x+1))" for _ in range(63995)), False, id="arithmetic-lines-half-cap"),
+    pytest.param("\n".join("x=$((x+1))" for _ in range(127995)), False, id="arithmetic-lines-cap"),
+    pytest.param("; ".join("x=$((x+1))" for _ in range(127994)) + "; gh pr list", True,
+                 id="chain-before-gh"),
+    pytest.param("gh pr list; " + "; ".join("x=$((x+1))" for _ in range(127994)), True,
+                 id="gh-before-chain"),
+    pytest.param("\n".join('if [[ "$a" == "b" ]] && (( c > 1 )); then echo "d"; fi'
+                          for _ in range(12386)), False, id="if-lines-half-cap"),
+    pytest.param("\n".join('if [[ "$a" == "b" ]] && (( c > 1 )); then echo "d"; fi'
+                          for _ in range(24773)), False, id="if-lines-cap"),
+    pytest.param("\n".join(f'printf "%s %s\\n" "$(( {i} + 1 ))" "$(( {i} * 2 ))"'
+                          for i in range(12542)), False, id="printf-half-cap"),
+    pytest.param("\n".join(f'printf "%s %s\\n" "$(( {i} + 1 ))" "$(( {i} * 2 ))"'
+                          for i in range(24732)), False, id="printf-cap"),
+    pytest.param("cat " + " ".join(f"<<A{i}" for i in range(86561)) + "\n", False,
+                 id="heredoc-operators-half-cap"),
+    pytest.param("((" * 383987 + "))" * 383987, False, id="double-parens-cap"),
+    pytest.param("(" * 767972 + "true" + ")" * 767972, False, id="nested-parens-cap"),
+    pytest.param("eval " * 76787 + "gh pr list", True, id="eval-quarter-cap"),
+    pytest.param("eval " * 307187 + "gh pr list", True, id="eval-cap"),
+])
+def test_pre_review_slow_rows_return_safe_fresh_hook_decisions(command, must_target, tmp_path):
+    assert len(json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})) <= 1536000
+    result, elapsed = _fresh_hook(command, tmp_path, 5)
+    assert elapsed < 5
+    assert result.returncode == 0, result.stderr
+    if must_target:
+        assert result.stdout, "gh must not run on an unchanged command"
+    if result.stdout:
+        body = json.loads(result.stdout)["hookSpecificOutput"]
+        if body.get("permissionDecision") == "deny":
+            assert any(reason in body["permissionDecisionReason"] for reason in (
+                "command too complex to route", "unterminated or unclassifiable heredoc"))
+        else:
+            assert body["updatedInput"]["command"] != command
+
+
+@pytest.mark.parametrize("command", [
+    "echo harmless", "echo 'gh pr list' | bash", "env X=x /bin/zsh -c 'gh pr list'",
+    "eval 'echo harmless'", "watch -n 2 'gh pr list'", "xargs bash -c 'gh pr list'",
+    "echo 'echo harmless' | sh", "echo 'текст' | bash", "echo # eval bash watch xargs",
+])
+def test_literal_search_prefilters_preserve_every_shell_extract(command):
+    scan = gh_identity._tokenize_bash(command)
+    expected = []
+    for pattern, parse in [
+        (gh_identity._SHELL_AT, gh_identity._c_argument),
+        (gh_identity._EVAL_AT, gh_identity._joined_words),
+        (gh_identity._WATCH_AT, gh_identity._watch_command),
+        (gh_identity._XARGS_AT, gh_identity._xargs_shell),
+        (gh_identity._ECHO_AT, gh_identity._echo_pipeline_text),
+    ]:
+        for match in pattern.finditer(scan.targets_visible):
+            inner = parse(scan.folded, match.end())
+            if inner:
+                expected.append(inner)
+    assert gh_identity._shell_texts(scan.folded, scan.targets_visible) == expected
+
+
+def test_relative_script_prefix_cleanup_does_not_copy_each_remaining_suffix():
+    work = gh_identity._RoutingWork(10 ** 9)
+    token = gh_identity._ROUTING_WORK.set(work)
+    try:
+        assert gh_identity._normalize_script_path(" " + "./" * 100000 + "script ") == "script"
+        assert work.steps == 100000 * gh_identity._CURSOR_WORK
+    finally:
+        gh_identity._ROUTING_WORK.reset(token)

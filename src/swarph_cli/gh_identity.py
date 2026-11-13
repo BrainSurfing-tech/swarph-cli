@@ -64,6 +64,9 @@ import json
 import os
 import re
 import shlex
+from bisect import bisect_left
+from collections import deque
+from functools import wraps
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -150,17 +153,33 @@ class _RoutingWork:
 
 _ROUTING_WORK = ContextVar("gh_routing_work", default=None)
 _HOOK_STATE = ContextVar("gh_hook_state", default=None)
-_QUOTE_NESTING = ContextVar("gh_quote_nesting", default=0)
-_WORK_PER_CHARACTER = 512
+_PARSER_NESTING = ContextVar("gh_parser_nesting", default=0)
+_WORK_PER_CHARACTER = 1280
 _WORK_FIXED_ALLOWANCE = 65536
-_WORK_ABSOLUTE_LIMIT = 14000000
+_WORK_ABSOLUTE_LIMIT = 132000000
+_CACHE_WORK = 128
+_CURSOR_WORK = 16
 
 
-def _charge_scan(characters: int = 1) -> None:
-    """Count cursor visits or the consumed range of a completed bulk search."""
+def _bounded_parser(parse):
+    @wraps(parse)
+    def bounded(*args, **kwargs):
+        depth = _PARSER_NESTING.get()
+        if depth >= 256:
+            raise RouterRefusal("command too complex to route; split the command and retry")
+        token = _PARSER_NESTING.set(depth + 1)
+        try:
+            return parse(*args, **kwargs)
+        finally:
+            _PARSER_NESTING.reset(token)
+    return bounded
+
+
+def _charge_scan(characters: Optional[int] = None) -> None:
+    """Count actual visits/ranges, with weighted completed cache operations."""
     work = _ROUTING_WORK.get()
     if work is not None:
-        work.steps += characters
+        work.steps += _CURSOR_WORK if characters is None else characters
         if work.steps > work.limit:
             raise RouterRefusal("command too complex to route; split the command and retry")
 
@@ -195,6 +214,35 @@ def _subspan(text: str, start: int, stop: int) -> str:
     return work.cache[key]
 
 
+def _separator_positions(text: str, characters: str) -> tuple:
+    work = _ROUTING_WORK.get()
+    root, offset = _span_origin(text)
+    key = ("separators", id(root), characters)
+    if key not in work.cache:
+        positions = tuple(m.start() for m in re.finditer("[" + re.escape(characters) + "]", root))
+        _charge_scan(len(root))
+        work.cache[key] = positions
+    return work.cache[key], offset
+
+
+def _previous_separator(text: str, stop: int, characters: str) -> int:
+    if _ROUTING_WORK.get() is None:
+        return max(text.rfind(c, 0, stop) for c in characters)
+    positions, offset = _separator_positions(text, characters)
+    index = bisect_left(positions, offset + stop) - 1
+    _charge_scan(_CACHE_WORK)
+    return positions[index] - offset if index >= 0 and positions[index] >= offset else -1
+
+
+def _next_separator(text: str, start: int, characters: str) -> int:
+    if _ROUTING_WORK.get() is None:
+        return min((p for c in characters if (p := text.find(c, start)) >= 0), default=-1)
+    positions, offset = _separator_positions(text, characters)
+    index = bisect_left(positions, offset + start)
+    _charge_scan(_CACHE_WORK)
+    return positions[index] - offset if index < len(positions) and positions[index] < offset + len(text) else -1
+
+
 def _match_lookup(text: str, start: int, kind: tuple) -> tuple:
     work = _ROUTING_WORK.get()
     if work is None:
@@ -203,9 +251,12 @@ def _match_lookup(text: str, start: int, kind: tuple) -> tuple:
     key = ("match", kind, id(root), offset + start)
     found = work.cache.get(key)
     if found is not None:
+        _charge_scan(_CACHE_WORK)
         return key, offset, min(len(text), found - offset)
     if ("miss", key, offset + len(text)) in work.cache:
+        _charge_scan(_CACHE_WORK)
         return key, offset, len(text)
+    _charge_scan(_CACHE_WORK)
     return key, offset, None
 
 
@@ -216,6 +267,7 @@ def _match_return(key: tuple, offset: int, text: str, end: int) -> int:
             work.cache[key] = offset + end
         else:
             work.cache[("miss", key, offset + len(text))] = True
+        _charge_scan(_CACHE_WORK)
     return end
 
 
@@ -418,7 +470,11 @@ def _unreadable_note(unreadable) -> str:
 _HEREDOC_OP_ID_ONLY = re.compile(
     r"<<(-)?(?!<)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?=[ \t\n;|&()<>]|$)"
 )
-_ASSIGN_NAME_AT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_ASSIGN_NAME_AT = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=")
+_OUTPUT_REDIRECT_AT = re.compile(r"(?:[0-9]*>>?\|?|&>>?)(?!&)")
+_FD_REDIRECT_AT = re.compile(r"[0-9]*(?:>&[0-9-]+|<&?[0-9-]*)")
+_WORD_AT = re.compile(r"([A-Za-z]+)(?=[ \t]|$)")
+_FD_OUTPUT_AT = re.compile(r"[0-9]+>")
 
 #: Module-level switches so mutant tests can flip each behavior and verify a test fails.
 _MASK_COMMENTS = True
@@ -692,22 +748,12 @@ def _is_terminator(line: str, delim: str, strip_tabs: bool) -> bool:
     return line == delim
 
 
+@_bounded_parser
 def _quote_end(command: str, start: int, *, mask_comments: Optional[bool] = None,
                heredocs: bool = True) -> int:
     """Match a quote while keeping nested substitutions in their own quote scope."""
-    depth = _QUOTE_NESTING.get()
-    if depth >= 256:
-        raise RouterRefusal("command too complex to route; split the command and retry")
-    token = _QUOTE_NESTING.set(depth + 1)
-    try:
-        return _quote_end_at(command, start, mask_comments=mask_comments, heredocs=heredocs)
-    finally:
-        _QUOTE_NESTING.reset(token)
-
-
-def _quote_end_at(command: str, start: int, *, mask_comments: Optional[bool],
-                  heredocs: bool) -> int:
-    kind = ("quote", mask_comments, heredocs, _COMMANDS_READING.get(), _BOUNDED_COMMANDS.get())
+    mc = _MASK_COMMENTS if mask_comments is None else mask_comments
+    kind = ("quote", mc, heredocs, _COMMANDS_READING.get())
     key, offset, cached = _match_lookup(command, start, kind)
     if cached is not None:
         return cached
@@ -815,7 +861,8 @@ def _subst_end_hd(command: str, open_paren: int, *,
     ending an unparenthesized ``case`` arm pattern ``pat)`` does not close
     the enclosing ``$(...)``.
     """
-    kind = ("heredoc", mask_comments, _COMMANDS_READING.get(), _BOUNDED_COMMANDS.get())
+    mc = _MASK_COMMENTS if mask_comments is None else mask_comments
+    kind = ("heredoc", mc, _COMMANDS_READING.get())
     key, offset, cached = _match_lookup(command, open_paren, kind)
     if cached is not None:
         return cached
@@ -823,13 +870,13 @@ def _subst_end_hd(command: str, open_paren: int, *,
         candidate = _subst_end(command, open_paren)
         if _is_arithmetic(command, open_paren, candidate):
             return _match_return(key, offset, command, candidate)
-    mc = _MASK_COMMENTS if mask_comments is None else mask_comments
     depth = 1
+    opened: dict[int, int] = {}
     brace_depth = 0
     i = open_paren + 1
     n = len(command)
     at_word_start = True
-    pending: list[tuple[str, bool]] = []
+    pending: deque[tuple[str, bool]] = deque()
     # Stack of [paren_depth_at_case, state] where state is one of:
     # "pre_in", "expect_pat", "in_pat", "in_pat_open", "in_body".
     case_stack: list[list] = []
@@ -842,7 +889,8 @@ def _subst_end_hd(command: str, open_paren: int, *,
             if case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "pre_in":
                 pass
             while pending:
-                delim, strip_tabs = pending.pop(0)
+                _charge_scan()
+                delim, strip_tabs = pending.popleft()
                 while i < n:
                     _charge_scan()
                     nl = _scan_find(command, "\n", i)
@@ -932,9 +980,14 @@ def _subst_end_hd(command: str, open_paren: int, *,
             at_word_start = True
             continue
         if c == "(":
+            # Reuse only substitutions entered with this matcher's initial parser state.
+            cacheable = (key is not None and brace_depth == 0 and not case_stack and not pending
+                         and i > 0 and command[i - 1] == "$" and not command.startswith("((", i))
             if case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "expect_pat":
                 case_stack[-1][1] = "in_pat_open"
             depth += 1
+            if cacheable:
+                opened[depth] = i
             at_word_start = True
             i += 1
             continue
@@ -950,6 +1003,9 @@ def _subst_end_hd(command: str, open_paren: int, *,
                 at_word_start = True
                 i += 1
                 continue
+            opening = opened.pop(depth, None)
+            if opening is not None:
+                _match_return((*key[:-1], offset + opening), offset, command, i)
             depth -= 1
             at_word_start = True
             if depth == 0:
@@ -1029,6 +1085,7 @@ class BashScan:
     heredoc_shell_texts: tuple[str, ...] = ()
 
 
+@_bounded_parser
 def _fold_bash_continuations(
     command: str,
     *,
@@ -1050,10 +1107,12 @@ def _fold_bash_continuations(
     """
     out: list[str] = []
     i = 0
+    if _plain_bash(command):
+        return command
     n = len(command)
     at_word_start = True
     brace_depth = 0
-    pending: list[tuple[str, bool]] = []
+    pending: deque[tuple[str, bool]] = deque()
     while i < n:
         _charge_scan()
         c = command[i]
@@ -1062,7 +1121,8 @@ def _fold_bash_continuations(
             i += 1
             at_word_start = True
             while pending:
-                delim, strip_tabs = pending.pop(0)
+                _charge_scan()
+                delim, strip_tabs = pending.popleft()
                 while i < n:
                     _charge_scan()
                     nl = _scan_find(command, "\n", i)
@@ -1417,31 +1477,45 @@ _SCRIPT_RUNNERS = frozenset({
 
 def _normalize_script_path(path: str) -> str:
     p = path.strip()
-    while p.startswith("./"):
-        p = p[2:]
-    return p
+    start = 0
+    while p.startswith("./", start):
+        _charge_scan()
+        start += 2
+    return p[start:]
 
 
 def _split_top_level_segments(text: str) -> list[tuple[int, int, str]]:
     """Split ``text`` into simple-command segments outside quotes and comments."""
-    segs: list[tuple[int, int, str]] = []
-    i = 0
+    work = _ROUTING_WORK.get()
+    if work is not None:
+        _span_origin(text)
+        key = ("segments", id(text), _MASK_COMMENTS)
+        if key in work.cache:
+            return work.cache[key]
+    segs = list(_iter_top_level_segments(text))
+    if work is not None:
+        work.cache[key] = segs
+    return segs
+
+
+def _iter_top_level_segments(text: str, start: int = 0):
+    i = start
     n = len(text)
-    seg_start = 0
+    seg_start = start
     at_word_start = True
     while i < n:
         _charge_scan()
         c = text[i]
         if c in "\n;|&(){}":
             if i > seg_start:
-                segs.append((seg_start, i, text[seg_start:i]))
+                yield seg_start, i, _subspan(text, seg_start, i)
             i += 1
             seg_start = i
             at_word_start = True
             continue
         if _MASK_COMMENTS and at_word_start and c == "#":
             if i > seg_start:
-                segs.append((seg_start, i, text[seg_start:i]))
+                yield seg_start, i, _subspan(text, seg_start, i)
             end = _scan_find(text, "\n", i)
             i = n if end < 0 else end + 1
             seg_start = i
@@ -1478,8 +1552,7 @@ def _split_top_level_segments(text: str) -> list[tuple[int, int, str]]:
         i += 1
         at_word_start = False
     if n > seg_start:
-        segs.append((seg_start, n, text[seg_start:n]))
-    return segs
+        yield seg_start, n, _subspan(text, seg_start, n)
 
 
 def _extract_simple_cmd_words_and_redirs(
@@ -1511,9 +1584,9 @@ def _extract_simple_cmd_words_and_redirs(
         if hd is not None:
             j = hd[3]
             continue
-        rm = re.match(r"(?:[0-9]*>>?\|?|&>>?)(?!&)", seg[j:])
+        rm = _OUTPUT_REDIRECT_AT.match(seg, j)
         if rm is not None:
-            j += rm.end()
+            j = rm.end()
             while j < n and seg[j] in " \t":
                 _charge_scan()
                 j += 1
@@ -1525,9 +1598,9 @@ def _extract_simple_cmd_words_and_redirs(
                     redirs.add(norm)
                 j = max(j + 1, wend)
             continue
-        om = re.match(r"[0-9]*(?:>&[0-9-]+|<&?[0-9-]*)", seg[j:])
+        om = _FD_REDIRECT_AT.match(seg, j)
         if om is not None:
-            j += om.end()
+            j = om.end()
             if not seg[j - 1].isdigit() and seg[j - 1] != "-":
                 while j < n and seg[j] in " \t":
                     _charge_scan()
@@ -1568,6 +1641,45 @@ def _extract_simple_cmd_words_and_redirs(
     return rem, redirs
 
 
+def _executed_paths(segment: str):
+    words, _ = _extract_simple_cmd_words_and_redirs(segment)
+    if words:
+        yield _normalize_script_path(words[0])
+        if words[0].rsplit("/", 1)[-1] in _SCRIPT_RUNNERS:
+            yield from (_normalize_script_path(arg) for arg in words[1:])
+
+
+def _later_executes_paths(text: str, start: int, paths: set[str]) -> bool:
+    work = _ROUTING_WORK.get()
+    if work is not None:
+        _span_origin(text)
+        key = ("executions", id(text), _MASK_COMMENTS,
+               _COMMANDS_READING.get(), _BOUNDED_COMMANDS.get())
+        saved = work.cache.get(key)
+        if saved is not None and start in saved[0]:
+            for path in sorted(paths):
+                executed = saved[1].get(path, -1) >= start
+                _charge_scan(_CACHE_WORK)
+                if executed:
+                    return True
+            return False
+    boundaries = {start, len(text)}
+    last_use: dict[str, int] = {}
+    for begin, end, segment in _iter_top_level_segments(text, start):
+        _charge_scan()
+        boundaries.add(begin)
+        if end < len(text) and text[end] in "\n;|&(){}":
+            boundaries.add(end + 1)
+        for path in _executed_paths(segment):
+            _charge_scan()
+            if path in paths:
+                return True
+            last_use[path] = begin
+    if work is not None:
+        work.cache[key] = boundaries, last_use
+    return False
+
+
 def _heredoc_writes_executed_file(
     text: str, op_start: int, after_heredoc_pos: int
 ) -> bool:
@@ -1575,11 +1687,11 @@ def _heredoc_writes_executed_file(
     ``>>``, or ``tee``) and that path later appears in the same command as a
     command word or as an argument of ``bash``/``sh``/``zsh``/``python``/``.``/``source``.
     """
-    line_start = text.rfind("\n", 0, op_start) + 1
-    line_end = _scan_find(text, "\n", op_start)
+    line_start = _previous_separator(text, op_start, "\n") + 1
+    line_end = _next_separator(text, op_start, "\n")
     if line_end < 0:
         line_end = len(text)
-    line_segs = _split_top_level_segments(text[line_start:line_end])
+    line_segs = _split_top_level_segments(_subspan(text, line_start, line_end))
     rel_op = op_start - line_start
     owner_idx = -1
     for idx, (s, e, _) in enumerate(line_segs):
@@ -1589,40 +1701,30 @@ def _heredoc_writes_executed_file(
             break
     if owner_idx < 0:
         return False
-    _, written_paths = _extract_simple_cmd_words_and_redirs(line_segs[owner_idx][2])
-    if owner_idx + 1 < len(line_segs):
-        next_rem, next_redirs = _extract_simple_cmd_words_and_redirs(
-            line_segs[owner_idx + 1][2]
-        )
-        if next_rem and next_rem[0].rsplit("/", 1)[-1] == "tee":
-            written_paths |= next_redirs
+    work = _ROUTING_WORK.get()
+    paths_key = ("heredoc-paths", id(line_segs), owner_idx,
+                 _COMMANDS_READING.get(), _BOUNDED_COMMANDS.get())
+    written_paths = work.cache.get(paths_key) if work is not None else None
+    if written_paths is None:
+        _, written_paths = _extract_simple_cmd_words_and_redirs(line_segs[owner_idx][2])
+        if owner_idx + 1 < len(line_segs):
+            next_rem, next_redirs = _extract_simple_cmd_words_and_redirs(line_segs[owner_idx + 1][2])
+            if next_rem and next_rem[0].rsplit("/", 1)[-1] == "tee":
+                written_paths |= next_redirs
+        if work is not None:
+            work.cache[paths_key] = frozenset(written_paths)
     if not written_paths:
         return False
-    later_segs = [seg for _, _, seg in line_segs[owner_idx + 1:]]
-    if after_heredoc_pos < len(text):
-        later_segs.extend(
-            seg for _, _, seg in _split_top_level_segments(text[after_heredoc_pos:])
-        )
-    for lseg in later_segs:
+    for _, _, lseg in line_segs[owner_idx + 1:]:
         _charge_scan()
-        rem, _ = _extract_simple_cmd_words_and_redirs(lseg)
-        if not rem:
-            continue
-        cmd_w = rem[0]
-        if _normalize_script_path(cmd_w) in written_paths:
+        if any(path in written_paths for path in _executed_paths(lseg)):
             return True
-        cmd_base = cmd_w.rsplit("/", 1)[-1]
-        if cmd_base in _SCRIPT_RUNNERS:
-            for arg in rem[1:]:
-                _charge_scan()
-                if _normalize_script_path(arg) in written_paths:
-                    return True
-    return False
+    return _later_executes_paths(text, after_heredoc_pos, written_paths)
 
 
 def _heredoc_feeds_shell(text: str, op_start: int) -> bool:
     """True when the simple command owning ``<<`` / ``<<<`` at ``op_start`` invokes a shell."""
-    seg_start = max(text.rfind(ch, 0, op_start) for ch in ";\n&|(){}") + 1
+    seg_start = _previous_separator(text, op_start, ";\n&|(){}") + 1
     j = seg_start
     while j < op_start:
         _charge_scan()
@@ -1654,16 +1756,19 @@ def _heredoc_feeds_shell(text: str, op_start: int) -> bool:
     return False
 
 
+@_bounded_parser
 def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                  arithmetic: bool = False) -> BashScan:
     """Single-pass bash scanner on continuation-folded text."""
+    if _plain_bash(text):
+        return _tokenize_bash(text)
     out: list[str] = []
     out_targets: list[str] = []
     i = 0
     n = len(text)
     at_word_start = True
     brace_depth = 0
-    pending: list[tuple[str, bool, bool, bool, int]] = []
+    pending: deque[tuple[str, bool, bool, bool, int]] = deque()
     unterminated = False
     unterminated_hd = False
     has_tick = False
@@ -1681,7 +1786,8 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
             i += 1
             at_word_start = True
             while pending:
-                delim, strip_tabs, quoted_delim, feeds_shell, op_pos = pending.pop(0)
+                _charge_scan()
+                delim, strip_tabs, quoted_delim, feeds_shell, op_pos = pending.popleft()
                 body_lines: list[str] = []
                 # Truncated inner heredocs must not invent a newline and shift later metadata.
                 body_has_nl = False
@@ -2066,6 +2172,13 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
 _PLAIN_BASH = re.compile(r"[A-Za-z0-9 _./:,@+-]*")
 
 
+def _plain_bash(command: str) -> bool:
+    if _PLAIN_BASH.fullmatch(command):
+        _charge_scan(len(command))
+        return True
+    return False
+
+
 def _tokenize_bash(
     command: str,
     *,
@@ -2106,8 +2219,7 @@ def _tokenize_bash_uncached(
     mc = _MASK_COMMENTS if mask_comments is None else mask_comments
     command = command or ""
     # Without syntax there is no folding, masking, or substitution metadata to collect.
-    if _PLAIN_BASH.fullmatch(command):
-        _charge_scan(len(command))
+    if _plain_bash(command):
         return BashScan(
             folded=command, visible=command,
             targets_visible=command,
@@ -2363,7 +2475,7 @@ def _echo_pipeline_text(command: str, i: int) -> Optional[str]:
         while i < n and command[i] in " \t":
             _charge_scan()
             i += 1
-    if i < n and not (command[i] in ";\n&|)>#" or re.match(r"[0-9]+>", command[i:])):
+    if i < n and not (command[i] in ";\n&|)>#" or _FD_OUTPUT_AT.match(command, i)):
         return None
     return " ".join(parts)
 
@@ -2371,27 +2483,27 @@ def _echo_pipeline_text(command: str, i: int) -> Optional[str]:
 def _shell_texts(command: str, visible: str) -> list[str]:
     """String arguments of the shell forms card #1346 names, outside quotes."""
     found: list[str] = []
-    for match in _SHELL_AT.finditer(visible):
+    for match in _SHELL_AT.finditer(visible) if "sh" in visible else ():
         _charge_scan()
         inner = _c_argument(command, match.end())
         if inner:
             found.append(inner)
-    for match in _EVAL_AT.finditer(visible):
+    for match in _EVAL_AT.finditer(visible) if "eval" in visible else ():
         _charge_scan()
         inner = _joined_words(command, match.end())
         if inner:
             found.append(inner)
-    for match in _WATCH_AT.finditer(visible):
+    for match in _WATCH_AT.finditer(visible) if "watch" in visible else ():
         _charge_scan()
         inner = _watch_command(command, match.end())
         if inner:
             found.append(inner)
-    for match in _XARGS_AT.finditer(visible):
+    for match in _XARGS_AT.finditer(visible) if "xargs" in visible else ():
         _charge_scan()
         inner = _xargs_shell(command, match.end())
         if inner:
             found.append(inner)
-    for match in _ECHO_AT.finditer(visible):
+    for match in _ECHO_AT.finditer(visible) if "echo" in visible else ():
         _charge_scan()
         inner = _echo_pipeline_text(command, match.end())
         if inner:
@@ -2614,16 +2726,16 @@ def _parse_gh_simple(text: str, i: int, *, prefix: bool,
         while True:
             while i < n and text[i] in " \t":
                 i += 1
-            am = re.match(r"([A-Za-z_][A-Za-z0-9_]*)=", text[i:])
+            am = _ASSIGN_NAME_AT.match(text, i)
             if not am:
                 break
-            vend = _value_end(text, i + am.end())
+            vend = _value_end(text, am.end())
             if vend is None:
                 return None
-            if spans is not None and text.startswith("$(", i + am.end()):
-                spans.append((i + am.end(), vend))
+            if spans is not None and text.startswith("$(", am.end()):
+                spans.append((am.end(), vend))
             if am.group(1) == "GH_TOKEN":
-                if not _is_allowlisted_value(text, i + am.end(), vend):
+                if not _is_allowlisted_value(text, am.end(), vend):
                     return None
                 saw_gh_token = True
             i = vend
@@ -2792,10 +2904,10 @@ def has_empty_gh_token(command: str) -> bool:
             vend = vpos
         else:
             continue
-        seg_start = max(visible.rfind(ch, 0, m.start()) for ch in ";\n&|({") + 1
-        before_words = visible[seg_start:m.start()].split()
+        seg_start = _previous_separator(visible, m.start(), ";\n&|({") + 1
+        before_words = deque(visible[seg_start:m.start()].split())
         while before_words and before_words[0] in _LEAD_KEYWORDS:
-            before_words.pop(0)
+            before_words.popleft()
         if before_words and before_words[0] == "export":
             return True
         # Prefix form: only assignments (and wrappers) may precede it.
@@ -2808,9 +2920,9 @@ def has_empty_gh_token(command: str) -> bool:
         while True:
             while i < len(visible) and visible[i] in " \t":
                 i += 1
-            am = re.match(r"([A-Za-z_][A-Za-z0-9_]*)=", visible[i:])
+            am = _ASSIGN_NAME_AT.match(visible, i)
             if am:
-                j = i + am.end()
+                j = am.end()
                 if visible[j:j + 2] in _EMPTY_GH_VALUE:
                     i = j + 2
                     continue
@@ -2827,9 +2939,9 @@ def has_empty_gh_token(command: str) -> bool:
                     break
                 i = k
                 continue
-            wm = re.match(r"([A-Za-z]+)(?=[ \t]|$)", visible[i:])
+            wm = _WORD_AT.match(visible, i)
             if wm and wm.group(1) in _WRAPPER_WORDS:
-                i += wm.end()
+                i = wm.end()
                 if wm.group(1) == "timeout":
                     while i < len(visible) and visible[i] in " \t":
                         i += 1
@@ -2916,26 +3028,26 @@ def _is_executable_assignment_before(before: str) -> bool:
     while i < n and before[i] in " \t":
         i += 1
     while True:
-        m = re.match(r"([A-Za-z]+)(?=[ \t]|$)", before[i:])
+        m = _WORD_AT.match(before, i)
         if m and m.group(1) in _LEAD_KEYWORDS:
-            i += m.end()
+            i = m.end()
             while i < n and before[i] in " \t":
                 i += 1
             continue
         break
     if i >= n:
         return True
-    m = re.match(r"([A-Za-z]+)(?=[ \t]|$)", before[i:])
+    m = _WORD_AT.match(before, i)
     if m and m.group(1) in _DECL_FORM_WORDS:
-        i += m.end()
+        i = m.end()
         while True:
             while i < n and before[i] in " \t":
                 i += 1
             if i >= n:
                 return True
-            am = re.match(r"[A-Za-z_][A-Za-z0-9_]*=", before[i:])
+            am = _ASSIGN_NAME_AT.match(before, i)
             if am:
-                i = _consume_visible_value(before, i + am.end())
+                i = _consume_visible_value(before, am.end())
                 continue
             tok = _read_word(before, i)
             if tok is None:
@@ -2949,13 +3061,13 @@ def _is_executable_assignment_before(before: str) -> bool:
             i += 1
         if i >= n:
             return True
-        am = re.match(r"[A-Za-z_][A-Za-z0-9_]*=", before[i:])
+        am = _ASSIGN_NAME_AT.match(before, i)
         if am:
-            i = _consume_visible_value(before, i + am.end())
+            i = _consume_visible_value(before, am.end())
             continue
-        wm = re.match(r"([A-Za-z]+)(?=[ \t]|$)", before[i:])
+        wm = _WORD_AT.match(before, i)
         if wm and wm.group(1) in _WRAPPER_WORDS:
-            i += wm.end()
+            i = wm.end()
             while True:
                 while i < n and before[i] in " \t":
                     i += 1
