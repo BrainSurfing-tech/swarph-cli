@@ -1,6 +1,8 @@
 """Card #1588: deterministic routing work must refuse before hook timeouts fail open."""
+import hashlib
 import json
 import os
+import random
 from pathlib import Path
 import subprocess
 import sys
@@ -315,9 +317,9 @@ def test_write_then_execute_stops_lookahead_at_the_first_match(monkeypatch):
     text = prefix + "bash script\n" + "echo unrelated\n" * 10000
     observed = []
     original = gh_identity._iter_top_level_segments
-    def record(value, start=0):
-        for row in original(value, start):
-            observed.append(row[2])
+    def record(value, start=0, stop_before=None, **options):
+        for row in original(value, start, stop_before, **options):
+            observed.append(value[row[0]:row[1]] if row[2] is not None else None)
             yield row
     monkeypatch.setattr(gh_identity, "_iter_top_level_segments", record)
     assert gh_identity._heredoc_writes_executed_file(text, text.index("<<"), len(prefix))
@@ -426,7 +428,7 @@ def test_budget_is_local_to_the_current_context():
 def test_literal_run_batching_keeps_the_complete_scan(command, monkeypatch):
     expected = gh_identity._tokenize_bash(command)
     expected_target = gh_identity.targets_gh(command)
-    monkeypatch.setattr(gh_identity, "_quote_run_end", lambda text, start: start)
+    monkeypatch.setattr(gh_identity, "_quote_run_end", lambda text, start, stop=None: start)
     assert gh_identity._tokenize_bash(command) == expected
     assert gh_identity.targets_gh(command) == expected_target
 
@@ -580,11 +582,11 @@ def test_cached_heredoc_paths_do_not_cross_parser_modes(monkeypatch):
     text = "cat > target <<'EOF'\nfixture\nEOF\nbash script\n"
     after = text.index("bash script")
     original = gh_identity._extract_simple_cmd_words_and_redirs
-    def mode_sensitive(segment):
-        if segment.startswith("cat"):
+    def mode_sensitive(segment, *args, **kwargs):
+        if not args and segment.startswith("cat"):
             normal = not gh_identity._COMMANDS_READING.get() and not gh_identity._BOUNDED_COMMANDS.get()
             return ["cat"], {"script" if normal else "other"}
-        return original(segment)
+        return original(segment, *args, **kwargs)
     monkeypatch.setattr(gh_identity, "_extract_simple_cmd_words_and_redirs", mode_sensitive)
     work_token = gh_identity._ROUTING_WORK.set(gh_identity._RoutingWork(10 ** 9))
     try:
@@ -701,17 +703,30 @@ def _quoted_body_fragment(variant):
         "quoted-target": 'cat > "$P"', "append": "cat >> p.txt",
         "brace": "{ cat > p.txt", "pipe": "true | cat > p.txt",
         "plain-control": "cat > p.txt",
+        "hash-and-quote": "cat > p.txt", "hash-double-quote": "cat > p.txt",
+        "hash-unquoted": "cat > p.txt", "hash-only": "cat > p.txt",
+        "two-quote-lines": "cat > p.txt", "hash-no-target": "cat",
     }[variant]
-    body = ('it is a note' if variant == "plain-control" else
-            'say "hi' if variant == "double-quote" else "it's a note")
-    return header + " <<'EOF'\n" + body + "\nEOF" + ("\n}" if variant == "brace" else "")
+    body = {
+        "plain-control": "it is a note", "double-quote": 'say "hi',
+        "hash-and-quote": "# it's a note\nit's another",
+        "hash-double-quote": '# a "note\nanother "one',
+        "hash-unquoted": "# it's a note\nit's another",
+        "hash-only": "# it's a note", "two-quote-lines": "it's a note\nit's another",
+        "hash-no-target": "# it's a note\nit's another",
+    }.get(variant, "it's a note")
+    delimiter = "EOF" if variant == "hash-unquoted" else "'EOF'"
+    return header + " <<" + delimiter + "\n" + body + "\nEOF" + ("\n}" if variant == "brace" else "")
 
 
 @pytest.mark.parametrize("copies", [96, 192, 768, 3072])
 @pytest.mark.parametrize("position", ["none", "first", "last"])
+@pytest.mark.parametrize("variant", ["apostrophe", "hash-and-quote"])
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux fresh-hook five-second bound")
-def test_apostrophe_heredocs_keep_the_base_fresh_hook_decision(copies, position, tmp_path):
-    command = "\n".join([_quoted_body_fragment("apostrophe")] * copies)
+def test_apostrophe_heredocs_keep_the_base_fresh_hook_decision(copies, position, variant, tmp_path):
+    command = "\n".join([_quoted_body_fragment(variant)] * copies)
+    if variant == "hash-and-quote" and copies == 192:
+        assert len(command) == 9791
     if position != "none":
         command = "gh pr list\n" + command if position == "first" else command + "\ngh pr list"
     run, elapsed = _fresh_hook(command, tmp_path, 5)
@@ -723,7 +738,8 @@ def test_apostrophe_heredocs_keep_the_base_fresh_hook_decision(copies, position,
         assert json.loads(run.stdout)["hookSpecificOutput"]["updatedInput"]["command"] != command
 
 
-@pytest.mark.parametrize("variant", ["apostrophe", "double-quote", "quoted-target", "append", "brace", "pipe", "plain-control"])
+@pytest.mark.parametrize("variant", ["apostrophe", "double-quote", "quoted-target", "append", "brace", "pipe", "plain-control",
+    "hash-and-quote", "hash-double-quote", "hash-unquoted", "hash-only", "two-quote-lines", "hash-no-target"])
 def test_quoted_body_lookahead_keeps_every_boundary_index_and_linear_work(variant, monkeypatch):
     factory = gh_identity._RoutingWork
     works = []
@@ -738,11 +754,14 @@ def test_quoted_body_lookahead_keeps_every_boundary_index_and_linear_work(varian
         assert not gh_identity.targets_gh(command)
         ratios.append(works[-1].steps / len(command))
         assert ratios[-1] < 3 * ratios[0]
+        if copies >= 48:
+            assert ratios[-1] < 1.3 * ratios[-2]
     print(variant, "copies3..3072 weighted units/char", ratios)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Bash/POSIX token replay")
-@pytest.mark.parametrize("variant", ["apostrophe", "double-quote", "quoted-target", "append", "brace", "pipe", "plain-control"])
+@pytest.mark.parametrize("variant", ["apostrophe", "double-quote", "quoted-target", "append", "brace", "pipe", "plain-control",
+    "hash-and-quote", "hash-double-quote", "hash-unquoted", "hash-only", "two-quote-lines", "hash-no-target"])
 def test_quoted_body_variants_still_deliver_the_token(variant, tmp_path, monkeypatch, capsys):
     from test_1588_shell_contexts import (
         test_nested_quoted_value_is_rewritten_and_token_reaches_gh as replay,
@@ -751,9 +770,54 @@ def test_quoted_body_variants_still_deliver_the_token(variant, tmp_path, monkeyp
     replay("P=p.txt\n" + command + "\ngh pr list", tmp_path, monkeypatch, capsys)
 
 
+_SHORTEST_HEREDOC_SHAPES = [
+    "cat >> \"$P\" <<'EOF'\n\\' gh pr list\n$'\nEOF",
+    "cat > p.txt <<-'EOF'\n\\'\nword ((\nit's\nEOF",
+    "{ cat; } > p.txt <<'EOF'\n\\'\n$' ))\n|\nEOF",
+]
+
+
+@pytest.mark.parametrize("fragment", _SHORTEST_HEREDOC_SHAPES)
+@pytest.mark.parametrize("copies", [48, 384])
+@pytest.mark.parametrize("with_gh", [False, True])
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux fresh-hook five-second bound")
+def test_shortest_seeded_shapes_keep_the_base_hook_decision(fragment, copies, with_gh, tmp_path):
+    command = "P=p.txt\n" + "\n".join([fragment] * copies) + ("\ngh pr list" if with_gh else "")
+    result, elapsed = _fresh_hook(command, tmp_path, 5)
+    assert result.returncode == 0 and elapsed < 5, result.stderr
+    if with_gh:
+        assert "updatedInput" in json.loads(result.stdout)["hookSpecificOutput"]
+    else:
+        assert not result.stdout
+
+
+@pytest.mark.parametrize("fragment", _SHORTEST_HEREDOC_SHAPES)
+@pytest.mark.skipif(os.name != "posix", reason="Bash token replay")
+def test_shortest_seeded_shapes_deliver_the_token(fragment, tmp_path, monkeypatch, capsys):
+    from test_1588_shell_contexts import test_nested_quoted_value_is_rewritten_and_token_reaches_gh as replay
+    replay("P=p.txt\n" + "\n".join([fragment] * 384) + "\ngh pr list", tmp_path, monkeypatch, capsys)
+
+
+def test_lookahead_memo_reuses_neutral_states_inside_a_long_segment():
+    fragment = "cat > p.txt <<'EOF'\n\\\na \"b\n\\' ' $(date)\nEOF"
+    rates = []
+    for copies in (6, 48, 192):
+        text = "\n".join([fragment] * copies)
+        work = gh_identity._RoutingWork(10 ** 12)
+        token = gh_identity._ROUTING_WORK.set(work)
+        try:
+            for start in range(0, len(text), len(fragment) + 1):
+                assert not gh_identity._later_executes_paths(text, start, {"absent"})
+            rates.append(work.steps / len(text))
+        finally:
+            gh_identity._ROUTING_WORK.reset(token)
+    assert max(rates) <= 1.5 * rates[0]
+
+
 def test_suffix_index_queries_match_fresh_parsing_across_quote_states():
     text = "\n".join([_quoted_body_fragment(v) for v in (
-        "apostrophe", "double-quote", "quoted-target", "brace", "append", "pipe")]) + "\nbash p.txt"
+        "apostrophe", "double-quote", "quoted-target", "brace", "append", "pipe",
+        "hash-and-quote", "hash-double-quote", "hash-unquoted")]) + "\nbash p.txt"
     starts = [0] + [i + 1 for i, c in enumerate(text) if c == "\n"]
     expected = {(start, path): gh_identity._later_executes_paths(text, start, {path})
                 for start in starts for path in ("p.txt", "absent", "cat")}
@@ -765,6 +829,136 @@ def test_suffix_index_queries_match_fresh_parsing_across_quote_states():
                 assert gh_identity._later_executes_paths(text, start, {path}) == expected[start, path]
     finally:
         gh_identity._ROUTING_WORK.reset(token)
+
+
+def test_lookahead_reuses_a_known_tail_after_a_short_uncached_prefix(monkeypatch):
+    fragment = _quoted_body_fragment("hash-and-quote")
+    text = "\n".join([fragment] * 192)
+    work = gh_identity._RoutingWork(10 ** 12)
+    token = gh_identity._ROUTING_WORK.set(work)
+    try:
+        assert not gh_identity._later_executes_paths(text, 0, {"p.txt"})
+        observed = []
+        original = gh_identity._iter_top_level_segments
+        def record(value, start=0, stop_before=None, **options):
+            for row in original(value, start, stop_before, **options):
+                observed.append(row)
+                yield row
+        monkeypatch.setattr(gh_identity, "_iter_top_level_segments", record)
+        assert not gh_identity._later_executes_paths(text, text.index(fragment, 1), {"p.txt"})
+        assert len(observed) <= 3
+        assert observed[-1][2] is None
+    finally:
+        gh_identity._ROUTING_WORK.reset(token)
+
+
+def test_bounded_execution_words_and_segment_ends_match_fresh_slices():
+    rng = random.Random(1588)
+    words = ["bash", "cat", "source", "command", "env", "then", "if", "-x", "--", "x=1",
+             "p.txt", "'p.txt'", '"p.txt"', "$'p\\x2etxt'", "$(echo p.txt)", "`echo p.txt`",
+             "${x}", "\\'", '"unterminated', "'unterminated", "# comment", "<<'EOF'", ">p.txt"]
+    texts = [" ".join(rng.choices(words, k=rng.randrange(1, 10))) for _ in range(240)]
+    texts += [_quoted_body_fragment(v) * 3 for v in ("apostrophe", "hash-and-quote", "hash-double-quote")]
+    for text in texts:
+        fresh = list(gh_identity._iter_top_level_segments(text))
+        work = gh_identity._RoutingWork(10 ** 12)
+        token = gh_identity._ROUTING_WORK.set(work)
+        try:
+            bounds = list(gh_identity._iter_top_level_segments(text, bounds_only=True))
+            assert [(a, b) for a, b, _ in bounds] == [(a, b) for a, b, _ in fresh]
+            for a, b, segment in fresh:
+                expected = gh_identity._extract_simple_cmd_words_and_redirs(segment)
+                assert gh_identity._extract_simple_cmd_words_and_redirs(text, a, b) == expected
+                expected_words = expected[0]
+                expected_paths = []
+                if expected_words:
+                    expected_paths.append(gh_identity._normalize_script_path(expected_words[0]))
+                    if expected_words[0].rsplit("/", 1)[-1] in gh_identity._SCRIPT_RUNNERS:
+                        expected_paths.extend(map(gh_identity._normalize_script_path, expected_words[1:]))
+                assert list(gh_identity._executed_paths(text, a, b)) == expected_paths
+        finally:
+            gh_identity._ROUTING_WORK.reset(token)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Bash syntax oracle")
+def test_seeded_heredoc_shapes_have_linear_work_and_no_small_input_refusal(monkeypatch, capsys):
+    headers = ["cat > p.txt <<'EOF'", "cat > p.txt <<EOF", 'cat >> "$P" <<\'EOF\'',
+        "tee p.txt <<'EOF'", "{ cat; } > p.txt <<'EOF'", "cat <<'EOF' > p.txt",
+        "cat <<'EOF'", "cat <<EOF", "python3 - <<'EOF'", "bash <<'EOF'",
+        "cat > p.txt <<-'EOF'", "cat <<'EOF' | tee p.txt", "(cat > p.txt) <<'EOF'"]
+    body = ["it's", "'", '"', 'a "b', "#", "# ", "$x", "${y}", "$(date)", "`date`",
+        "\\", "\\'", '\\"', "\\`", "(", ")", "((", "))", "{", "}", "word", "a b", ";",
+        "|", "&&", ">", "<", "<<", "$'", "x=1", "gh pr list", "EOF2", "$((", "[", "]",
+        "!", "*", "~", "%s", "=", "-"]
+    statements = ['echo "a $x"', "echo 'b'", "x=$((x+1))", 'y="$(date)"', "ls | wc -l",
+        "true && false", "echo `date`", "f() { echo a; }", "(cd /tmp; ls)",
+        '[[ -n "$x" ]] && echo y', "echo $'a\\'b'", 'cat <<< "x"',
+        "case $x in a) echo 1;; esac", "for i in 1 2; do echo $i; done", "gh pr list",
+        "echo it\\'s", "# it's a comment", 'echo "it\'s"', "x=(a 'b c')",
+        'echo ${x:-"d"}', "bash -c 'echo \"a\"'", 'eval "echo 1"']
+    rng = random.Random(1588)
+    factory, works = gh_identity._RoutingWork, []
+    def capture(limit):
+        work = factory(limit)
+        works.append(work)
+        return work
+    monkeypatch.setattr(gh_identity, "_RoutingWork", capture)
+    monkeypatch.setattr(gh_identity, "resolve", lambda peer: gh_identity.Resolution(
+        "fixture", "fixture-login", "test mapping"))
+    accepted, tried, worst, exclusions, syntax_accepted = 0, set(), 0, [], 0
+    while accepted < 200:
+        parts = []
+        for _ in range(rng.choice((1, 1, 1, 2, 3))):
+            if rng.random() < 0.75:
+                lines = [" ".join(rng.choice(body) for _ in range(rng.choice((1, 1, 2, 3))))
+                         for _ in range(rng.choice((1, 2, 2, 3, 4)))]
+                parts.append((rng.choice(statements) + "; " if rng.random() < 0.2 else "")
+                             + rng.choice(headers) + "\n" + "\n".join(lines) + "\nEOF")
+            else:
+                parts.append(rng.choice(statements))
+        fragment = "\n".join(parts)
+        if fragment in tried:
+            continue
+        tried.add(fragment)
+        syntax = subprocess.run(["bash", "-n"], input=fragment, text=True, capture_output=True, timeout=3)
+        if syntax.returncode or syntax.stderr:
+            continue
+        syntax_accepted += 1
+        small = "\n".join([fragment] * 24)
+        policy_rejected = gh_identity.has_unterminated_heredoc(small)
+        if policy_rejected:
+            # This seed's sole policy exclusion also DENIES at base 4d17e80, with/without gh.
+            assert hashlib.sha256(fragment.encode()).hexdigest() == (
+                "84aeeb3b3e5b696dd03ec2b6313f60dde7f3b4ca761238c8d79eb4b98cf4c62f")
+            exclusions.append(fragment)
+        else:
+            accepted += 1
+        for suffix in ("", "\ngh pr list"):
+            units = []
+            for copies in (24, 768):
+                command = "\n".join([fragment] * copies) + suffix
+                assert len(command) <= 250000
+                before = len(works)
+                assert gh_route.run_hook(json.dumps({"tool_input": {"command": command}})) == 0
+                assert len(works) == before + 1
+                units.append(works[-1].steps / len(command))
+                output = capsys.readouterr().out
+                if output:
+                    decision = json.loads(output)["hookSpecificOutput"]
+                    if policy_rejected:
+                        assert "unterminated or unclassifiable heredoc" in decision.get("permissionDecisionReason", ""), decision
+                    else:
+                        assert decision.get("permissionDecision") != "deny", (accepted, fragment, decision)
+                if suffix and not policy_rejected:
+                    assert output and "updatedInput" in decision, (accepted, fragment)
+                works[-1].cache.clear()
+            growth = units[1] / units[0]
+            worst = max(worst, growth)
+            assert growth <= 1.5, (accepted, fragment, units)
+    print("heredoc property seed=1588 shapes=200 max_growth=", worst,
+          "drawn=", len(tried), "bash_syntax_accepted=", syntax_accepted,
+          "existing heredoc-policy exclusions=", len(exclusions))
+    print("heredoc policy fixtures", json.dumps(exclusions))
 
 
 def test_literal_runs_and_native_candidates_preserve_the_complete_scan(monkeypatch):

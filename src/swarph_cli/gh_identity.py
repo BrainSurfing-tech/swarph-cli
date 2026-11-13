@@ -187,9 +187,10 @@ def _charge_scan(characters: Optional[int] = None) -> None:
             raise RouterRefusal("command too complex to route; split the command and retry")
 
 
-def _scan_find(text: str, needle: str, start: int) -> int:
-    end = text.find(needle, start)
-    _charge_scan(max(0, (len(text) if end < 0 else end + len(needle)) - start))
+def _scan_find(text: str, needle: str, start: int, stop: Optional[int] = None) -> int:
+    limit = len(text) if stop is None else stop
+    end = text.find(needle, start, limit)
+    _charge_scan(max(0, (limit if end < 0 else end + len(needle)) - start))
     return end
 
 
@@ -284,7 +285,12 @@ _QUOTE_SPECIAL = re.compile(r'["\\$`]')
 _QUOTED_COMMAND_AT = re.compile(r"\$['\"]|['\"]")
 
 
-def _quote_run_end(text: str, start: int) -> int:
+def _quote_run_end(text: str, start: int, stop: Optional[int] = None) -> int:
+    if stop is not None and stop < len(text):
+        match = _QUOTE_SPECIAL.search(text, start, stop)
+        end = stop if match is None else match.start()
+        _charge_scan(end - start + (match is not None))
+        return end
     key, offset, cached = _match_lookup(text, start, ("quote-run",))
     if cached is not None:
         return cached
@@ -504,14 +510,15 @@ _ANSI_C_SIMPLE = {
 }
 
 
-def _unescape_ansi_c(text: str, start: int) -> tuple[str, int, bool]:
+def _unescape_ansi_c(text: str, start: int, stop: Optional[int] = None) -> tuple[str, int, bool]:
     """Parse ``$'...'`` starting after ``$'`` at ``start`` -> (unescaped, next_idx, closed)."""
     # Bash finds the word boundary before decoding escapes such as backslash-c.
     end = start
-    while end < len(text) and text[end] != "'":
+    limit = len(text) if stop is None else stop
+    while end < limit and text[end] != "'":
         _charge_scan()
-        end += 2 if text[end] == "\\" and end + 1 < len(text) else 1
-    closed = end < len(text)
+        end += 2 if text[end] == "\\" and end + 1 < limit else 1
+    closed = end < limit
     n = end
     j = start
     buf: list[str] = []
@@ -570,6 +577,7 @@ def _parse_heredoc_op(
     pos: int,
     *,
     identifier_only: Optional[bool] = None,
+    stop: Optional[int] = None,
 ) -> Optional[tuple[str, bool, bool, int, bool]]:
     """Parse ``<<[-] word`` at ``pos`` as bash does (any word, after quote removal).
 
@@ -582,13 +590,13 @@ def _parse_heredoc_op(
         return None
     id_only = _HEREDOC_IDENTIFIER_ONLY if identifier_only is None else identifier_only
     if id_only:
-        m = _HEREDOC_OP_ID_ONLY.match(text, pos)
+        m = _HEREDOC_OP_ID_ONLY.match(text, pos, len(text) if stop is None else stop)
         if m is None:
             return None
         return (m.group(3), bool(m.group(1)), bool(m.group(2)), m.end(), False)
     strip_tabs = text.startswith("<<-", pos)
     j = pos + (3 if strip_tabs else 2)
-    n = len(text)
+    n = len(text) if stop is None else stop
     while j < n and text[j] in " \t":
         _charge_scan()
         j += 1
@@ -609,9 +617,9 @@ def _parse_heredoc_op(
                 bad = True
                 j = n
             continue
-        if text.startswith("$'", j):
+        if text.startswith("$'", j, n):
             quoted = True
-            val, j, closed = _unescape_ansi_c(text, j + 2)
+            val, j, closed = _unescape_ansi_c(text, j + 2, n)
             parts.append(val)
             if not closed:
                 bad = True
@@ -619,7 +627,7 @@ def _parse_heredoc_op(
             continue
         if c == "'":
             quoted = True
-            k = _scan_find(text, "'", j + 1)
+            k = _scan_find(text, "'", j + 1, n)
             if k < 0:
                 bad = True
                 j = n
@@ -627,7 +635,7 @@ def _parse_heredoc_op(
             parts.append(text[j + 1:k])
             j = k + 1
             continue
-        if c == '"' or text.startswith('$"', j):
+        if c == '"' or text.startswith('$"', j, n):
             quoted = True
             k = j + (2 if c == "$" else 1)
             while k < n and text[k] != '"':
@@ -652,14 +660,14 @@ def _parse_heredoc_op(
     return ("".join(parts), strip_tabs, quoted, j, bad)
 
 
-def _unquote_word_at(text: str, pos: int) -> tuple[Optional[str], int, bool]:
+def _unquote_word_at(text: str, pos: int, stop: Optional[int] = None) -> tuple[Optional[str], int, bool]:
     """Read one shell word at ``pos`` and perform bash quote/escape removal.
 
     Returns ``(unquoted_or_None_if_dynamic, end_pos, had_quote_or_escape)``.
     If the word contains unescaped ``$`` (other than ``$'...'`` / ``$"..."``)
     or backticks, ``unquoted`` is ``None``.
     """
-    n = len(text)
+    n = len(text) if stop is None else stop
     j = pos
     parts: list[str] = []
     dynamic = False
@@ -676,9 +684,9 @@ def _unquote_word_at(text: str, pos: int) -> tuple[Optional[str], int, bool]:
                 dynamic = True
                 j = n
             continue
-        if _RESOLVE_ANSI_C and text.startswith("$'", j):
+        if _RESOLVE_ANSI_C and text.startswith("$'", j, n):
             had_qe = True
-            val, j, closed = _unescape_ansi_c(text, j + 2)
+            val, j, closed = _unescape_ansi_c(text, j + 2, n)
             if not closed:
                 dynamic = True
                 break
@@ -686,20 +694,20 @@ def _unquote_word_at(text: str, pos: int) -> tuple[Optional[str], int, bool]:
             continue
         if c == "'":
             had_qe = True
-            k = _scan_find(text, "'", j + 1)
-            if k < 0:
+            k = _scan_find(text, "'", j + 1, n)
+            if k < 0 or k >= n:
                 dynamic = True
                 j = n
                 break
             parts.append(text[j + 1:k])
             j = k + 1
             continue
-        if c == '"' or text.startswith('$"', j):
+        if c == '"' or text.startswith('$"', j, n):
             had_qe = True
             k = j + (2 if c == "$" else 1)
             while k < n and text[k] != '"':
                 _charge_scan()
-                run_end = _quote_run_end(text, k)
+                run_end = _quote_run_end(text, k, n)
                 if run_end > k:
                     parts.append(_subspan(text, k, run_end))
                     k = run_end
@@ -723,17 +731,17 @@ def _unquote_word_at(text: str, pos: int) -> tuple[Optional[str], int, bool]:
             continue
         if c in "$`":
             dynamic = True
-            if text.startswith("$(", j):
+            if text.startswith("$(", j, n):
                 end = _subst_end_hd(text, j + 1)
                 j = end + 1 if end < n else n
                 continue
-            if text.startswith("${", j):
-                end = _scan_find(text, "}", j + 2)
-                j = n if end < 0 else end + 1
+            if text.startswith("${", j, n):
+                end = _scan_find(text, "}", j + 2, n)
+                j = n if end < 0 or end >= n else end + 1
                 continue
             if c == "`":
-                end = _scan_find(text, "`", j + 1)
-                j = n if end < 0 else end + 1
+                end = _scan_find(text, "`", j + 1, n)
+                j = n if end < 0 or end >= n else end + 1
                 continue
         parts.append(c)
         j += 1
@@ -1523,26 +1531,63 @@ def _split_top_level_segments(text: str) -> list[tuple[int, int, str]]:
     return segs
 
 
-def _iter_top_level_segments(text: str, start: int = 0):
+def _iter_top_level_segments(text: str, start: int = 0, stop_before=None, *, bounds_only=False):
     i = start
     n = len(text)
     seg_start = start
     at_word_start = True
+    work = _ROUTING_WORK.get()
+    transitions = None
+    if work is not None and bounds_only:
+        # Reuse a completed lexical suffix even when earlier quotes changed segmentation.
+        _span_origin(text)
+        transitions = work.cache.setdefault(("segment-ends", id(text), _MASK_COMMENTS), {})
+    visited = []
+    def completed(end, following):
+        if transitions is not None:
+            for state in visited:
+                transitions[state] = (end, following)
+                _charge_scan(_CACHE_HIT_WORK)
+            visited.clear()
+    def segment(begin, end):
+        return "" if bounds_only else _subspan(text, begin, end)
     while i < n:
         _charge_scan()
+        if stop_before is not None and i == seg_start:
+            cached = i in stop_before
+            _charge_scan(_CACHE_WORK)
+            if cached:
+                yield i, i, None
+                return
+        if transitions is not None:
+            state = (i, at_word_start)
+            cached_end = transitions.get(state)
+            _charge_scan(_CACHE_HIT_WORK)
+            if cached_end is not None:
+                end, following = cached_end
+                completed(end, following)
+                if end > seg_start:
+                    yield seg_start, end, segment(seg_start, end)
+                i = seg_start = following
+                at_word_start = True
+                continue
+            visited.append(state)
         c = text[i]
         if c in "\n;|&(){}":
+            completed(i, i + 1)
             if i > seg_start:
-                yield seg_start, i, _subspan(text, seg_start, i)
+                yield seg_start, i, segment(seg_start, i)
             i += 1
             seg_start = i
             at_word_start = True
             continue
         if _MASK_COMMENTS and at_word_start and c == "#":
-            if i > seg_start:
-                yield seg_start, i, _subspan(text, seg_start, i)
             end = _scan_find(text, "\n", i)
-            i = n if end < 0 else end + 1
+            following = n if end < 0 else end + 1
+            completed(i, following)
+            if i > seg_start:
+                yield seg_start, i, segment(seg_start, i)
+            i = following
             seg_start = i
             at_word_start = True
             continue
@@ -1576,18 +1621,20 @@ def _iter_top_level_segments(text: str, start: int = 0):
             continue
         i += 1
         at_word_start = False
+    completed(n, n)
     if n > seg_start:
-        yield seg_start, n, _subspan(text, seg_start, n)
+        yield seg_start, n, segment(seg_start, n)
 
 
 def _extract_simple_cmd_words_and_redirs(
-    seg: str,
+    seg: str, start: int = 0, stop: Optional[int] = None, *, execution_only=False,
 ) -> tuple[list[str], set[str]]:
     """Extract ``(command_words, redirected_output_paths)`` from one simple command."""
     words: list[str] = []
     redirs: set[str] = set()
-    j = 0
-    n = len(seg)
+    j = start
+    n = len(seg) if stop is None else stop
+    prefix, wrapper_options = True, False
     while j < n:
         _charge_scan()
         while j < n and seg[j] in " \t":
@@ -1602,10 +1649,10 @@ def _extract_simple_cmd_words_and_redirs(
             while j < n and seg[j] in " \t":
                 _charge_scan()
                 j += 1
-            _, wend, _ = _unquote_word_at(seg, j)
+            _, wend, _ = _unquote_word_at(seg, j, n)
             j = max(j + 1, wend)
             continue
-        hd = _parse_heredoc_op(seg, j)
+        hd = _parse_heredoc_op(seg, j, stop=n)
         if hd is not None:
             j = hd[3]
             continue
@@ -1616,7 +1663,7 @@ def _extract_simple_cmd_words_and_redirs(
                 _charge_scan()
                 j += 1
             if j < n:
-                unq, wend, _ = _unquote_word_at(seg, j)
+                unq, wend, _ = _unquote_word_at(seg, j, n)
                 target = unq if unq is not None else seg[j:wend]
                 norm = _normalize_script_path(target)
                 if norm and norm not in ("/dev/null", "-"):
@@ -1631,16 +1678,28 @@ def _extract_simple_cmd_words_and_redirs(
                     _charge_scan()
                     j += 1
                 if j < n:
-                    _, wend, _ = _unquote_word_at(seg, j)
+                    _, wend, _ = _unquote_word_at(seg, j, n)
                     j = max(j + 1, wend)
             continue
-        unq, wend, _ = _unquote_word_at(seg, j)
+        unq, wend, _ = _unquote_word_at(seg, j, n)
         if wend <= j:
             j += 1
             continue
         w = unq if unq is not None else seg[j:wend]
         words.append(w)
         j = wend
+        if execution_only and prefix:
+            if w in _LEAD_KEYWORDS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
+                continue
+            if w in _WRAPPER_WORDS:
+                wrapper_options = True
+                continue
+            if wrapper_options and w.startswith("-"):
+                continue
+            prefix = False
+            # Non-interpreters execute only their first word, never their arguments.
+            if w.rsplit("/", 1)[-1] not in _SCRIPT_RUNNERS:
+                return [w], redirs
     idx = 0
     while idx < len(words):
         _charge_scan()
@@ -1666,8 +1725,8 @@ def _extract_simple_cmd_words_and_redirs(
     return rem, redirs
 
 
-def _executed_paths(segment: str):
-    words, _ = _extract_simple_cmd_words_and_redirs(segment)
+def _executed_paths(segment: str, start: int = 0, stop: Optional[int] = None):
+    words, _ = _extract_simple_cmd_words_and_redirs(segment, start, stop, execution_only=True)
     if words:
         yield _normalize_script_path(words[0])
         if words[0].rsplit("/", 1)[-1] in _SCRIPT_RUNNERS:
@@ -1676,34 +1735,50 @@ def _executed_paths(segment: str):
 
 def _later_executes_paths(text: str, start: int, paths: set[str]) -> bool:
     work = _ROUTING_WORK.get()
+    known = None
     if work is not None:
         _span_origin(text)
         key = ("executions", id(text), _MASK_COMMENTS,
                _COMMANDS_READING.get(), _BOUNDED_COMMANDS.get())
-        for boundaries, last_use in work.cache.get(key, ()):
+        known = work.cache.setdefault(key, {})
+    def from_index(begin):
+        if known is None:
+            return None
+        suffix = known.get(begin)
+        _charge_scan(_CACHE_WORK)
+        if suffix is None:
+            return None
+        for path in sorted(paths):
+            executed = suffix.get(path, -1) >= begin
             _charge_scan(_CACHE_WORK)
-            if start in boundaries:
-                for path in sorted(paths):
-                    executed = last_use.get(path, -1) >= start
-                    _charge_scan(_CACHE_WORK)
-                    if executed:
-                        return True
-                return False
+            if executed:
+                return True
+        return False
+    cached = from_index(start)
+    if cached is not None:
+        return cached
     boundaries = {start, len(text)}
     last_use: dict[str, int] = {}
-    for begin, end, segment in _iter_top_level_segments(text, start):
+    for begin, end, segment in _iter_top_level_segments(text, start, known, bounds_only=True):
         _charge_scan()
+        if segment is None:
+            cached = from_index(begin)
+            if cached is None:
+                raise RouterRefusal("command too complex to route; split the command and retry")
+            return cached
         boundaries.add(begin)
         if end < len(text) and text[end] in "\n;|&(){}":
             boundaries.add(end + 1)
-        for path in _executed_paths(segment):
+        for path in _executed_paths(text, begin, end):
             _charge_scan()
             if path in paths:
                 return True
             last_use[path] = begin
-    if work is not None:
-        # Alternating quote states need separate indexes, not repeated replacement.
-        work.cache.setdefault(key, []).append((boundaries, last_use))
+    if known is not None:
+        # Share a completed suffix from any recorded restart, including after a comment.
+        for boundary in boundaries:
+            known.setdefault(boundary, last_use)
+            _charge_scan(_CACHE_WORK)
     return False
 
 
