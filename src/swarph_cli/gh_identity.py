@@ -50,6 +50,10 @@ and #1346 did not introduce them:
   bash -c 'echo it'\\''s done; gh pr view 1'
 - adjacent quoted pieces: bash -c 'echo 1;'"gh pr view 1"
 - a dynamic pipe into a shell: echo "$CMD" | bash
+- unsupported constant pipelines: printf, echo -e / echo -n; receivers
+  bash -x / bash -e / bash -, env bash, sh -s --; intermediate tee,
+  a cat here-string or cat heredoc piped to bash, or xargs. Plain echo into bash/sh -s
+  is supported, including a trailing output redirect or comment.
 - $(which gh) pr list
 - bash -c "$(echo gh) pr view 1"
 - a variable: CMD="gh pr view 1"; bash -c "$CMD"
@@ -568,6 +572,38 @@ def _is_terminator(line: str, delim: str, strip_tabs: bool) -> bool:
     return line == delim
 
 
+def _quote_end(command: str, start: int, *, mask_comments: Optional[bool] = None,
+               heredocs: bool = True) -> int:
+    """Match a quote while keeping nested substitutions in their own quote scope."""
+    quote = command[start]
+    n = len(command)
+    if quote == "'":
+        end = command.find("'", start + 1)
+        return end if end >= 0 else n
+    i = start + 1
+    while i < n:
+        if command[i] == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if command[i] == quote:
+            return i
+        if quote == '"' and command.startswith("$(", i):
+            end = (_subst_end_hd(command, i + 1, mask_comments=mask_comments)
+                   if heredocs else _subst_end(command, i + 1))
+            i = end + 1
+            continue
+        if quote == '"' and command[i] == "`":
+            i = _quote_end(command, i, mask_comments=mask_comments, heredocs=heredocs) + 1
+            continue
+        i += 1
+    return n
+
+
+def _is_arithmetic(command: str, open_paren: int, end: int) -> bool:
+    return (command.startswith("((", open_paren) and end < len(command)
+            and command[end - 1:end + 1] == "))")
+
+
 def _subst_end(command: str, open_paren: int) -> int:
     """Index of the ``)`` matching ``command[open_paren] == '('``."""
     depth = 1
@@ -582,14 +618,8 @@ def _subst_end(command: str, open_paren: int) -> int:
             j = command.find("'", i + 1)
             i = n if j < 0 else j + 1
             continue
-        if c == '"':
-            i += 1
-            while i < n and command[i] != '"':
-                if command[i] == "\\" and i + 1 < n:
-                    i += 2
-                    continue
-                i += 1
-            i = i + 1 if i < n else n
+        if c in ('"', "`"):
+            i = _quote_end(command, i, heredocs=False) + 1
             continue
         if c == "(":
             depth += 1
@@ -616,7 +646,9 @@ def _subst_end_hd(command: str, open_paren: int, *,
     the enclosing ``$(...)``.
     """
     if command.startswith("((", open_paren):
-        return _subst_end(command, open_paren)
+        candidate = _subst_end(command, open_paren)
+        if _is_arithmetic(command, open_paren, candidate):
+            return candidate
     mc = _MASK_COMMENTS if mask_comments is None else mask_comments
     depth = 1
     brace_depth = 0
@@ -682,17 +714,11 @@ def _subst_end_hd(command: str, open_paren: int, *,
             j = command.find("'", i + 1)
             i = n if j < 0 else j + 1
             continue
-        if c == '"':
+        if c in ('"', "`"):
             if case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "expect_pat":
                 case_stack[-1][1] = "in_pat"
             at_word_start = False
-            i += 1
-            while i < n and command[i] != '"':
-                if command[i] == "\\" and i + 1 < n:
-                    i += 2
-                    continue
-                i += 1
-            i = i + 1 if i < n else n
+            i = _quote_end(command, i, mask_comments=mc) + 1
             continue
         if c == "<" and not (i > 0 and command[i - 1] == "<"):
             if command.startswith("<<<", i):
@@ -777,6 +803,35 @@ def _subst_end_hd(command: str, open_paren: int, *,
         at_word_start = False
         i += 1
     return n
+
+
+def _arithmetic_span(command: str, pos: int, *, mask_comments: bool) -> Optional[tuple[int, int]]:
+    """Body-end and stop of a standalone ((...)) or legacy $[...] expression."""
+    n = len(command)
+    if command.startswith("((", pos):
+        end = _subst_end_hd(command, pos, mask_comments=mask_comments)
+        return (end - 1, end + 1) if _is_arithmetic(command, pos, end) else None
+    if not command.startswith("$[", pos):
+        return None
+    depth, i = 1, pos + 2
+    while i < n:
+        if command[i] == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if command[i] in "'\"`":
+            i = _quote_end(command, i, mask_comments=mask_comments) + 1
+            continue
+        if command.startswith("$(", i):
+            i = _subst_end_hd(command, i + 1, mask_comments=mask_comments) + 1
+            continue
+        if command[i] == "[":
+            depth += 1
+        elif command[i] == "]":
+            depth -= 1
+            if depth == 0:
+                return i, i + 1
+        i += 1
+    return n, n
 
 
 @dataclass(frozen=True)
@@ -879,13 +934,28 @@ def _fold_bash_continuations(
             continue
         if command.startswith("$((", i):
             end = _subst_end_hd(command, i + 1, mask_comments=mask_comments)
+            if _is_arithmetic(command, i + 1, end):
+                inner = _fold_bash_continuations(
+                    command[i + 2:end], mask_comments=mask_comments,
+                    fold_continuations_in_comments=fold_continuations_in_comments,
+                    arithmetic=True,
+                )
+                out.append("$(" + inner + ")")
+                i = end + 1
+                at_word_start = False
+                continue
+        math = (_arithmetic_span(command, i, mask_comments=mask_comments)
+                if not arithmetic and c in "($" and not (i > 0 and command[i - 1] == "(")
+                else None)
+        if math is not None:
+            body_end, stop = math
             inner = _fold_bash_continuations(
-                command[i + 2:end], mask_comments=mask_comments,
+                command[i + 2:body_end], mask_comments=mask_comments,
                 fold_continuations_in_comments=fold_continuations_in_comments,
                 arithmetic=True,
             )
-            out.append("$(" + inner + (")" if end < n else ""))
-            i = end + 1 if end < n else n
+            out.append(command[i:i + 2] + inner + command[body_end:stop])
+            i = stop
             at_word_start = False
             continue
         if c == "<" and not arithmetic:
@@ -961,7 +1031,7 @@ def _fold_bash_continuations(
                         command[i + 2:end],
                         mask_comments=mask_comments,
                         fold_continuations_in_comments=fold_continuations_in_comments,
-                        arithmetic=command.startswith("$((", i),
+                        arithmetic=_is_arithmetic(command, i + 1, end),
                     )
                     out.append("$(" + inner + (")" if end < n else ""))
                     i = end + 1 if end < n else n
@@ -997,6 +1067,9 @@ def _closed_assignment_value_end(text: str, i: int, *,
                 return None
             i = end + 1
             continue
+        if text.startswith("$[", i):
+            _, i = _arithmetic_span(text, i, mask_comments=mask_comments)
+            continue
         if text.startswith("${", i):
             end = text.find("}", i + 2)
             if end < 0:
@@ -1029,24 +1102,7 @@ def _closed_assignment_value_end(text: str, i: int, *,
             i = j + 1
             continue
         if c == '"' or text.startswith('$"', i):
-            j = i + (2 if c == "$" else 1)
-            while j < n and text[j] != '"':
-                if text[j] == "\\" and j + 1 < n:
-                    j += 2
-                    continue
-                if text.startswith("$(", j):
-                    end = _subst_end_hd(text, j + 1, mask_comments=mask_comments)
-                    if end >= n:
-                        return None
-                    j = end + 1
-                    continue
-                if text[j] == "`":
-                    end = text.find("`", j + 1)
-                    if end < 0:
-                        return None
-                    j = end + 1
-                    continue
-                j += 1
+            j = _quote_end(text, i + (1 if c == "$" else 0), mask_comments=mask_comments)
             if j >= n:
                 return None
             i = j + 1
@@ -1502,6 +1558,24 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
             i += 1
             at_word_start = False
             continue
+        math = (_arithmetic_span(text, i, mask_comments=mask_comments)
+                if not arithmetic and c in "($" and not (i > 0 and text[i - 1] == "(")
+                else None)
+        if math is not None:
+            body_end, stop = math
+            sub = _scan_folded(text[i + 2:body_end], base + i + 2,
+                               mask_comments=mask_comments, arithmetic=True)
+            unterminated |= sub.unterminated_quote
+            unterminated_hd |= sub.unterminated_heredoc
+            has_tick |= sub.has_backtick
+            has_hd |= sub.has_heredoc
+            spans.extend(sub.subst_spans)
+            heredoc_shell_texts.extend(sub.heredoc_shell_texts)
+            out.append(text[i:i + 2] + sub.visible + text[body_end:stop])
+            out_targets.append(text[i:i + 2] + sub.targets_visible + text[body_end:stop])
+            i = stop
+            at_word_start = False
+            continue
         if c == "<" and not arithmetic:
             if text.startswith("<<<", i):
                 has_hd = True
@@ -1627,7 +1701,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                     spans.append((base + i, base + stop))
                     sub = _scan_folded(
                         text[i + 2:end], base + i + 2, mask_comments=mask_comments,
-                        arithmetic=text.startswith("$((", i))
+                        arithmetic=_is_arithmetic(text, i + 1, end))
                     unterminated |= sub.unterminated_quote
                     unterminated_hd |= sub.unterminated_heredoc
                     has_tick |= sub.has_backtick
@@ -1683,7 +1757,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
             spans.append((base + i, base + stop))
             sub = _scan_folded(
                 text[i + 2:end], base + i + 2, mask_comments=mask_comments,
-                arithmetic=text.startswith("$((", i))
+                arithmetic=_is_arithmetic(text, i + 1, end))
             unterminated |= sub.unterminated_quote
             unterminated_hd |= sub.unterminated_heredoc
             has_tick |= sub.has_backtick
@@ -2006,7 +2080,7 @@ def _echo_pipeline_text(command: str, i: int) -> Optional[str]:
         i += 2
         while i < n and command[i] in " \t":
             i += 1
-    if i < n and command[i] not in ";\n&|)":
+    if i < n and not (command[i] in ";\n&|)>#" or re.match(r"[0-9]+>", command[i:])):
         return None
     return " ".join(parts)
 

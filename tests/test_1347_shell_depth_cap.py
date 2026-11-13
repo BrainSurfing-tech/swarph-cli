@@ -58,7 +58,7 @@ def test_the_router_docstring_names_the_known_limits():
         "adjacent quoted pieces",
     ):
         assert phrase in text, phrase
-    for stale in ("ANSI-C", "here-string", 'g""h'):
+    for stale in ("ANSI-C", 'g""h'):
         assert stale not in text, stale
 
 
