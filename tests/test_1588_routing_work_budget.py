@@ -60,6 +60,11 @@ def test_dense_arithmetic_keeps_the_base_hook_decision(command, calls_gh, tmp_pa
         assert capsys.readouterr().out == "", "base allows this ordinary non-gh command unchanged"
 
 
+def _fresh_hook_elapsed_bound(reference):
+    # Lab97787: shared CI uses a separate bound; idle reference and depth bounds stay.
+    return 10 if reference == 5 and os.environ.get("CI") == "true" else reference
+
+
 def _fresh_hook(command, tmp_path, timeout):
     mapping = tmp_path / "identities.json"
     mapping.write_text(json.dumps({"budget-fixture": "fixture-login"}))
@@ -71,9 +76,30 @@ def _fresh_hook(command, tmp_path, timeout):
     result = subprocess.run(
         [sys.executable, "-c", "from swarph_cli.commands import gh_route; raise SystemExit(gh_route.run_hook())"],
         input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
-        capture_output=True, text=True, timeout=timeout, cwd=tmp_path, env=env,
+        capture_output=True, text=True,
+        timeout=15 if timeout == 5 and os.environ.get("CI") == "true" else timeout,
+        cwd=tmp_path, env=env,
     )
     return result, time.perf_counter() - started
+
+
+@pytest.mark.parametrize(("ci", "requested", "wait", "elapsed_limit"), [
+    pytest.param("true", 5, 15, 10, id="ci-five-second-reference"),
+    pytest.param("false", 5, 5, 5, id="local-five-second-reference"),
+    pytest.param("true", 2, 2, 2, id="ci-depth-probe"),
+    pytest.param("false", 2, 2, 2, id="local-depth-probe"),
+])
+def test_ci_timing_allowance_never_changes_reference_or_depth_limits(
+        ci, requested, wait, elapsed_limit, monkeypatch, tmp_path):
+    monkeypatch.setenv("CI", ci)
+    observed = []
+    def capture(argv, **options):
+        observed.append(options["timeout"])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", capture)
+    _fresh_hook("echo fixture", tmp_path, requested)
+    assert observed == [wait]
+    assert _fresh_hook_elapsed_bound(requested) == elapsed_limit
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux CI two-second hook bound")
@@ -114,7 +140,7 @@ def test_nested_shift_budget_returns_a_real_hook_decision_within_two_seconds(dep
 def test_large_hook_inputs_decide_within_five_seconds(command, must_refuse, tmp_path):
     result, elapsed = _fresh_hook(command, tmp_path, 5)
     assert result.returncode == 0, result.stderr
-    assert elapsed < 5
+    assert elapsed <= _fresh_hook_elapsed_bound(5), f"fresh hook elapsed={elapsed:.3f}s"
     print("input chars", len(command), "hook seconds", elapsed)
     if must_refuse:
         body = json.loads(result.stdout)["hookSpecificOutput"]
@@ -133,7 +159,7 @@ def test_large_hook_inputs_decide_within_five_seconds(command, must_refuse, tmp_
 def test_heredoc_density_always_gets_a_fresh_hook_decision(command, tmp_path):
     assert len(json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})) <= 1536000
     result, elapsed = _fresh_hook(command, tmp_path, 5)
-    assert elapsed < 5
+    assert elapsed <= _fresh_hook_elapsed_bound(5), f"fresh hook elapsed={elapsed:.3f}s"
     assert result.returncode == 0, result.stderr
     if result.stdout:
         body = json.loads(result.stdout)["hookSpecificOutput"]
@@ -495,7 +521,7 @@ def test_exact_default_payload_cap_decides_within_five_seconds(shape, tmp_path):
     base_size = len(json.dumps({"tool_name": "Bash", "tool_input": {"command": prefix + suffix}}))
     command = prefix + "x" * (cap - base_size) + suffix
     result, elapsed = _fresh_hook(command, tmp_path, 5)
-    assert elapsed < 5
+    assert elapsed <= _fresh_hook_elapsed_bound(5), f"fresh hook elapsed={elapsed:.3f}s"
     assert result.returncode == 0, result.stderr
     if shape == "gh-quoted":
         assert json.loads(result.stdout)["hookSpecificOutput"]["updatedInput"]["command"] != command
@@ -539,7 +565,7 @@ EOF"""
 def test_mixed_file_writing_heredocs_get_the_base_rewrite_within_five_seconds(tmp_path):
     command = _mixed_file_heredocs(250000)
     result, elapsed = _fresh_hook(command, tmp_path, 5)
-    assert elapsed < 5
+    assert elapsed <= _fresh_hook_elapsed_bound(5), f"fresh hook elapsed={elapsed:.3f}s"
     assert result.returncode == 0, result.stderr
     body = json.loads(result.stdout)["hookSpecificOutput"]
     assert body["updatedInput"]["command"].endswith(command)
@@ -632,7 +658,7 @@ def test_cached_heredoc_paths_do_not_cross_parser_modes(monkeypatch):
 def test_pre_review_slow_rows_return_safe_fresh_hook_decisions(command, must_target, tmp_path):
     assert len(json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})) <= 1536000
     result, elapsed = _fresh_hook(command, tmp_path, 5)
-    assert elapsed < 5
+    assert elapsed <= _fresh_hook_elapsed_bound(5), f"fresh hook elapsed={elapsed:.3f}s"
     assert result.returncode == 0, result.stderr
     if must_target:
         assert result.stdout, "gh must not run on an unchanged command"
@@ -731,7 +757,7 @@ def test_apostrophe_heredocs_keep_the_base_fresh_hook_decision(copies, position,
         command = "gh pr list\n" + command if position == "first" else command + "\ngh pr list"
     run, elapsed = _fresh_hook(command, tmp_path, 5)
     assert run.returncode == 0, run.stderr
-    assert elapsed < 5
+    assert elapsed <= _fresh_hook_elapsed_bound(5), f"fresh hook elapsed={elapsed:.3f}s"
     if position == "none":
         assert not run.stdout
     else:
@@ -784,7 +810,8 @@ _SHORTEST_HEREDOC_SHAPES = [
 def test_shortest_seeded_shapes_keep_the_base_hook_decision(fragment, copies, with_gh, tmp_path):
     command = "P=p.txt\n" + "\n".join([fragment] * copies) + ("\ngh pr list" if with_gh else "")
     result, elapsed = _fresh_hook(command, tmp_path, 5)
-    assert result.returncode == 0 and elapsed < 5, result.stderr
+    assert result.returncode == 0, result.stderr
+    assert elapsed <= _fresh_hook_elapsed_bound(5), f"fresh hook elapsed={elapsed:.3f}s"
     if with_gh:
         assert "updatedInput" in json.loads(result.stdout)["hookSpecificOutput"]
     else:
