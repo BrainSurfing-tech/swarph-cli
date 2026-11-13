@@ -624,6 +624,9 @@ def _subst_end(command: str, open_paren: int) -> int:
         if c == "\\" and i + 1 < n:
             i += 2
             continue
+        if command.startswith("$'", i):
+            _, i, _ = _unescape_ansi_c(command, i + 2)
+            continue
         if c == "'":
             j = command.find("'", i + 1)
             i = n if j < 0 else j + 1

@@ -117,7 +117,8 @@ def test_pipeline_scope_does_not_expand_to_data_or_dynamic_text(command):
     "echo 'gh pr list' | bash # note",
 ])
 def test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
-        command, tmp_path, monkeypatch, capsys, require_execution=True):
+        command, tmp_path, monkeypatch, capsys, require_execution=True,
+        expected_decision="rewrite"):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     fake_gh = fake_bin / "gh"
@@ -164,7 +165,12 @@ def test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
     })) == 0
     output = capsys.readouterr().out
     assert output, "gh ran, so the real hook must rewrite, not allow unchanged"
-    rewritten = json.loads(output)["hookSpecificOutput"]["updatedInput"]["command"]
+    body = json.loads(output)["hookSpecificOutput"]
+    if body.get("permissionDecision") == "deny":
+        assert expected_decision in (None, "deny"), body
+        return
+    assert expected_decision in (None, "rewrite"), body
+    rewritten = body["updatedInput"]["command"]
     routed = run(rewritten)
     # Expansion can execute gh before Bash reports an arithmetic error.
     assert routed.returncode == raw.returncode, routed.stderr
@@ -486,6 +492,96 @@ def test_bounded_standalone_body_is_commands_not_an_arithmetic_grammar_rule(
         gh_identity._BOUNDED_COMMANDS.reset(bounded_token)
         gh_identity._COMMANDS_READING.reset(token)
     assert modes == {"fold": [arithmetic], "scan": [arithmetic]}
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+@pytest.mark.parametrize("command", [
+    pytest.param("((cat <<EOF\na $((1 << 2)) b\nEOF; bash -c $'echo $(\\x28bash <<< \\'gh pr list\\'; echo $(case x in x) :;; esac)))') | (cat))\necho done", id="round7_gating_1"),
+    pytest.param("((cat <<EOF\na $((1 + 2)) b\nEOF; bash -c $'echo $(\\x28bash <<< \\'gh pr list\\'; echo $(case x in x) :;; esac)))') | (cat))\necho done", id="round7_gating_2"),
+    pytest.param("((cat <<EOF\na $((1 << 2)) b\nEOF; bash -c $'echo $(\\x28bash <<< \\'gh pr list\\'; echo $(case x in x) :;; esac)))') | (cat))", id="round7_gating_3"),
+    pytest.param("((cat <<EOF\na b\nEOF; bash -c $'echo $(\\x28bash <<< \\'gh pr list\\'; echo $(case x in x) :;; esac)))') | (cat))\necho done", id="round7_gating_4"),
+    pytest.param("((cat <<EOF\na b\nEOF; bash -c $'echo $(\\x28bash <<< \\'gh pr list\\'; echo $(case x in x) :;; esac)))') | (cat))", id="round7_gating_5"),
+])
+def test_ansi_c_pairing_cannot_allow_the_gating_command(
+        command, tmp_path, monkeypatch, capsys):
+    test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
+        command, tmp_path, monkeypatch, capsys,
+        require_execution=sys.platform != "darwin", expected_decision=None)
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+@pytest.mark.parametrize("command,decision", [
+    pytest.param("((true; bash -c $'echo $(\\x28bash <<< \\'gh pr list\\'; echo $(case x in x) :;; esac)))') | (cat))", "rewrite", id="round7_neighbour_1"),
+    pytest.param("((bash -c $'echo $(\\x28bash <<< \\'gh pr list\\'; echo $(case x in x) :;; esac)))') | (cat))", "rewrite", id="round7_neighbour_2"),
+    pytest.param("(bash -c $'echo $(\\x28bash <<< \\'gh pr list\\'; echo $(case x in x) :;; esac)))')", "rewrite", id="round7_neighbour_3"),
+    pytest.param("echo $((bash -c $'echo $(\\x28bash <<< \\'gh pr list\\'; echo $(case x in x) :;; esac)))') | (cat))", "rewrite", id="round7_neighbour_4"),
+    pytest.param("((bash -c $'gh pr list') | (cat))", "rewrite", id="round7_neighbour_5"),
+    pytest.param("((bash -c $'echo \\x28; gh pr list') | (cat))", "rewrite", id="round7_neighbour_6"),
+    pytest.param("((echo $'a)'; gh pr list) | (cat))", "rewrite", id="round7_neighbour_7"),
+    pytest.param("((echo $'it\\'s)'; gh pr list) | (cat))", "rewrite", id="round7_neighbour_8"),
+    pytest.param("((echo $'it\\'s'; gh pr list) | (cat))", "rewrite", id="round7_neighbour_9"),
+    pytest.param("echo $((echo $'it\\'s)'; gh pr list) | (cat))", "rewrite", id="round7_neighbour_10"),
+    pytest.param("((echo 'a)'; gh pr list) | (cat))", "rewrite", id="round7_neighbour_11"),
+    pytest.param("((echo $'it\\'s))'; gh pr list) | (cat))", "rewrite", id="round7_neighbour_12"),
+    pytest.param("echo $((echo $'it\\'s))'; gh pr list) | (cat))", "rewrite", id="round7_neighbour_13"),
+    pytest.param("((echo $'it\\'s))'; bash -c 'gh pr list') | (cat))", "rewrite", id="round7_neighbour_14"),
+    pytest.param("echo $'it\\'s))'; gh pr list", "rewrite", id="round7_neighbour_15"),
+    pytest.param("(echo $'it\\'s))'; gh pr list)", "rewrite", id="round7_neighbour_16"),
+    pytest.param("echo $(echo $'it\\'s))'; gh pr list)", "rewrite", id="round7_neighbour_17"),
+    # Lab97442: v18 may become DENY; real Bash EOF warning + original4d DENY verified.
+    pytest.param("((cat <<EOF\na b\nEOF; echo $'it\\'s))'; gh pr list) | (cat))", None, id="round7_neighbour_18"),
+    pytest.param("((echo $'it\\'s))') | (cat))\ngh pr list", "rewrite", id="round7_neighbour_19"),
+    pytest.param("echo $((echo $'it\\'s))') | (cat))\ngh pr list", "rewrite", id="round7_neighbour_20"),
+    pytest.param("((echo $'it\\'s))') | (cat))\n\"gh\" pr list", "rewrite", id="round7_neighbour_21"),
+    pytest.param("bash -c $'echo $(\\x28bash <<< \\'gh pr list\\'; echo $(case x in x) :;; esac)))'", "rewrite", id="round7_neighbour_22"),
+    pytest.param("((cat <<EOF\na b\nEOF\nbash -c $'echo $(\\x28bash <<< \\'gh pr list\\'; echo $(case x in x) :;; esac)))') | (cat))", "rewrite", id="round7_neighbour_23"),
+])
+def test_ansi_c_pairing_neighbours_keep_their_decision(
+        command, decision, tmp_path, monkeypatch, capsys):
+    test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
+        command, tmp_path, monkeypatch, capsys,
+        require_execution=False, expected_decision=decision)
+
+
+@pytest.mark.parametrize("word", [
+    "$'it\\'s))('", "$'a\\\\))('", "$'a\\x27))('", "$'a\\047))('",
+    "$'a\\u0027))('", "$'a\\U00000027))('", "$'a\\c'))('",
+    "$'a)('", "$'it\\'s)\n('",
+])
+def test_parenthesis_pairing_skips_ansi_c_escapes(word):
+    command = "(echo " + word + "; echo after)tail"
+    assert gh_identity._subst_end(command, 0) == command.index(")tail")
+
+
+def test_unclosed_ansi_c_word_cannot_supply_a_closing_parenthesis():
+    command = "(echo $'it\\'s)"
+    assert gh_identity._subst_end(command, 0) == len(command)
+
+
+@pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
+                    reason="Bash/POSIX oracle")
+def test_denial_is_not_accepted_by_the_existing_rewrite_probes(tmp_path, monkeypatch, capsys):
+    def deny(_):
+        print(json.dumps({"hookSpecificOutput": {"permissionDecision": "deny"}}))
+        return 0
+
+    monkeypatch.setattr(gh_route, "run_hook", deny)
+    with pytest.raises(AssertionError):
+        test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
+            "gh pr list", tmp_path, monkeypatch, capsys)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or shutil.which("bash") is None,
+                    reason="Linux Bash EOF-warning proof for Lab ruling97442")
+def test_v18_permitted_denial_is_an_unterminated_heredoc(tmp_path, capsys):
+    command = "((cat <<EOF\na b\nEOF; echo $'it\\'s))'; gh pr list) | (cat))"
+    result, _ = _bash_with_fake_gh(command, tmp_path)
+    assert "here-document" in result.stderr
+    assert "delimited by end-of-file" in result.stderr
+    with capsys.disabled():
+        print(f"v18 EOF proof rc={result.returncode}, stderr={result.stderr!r}")
 
 
 def test_no_execution_still_requires_a_hook_rewrite(tmp_path, monkeypatch, capsys):
