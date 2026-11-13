@@ -1828,6 +1828,9 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
     )
 
 
+_PLAIN_BASH = re.compile(r"[A-Za-z0-9 _./:,@+-]*")
+
+
 def _tokenize_bash(
     command: str,
     *,
@@ -1848,6 +1851,14 @@ def _tokenize_bash(
       a following ``gh`` call.
     """
     mc = _MASK_COMMENTS if mask_comments is None else mask_comments
+    command = command or ""
+    # Without syntax there is no folding, masking, or substitution metadata to collect.
+    if _PLAIN_BASH.fullmatch(command):
+        return BashScan(
+            folded=command, visible=command,
+            targets_visible=command,
+            unterminated_quote=False, has_backtick=False, has_heredoc=False, subst_spans=(),
+        )
     fcc = (_FOLD_CONTINUATIONS_IN_COMMENTS
            if fold_continuations_in_comments is None
            else fold_continuations_in_comments)
@@ -2118,6 +2129,8 @@ def _shell_texts(command: str, visible: str) -> list[str]:
 
 def _quoted_gh_command_word(command: str, visible: str) -> bool:
     """``"gh" pr view`` and ``'gh' pr list``: the command word is gh once unquoted."""
+    if "'" not in command and '"' not in command:
+        return False
     at_word = _AT_WORD if _ENABLE_BANG_AND_ENV_ASSIGN else _AT_WORD_LEGACY
     i = 0
     n = len(command)

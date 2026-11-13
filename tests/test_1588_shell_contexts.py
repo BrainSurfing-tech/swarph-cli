@@ -433,3 +433,66 @@ def test_speculative_reading_cannot_change_another_threads_denial_flags(monkeypa
         finally:
             release.set()
         assert future.result(timeout=3) is False
+
+
+@pytest.mark.parametrize("command", [
+    pytest.param("gh pr list", id="simple-call"),
+    pytest.param("eval " * 1000 + "gh pr list", id="deep-bare-eval"),
+    pytest.param("ordinary_word " * 1000, id="long-bare-words"),
+])
+def test_plain_shell_text_does_not_walk_the_full_tokenizer(command, monkeypatch):
+    def unexpected_walk(*args, **kwargs):
+        raise AssertionError("plain text walked the full tokenizer")
+
+    monkeypatch.setattr(gh_identity, "_fold_bash_continuations", unexpected_walk)
+    assert gh_identity._tokenize_bash(command).visible == command
+
+
+@pytest.mark.parametrize("mask_comments", [False, True])
+def test_plain_fast_path_matches_every_full_scan_field(mask_comments):
+    import random
+
+    commands = [
+        "", "gh pr list", "eval gh pr list", "x=ordinary gh pr list",
+        "echo 'gh pr list'", 'echo "$(gh pr list)"', "echo `gh pr list`",
+        "echo $((1 << 2))", "(( x = '$(gh pr list)' ))", "echo $[1<<2]",
+        "cat <<EOF\n$(gh pr list)\nEOF", "gh pr list # gh pr view",
+        "g\\\nh pr list", "echo 'unterminated", "X=1; gh pr list",
+        "(gh pr list)", "{ gh pr list; }", "! gh pr list", "echo hi | gh pr list",
+    ]
+    rng = random.Random(5319)
+    commands.extend("".join(rng.choices("ab gh./0123_- \t\n", k=rng.randrange(100)))
+                    for _ in range(2000))
+    for command in commands:
+        folded = gh_identity._fold_bash_continuations(
+            command, mask_comments=mask_comments,
+            fold_continuations_in_comments=gh_identity._FOLD_CONTINUATIONS_IN_COMMENTS)
+        expected = gh_identity._scan_folded(folded, mask_comments=mask_comments)
+        assert gh_identity._tokenize_bash(command, mask_comments=mask_comments) == expected
+
+
+@pytest.mark.parametrize("mask_comments", [False, True])
+def test_plain_allowlist_complement_always_uses_full_scan(mask_comments, monkeypatch):
+    import string
+
+    allowed = set(string.ascii_letters + string.digits + " -_./:,@+")
+    excluded = [chr(code) for code in range(128) if chr(code) not in allowed]
+    excluded += ["\u0085", "\u00a0", "\u00e9", "\u200b", "\u2028", "\U0001f600"]
+    original_fold = gh_identity._fold_bash_continuations
+    walks = []
+
+    def record_walk(*args, **kwargs):
+        walks.append(True)
+        return original_fold(*args, **kwargs)
+
+    monkeypatch.setattr(gh_identity, "_fold_bash_continuations", record_walk)
+    for char in excluded:
+        for command in (char + "gh pr list", "gh" + char + " pr list", "gh pr list" + char):
+            folded = original_fold(
+                command, mask_comments=mask_comments,
+                fold_continuations_in_comments=gh_identity._FOLD_CONTINUATIONS_IN_COMMENTS)
+            expected = gh_identity._scan_folded(folded, mask_comments=mask_comments)
+            walks.clear()
+            actual = gh_identity._tokenize_bash(command, mask_comments=mask_comments)
+            assert walks, repr(command)
+            assert actual == expected
