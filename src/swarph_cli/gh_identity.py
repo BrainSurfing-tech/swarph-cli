@@ -65,7 +65,7 @@ import os
 import re
 import shlex
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -114,12 +114,14 @@ _WRAPPERS = (
 # Found by re-running drop's own failing corpus rather than the PR's seven cases:
 # "0/7 false positives is measured against your seven cases, not mine, and the claim
 # as written is wider than its evidence." The token list was, too.
-_START = (r"(?:^|[;&|]|\$\(|`|\(|\)|\{"
-          r"|\bthen\b|\bdo\b|\belse\b|\bif\b|\bwhile\b|\buntil\b|\belif\b"
+_START = (r"(?:^|[;&|]|\$\(|`|\(|\)"
+          r"|(?<![^\s;&|(){}])(?:\{|\b(?:then|do|else|if|while|until|elif)\b)"
           r"|&&|\|\|)")
 _LEAD = r"[ \t]*"                       # leading whitespace/tab — also missed before
 _BANGPFX = r"(?:![ \t]+)*"
-_ENVPFX = r"(?:[A-Za-z_][A-Za-z0-9_]*=(?:\$\([^)]*\)|(?!\$\()\S*)[ \t]+)*"
+# Prefix matching must not swallow command separators or keyword-looking assignment data.
+_ENV_VALUE = r"(?:\\[^\s]|[^\s;|&\\<>]|[<>]&|&>|>\||[<>](?![&|]))*"
+_ENVPFX = rf"(?:[A-Za-z_][A-Za-z0-9_]*=(?:\$\([^)]*\)|(?!\$\(){_ENV_VALUE})[ \t]+)*"
 _WRAPPFX = rf"(?:(?:{_WRAPPERS})[ \t]+)*"
 _WRAPPFX_PLUS = rf"(?:(?:{_WRAPPERS})[ \t]+)+"
 _CMD_PREFIX = rf"{_BANGPFX}{_ENVPFX}(?:{_WRAPPFX_PLUS}{_ENVPFX})?"
@@ -143,20 +145,90 @@ class RouterRefusal(Exception):
 class _RoutingWork:
     limit: int
     steps: int = 0
+    cache: dict = field(default_factory=dict, repr=False)
 
 
 _ROUTING_WORK = ContextVar("gh_routing_work", default=None)
-_WORK_PER_CHARACTER = 1280
+_HOOK_STATE = ContextVar("gh_hook_state", default=None)
+_WORK_PER_CHARACTER = 512
 _WORK_FIXED_ALLOWANCE = 65536
+_WORK_ABSOLUTE_LIMIT = 8000000
 
 
-def _charge_scan(characters: int) -> None:
-    """Precharge each visited scanner span; repeated scans must stay linear in input size."""
+def _charge_scan(characters: int = 1) -> None:
+    """Count cursor visits or the consumed range of a completed bulk search."""
     work = _ROUTING_WORK.get()
     if work is not None:
-        work.steps += characters + 1
+        work.steps += characters
         if work.steps > work.limit:
             raise RouterRefusal("command too complex to route; split the command and retry")
+
+
+def _scan_find(text: str, needle: str, start: int) -> int:
+    end = text.find(needle, start)
+    _charge_scan(max(0, (len(text) if end < 0 else end + len(needle)) - start))
+    return end
+
+
+def _span_origin(text: str) -> tuple[str, int]:
+    work = _ROUTING_WORK.get()
+    if work is None:
+        return text, 0
+    entry = work.cache.setdefault(("origin", id(text)), (text, text, 0))
+    return entry[1], entry[2]
+
+
+def _subspan(text: str, start: int, stop: int) -> str:
+    work = _ROUTING_WORK.get()
+    if work is None:
+        return text[start:stop]
+    root, offset = _span_origin(text)
+    start, stop, _ = slice(start, stop).indices(len(text))
+    key = ("slice", id(root), offset + start, offset + stop)
+    if key not in work.cache:
+        value = text[start:stop]
+        if value is not text:
+            _charge_scan(len(value))
+        work.cache[key] = value
+        work.cache[("origin", id(value))] = (value, root, offset + start)
+    return work.cache[key]
+
+
+def _match_lookup(text: str, start: int, kind: tuple) -> tuple:
+    work = _ROUTING_WORK.get()
+    if work is None:
+        return None, 0, None
+    root, offset = _span_origin(text)
+    key = ("match", kind, id(root), offset + start)
+    found = work.cache.get(key)
+    if found is not None:
+        return key, offset, min(len(text), found - offset)
+    if ("miss", key, offset + len(text)) in work.cache:
+        return key, offset, len(text)
+    return key, offset, None
+
+
+def _match_return(key: tuple, offset: int, text: str, end: int) -> int:
+    work = _ROUTING_WORK.get()
+    if work is not None:
+        if end < len(text):
+            work.cache[key] = offset + end
+        else:
+            work.cache[("miss", key, offset + len(text))] = True
+    return end
+
+
+_QUOTE_SPECIAL = re.compile(r'["\\$`]')
+
+
+def _quote_run_end(text: str, start: int) -> int:
+    key, offset, cached = _match_lookup(text, start, ("quote-run",))
+    if cached is not None:
+        return cached
+    match = _QUOTE_SPECIAL.search(text, start)
+    end = len(text) if match is None else match.start()
+    _charge_scan(end - start + (match is not None))
+    return _match_return(key, offset, text, end)
 
 
 @dataclass(frozen=True)
@@ -369,12 +441,14 @@ def _unescape_ansi_c(text: str, start: int) -> tuple[str, int, bool]:
     # Bash finds the word boundary before decoding escapes such as backslash-c.
     end = start
     while end < len(text) and text[end] != "'":
+        _charge_scan()
         end += 2 if text[end] == "\\" and end + 1 < len(text) else 1
     closed = end < len(text)
     n = end
     j = start
     buf: list[str] = []
     while j < n:
+        _charge_scan()
         c = text[j]
         if c == "\\" and j + 1 < n:
             nxt = text[j + 1]
@@ -385,6 +459,7 @@ def _unescape_ansi_c(text: str, start: int) -> tuple[str, int, bool]:
             if nxt == "x" and j + 2 < n:
                 k = j + 2
                 while k < min(n, j + 4) and text[k] in "0123456789abcdefABCDEF":
+                    _charge_scan()
                     k += 1
                 if k > j + 2:
                     buf.append(chr(int(text[j + 2:k], 16)))
@@ -394,6 +469,7 @@ def _unescape_ansi_c(text: str, start: int) -> tuple[str, int, bool]:
                 max_hex = 4 if nxt == "u" else 8
                 k = j + 2
                 while k < min(n, j + 2 + max_hex) and text[k] in "0123456789abcdefABCDEF":
+                    _charge_scan()
                     k += 1
                 if k > j + 2:
                     cp = int(text[j + 2:k], 16)
@@ -408,6 +484,7 @@ def _unescape_ansi_c(text: str, start: int) -> tuple[str, int, bool]:
             if nxt in "01234567":
                 k = j + 1
                 while k < min(n, j + 4) and text[k] in "01234567":
+                    _charge_scan()
                     k += 1
                 buf.append(chr(int(text[j + 1:k], 8) & 0xFF))
                 j = k
@@ -445,6 +522,7 @@ def _parse_heredoc_op(
     j = pos + (3 if strip_tabs else 2)
     n = len(text)
     while j < n and text[j] in " \t":
+        _charge_scan()
         j += 1
     if j >= n or text[j] in "\n;|&()<>#":
         return ("", strip_tabs, False, j, True)
@@ -452,6 +530,7 @@ def _parse_heredoc_op(
     quoted = False
     bad = False
     while j < n and text[j] not in " \t\n;|&()<>":
+        _charge_scan()
         c = text[j]
         if c == "\\":
             quoted = True
@@ -472,7 +551,7 @@ def _parse_heredoc_op(
             continue
         if c == "'":
             quoted = True
-            k = text.find("'", j + 1)
+            k = _scan_find(text, "'", j + 1)
             if k < 0:
                 bad = True
                 j = n
@@ -484,6 +563,7 @@ def _parse_heredoc_op(
             quoted = True
             k = j + (2 if c == "$" else 1)
             while k < n and text[k] != '"':
+                _charge_scan()
                 if text[k] == "\\" and k + 1 < n:
                     if text[k + 1] in '"\\$`\n':
                         parts.append(text[k + 1])
@@ -517,6 +597,7 @@ def _unquote_word_at(text: str, pos: int) -> tuple[Optional[str], int, bool]:
     dynamic = False
     had_qe = False
     while j < n and text[j] not in " \t\n;|&()<>":
+        _charge_scan()
         c = text[j]
         if c == "\\":
             had_qe = True
@@ -537,7 +618,7 @@ def _unquote_word_at(text: str, pos: int) -> tuple[Optional[str], int, bool]:
             continue
         if c == "'":
             had_qe = True
-            k = text.find("'", j + 1)
+            k = _scan_find(text, "'", j + 1)
             if k < 0:
                 dynamic = True
                 j = n
@@ -549,6 +630,12 @@ def _unquote_word_at(text: str, pos: int) -> tuple[Optional[str], int, bool]:
             had_qe = True
             k = j + (2 if c == "$" else 1)
             while k < n and text[k] != '"':
+                _charge_scan()
+                run_end = _quote_run_end(text, k)
+                if run_end > k:
+                    parts.append(_subspan(text, k, run_end))
+                    k = run_end
+                    continue
                 if text[k] == "\\" and k + 1 < n:
                     if text[k + 1] in '"\\$`\n':
                         parts.append(text[k + 1])
@@ -573,11 +660,11 @@ def _unquote_word_at(text: str, pos: int) -> tuple[Optional[str], int, bool]:
                 j = end + 1 if end < n else n
                 continue
             if text.startswith("${", j):
-                end = text.find("}", j + 2)
+                end = _scan_find(text, "}", j + 2)
                 j = n if end < 0 else end + 1
                 continue
             if c == "`":
-                end = text.find("`", j + 1)
+                end = _scan_find(text, "`", j + 1)
                 j = n if end < 0 else end + 1
                 continue
         parts.append(c)
@@ -586,7 +673,15 @@ def _unquote_word_at(text: str, pos: int) -> tuple[Optional[str], int, bool]:
 
 
 def _blanks(text: str) -> str:
-    return "".join("\n" if ch == "\n" else " " for ch in text)
+    work = _ROUTING_WORK.get()
+    key = ("blanks", id(text))
+    if work is not None and key in work.cache:
+        return work.cache[key][1]
+    result = "".join("\n" if ch == "\n" else " " for ch in text)
+    _charge_scan(len(text))
+    if work is not None:
+        work.cache[key] = (text, result)
+    return result
 
 
 def _is_terminator(line: str, delim: str, strip_tabs: bool) -> bool:
@@ -599,19 +694,28 @@ def _is_terminator(line: str, delim: str, strip_tabs: bool) -> bool:
 def _quote_end(command: str, start: int, *, mask_comments: Optional[bool] = None,
                heredocs: bool = True) -> int:
     """Match a quote while keeping nested substitutions in their own quote scope."""
-    _charge_scan(len(command) - start)
+    kind = ("quote", mask_comments, heredocs, _COMMANDS_READING.get(), _BOUNDED_COMMANDS.get())
+    key, offset, cached = _match_lookup(command, start, kind)
+    if cached is not None:
+        return cached
     quote = command[start]
     n = len(command)
     if quote == "'":
-        end = command.find("'", start + 1)
-        return end if end >= 0 else n
+        end = _scan_find(command, "'", start + 1)
+        return _match_return(key, offset, command, end if end >= 0 else n)
     i = start + 1
     while i < n:
+        _charge_scan()
+        if quote == '"':
+            run_end = _quote_run_end(command, i)
+            if run_end > i:
+                i = run_end
+                continue
         if command[i] == "\\" and i + 1 < n:
             i += 2
             continue
         if command[i] == quote:
-            return i
+            return _match_return(key, offset, command, i)
         if quote == '"' and command.startswith("$(", i):
             end = (_subst_end_hd(command, i + 1, mask_comments=mask_comments)
                    if heredocs else _subst_end(command, i + 1))
@@ -621,7 +725,7 @@ def _quote_end(command: str, start: int, *, mask_comments: Optional[bool] = None
             i = _quote_end(command, i, mask_comments=mask_comments, heredocs=heredocs) + 1
             continue
         i += 1
-    return n
+    return _match_return(key, offset, command, n)
 
 
 _COMMANDS_READING = ContextVar("gh_commands_reading", default=False)
@@ -639,7 +743,7 @@ def _is_arithmetic(command: str, open_paren: int, end: int) -> bool:
         _ARITHMETIC_SEEN.set(True)
         bodies = _STANDALONE_BODIES.get()
         if bodies is not None:
-            body = command[open_paren + 2:end - 1]
+            body = _subspan(command, open_paren + 2, end - 1)
             if "<<" in body:
                 bodies.setdefault(body, None)
     return arithmetic
@@ -647,11 +751,15 @@ def _is_arithmetic(command: str, open_paren: int, end: int) -> bool:
 
 def _subst_end(command: str, open_paren: int) -> int:
     """Index of the ``)`` matching ``command[open_paren] == '('``."""
-    _charge_scan(len(command) - open_paren)
+    key, offset, cached = _match_lookup(command, open_paren, ("paren",))
+    if cached is not None:
+        return cached
     depth = 1
+    opened = [open_paren]
     i = open_paren + 1
     n = len(command)
     while i < n and depth:
+        _charge_scan()
         c = command[i]
         if c == "\\" and i + 1 < n:
             i += 2
@@ -660,7 +768,7 @@ def _subst_end(command: str, open_paren: int) -> int:
             _, i, _ = _unescape_ansi_c(command, i + 2)
             continue
         if c == "'":
-            j = command.find("'", i + 1)
+            j = _scan_find(command, "'", i + 1)
             i = n if j < 0 else j + 1
             continue
         if c in ('"', "`"):
@@ -668,12 +776,16 @@ def _subst_end(command: str, open_paren: int) -> int:
             continue
         if c == "(":
             depth += 1
+            opened.append(i)
         elif c == ")":
             depth -= 1
+            opening = opened.pop()
+            if key is not None:
+                _match_return((*key[:-1], offset + opening), offset, command, i)
             if depth == 0:
                 return i
         i += 1
-    return n
+    return _match_return(key, offset, command, n)
 
 
 _CASE_WORD_RE = re.compile(r"case(?=[ \t\n])")
@@ -690,11 +802,14 @@ def _subst_end_hd(command: str, open_paren: int, *,
     ending an unparenthesized ``case`` arm pattern ``pat)`` does not close
     the enclosing ``$(...)``.
     """
-    _charge_scan(len(command) - open_paren)
+    kind = ("heredoc", mask_comments, _COMMANDS_READING.get(), _BOUNDED_COMMANDS.get())
+    key, offset, cached = _match_lookup(command, open_paren, kind)
+    if cached is not None:
+        return cached
     if command.startswith("((", open_paren):
         candidate = _subst_end(command, open_paren)
         if _is_arithmetic(command, open_paren, candidate):
-            return candidate
+            return _match_return(key, offset, command, candidate)
     mc = _MASK_COMMENTS if mask_comments is None else mask_comments
     depth = 1
     brace_depth = 0
@@ -706,6 +821,7 @@ def _subst_end_hd(command: str, open_paren: int, *,
     # "pre_in", "expect_pat", "in_pat", "in_pat_open", "in_body".
     case_stack: list[list] = []
     while i < n and depth:
+        _charge_scan()
         c = command[i]
         if c == "\n":
             i += 1
@@ -715,7 +831,8 @@ def _subst_end_hd(command: str, open_paren: int, *,
             while pending:
                 delim, strip_tabs = pending.pop(0)
                 while i < n:
-                    nl = command.find("\n", i)
+                    _charge_scan()
+                    nl = _scan_find(command, "\n", i)
                     lend = n if nl < 0 else nl
                     if _is_terminator(command[i:lend], delim, strip_tabs):
                         i = lend + 1 if nl >= 0 else n
@@ -726,7 +843,7 @@ def _subst_end_hd(command: str, open_paren: int, *,
                     i = nl + 1
             continue
         if mc and at_word_start and brace_depth == 0 and c == "#":
-            end = command.find("\n", i)
+            end = _scan_find(command, "\n", i)
             i = n if end < 0 else end
             continue
         if c == "\\" and i + 1 < n:
@@ -757,7 +874,7 @@ def _subst_end_hd(command: str, open_paren: int, *,
             if case_stack and case_stack[-1][0] == depth and case_stack[-1][1] == "expect_pat":
                 case_stack[-1][1] = "in_pat"
             at_word_start = False
-            j = command.find("'", i + 1)
+            j = _scan_find(command, "'", i + 1)
             i = n if j < 0 else j + 1
             continue
         if c in ('"', "`"):
@@ -823,7 +940,7 @@ def _subst_end_hd(command: str, open_paren: int, *,
             depth -= 1
             at_word_start = True
             if depth == 0:
-                return i
+                return _match_return(key, offset, command, i)
             i += 1
             continue
         if at_word_start and brace_depth == 0:
@@ -848,12 +965,11 @@ def _subst_end_hd(command: str, open_paren: int, *,
                 case_stack[-1][1] = "in_pat"
         at_word_start = False
         i += 1
-    return n
+    return _match_return(key, offset, command, n)
 
 
 def _arithmetic_span(command: str, pos: int, *, mask_comments: bool) -> Optional[tuple[int, int]]:
     """Body-end and stop of a standalone ((...)) or legacy $[...] expression."""
-    _charge_scan(len(command) - pos)
     n = len(command)
     if command.startswith("((", pos):
         if _BOUNDED_COMMANDS.get() and (pos == 0 or command[pos - 1] != "$"):
@@ -866,6 +982,7 @@ def _arithmetic_span(command: str, pos: int, *, mask_comments: bool) -> Optional
         return None
     depth, i = 1, pos + 2
     while i < n:
+        _charge_scan()
         if command[i] == "\\" and i + 1 < n:
             i += 2
             continue
@@ -918,7 +1035,6 @@ def _fold_bash_continuations(
       removed without changing word-start state. ``\\<CR><LF>`` is not a
       continuation and is kept in place.
     """
-    _charge_scan(len(command))
     out: list[str] = []
     i = 0
     n = len(command)
@@ -926,6 +1042,7 @@ def _fold_bash_continuations(
     brace_depth = 0
     pending: list[tuple[str, bool]] = []
     while i < n:
+        _charge_scan()
         c = command[i]
         if c == "\n":
             out.append("\n")
@@ -934,7 +1051,8 @@ def _fold_bash_continuations(
             while pending:
                 delim, strip_tabs = pending.pop(0)
                 while i < n:
-                    nl = command.find("\n", i)
+                    _charge_scan()
+                    nl = _scan_find(command, "\n", i)
                     lend = n if nl < 0 else nl
                     line = command[i:lend]
                     out.append(line)
@@ -948,13 +1066,14 @@ def _fold_bash_continuations(
             continue
         if mask_comments and at_word_start and brace_depth == 0 and c == "#":
             if not fold_continuations_in_comments:
-                end = command.find("\n", i)
+                end = _scan_find(command, "\n", i)
                 end = n if end < 0 else end
                 out.append(command[i:end])
                 i = end
                 continue
             j = i
             while j < n:
+                _charge_scan()
                 if command[j] == "\\" and j + 1 < n and command[j + 1] == "\n":
                     j += 2
                     continue
@@ -988,7 +1107,7 @@ def _fold_bash_continuations(
             end = _subst_end_hd(command, i + 1, mask_comments=mask_comments)
             if _is_arithmetic(command, i + 1, end):
                 inner = _fold_bash_continuations(
-                    command[i + 2:end], mask_comments=mask_comments,
+                    _subspan(command, i + 2, end), mask_comments=mask_comments,
                     fold_continuations_in_comments=fold_continuations_in_comments,
                     arithmetic=True,
                 )
@@ -1002,7 +1121,7 @@ def _fold_bash_continuations(
         if math is not None:
             body_end, stop = math
             inner = _fold_bash_continuations(
-                command[i + 2:body_end], mask_comments=mask_comments,
+                _subspan(command, i + 2, body_end), mask_comments=mask_comments,
                 fold_continuations_in_comments=fold_continuations_in_comments,
                 arithmetic=not (_BOUNDED_COMMANDS.get() and command.startswith("((", i)),
             )
@@ -1044,6 +1163,7 @@ def _fold_bash_continuations(
             at_word_start = False
             j = i + 2
             while j < n:
+                _charge_scan()
                 if command[j] == "\\" and j + 1 < n:
                     j += 2
                     continue
@@ -1056,7 +1176,7 @@ def _fold_bash_continuations(
             continue
         if c == "'" and not arithmetic:
             at_word_start = False
-            j = command.find("'", i + 1)
+            j = _scan_find(command, "'", i + 1)
             end = n if j < 0 else j + 1
             out.append(command[i:end])
             i = end
@@ -1070,6 +1190,12 @@ def _fold_bash_continuations(
                 out.append('"')
                 i += 1
             while i < n and command[i] != '"':
+                _charge_scan()
+                run_end = _quote_run_end(command, i)
+                if run_end > i:
+                    out.append(_subspan(command, i, run_end))
+                    i = run_end
+                    continue
                 if command[i] == "\\" and i + 1 < n:
                     if command[i + 1] == "\n":
                         i += 2
@@ -1080,7 +1206,7 @@ def _fold_bash_continuations(
                 if command[i] == "$" and i + 1 < n and command[i + 1] == "(":
                     end = _subst_end_hd(command, i + 1, mask_comments=mask_comments)
                     inner = _fold_bash_continuations(
-                        command[i + 2:end],
+                        _subspan(command, i + 2, end),
                         mask_comments=mask_comments,
                         fold_continuations_in_comments=fold_continuations_in_comments,
                         arithmetic=_is_arithmetic(command, i + 1, end),
@@ -1097,7 +1223,14 @@ def _fold_bash_continuations(
         out.append(c)
         i += 1
         at_word_start = False
-    return "".join(out)
+    folded = "".join(out)
+    if folded is not command:
+        _charge_scan(len(folded))
+    work = _ROUTING_WORK.get()
+    if work is not None and folded == command:
+        root, offset = _span_origin(command)
+        work.cache[("origin", id(folded))] = (folded, root, offset)
+    return folded
 
 
 def _closed_assignment_value_end(text: str, i: int, *,
@@ -1110,6 +1243,7 @@ def _closed_assignment_value_end(text: str, i: int, *,
     """
     n = len(text)
     while i < n:
+        _charge_scan()
         c = text[i]
         if c in " \t;\n&|()<>":
             break
@@ -1123,13 +1257,13 @@ def _closed_assignment_value_end(text: str, i: int, *,
             _, i = _arithmetic_span(text, i, mask_comments=mask_comments)
             continue
         if text.startswith("${", i):
-            end = text.find("}", i + 2)
+            end = _scan_find(text, "}", i + 2)
             if end < 0:
                 return None
             i = end + 1
             continue
         if c == "`":
-            j = text.find("`", i + 1)
+            j = _scan_find(text, "`", i + 1)
             if j < 0:
                 return None
             i = j + 1
@@ -1137,6 +1271,7 @@ def _closed_assignment_value_end(text: str, i: int, *,
         if text.startswith("$'", i):
             j = i + 2
             while j < n:
+                _charge_scan()
                 if text[j] == "\\" and j + 1 < n:
                     j += 2
                     continue
@@ -1148,7 +1283,7 @@ def _closed_assignment_value_end(text: str, i: int, *,
             i = j + 1
             continue
         if c == "'":
-            j = text.find("'", i + 1)
+            j = _scan_find(text, "'", i + 1)
             if j < 0:
                 return None
             i = j + 1
@@ -1181,11 +1316,13 @@ def _normalize_assignment_values(
     if "=" not in visible and not quoted_gh_words:
         return visible
     chars = list(visible)
+    _charge_scan(len(chars))
     n = len(visible)
     gh_inv = _GH_INVOCATION if _ENABLE_BANG_AND_ENV_ASSIGN else _GH_INVOCATION_LEGACY
     if "=" in visible:
         i = 0
         while i < n:
+            _charge_scan()
             if i == 0 or visible[i - 1] in " \t\n;|&({":
                 am = _ASSIGN_NAME_AT.match(visible, i)
                 if am is not None:
@@ -1194,11 +1331,13 @@ def _normalize_assignment_values(
                         folded, vstart, mask_comments=mask_comments)
                     if vend is not None and vend > vstart:
                         span_vis = "".join(chars[vstart:vend])
+                        _charge_scan(len(span_vis))
                         if not (gh_inv.search(span_vis) or any(
                             pattern.search(span_vis)
                             for pattern in (_SHELL_AT, _EVAL_AT, _WATCH_AT, _XARGS_AT)
                         ) or ("|" in span_vis and _ECHO_AT.search(span_vis))):
                             for k in range(vstart, vend):
+                                _charge_scan()
                                 chars[k] = "x"
                         i = vend
                         continue
@@ -1206,24 +1345,28 @@ def _normalize_assignment_values(
     if quoted_gh_words:
         at_word = _AT_WORD if _ENABLE_BANG_AND_ENV_ASSIGN else _AT_WORD_LEGACY
         cur = "".join(chars)
+        _charge_scan(len(cur))
         for wstart, wend in quoted_gh_words:
-            if wend - wstart >= 2 and at_word.search(cur[:wstart]) is not None:
+            _charge_scan()
+            if wend - wstart >= 2 and at_word.search(_subspan(cur, 0, wstart)) is not None:
                 rep = "gh" + (" " * (wend - wstart - 2))
                 for k, ch in enumerate(rep):
+                    _charge_scan()
                     chars[wstart + k] = ch
                 cur = "".join(chars)
+                _charge_scan(len(cur))
     return "".join(chars)
 
 
 def _scan_subst_only_for_targets(segment: str, *, mask_comments: bool) -> str:
     """Blank ``segment`` while preserving any ``$(...)`` or `` `...` `` inside it."""
-    _charge_scan(len(segment))
     if "$(" not in segment and "`" not in segment:
         return _blanks(segment)
     res: list[str] = []
     k = 0
     m = len(segment)
     while k < m:
+        _charge_scan()
         if segment[k] == "\\" and k + 1 < m:
             res.append("  ")
             k += 2
@@ -1231,19 +1374,19 @@ def _scan_subst_only_for_targets(segment: str, *, mask_comments: bool) -> str:
         if segment.startswith("$(", k):
             end = _subst_end_hd(segment, k + 1, mask_comments=mask_comments)
             stop = end + 1 if end < m else m
-            sub = _scan_folded(segment[k + 2:end], 0, mask_comments=mask_comments)
+            sub = _scan_folded(_subspan(segment, k + 2, end), 0, mask_comments=mask_comments)
             close_p = ")" if end < m else ""
             res.append("$(" + sub.targets_visible + close_p)
             k = stop
             continue
         if segment[k] == "`":
-            j = segment.find("`", k + 1)
+            j = _scan_find(segment, "`", k + 1)
             if j < 0:
-                sub = _scan_folded(segment[k + 1:], 0, mask_comments=mask_comments)
+                sub = _scan_folded(_subspan(segment, k + 1, m), 0, mask_comments=mask_comments)
                 res.append("`" + sub.targets_visible)
                 k = m
                 continue
-            sub = _scan_folded(segment[k + 1:j], 0, mask_comments=mask_comments)
+            sub = _scan_folded(_subspan(segment, k + 1, j), 0, mask_comments=mask_comments)
             res.append("`" + sub.targets_visible + "`")
             k = j + 1
             continue
@@ -1274,6 +1417,7 @@ def _split_top_level_segments(text: str) -> list[tuple[int, int, str]]:
     seg_start = 0
     at_word_start = True
     while i < n:
+        _charge_scan()
         c = text[i]
         if c in "\n;|&(){}":
             if i > seg_start:
@@ -1285,7 +1429,7 @@ def _split_top_level_segments(text: str) -> list[tuple[int, int, str]]:
         if _MASK_COMMENTS and at_word_start and c == "#":
             if i > seg_start:
                 segs.append((seg_start, i, text[seg_start:i]))
-            end = text.find("\n", i)
+            end = _scan_find(text, "\n", i)
             i = n if end < 0 else end + 1
             seg_start = i
             at_word_start = True
@@ -1299,13 +1443,14 @@ def _split_top_level_segments(text: str) -> list[tuple[int, int, str]]:
             at_word_start = False
             continue
         if c == "'":
-            k = text.find("'", i + 1)
+            k = _scan_find(text, "'", i + 1)
             i = n if k < 0 else k + 1
             at_word_start = False
             continue
         if c == '"':
             i += 1
             while i < n and text[i] != '"':
+                _charge_scan()
                 if text[i] == "\\" and i + 1 < n:
                     i += 2
                     continue
@@ -1333,7 +1478,9 @@ def _extract_simple_cmd_words_and_redirs(
     j = 0
     n = len(seg)
     while j < n:
+        _charge_scan()
         while j < n and seg[j] in " \t":
+            _charge_scan()
             j += 1
         if j >= n:
             break
@@ -1342,6 +1489,7 @@ def _extract_simple_cmd_words_and_redirs(
         if seg.startswith("<<<", j):
             j += 3
             while j < n and seg[j] in " \t":
+                _charge_scan()
                 j += 1
             _, wend, _ = _unquote_word_at(seg, j)
             j = max(j + 1, wend)
@@ -1354,6 +1502,7 @@ def _extract_simple_cmd_words_and_redirs(
         if rm is not None:
             j += rm.end()
             while j < n and seg[j] in " \t":
+                _charge_scan()
                 j += 1
             if j < n:
                 unq, wend, _ = _unquote_word_at(seg, j)
@@ -1368,6 +1517,7 @@ def _extract_simple_cmd_words_and_redirs(
             j += om.end()
             if not seg[j - 1].isdigit() and seg[j - 1] != "-":
                 while j < n and seg[j] in " \t":
+                    _charge_scan()
                     j += 1
                 if j < n:
                     _, wend, _ = _unquote_word_at(seg, j)
@@ -1382,6 +1532,7 @@ def _extract_simple_cmd_words_and_redirs(
         j = wend
     idx = 0
     while idx < len(words):
+        _charge_scan()
         w = words[idx]
         if w in _LEAD_KEYWORDS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
             idx += 1
@@ -1389,12 +1540,14 @@ def _extract_simple_cmd_words_and_redirs(
         if w in _WRAPPER_WORDS:
             idx += 1
             while idx < len(words) and words[idx].startswith("-"):
+                _charge_scan()
                 idx += 1
             continue
         break
     rem = words[idx:]
     if rem and rem[0].rsplit("/", 1)[-1] == "tee":
         for arg in rem[1:]:
+            _charge_scan()
             if not arg.startswith("-"):
                 norm = _normalize_script_path(arg)
                 if norm and norm not in ("/dev/null", "-"):
@@ -1410,13 +1563,14 @@ def _heredoc_writes_executed_file(
     command word or as an argument of ``bash``/``sh``/``zsh``/``python``/``.``/``source``.
     """
     line_start = text.rfind("\n", 0, op_start) + 1
-    line_end = text.find("\n", op_start)
+    line_end = _scan_find(text, "\n", op_start)
     if line_end < 0:
         line_end = len(text)
     line_segs = _split_top_level_segments(text[line_start:line_end])
     rel_op = op_start - line_start
     owner_idx = -1
     for idx, (s, e, _) in enumerate(line_segs):
+        _charge_scan()
         if s <= rel_op <= e:
             owner_idx = idx
             break
@@ -1437,6 +1591,7 @@ def _heredoc_writes_executed_file(
             seg for _, _, seg in _split_top_level_segments(text[after_heredoc_pos:])
         )
     for lseg in later_segs:
+        _charge_scan()
         rem, _ = _extract_simple_cmd_words_and_redirs(lseg)
         if not rem:
             continue
@@ -1446,6 +1601,7 @@ def _heredoc_writes_executed_file(
         cmd_base = cmd_w.rsplit("/", 1)[-1]
         if cmd_base in _SCRIPT_RUNNERS:
             for arg in rem[1:]:
+                _charge_scan()
                 if _normalize_script_path(arg) in written_paths:
                     return True
     return False
@@ -1456,7 +1612,9 @@ def _heredoc_feeds_shell(text: str, op_start: int) -> bool:
     seg_start = max(text.rfind(ch, 0, op_start) for ch in ";\n&|(){}") + 1
     j = seg_start
     while j < op_start:
+        _charge_scan()
         while j < op_start and text[j] in " \t":
+            _charge_scan()
             j += 1
         if j >= op_start:
             break
@@ -1486,7 +1644,6 @@ def _heredoc_feeds_shell(text: str, op_start: int) -> bool:
 def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                  arithmetic: bool = False) -> BashScan:
     """Single-pass bash scanner on continuation-folded text."""
-    _charge_scan(len(text))
     out: list[str] = []
     out_targets: list[str] = []
     i = 0
@@ -1503,6 +1660,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
     heredoc_shell_texts: list[str] = []
 
     while i < n:
+        _charge_scan()
         c = text[i]
         if c == "\n":
             out.append("\n")
@@ -1517,7 +1675,8 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                 term_line: Optional[str] = None
                 term_has_nl = False
                 while i < n:
-                    nl = text.find("\n", i)
+                    _charge_scan()
+                    nl = _scan_find(text, "\n", i)
                     lend = n if nl < 0 else nl
                     line = text[i:lend]
                     if _is_terminator(line, delim, strip_tabs):
@@ -1577,7 +1736,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                         out_targets.append("\n")
             continue
         if mask_comments and at_word_start and brace_depth == 0 and c == "#":
-            end = text.find("\n", i)
+            end = _scan_find(text, "\n", i)
             end = n if end < 0 else end
             seg = text[i:end]
             blank_seg = _blanks(seg)
@@ -1620,7 +1779,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                 else None)
         if math is not None:
             body_end, stop = math
-            sub = _scan_folded(text[i + 2:body_end], base + i + 2,
+            sub = _scan_folded(_subspan(text, i + 2, body_end), base + i + 2,
                                mask_comments=mask_comments,
                                arithmetic=not (_BOUNDED_COMMANDS.get() and text.startswith("((", i)))
             unterminated |= sub.unterminated_quote
@@ -1643,6 +1802,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                 i += 3
                 if feeds_sh:
                     while i < n and text[i] in " \t":
+                        _charge_scan()
                         out.append(text[i])
                         out_targets.append(text[i])
                         i += 1
@@ -1702,6 +1862,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
             at_word_start = False
             j = i + 2
             while j < n:
+                _charge_scan()
                 if text[j] == "\\" and j + 1 < n:
                     j += 2
                     continue
@@ -1721,7 +1882,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
             continue
         if c == "'" and not arithmetic:
             at_word_start = False
-            j = text.find("'", i + 1)
+            j = _scan_find(text, "'", i + 1)
             if j < 0:
                 unterminated = True
                 out.append(_blanks(text[i:]))
@@ -1747,6 +1908,14 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                 out_targets.append('"')
                 i += 1
             while i < n and text[i] != '"':
+                _charge_scan()
+                run_end = _quote_run_end(text, i)
+                if run_end > i:
+                    blank = _blanks(_subspan(text, i, run_end))
+                    out.append(blank)
+                    out_targets.append(blank)
+                    i = run_end
+                    continue
                 if text[i] == "\\" and i + 1 < n:
                     out.append("  ")
                     out_targets.append("  ")
@@ -1758,7 +1927,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                     stop = end + 1 if end < n else n
                     spans.append((base + i, base + stop))
                     sub = _scan_folded(
-                        text[i + 2:end], base + i + 2, mask_comments=mask_comments,
+                        _subspan(text, i + 2, end), base + i + 2, mask_comments=mask_comments,
                         arithmetic=_is_arithmetic(text, i + 1, end))
                     unterminated |= sub.unterminated_quote
                     unterminated_hd |= sub.unterminated_heredoc
@@ -1774,7 +1943,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                 if text[i] == "`":
                     subst_seen = True
                     has_tick = True
-                    j = text.find("`", i + 1)
+                    j = _scan_find(text, "`", i + 1)
                     if j < 0:
                         unterminated = True
                         tail = _blanks(text[i:])
@@ -1783,7 +1952,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                         i = n
                         break
                     sub = _scan_folded(
-                        text[i + 1:j], base + i + 1, mask_comments=mask_comments)
+                        _subspan(text, i + 1, j), base + i + 1, mask_comments=mask_comments)
                     unterminated |= sub.unterminated_quote
                     unterminated_hd |= sub.unterminated_heredoc
                     has_hd |= sub.has_heredoc
@@ -1814,7 +1983,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
             stop = end + 1 if end < n else n
             spans.append((base + i, base + stop))
             sub = _scan_folded(
-                text[i + 2:end], base + i + 2, mask_comments=mask_comments,
+                _subspan(text, i + 2, end), base + i + 2, mask_comments=mask_comments,
                 arithmetic=_is_arithmetic(text, i + 1, end))
             unterminated |= sub.unterminated_quote
             unterminated_hd |= sub.unterminated_heredoc
@@ -1830,10 +1999,10 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
         if c == "`":
             at_word_start = False
             has_tick = True
-            j = text.find("`", i + 1)
+            j = _scan_find(text, "`", i + 1)
             if j < 0:
                 sub = _scan_folded(
-                    text[i + 1:], base + i + 1, mask_comments=mask_comments)
+                    _subspan(text, i + 1, n), base + i + 1, mask_comments=mask_comments)
                 unterminated |= sub.unterminated_quote
                 unterminated_hd |= sub.unterminated_heredoc
                 has_hd |= sub.has_heredoc
@@ -1844,7 +2013,7 @@ def _scan_folded(text: str, base: int = 0, *, mask_comments: bool = True,
                 i = n
                 continue
             sub = _scan_folded(
-                text[i + 1:j], base + i + 1, mask_comments=mask_comments)
+                _subspan(text, i + 1, j), base + i + 1, mask_comments=mask_comments)
             unterminated |= sub.unterminated_quote
             unterminated_hd |= sub.unterminated_heredoc
             has_hd |= sub.has_heredoc
@@ -1890,6 +2059,24 @@ def _tokenize_bash(
     mask_comments: Optional[bool] = None,
     fold_continuations_in_comments: Optional[bool] = None,
 ) -> BashScan:
+    state = _HOOK_STATE.get()
+    if state is None:
+        return _tokenize_bash_uncached(command, mask_comments=mask_comments,
+            fold_continuations_in_comments=fold_continuations_in_comments)
+    key = (command, mask_comments, fold_continuations_in_comments,
+           _COMMANDS_READING.get(), _BOUNDED_COMMANDS.get())
+    if key not in state["scans"]:
+        state["scans"][key] = _tokenize_bash_uncached(command, mask_comments=mask_comments,
+            fold_continuations_in_comments=fold_continuations_in_comments)
+    return state["scans"][key]
+
+
+def _tokenize_bash_uncached(
+    command: str,
+    *,
+    mask_comments: Optional[bool] = None,
+    fold_continuations_in_comments: Optional[bool] = None,
+) -> BashScan:
     """The one shared bash tokenizer for ``targets_gh``, ``already_explicit``
     and ``_strip_allowlisted_gh_token`` (card #1555).
 
@@ -1905,9 +2092,9 @@ def _tokenize_bash(
     """
     mc = _MASK_COMMENTS if mask_comments is None else mask_comments
     command = command or ""
-    _charge_scan(len(command))
     # Without syntax there is no folding, masking, or substitution metadata to collect.
     if _PLAIN_BASH.fullmatch(command):
+        _charge_scan(len(command))
         return BashScan(
             folded=command, visible=command,
             targets_visible=command,
@@ -1982,12 +2169,18 @@ def _quoted_body(command: str, i: int) -> tuple[str, int]:
     q = command[i]
     j = i + 1
     if q == "'":
-        k = command.find("'", j)
+        k = _scan_find(command, "'", j)
         if k < 0:
             return command[j:], n
         return command[j:k], k + 1
     buf: list[str] = []
     while j < n and command[j] != '"':
+        _charge_scan()
+        run_end = _quote_run_end(command, j)
+        if run_end > j:
+            buf.append(_subspan(command, j, run_end))
+            j = run_end
+            continue
         if command[j] == "\\" and j + 1 < n:
             buf.append(command[j + 1])
             j += 2
@@ -2002,11 +2195,12 @@ def _quoted_body(command: str, i: int) -> tuple[str, int]:
 def _next_token(command: str, i: int) -> Optional[tuple]:
     n = len(command)
     while i < n and command[i] in " \t":
+        _charge_scan()
         i += 1
     if i >= n:
         return None
     if _MASK_COMMENTS and command[i] == "#":
-        end = command.find("\n", i)
+        end = _scan_find(command, "\n", i)
         end = n if end < 0 else end + 1
         return ("sep", i, end, "")
     if command[i] in ";\n&|":
@@ -2020,6 +2214,7 @@ def _next_token(command: str, i: int) -> Optional[tuple]:
     buf: list[str] = []
     j = i
     while j < n and command[j] not in " \t;\n&|":
+        _charge_scan()
         if command[j] in "'\"":
             break
         if command[j] == "\\" and j + 1 < n:
@@ -2127,7 +2322,9 @@ def _echo_pipeline_text(command: str, i: int) -> Optional[str]:
     parts: list[str] = []
     n = len(command)
     while i < n:
+        _charge_scan()
         while i < n and command[i] in " \t":
+            _charge_scan()
             i += 1
         if i < n and command[i] == "|":
             break
@@ -2140,15 +2337,18 @@ def _echo_pipeline_text(command: str, i: int) -> Optional[str]:
         return None
     i += 1
     while i < n and command[i] in " \t":
+        _charge_scan()
         i += 1
     shell, i, _ = _unquote_word_at(command, i)
     if shell is None or not _is_shell_word(shell):
         return None
     while i < n and command[i] in " \t":
+        _charge_scan()
         i += 1
     if command.startswith("-s", i):
         i += 2
         while i < n and command[i] in " \t":
+            _charge_scan()
             i += 1
     if i < n and not (command[i] in ";\n&|)>#" or re.match(r"[0-9]+>", command[i:])):
         return None
@@ -2159,22 +2359,27 @@ def _shell_texts(command: str, visible: str) -> list[str]:
     """String arguments of the shell forms card #1346 names, outside quotes."""
     found: list[str] = []
     for match in _SHELL_AT.finditer(visible):
+        _charge_scan()
         inner = _c_argument(command, match.end())
         if inner:
             found.append(inner)
     for match in _EVAL_AT.finditer(visible):
+        _charge_scan()
         inner = _joined_words(command, match.end())
         if inner:
             found.append(inner)
     for match in _WATCH_AT.finditer(visible):
+        _charge_scan()
         inner = _watch_command(command, match.end())
         if inner:
             found.append(inner)
     for match in _XARGS_AT.finditer(visible):
+        _charge_scan()
         inner = _xargs_shell(command, match.end())
         if inner:
             found.append(inner)
     for match in _ECHO_AT.finditer(visible):
+        _charge_scan()
         inner = _echo_pipeline_text(command, match.end())
         if inner:
             found.append(inner)
@@ -2189,9 +2394,10 @@ def _quoted_gh_command_word(command: str, visible: str) -> bool:
     i = 0
     n = len(command)
     while i < n:
+        _charge_scan()
         if (_RESOLVE_ANSI_C and command.startswith("$'", i)) or command.startswith('$"', i):
             body, end = _quoted_body(command, i)
-            if _GH_EXACT.match(body) and at_word.search(visible[:i]) is not None:
+            if _GH_EXACT.match(body) and at_word.search(_subspan(visible, 0, i)) is not None:
                 return True
             i = end if end > i else i + 2
             continue
@@ -2199,7 +2405,7 @@ def _quoted_gh_command_word(command: str, visible: str) -> bool:
             i += 1
             continue
         body, end = _quoted_body(command, i)
-        if _GH_EXACT.match(body) and at_word.search(visible[:i]) is not None:
+        if _GH_EXACT.match(body) and at_word.search(_subspan(visible, 0, i)) is not None:
             return True
         i = end if end > i else i + 1
     return False
@@ -2208,8 +2414,14 @@ def _quoted_gh_command_word(command: str, visible: str) -> bool:
 def targets_gh(command: str) -> bool:
     """True when the command actually invokes `gh`, not when a quote or comment mentions it."""
     command = command or ""
-    work_token = _ROUTING_WORK.set(_RoutingWork(
-        _WORK_PER_CHARACTER * len(command) + _WORK_FIXED_ALLOWANCE))
+    state = _HOOK_STATE.get()
+    if state is not None:
+        state["scans"].clear()
+    work = _RoutingWork(min(
+        _WORK_PER_CHARACTER * len(command) + _WORK_FIXED_ALLOWANCE, _WORK_ABSOLUTE_LIMIT))
+    work_token = _ROUTING_WORK.set(work)
+    if state is not None:
+        state["work"] = work
     seen_token = _ARITHMETIC_SEEN.set(False)
     # Visit distinct bodies in discovery order so the work budget is hash-seed independent.
     bodies_token = _STANDALONE_BODIES.set({})
@@ -2482,6 +2694,8 @@ def already_explicit(command: str) -> bool:
         return False
     raw = scan.folded
     visible = scan.visible
+    if "GH_TOKEN=" not in visible:
+        return False
     if not visible.strip():
         return False
     if "`" in visible or "<<" in visible:

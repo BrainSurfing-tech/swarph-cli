@@ -30,6 +30,9 @@ from swarph_cli.cell import cells_dir
 from swarph_cli.console_safe import print_safe
 
 
+_MAX_HOOK_INPUT_CHARACTERS = 1536000
+
+
 def _deny(reason: str) -> int:
     """Emit a PreToolUse denial. The reason is operator-facing and must name the
     remedy — a refusal that does not carry its escape is #468's class."""
@@ -51,27 +54,39 @@ def _allow_unchanged() -> int:
 
 
 def run_hook(stdin_text: Optional[str] = None) -> int:
+    state_token = ghid._HOOK_STATE.set({"scans": {}, "work": None})
     try:
         return _run_hook(stdin_text)
+    except ghid.RouterRefusal as exc:
+        return _deny(str(exc))
     except Exception as exc:
         # A hook crash otherwise leaves gh on the ambient shared identity.
         return _deny(f"identity routing failed ({type(exc).__name__}); "
                      "correct the command or hook payload and retry")
+    finally:
+        ghid._HOOK_STATE.reset(state_token)
 
 
 def _run_hook(stdin_text: Optional[str] = None) -> int:
-    raw = stdin_text if stdin_text is not None else sys.stdin.read()
+    raw = stdin_text if stdin_text is not None else sys.stdin.read(_MAX_HOOK_INPUT_CHARACTERS + 1)
+    if len(raw or "") > _MAX_HOOK_INPUT_CHARACTERS:
+        raise ghid.RouterRefusal("command too long to route; use a file or split the command and retry")
     # PS 5.1 native pipes prefix a (double) UTF-8 BOM; strip before parse.
     raw = (raw or "").lstrip("\ufeff")
     payload = json.loads(raw or "{}")
 
     command = (payload.get("tool_input") or {}).get("command") or ""
-    try:
-        targeted = ghid.targets_gh(command)
-    except ghid.RouterRefusal as exc:
-        return _deny(str(exc))
-    if not targeted:
+    if not ghid.targets_gh(command):
         return _allow_unchanged()
+    state = ghid._HOOK_STATE.get()
+    work_token = ghid._ROUTING_WORK.set(state["work"] if state is not None else None)
+    try:
+        return _route_targeted(payload, command)
+    finally:
+        ghid._ROUTING_WORK.reset(work_token)
+
+
+def _route_targeted(payload: dict, command: str) -> int:
     if ghid.has_disallowed_gh_token_assignment(command):
         return _deny("text still contains GH_TOKEN; put that text in "
                      "--body-file or use the explicit form "
