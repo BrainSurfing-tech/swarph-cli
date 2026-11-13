@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -116,7 +117,7 @@ def test_pipeline_scope_does_not_expand_to_data_or_dynamic_text(command):
     "echo 'gh pr list' | bash # note",
 ])
 def test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
-        command, tmp_path, monkeypatch, capsys):
+        command, tmp_path, monkeypatch, capsys, require_execution=True):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     fake_gh = fake_bin / "gh"
@@ -137,9 +138,22 @@ def test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
                  "GH_PROBE": str(marker)},
         )
 
+    if not require_execution:
+        # Prove PATH/binary/marker portability before accepting a Bash parse difference.
+        probe = run("command -v gh; command gh __fixture_probe__")
+        assert probe.returncode == 0, probe.stderr
+        assert probe.stdout.strip() == str(fake_gh)
+        assert marker.read_text().splitlines() == ["unset"]
+        marker.unlink()
     raw = run(command)
-    assert marker.read_text().splitlines() == ["unset"]
-    marker.unlink()
+    ran_gh = marker.exists()
+    if ran_gh:
+        assert marker.read_text().splitlines() == ["unset"]
+        marker.unlink()
+    else:
+        assert not require_execution, (raw.returncode, raw.stderr)
+        with capsys.disabled():
+            print(f"Card1588 Bash no-gh parse: {command!r}, rc={raw.returncode}, stderr={raw.stderr!r}", flush=True)
     mapping = tmp_path / "gh-identities.json"
     mapping.write_text(json.dumps({"mapped-fixture": "fixture-login"}), encoding="utf-8")
     monkeypatch.setenv(gh_identity.MAPPING_ENV, str(mapping))
@@ -154,7 +168,10 @@ def test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
     routed = run(rewritten)
     # Expansion can execute gh before Bash reports an arithmetic error.
     assert routed.returncode == raw.returncode, routed.stderr
-    assert marker.read_text().splitlines() == ["fixture-token"]
+    if ran_gh:
+        assert marker.read_text().splitlines() == ["fixture-token"]
+    else:
+        assert not marker.exists()
 
 
 @pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
@@ -300,7 +317,17 @@ def test_known_limits_names_unsupported_constant_pipeline_forms(limit):
 def test_arithmetic_union_and_apostrophe_expansions_reach_gh(
         command, tmp_path, monkeypatch, capsys):
     test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
-        command, tmp_path, monkeypatch, capsys)
+        command, tmp_path, monkeypatch, capsys, require_execution=sys.platform != "darwin")
+
+
+def test_no_execution_still_requires_a_hook_rewrite(tmp_path, monkeypatch, capsys):
+    if os.name != "posix" or shutil.which("bash") is None:
+        pytest.skip("Bash/POSIX oracle")
+    monkeypatch.setattr(gh_route, "run_hook", lambda _: 0)
+    with pytest.raises(AssertionError, match="real hook must rewrite"):
+        test_nested_quoted_value_is_rewritten_and_token_reaches_gh(
+            "((cat <<'EOF'\nit's\nEOF\ngh pr list # '))",
+            tmp_path, monkeypatch, capsys, require_execution=False)
 
 
 @pytest.mark.skipif(os.name != "posix" or shutil.which("bash") is None,
