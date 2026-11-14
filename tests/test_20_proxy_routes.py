@@ -167,7 +167,7 @@ def test_bad_typed_arguments_and_missing_guards_are_refused(verb, args):
         route_for(verb, args, "cell-one")
 
 
-@pytest.mark.parametrize("verb", ["board.obligations.release", "memory.links", "board.cards.create", "grants", "peers.register", "token.mint", "POST /peers/register", None, [], {}])
+@pytest.mark.parametrize("verb", ["board.obligations.release", "memory.links", "grants", "peers.register", "token.mint", "POST /peers/register", None, [], {}])
 def test_any_unlisted_verb_is_refused(verb):
     with pytest.raises(ProxyError, match="verb_not_allowed"):
         route_for(verb, {}, "cell-one")
@@ -337,6 +337,8 @@ def wire_gateway(tmp_path):
             authenticated.append(self.headers.get("Authorization") == "Bearer " + fixture_auth)
             response = routes.get((self.command, self.path))
             status = 200 if response is not None and authenticated[-1] else 404
+            if isinstance(response, tuple) and authenticated[-1]:
+                status, response = response
             if (self.command, self.path) == ("POST", "/memory") and body == {
                     "op": "list", "arguments": {"type": "reference", "tag": "auth", "limit": 5}}:
                 response = {"result": [{"slug": "reference_auth", "type": "reference", "tags": ["auth"]}]}
@@ -344,7 +346,8 @@ def wire_gateway(tmp_path):
                 response = dict(_WIRE_CHANNEL)
             elif (self.command, self.path) == ("POST", "/messages") and body.get("thread_id") == _WIRE_THREAD:
                 response = dict(_WIRE_SAY)
-            payload = json.dumps(response if status == 200 else {"detail": "fixture route rejected"}).encode()
+            payload = json.dumps(response if response is not None and authenticated[-1]
+                                 else {"detail": "fixture route rejected"}).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -379,6 +382,134 @@ def test_committee_motions_list_round_trips_in_read_only_mode(wire_gateway):
                      "status": 200, "body": {"motions": []}}
     assert seen == [("GET", "/committee/room-one/motions", None)]
     assert authenticated == [True]
+
+
+@pytest.mark.parametrize("cell", ["cell-one", "second-cell"])
+def test_card_create_minimal_shape_pins_actor_and_round_trips(wire_gateway, cell):
+    proxy, seen, authenticated, routes = wire_gateway
+    proxy.config = replace(proxy.config, cell=cell)
+    card = {"id": 1567, "project_id": 18, "title": "new card", "created_by": cell}
+    routes[("POST", "/board/cards")] = card
+    reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                           "verb": "board.cards.create", "args": {"project": 18, "title": "new card"}})
+    assert reply == {"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c", "ok": True,
+                     "status": 200, "body": card}
+    assert seen == [("POST", "/board/cards", {"actor": cell, "project_id": 18, "title": "new card"})]
+    assert authenticated == [True]
+
+
+def test_card_create_full_shape_preserves_all_allowed_fields(wire_gateway):
+    proxy, seen, authenticated, routes = wire_gateway
+    card = {"id": 1567, "project_id": 18, "title": "full card", "stage": "proposed"}
+    routes[("POST", "/board/cards")] = card
+    args = {"project": 18, "title": "full card", "body": "fixture body", "priority": 0,
+            "labels": ["bugs", "commander-gated"], "assignee": "cell-one"}
+    reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                           "verb": "board.cards.create", "args": args})
+    assert reply["ok"] is True and reply["body"] == card
+    assert seen == [("POST", "/board/cards", {
+        "actor": "cell-one", "project_id": 18, "title": "full card", "body": "fixture body",
+        "priority": 0, "labels": ["bugs", "commander-gated"], "assignee": "cell-one"})]
+    assert authenticated == [True]
+
+
+def test_card_create_accepts_inclusive_limits(wire_gateway):
+    proxy, seen, _, routes = wire_gateway
+    routes[("POST", "/board/cards")] = {"id": 1567}
+    args = {"project": 1, "title": "é" * 1000, "body": "x" * 200_000, "priority": 13,
+            "labels": ["a" * 38 + f"{i:02d}" for i in range(12)], "assignee": "z" * 64}
+    reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                           "verb": "board.cards.create", "args": args})
+    assert reply["ok"] is True
+    assert seen == [("POST", "/board/cards", {
+        "actor": "cell-one", "project_id": 1, "title": "é" * 1000, "body": "x" * 200_000,
+        "priority": 13, "labels": ["a" * 38 + f"{i:02d}" for i in range(12)], "assignee": "z" * 64})]
+
+
+def test_card_create_validates_lowercased_labels_without_changing_them(wire_gateway):
+    proxy, seen, _, routes = wire_gateway
+    routes[("POST", "/board/cards")] = {"id": 1567}
+    reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                           "verb": "board.cards.create", "args": {
+                               "project": 18, "title": "new card", "labels": ["AB", "9-a", "BUGS", "bugs"]}})
+    assert reply["ok"] is True
+    assert seen == [("POST", "/board/cards", {
+        "actor": "cell-one", "project_id": 18, "title": "new card", "labels": ["AB", "9-a", "BUGS", "bugs"]})]
+
+
+_CREATE_MINIMAL = {"project": 18, "title": "new card"}
+_CREATE_INVALID = [
+    pytest.param({**_CREATE_MINIMAL, "priority": 14}, id="priority-handler-max"),
+    *[pytest.param({**_CREATE_MINIMAL, "labels": value}, id=f"labels-handler-{name}")
+      for name, value in [("count", ["bugs"] * 13), ("short", ["a"]),
+                          ("underscore", ["a_b"]), ("dot", ["a.b"]),
+                          ("long", ["a" * 41]), ("leading-hyphen", ["-ab"]),
+                          ("trailing-hyphen", ["ab-"])]],
+    pytest.param({"title": "new card"}, id="missing-project"),
+    pytest.param({"project": 18}, id="missing-title"),
+    *[pytest.param({**_CREATE_MINIMAL, key: value}, id=f"forbidden-{key}")
+      for key, value in {"actor": "other-cell", "ai2": True, "links": {"ref": "https://example.invalid/ref"},
+                         "due_at": "2026-11-15T00:00:00Z", "project_id": 99, "stage": "done", "cell": "other-cell",
+                         "path": "/board/cards", "method": "POST", "headers": {"X-Fixture": "fixture"},
+                         "token": "fixture", "unknown": "fixture"}.items()],
+    *[pytest.param({**_CREATE_MINIMAL, "project": v}, id=f"project-{i}")
+      for i, v in enumerate([True, False, 0, -1, 1.5, "18", None, {}, []])],
+    *[pytest.param({**_CREATE_MINIMAL, "title": v}, id=f"title-{i}")
+      for i, v in enumerate(["", " ", "\n\t", "x" * 1001, False, 17, None, {}, []])],
+    *[pytest.param({**_CREATE_MINIMAL, "body": v}, id=f"body-{i}")
+      for i, v in enumerate(["", " ", "x" * 200_001, False, 17, None, {}, []])],
+    *[pytest.param({**_CREATE_MINIMAL, "priority": v}, id=f"priority-{i}")
+      for i, v in enumerate([-1, 101, True, False, 1.0, "0", None, {}, []])],
+    *[pytest.param({**_CREATE_MINIMAL, "labels": v}, id=f"labels-{i}")
+      for i, v in enumerate(["bugs", [], ["bugs"] * 21, [None], [""], ["a b"], ["a" * 65],
+                             ["../x"], ["a/b"], ["x\n"], ["é"], [True], False, None, {}])],
+    *[pytest.param({**_CREATE_MINIMAL, "assignee": v}, id=f"assignee-{i}")
+      for i, v in enumerate(["", "a b", "../peer", "a/b", "a" * 65, "é", True, False, 1, None, {}, []])],
+    *[pytest.param(v, id=f"non-object-{i}") for i, v in enumerate([None, False, [], "payload"])],
+]
+
+
+@pytest.mark.parametrize("args", _CREATE_INVALID)
+def test_card_create_refuses_bad_args_before_gateway(wire_gateway, args):
+    proxy, seen, _, routes = wire_gateway
+    routes[("POST", "/board/cards")] = {"id": 1567}
+    reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                           "verb": "board.cards.create", "args": args})
+    assert reply["error"] == "bad_args"
+    assert seen == []
+
+
+def test_card_create_is_a_write_refused_in_read_only_mode(wire_gateway):
+    proxy, seen, _, routes = wire_gateway
+    routes[("POST", "/board/cards")] = {"id": 1567}
+    proxy.config = replace(proxy.config, read_only=True)
+    request = {"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+               "verb": "board.cards.create", "args": dict(_CREATE_MINIMAL)}
+    assert proxy.request(request)["error"] == "verb_not_allowed"
+    assert seen == []
+    proxy.config = replace(proxy.config, read_only=False)
+    assert proxy.request(request)["ok"] is True
+    assert len(seen) == 1
+
+
+def test_card_create_gateway_403_returns_fixed_error_not_gateway_body(wire_gateway):
+    proxy, seen, authenticated, routes = wire_gateway
+    routes[("POST", "/board/cards")] = (403, {"detail": "PROJECT_GRANT_SENTINEL"})
+    reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                           "verb": "board.cards.create", "args": dict(_CREATE_MINIMAL)})
+    assert reply == {"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c", "ok": False,
+                     "status": 403, "error": "upstream_error",
+                     "detail": "The gateway did not return a complete successful JSON response."}
+    assert seen == [("POST", "/board/cards", {"actor": "cell-one", "project_id": 18, "title": "new card"})]
+    assert authenticated == [True]
+    assert "PROJECT_GRANT_SENTINEL" not in json.dumps(reply)
+
+
+def test_card_create_route_does_not_retain_mutable_labels():
+    args = {"project": 18, "title": "new card", "labels": ["bugs"]}
+    body = route_for("board.cards.create", args, "cell-one")[2]
+    args["labels"].append("../unvalidated")
+    assert body == {"project_id": 18, "title": "new card", "labels": ["bugs"], "actor": "cell-one"}
 
 
 def test_committee_motion_get_preserves_gateway_visibility_in_read_only_mode(wire_gateway):
