@@ -92,8 +92,9 @@ _SCHEMAS = {
         r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", v) is not None}, {}),
     "memory.list": ({}, {"type": _name, "tag": _name, "limit": _limit}),
     "board.cards.create": ({"project": _id, "title": _text(1000)}, {
-        "body": _text(200_000), "priority": lambda v: type(v) is int and 0 <= v <= 100,
-        "labels": lambda v: type(v) is list and 1 <= len(v) <= 20 and all(_name(i) for i in v),
+        "body": _text(200_000), "priority": lambda v: type(v) is int and 0 <= v <= 13,
+        "labels": lambda v: type(v) is list and 1 <= len(v) <= 12 and all(
+            isinstance(i, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,38}[a-z0-9]", i.lower()) is not None for i in v),
         "assignee": _name}),
     "board.cards.say": ({"id": _id, "content": _text(200_000)}, {"kind": _kind, "to_node": _name}),
     "mesh.send": ({"to_node": _name, "content": _text(200_000)}, {"kind": _kind, "reply_to": _id}),

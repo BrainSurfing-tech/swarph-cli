@@ -145,8 +145,16 @@ omitted fields are omitted upstream unless a default is stated.
 - `q`: non-blank search string, 1–1000 Unicode characters, URL-encoded as one
   query value. It never supplies another query parameter or caller actor.
 - Card creation: `title` is non-blank, 1–1000 characters; optional `body` is
-  non-blank, 1–200000 characters. `priority` is a JSON integer 0–100, never a
-  boolean. `labels` is an array of 1–20 `name` strings; `assignee` is a `name`.
+  non-blank, 1–200000 characters. `priority` is a JSON integer 0–13, never a
+  boolean. `labels` is an array of 1–12 strings, each matching
+  `^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$` after `lower()` (2–40 characters,
+  alphanumeric ends, hyphens inside). `assignee` is a `name`.
+  These bounds mirror the create handler's
+  [priority validator](https://github.com/BrainSurfing-tech/mesh-gateway/blob/feda473b778f307cb89ae92ee89922774485bd60/server.py#L13805) and
+  [label validator](https://github.com/BrainSurfing-tech/mesh-gateway/blob/feda473b778f307cb89ae92ee89922774485bd60/server.py#L13731),
+  called by [card creation](https://github.com/BrainSurfing-tech/mesh-gateway/blob/feda473b778f307cb89ae92ee89922774485bd60/server.py#L16604).
+  The proxy validates labels without changing them; the gateway lowercases and
+  deduplicates them.
 - `enabled_only`, `unread_only`, `overdue`, `grandfathered`: JSON booleans.
 - `ids`: array of 1–500 positive integers; every element is checked.
 - `outcome`: `pass`, `fail`, `cannot_evaluate`, or `skipped`. Only the gateway
@@ -184,7 +192,7 @@ older bundled CLI gateway. There is no generic gateway passthrough.
 | `committee.motions.list` | `channel` | `GET /committee/{channel}/motions`; [gateway handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/d0c5dcca7ace610178d2dca20ca910ee8931977a/server.py#L22995). Open motions only. |
 | `committee.motion.get` | `channel`, `id` | `GET /committee/{channel}/motions/{id}`; [gateway handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/d0c5dcca7ace610178d2dca20ca910ee8931977a/server.py#L22977). Gateway membership and sealed-ballot visibility are unchanged. |
 | `board.cards.say` | `id`, `content`, `kind?`, `to_node?:name` | `POST /messages` with pinned `from_node=<cell>` and server-derived card thread; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L6493) |
-| `board.cards.create` | `project`, `title`, `body?`, `priority?`, `labels?`, `assignee?:name` | WRITE: `POST /board/cards` with `project_id` from `project` and pinned `actor=<cell>`; only the listed fields may be supplied (card #1567, shape 98197). |
+| `board.cards.create` | `project`, `title`, `body?`, `priority?`, `labels?`, `assignee?:name` | WRITE: `POST /board/cards` with `project_id` from `project` and pinned `actor=<cell>`; only the listed fields may be supplied (card #1567, shape 98197 corrected by 98224). |
 | `mesh.send` | `to_node:name`, `content`, `kind?`, `reply_to?` | `POST /messages` with pinned `from_node=<cell>`; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L6493) |
 | `channel.post` | `channel:name`, `content`, `kind?` | `POST /messages` with pinned `from_node=<cell>`, no DM recipient; [exclusive destination check](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L6545) |
 | `mesh.mark_read` | `ids` | `POST /messages/read`; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L7643). The gateway scopes writes to message participants. |

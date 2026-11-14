@@ -416,18 +416,35 @@ def test_card_create_full_shape_preserves_all_allowed_fields(wire_gateway):
 def test_card_create_accepts_inclusive_limits(wire_gateway):
     proxy, seen, _, routes = wire_gateway
     routes[("POST", "/board/cards")] = {"id": 1567}
-    args = {"project": 1, "title": "é" * 1000, "body": "x" * 200_000, "priority": 100,
-            "labels": ["a" * 64] * 20, "assignee": "z" * 64}
+    args = {"project": 1, "title": "é" * 1000, "body": "x" * 200_000, "priority": 13,
+            "labels": ["a" * 38 + f"{i:02d}" for i in range(12)], "assignee": "z" * 64}
     reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
                            "verb": "board.cards.create", "args": args})
     assert reply["ok"] is True
     assert seen == [("POST", "/board/cards", {
         "actor": "cell-one", "project_id": 1, "title": "é" * 1000, "body": "x" * 200_000,
-        "priority": 100, "labels": ["a" * 64] * 20, "assignee": "z" * 64})]
+        "priority": 13, "labels": ["a" * 38 + f"{i:02d}" for i in range(12)], "assignee": "z" * 64})]
+
+
+def test_card_create_validates_lowercased_labels_without_changing_them(wire_gateway):
+    proxy, seen, _, routes = wire_gateway
+    routes[("POST", "/board/cards")] = {"id": 1567}
+    reply = proxy.request({"request_id": "97fb3490-9147-4da6-acb2-29bac3df210c",
+                           "verb": "board.cards.create", "args": {
+                               "project": 18, "title": "new card", "labels": ["AB", "9-a", "BUGS", "bugs"]}})
+    assert reply["ok"] is True
+    assert seen == [("POST", "/board/cards", {
+        "actor": "cell-one", "project_id": 18, "title": "new card", "labels": ["AB", "9-a", "BUGS", "bugs"]})]
 
 
 _CREATE_MINIMAL = {"project": 18, "title": "new card"}
 _CREATE_INVALID = [
+    pytest.param({**_CREATE_MINIMAL, "priority": 14}, id="priority-handler-max"),
+    *[pytest.param({**_CREATE_MINIMAL, "labels": value}, id=f"labels-handler-{name}")
+      for name, value in [("count", ["bugs"] * 13), ("short", ["a"]),
+                          ("underscore", ["a_b"]), ("dot", ["a.b"]),
+                          ("long", ["a" * 41]), ("leading-hyphen", ["-ab"]),
+                          ("trailing-hyphen", ["ab-"])]],
     pytest.param({"title": "new card"}, id="missing-project"),
     pytest.param({"project": 18}, id="missing-title"),
     *[pytest.param({**_CREATE_MINIMAL, key: value}, id=f"forbidden-{key}")
