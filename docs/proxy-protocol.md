@@ -144,6 +144,9 @@ omitted fields are omitted upstream unless a default is stated.
   `evidence`: 1–4000, also non-whitespace strings.
 - `q`: non-blank search string, 1–1000 Unicode characters, URL-encoded as one
   query value. It never supplies another query parameter or caller actor.
+- Card creation: `title` is non-blank, 1–1000 characters; optional `body` is
+  non-blank, 1–200000 characters. `priority` is a JSON integer 0–100, never a
+  boolean. `labels` is an array of 1–20 `name` strings; `assignee` is a `name`.
 - `enabled_only`, `unread_only`, `overdue`, `grandfathered`: JSON booleans.
 - `ids`: array of 1–500 positive integers; every element is checked.
 - `outcome`: `pass`, `fail`, `cannot_evaluate`, or `skipped`. Only the gateway
@@ -181,6 +184,7 @@ older bundled CLI gateway. There is no generic gateway passthrough.
 | `committee.motions.list` | `channel` | `GET /committee/{channel}/motions`; [gateway handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/d0c5dcca7ace610178d2dca20ca910ee8931977a/server.py#L22995). Open motions only. |
 | `committee.motion.get` | `channel`, `id` | `GET /committee/{channel}/motions/{id}`; [gateway handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/d0c5dcca7ace610178d2dca20ca910ee8931977a/server.py#L22977). Gateway membership and sealed-ballot visibility are unchanged. |
 | `board.cards.say` | `id`, `content`, `kind?`, `to_node?:name` | `POST /messages` with pinned `from_node=<cell>` and server-derived card thread; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L6493) |
+| `board.cards.create` | `project`, `title`, `body?`, `priority?`, `labels?`, `assignee?:name` | WRITE: `POST /board/cards` with `project_id` from `project` and pinned `actor=<cell>`; only the listed fields may be supplied (card #1567, shape 98197). |
 | `mesh.send` | `to_node:name`, `content`, `kind?`, `reply_to?` | `POST /messages` with pinned `from_node=<cell>`; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L6493) |
 | `channel.post` | `channel:name`, `content`, `kind?` | `POST /messages` with pinned `from_node=<cell>`, no DM recipient; [exclusive destination check](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L6545) |
 | `mesh.mark_read` | `ids` | `POST /messages/read`; [model/handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/657e7e9aed0b3d8c14589da8b5192041ed5f9f0f/server.py#L7643). The gateway scopes writes to message participants. |
@@ -211,10 +215,19 @@ silently ignore unknown PATCH fields. A target of `done` is refused regardless
 of the source stage/version. The gateway, not the proxy, atomically evaluates
 the expected-state guards and its own permission checks.
 
+For `board.cards.create`, there is one POST and no preparatory read. The proxy
+sets actor from its own configured cell, never caller arguments; `actor`, `ai2`,
+`links`, `due_at`, `stage` and every other unlisted field are refused. This is a
+write and is refused before HTTP when `read_only:true`. The gateway's project
+grants and assignment restrictions still decide whether it succeeds; exposing
+the verb grants no access. A gateway 403 returns `ok:false`, `error:upstream_error`,
+`status:403` and the fixed published detail, never the gateway's response body.
+A 2xx reply passes through the new card unchanged.
+
 No verb accepts `from_node`, `actor`, `cc`, or a field called `obligation_id`.
 Obligation identifiers use `id`. Memory callers cannot supply nested
 `arguments`, tool names, operations, or arbitrary metadata. `memory.links`,
-`release`, grants, project/card creation, peer registration, token lifecycle,
+`release`, grants, project creation, peer registration, token lifecycle,
 committee-chair verbs, and every other unlisted operation are unavailable.
 The close schema accepts bounded text and/or condition evidence and passes
 `skipped` through to the gateway. It deliberately does not expose the gateway's

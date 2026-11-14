@@ -91,6 +91,10 @@ _SCHEMAS = {
     "memory.get": ({"slug": lambda v: isinstance(v, str) and re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", v) is not None}, {}),
     "memory.list": ({}, {"type": _name, "tag": _name, "limit": _limit}),
+    "board.cards.create": ({"project": _id, "title": _text(1000)}, {
+        "body": _text(200_000), "priority": lambda v: type(v) is int and 0 <= v <= 100,
+        "labels": lambda v: type(v) is list and 1 <= len(v) <= 20 and all(_name(i) for i in v),
+        "assignee": _name}),
     "board.cards.say": ({"id": _id, "content": _text(200_000)}, {"kind": _kind, "to_node": _name}),
     "mesh.send": ({"to_node": _name, "content": _text(200_000)}, {"kind": _kind, "reply_to": _id}),
     "channel.post": ({"channel": _name, "content": _text(200_000)}, {"kind": _kind}),
@@ -123,6 +127,10 @@ def route_for(verb: str, args: dict, cell: str) -> tuple[str, str, dict | None]:
         raise ProxyError("bad_args")
     if verb == "board.obligations.close" and not {"evidence", "evidence_json"} & args.keys():
         raise ProxyError("bad_args")
+    if verb == "board.cards.create":
+        return "POST", "/board/cards", {
+            "project_id": args["project"],
+            **{k: list(v) if k == "labels" else v for k, v in args.items() if k != "project"}, "actor": cell}
     if verb in ("committee.motions.list", "committee.motion.get"):
         suffix = f"/{args['id']}" if verb == "committee.motion.get" else ""
         return "GET", f"/committee/{args['channel']}/motions" + suffix, None
