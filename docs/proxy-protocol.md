@@ -231,6 +231,8 @@ grants and assignment restrictions still decide whether it succeeds; exposing
 the verb grants no access. A gateway 403 returns `ok:false`, `error:upstream_error`,
 `status:403` and the fixed published detail, never the gateway's response body.
 A 2xx reply passes through the new card unchanged.
+A create also mints the board menu's mandatory obligation rows with no holder
+([gateway handler](https://github.com/BrainSurfing-tech/mesh-gateway/blob/feda473b778f307cb89ae92ee89922774485bd60/server.py#L16658-L16684)).
 
 No verb accepts `from_node`, `actor`, `cc`, or a field called `obligation_id`.
 Obligation identifiers use `id`. Memory callers cannot supply nested
