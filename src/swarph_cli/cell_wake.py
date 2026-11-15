@@ -123,10 +123,13 @@ def _read_batch(inbox, cursor):
                 and info.st_size == cursor["offset"] and cursor["offset"] > 0
                 and cursor.get("mtime_ns") == info.st_mtime_ns
                 and cursor.get("ctime_ns") == info.st_ctime_ns):
-            # Idle poll, file metadata unchanged: prefix cannot have been
-            # rewritten without touching ctime, so skip the O(size) rehash
+            # Idle poll, file metadata unchanged: skip the O(size) rehash
             # (~0.20s/poll at 100MB, probe 5480). Copy-truncate/regrow
             # changes ctime/mtime and still falls through to the rehash.
+            # Known bypass: a store through a shared writable mapping
+            # (mmap) can rewrite the prefix without touching ctime/mtime;
+            # it needs write access to the inbox and is noticed at the
+            # next append, when the metadata change forces the rehash.
             return dict(cursor), False
         digest = hashlib.sha256()
         if not rotated:
