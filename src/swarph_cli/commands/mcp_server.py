@@ -303,8 +303,9 @@ def _proxy_mode():
 
 
 class _ProxyFailure(RuntimeError):
-    def __init__(self, code, verb):
+    def __init__(self, code, verb, status):
         self.code = code
+        self.status = status
         super().__init__(f"proxy mode: {code} ({verb})")
 
 
@@ -323,7 +324,7 @@ def _proxy_request(verb, arguments):
         code = reply.get("error")
         if code not in local_proxy.ERRORS:
             code = "invalid_proxy_response"
-        raise _ProxyFailure(code, verb)
+        raise _ProxyFailure(code, verb, status)
     return reply["body"]
 
 
@@ -333,8 +334,8 @@ def _proxy_inbox(unread_only):
         try:
             body = _proxy_request("mesh.inbox", {"unread_only": unread_only, "limit": limit})
         except _ProxyFailure as exc:
-            # 0.75.0 reports its reply cap as upstream_error; retry reads only.
-            if exc.code != "upstream_error" or limit == 1:
+            # 0.75.0's cap refusal follows HTTP 200; HTTP failures must not retry.
+            if exc.code != "upstream_error" or exc.status != 200 or limit == 1:
                 raise
             limit = max(1, limit // 2)
             continue
@@ -749,7 +750,8 @@ try:
         """Reply to a DM by id in one call, no content file. Routed to the sender in the
         original's thread. The reply IS the ack: the replied-to message is marked read.
         Proxy mode 0.75.0 sends reply_to but no thread_id; the original thread
-        is not preserved. An acknowledgement failure reports the already-sent
+        is not preserved. A read original older than the bounded inbox window
+        cannot be found. An acknowledgement failure reports the already-sent
         reply id without retrying the send. Does not close board obligations."""
         return _dm_reply(message_id, text, kind)
 

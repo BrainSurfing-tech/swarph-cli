@@ -346,12 +346,23 @@ Compatibility is with the installed **0.75.0** proxy: unread DMs use
 `thread_id`, so a reply does not preserve the original thread. Reply and thread
 lookups search unread first, then the bounded all-message inbox if needed.
 They start at 1000 rows and halve the window on the 0.75.0 proxy's
-`upstream_error` reply-cap signal, down to one row; only inbox reads are retried.
+`upstream_error` with HTTP status200 reply-cap signal, down to one row; only inbox reads are retried.
 Other errors and all writes are never retried. `swarph_dm_thread` returns
 **inbound messages only** from the matching window, so older read history may
 be absent. The proxy has no backwards paging; an original outside the bounded
 window cannot be found. If acknowledgement fails after sending, the result
 includes the sent id and `reply_sent: true`; do not resend blindly.
+
+The cell-side reply-line bound accounts for the 0.75.0 proxy's ASCII re-encoding;
+the gateway and request caps stay at1MiB. Status200 malformed/reflection-refused
+responses share the cap signal and get the same bounded read retries. A newest
+DM refused for a secret pattern or still too large even alone remains unreadable
+until marked read. After checking its id from trusted metadata, recovery uses
+the proxy, never a direct credential fallback:
+
+```bash
+swarph proxy call mesh.mark_read --socket "$SWARPH_PROXY_SOCKET" --args-json '{"ids":[123]}'
+```
 
 Proxy-mode unread returns the **newest 100** messages, in chronological order,
 so an unanswered FYI backlog cannot hide a new question. It uses the same

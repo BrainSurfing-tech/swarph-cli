@@ -28,7 +28,8 @@ def messages(n, *, read=False, size=1400):
 
 @pytest.fixture
 def capped_proxy(proxy, monkeypatch, tmp_path):
-    ctx = SimpleNamespace(messages=[], wire=[], upstream=[], sent=[], marked=[])
+    ctx = SimpleNamespace(messages=[], wire=[], upstream=[], sent=[], marked=[],
+                          failures={}, writes=[], response_sizes=[])
     class Gateway(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -37,6 +38,9 @@ def capped_proxy(proxy, monkeypatch, tmp_path):
             url = urlsplit(self.path)
             args = parse_qs(url.query)
             ctx.upstream.append((url.path, args))
+            status = ctx.failures.get(("GET", url.path))
+            if status:
+                return self.answer({"detail": "fixture failure"}, status)
             if url.path == "/whoami":
                 body = {"peer": "opencode"}
             else:
@@ -49,6 +53,10 @@ def capped_proxy(proxy, monkeypatch, tmp_path):
 
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            ctx.writes.append(self.path)
+            status = ctx.failures.get(("POST", self.path))
+            if status:
+                return self.answer({"detail": "fixture failure"}, status)
             if self.path == "/messages":
                 ctx.sent.append(body)
                 self.answer({"id": 1001, "thread_id": None})
@@ -56,9 +64,10 @@ def capped_proxy(proxy, monkeypatch, tmp_path):
                 ctx.marked.extend(body["ids"])
                 self.answer({"ids": body["ids"]})
 
-        def answer(self, body):
-            raw = json.dumps(body).encode()
-            self.send_response(200)
+        def answer(self, body, status=200):
+            raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
+            ctx.response_sizes.append(len(raw))
+            self.send_response(status)
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             try:
