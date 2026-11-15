@@ -326,7 +326,7 @@ def _proxy_identity(self_name=None):
     who = body.get("peer") if isinstance(body, dict) else None
     if not isinstance(who, str) or not who or body.get("is_root"):
         raise RuntimeError("proxy mode: proxy did not identify a scoped peer")
-    expected = self_name if self_name is not None else os.environ.get("SWARPH_SELF")
+    expected, _ = identity.declared(self_name, env=identity.SELF_ONLY)
     if expected is not None and expected != who:
         raise RuntimeError("proxy mode: declared identity does not match the proxy peer")
     return who

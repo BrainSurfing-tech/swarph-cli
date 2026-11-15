@@ -294,8 +294,14 @@ def test_direct_session_is_refused_before_any_resolver(proxy):
     assert proxy.calls == []
 
 
-def test_matching_declared_identity_is_accepted(proxy, monkeypatch):
-    monkeypatch.setenv("SWARPH_SELF", "opencode")
+@pytest.mark.parametrize("declared", ("opencode", " opencode "))
+def test_matching_declared_identity_is_accepted(proxy, monkeypatch, declared):
+    monkeypatch.setenv("SWARPH_SELF", declared)
+    assert m._dm_unread()["self"] == "opencode"
+
+
+def test_ambient_cell_cannot_override_the_proxy_peer(proxy, monkeypatch):
+    monkeypatch.setenv("SWARPH_CELL", "leaked-cell")
     assert m._dm_unread()["self"] == "opencode"
 
 
