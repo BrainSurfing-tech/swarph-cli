@@ -343,10 +343,24 @@ or credential fallback.
 Compatibility is with the installed **0.75.0** proxy: unread DMs use
 `mesh.inbox` with `unread_only`; replies send to the original sender with
 `reply_to`, then acknowledge via `mesh.mark_read`. That proxy cannot send
-`thread_id`, so a reply does not preserve the original thread. `swarph_dm_thread`
-returns **inbound messages only**, within the last 1000 inbox messages, and
-labels this limitation. If acknowledgement fails after sending, the result
+`thread_id`, so a reply does not preserve the original thread. Reply and thread
+lookups search unread first, then the bounded all-message inbox if needed.
+They start at 1000 rows and halve the window on the 0.75.0 proxy's
+`upstream_error` reply-cap signal, down to one row; only inbox reads are retried.
+Other errors and all writes are never retried. `swarph_dm_thread` returns
+**inbound messages only** from the matching window, so older read history may
+be absent. The proxy has no backwards paging; an original outside the bounded
+window cannot be found. If acknowledgement fails after sending, the result
 includes the sent id and `reply_sent: true`; do not resend blindly.
+
+Proxy-mode unread returns the **newest 100** messages, in chronological order,
+so an unanswered FYI backlog cannot hide a new question. It uses the same
+cap-aware read and never relies on the proxy monitor's private cursor. When
+the window is complete, `not_returned` is exact. When the returned window is
+full, the older total is unknown: the result instead has
+`not_returned_at_least`, `total_unknown: true`, `window_full: true` and a notice.
+`unread_seen` counts only the fetched window, not the unknown total. Direct
+mode retains its existing cursor/grace filtering and oldest-first ceiling.
 
 `swarph_memory_navigate` supports `get` and `list` via `memory.get` / `memory.list`.
 Graph operations and credentialed `swarph_search` return an explicit proxy-mode

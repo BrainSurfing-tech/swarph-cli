@@ -140,7 +140,7 @@ def test_reply_routes_to_original_sender_then_acks_without_thread_id(proxy):
     assert result["thread_id"] is None
     assert "0.75.0" in result["note"] and "thread" in result["note"]
     assert [c["verb"] for c in proxy.calls] == ["whoami", "mesh.inbox", "mesh.send", "mesh.mark_read"]
-    assert proxy.calls[1]["args"] == {"unread_only": False, "limit": 1000}
+    assert proxy.calls[1]["args"] == {"unread_only": True, "limit": 1000}
     assert proxy.calls[2]["args"] == {"to_node": "sender", "content": "reply body", "kind": "answer", "reply_to": 7}
     assert proxy.calls[3]["args"] == {"ids": [7]}
 
@@ -247,7 +247,8 @@ def test_unscoped_proxy_identity_is_not_accepted(proxy, peer):
 
 def test_unknown_message_never_sends_or_marks_anything(proxy):
     assert "proxy mode" in m._dm_reply(999, "reply")["error"]
-    assert [c["verb"] for c in proxy.calls] == ["whoami", "mesh.inbox"]
+    assert [c["verb"] for c in proxy.calls] == ["whoami", "mesh.inbox", "mesh.inbox"]
+    assert [c["args"]["unread_only"] for c in proxy.calls[1:]] == [True, False]
 
 
 @pytest.mark.skipif(m.mcp is None, reason="optional MCP SDK not installed")
