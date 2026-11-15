@@ -302,6 +302,12 @@ def _proxy_mode():
     return os.environ.get("SWARPH_PROXY_SOCKET") is not None
 
 
+class _ProxyFailure(RuntimeError):
+    def __init__(self, code, verb):
+        self.code = code
+        super().__init__(f"proxy mode: {code} ({verb})")
+
+
 def _proxy_request(verb, arguments):
     from swarph_cli import local_proxy
 
@@ -317,8 +323,43 @@ def _proxy_request(verb, arguments):
         code = reply.get("error")
         if code not in local_proxy.ERRORS:
             code = "invalid_proxy_response"
-        raise RuntimeError(f"proxy mode: {code} ({verb})")
+        raise _ProxyFailure(code, verb)
     return reply["body"]
+
+
+def _proxy_inbox(unread_only):
+    limit = DM_GATEWAY_WINDOW
+    while True:
+        try:
+            body = _proxy_request("mesh.inbox", {"unread_only": unread_only, "limit": limit})
+        except _ProxyFailure as exc:
+            # 0.75.0 reports its reply cap as upstream_error; retry reads only.
+            if exc.code != "upstream_error" or limit == 1:
+                raise
+            limit = max(1, limit // 2)
+            continue
+        messages = body.get("messages") if isinstance(body, dict) else None
+        if not isinstance(messages, list):
+            raise RuntimeError("proxy mode: invalid inbox response")
+        return messages, len(messages) >= limit
+
+
+def _proxy_unread(self_name):
+    who = _proxy_identity(self_name)
+    messages, full = _proxy_inbox(True)
+    inbound = sorted((m for m in messages if m.get("from_node") != who),
+                     key=lambda m: int(m.get("id") or 0))
+    keep = inbound[-DM_CEILING:]
+    result = {"self": who, "messages": [_lean(m) for m in keep], "n": len(keep),
+              "unread_seen": len(inbound), "hidden_stale": 0,
+              "window_full": full, "total_unknown": full}
+    omitted = len(inbound) - len(keep)
+    if full:
+        result.update(not_returned_at_least=omitted,
+                      note="Newest unread window only; total unread is unknown and the omitted count is a lower bound")
+    else:
+        result["not_returned"] = omitted
+    return result
 
 
 def _proxy_identity(self_name=None):
@@ -361,15 +402,13 @@ def _proxy_original(message_id, self_name):
     if type(message_id) is not int or message_id <= 0:
         raise RuntimeError("proxy mode: message id must be a positive integer")
     who = _proxy_identity(self_name)
-    body = _proxy_request("mesh.inbox", {"unread_only": False, "limit": DM_GATEWAY_WINDOW})
-    messages = body.get("messages") if isinstance(body, dict) else None
-    if not isinstance(messages, list):
-        raise RuntimeError("proxy mode: invalid inbox response")
-    inbound = [m for m in messages if m.get("from_node") != who]
-    original = next((m for m in inbound if m.get("id") == message_id), None)
-    if original is None:
-        raise RuntimeError("proxy mode: message not found in the bounded inbound inbox")
-    return who, inbound, original, len(messages) >= DM_GATEWAY_WINDOW
+    for unread_only in (True, False):
+        messages, full = _proxy_inbox(unread_only)
+        inbound = [m for m in messages if m.get("from_node") != who]
+        original = next((m for m in inbound if m.get("id") == message_id), None)
+        if original is not None:
+            return who, inbound, original, full
+    raise RuntimeError("proxy mode: message not found in the bounded inbound inbox")
 
 
 def _proxy_reply(message_id, text, kind, self_name):
@@ -488,12 +527,12 @@ def _dm_unread(self_name: str | None = None) -> dict:
     those read_at-null DMs. Peek semantics: marks nothing read and does not
     advance the cursor. Above DM_CEILING the oldest DM_CEILING are returned
     in full and `not_returned` says how many remain.
+    Proxy mode instead returns the newest DM_CEILING without a monitor cursor;
+    a full bounded window reports only a lower bound, never an exact total.
     """
     try:
         if _proxy_mode():
-            who = _proxy_identity(self_name)
-            d = _proxy_request("mesh.inbox", {"unread_only": True, "limit": DM_GATEWAY_WINDOW})
-            st = 200
+            return _proxy_unread(self_name)
         else:
             who, gw, tok = _dm_session(self_name)
             st, d = _mesh._http_get_json(
@@ -578,7 +617,7 @@ def _dm_thread(message_id: int, self_name: str | None = None) -> dict:
             messages.sort(key=lambda m: int(m.get("id") or 0))
             return {"thread_id": tid, "messages": [_lean(m) for m in messages],
                     "n": len(messages), "window_full": full, "inbound_only": True,
-                    "note": "proxy mode 0.75.0: inbound messages only; outbound replies are unavailable"}
+                    "note": "proxy mode 0.75.0: inbound messages only from an unread-first bounded window; read history and outbound replies may be absent"}
         who, gw, tok = _dm_session(self_name)
         original, why = _mesh._find_inbox_message(gw, tok, who, int(message_id), DM_GATEWAY_WINDOW)
         if original is None:
@@ -700,7 +739,9 @@ try:
         and hidden_stale counts it. No paging parameter.
         Replying with swarph_dm_reply is the ack.
         `not_returned` > 0 means more than the ceiling were unread and the oldest
-        were returned in full."""
+        were returned in full. In proxy mode the newest 100 are returned instead.
+        An incomplete window uses not_returned_at_least and total_unknown=true,
+        not an exact not_returned count; no monitor cursor is read."""
         return _dm_unread()
 
     @mcp.tool()
@@ -716,8 +757,9 @@ try:
     def swarph_dm_thread(message_id: int) -> dict:
         """The conversation a DM belongs to, full bodies, oldest first.
 
-        Proxy mode 0.75.0 returns inbound messages only, within the most recent
-        1000 inbox messages, and says so explicitly in the result.
+        Proxy mode 0.75.0 searches unread first, then a bounded all-message
+        inbox if needed, shrinking on reply-cap errors. It returns inbound
+        messages only from the matching window; read history may be absent.
         """
         return _dm_thread(message_id)
 
