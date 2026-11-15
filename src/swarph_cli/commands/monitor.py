@@ -57,6 +57,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="command", required=True)
 
+    from swarph_cli import cell_wake
+    cell_wake.add_arguments(sub.add_parser(
+        "wake-from-inbox", help="tokenless wake from a proxy monitor's inbox.log"))
+
     start = sub.add_parser("start", help="start the monitor (idempotent)")
     start.add_argument(
         "--deliver",
@@ -2129,6 +2133,10 @@ def _cmd_install_reexec(args: argparse.Namespace) -> int:
 
 
 def run_monitor(argv: list[str]) -> int:
+    # This cell-user path must not build any gateway/token monitor configuration.
+    if argv[:1] == ["wake-from-inbox"]:
+        from swarph_cli import cell_wake
+        return cell_wake.main(argv[1:])
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)

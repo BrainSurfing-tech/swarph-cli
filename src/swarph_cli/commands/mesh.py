@@ -3907,7 +3907,7 @@ def _tmux_enter(target: str) -> bool:
         return False
 
 
-def _tmux_wake(target: str) -> Optional[bool]:
+def _tmux_wake(target: str, *, opencode_only: bool = False) -> Optional[bool]:
     """Inject the wake prompt and confirm it SUBMITTED (#533).
 
     Was: Codex's blind double-Enter, on the assumption that a second Enter in
@@ -3930,14 +3930,26 @@ def _tmux_wake(target: str) -> Optional[bool]:
     """
     try:
         seen = _capture_pane_lines(target)
-        prompt = _wake_prompt_for(seen)
-        subprocess.run(
-            ["tmux", "send-keys", "-t", target, "-l", prompt],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
-        )
+        inject = True
+        if opencode_only:
+            if not seen or not _is_opencode_pane(seen) or _opencode_running(seen):
+                return None
+            composer = _opencode_composer_state(seen)
+            if composer not in ("clear", "wake"):
+                return None
+            inject = composer == "clear"
+            prompt = _OPENCODE_WAKE_PROMPT
+        else:
+            prompt = _wake_prompt_for(seen)
+        bounded = {"timeout": 5} if opencode_only else {}
+        if inject:
+            subprocess.run(
+                ["tmux", "send-keys", "-t", target, "-l", prompt],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace", **bounded,
+            )
         time.sleep(_WAKE_SETTLE_S)
         for _ in range(_WAKE_SUBMIT_ATTEMPTS):
             subprocess.run(
@@ -3945,7 +3957,7 @@ def _tmux_wake(target: str) -> Optional[bool]:
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace",
+                text=True, encoding="utf-8", errors="replace", **bounded,
             )
             time.sleep(_WAKE_SETTLE_S)
             state = _composer_state(target)
@@ -3978,7 +3990,7 @@ def _tmux_wake(target: str) -> Optional[bool]:
             flush=True,
         )
         return False
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         print(
             f"[monitor] tmux wake failed; pane may hold an unsubmitted wake: {exc}",
             file=sys.stderr,

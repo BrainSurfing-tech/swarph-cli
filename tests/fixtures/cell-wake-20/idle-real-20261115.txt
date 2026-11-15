@@ -1,0 +1,8 @@
+     ▣  Build · DeepSeek V4 Pro · 12.5s
+
+  ┃
+  ┃
+  ┃
+  ┃  Build auto · DeepSeek V4 Pro DeepSeek
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   /home/cell-opencode          284.2K (27%) · $1.93  ctrl+p commands
