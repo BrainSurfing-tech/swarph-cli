@@ -25,6 +25,11 @@ from .proxy_routes import READ_VERBS, ProxyError, route_for
 UPSTREAM_TIMEOUT = 15
 CLIENT_TIMEOUT = UPSTREAM_TIMEOUT + 5
 MAX_LINE = 1_048_576
+# 0.75.0 re-encodes N gateway bytes: strings grow <=3x under ASCII escaping,
+# numbers <=4.5x (1e15 -> 1000000000000000.0), separators <=2x. Budget 6x
+# per input token plus 256 for the fixed UUID/status/body envelope and LF.
+# Only the client's response bound grows; gateway/request caps stay at N.
+MAX_REPLY_LINE = 6 * MAX_LINE + 256
 ERRORS = {
     "verb_not_allowed": "This verb is not available through the proxy.",
     "bad_args": "The request does not match the published argument schema.",
@@ -543,9 +548,9 @@ def call(socket_path: str, verb: str, args: dict):
             connection.connect(socket_path)
             connection.sendall(json.dumps({"request_id": request_id, "verb": verb, "args": args}).encode() + b"\n")
             with connection.makefile("rb") as stream:
-                raw = stream.readline(MAX_LINE + 1)
+                raw = stream.readline(MAX_REPLY_LINE + 1)
             result = _json(raw)
-            if len(raw) > MAX_LINE or not raw.endswith(b"\n") or not isinstance(result, dict):
+            if len(raw) > MAX_REPLY_LINE or not raw.endswith(b"\n") or not isinstance(result, dict):
                 raise ValueError
             # Out-of-band refusals may lack an id; a success must match this request.
             if result.get("ok") is True and result.get("request_id") != request_id:
