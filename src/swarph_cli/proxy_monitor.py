@@ -76,6 +76,13 @@ def _private_transport(proxy):
             return status, body
         except ProxyError as exc:
             status = getattr(exc, "status", None)
+            # Cap refusal is typed, never string-matched: call_gateway flags
+            # only its 1 MiB size refusals (upstream_error, gateway status 200)
+            # with cap_exceeded; other upstream_error/200 failures (bad JSON,
+            # credential reflection) carry no flag and keep the old path.
+            if exc.error == "upstream_error" and getattr(exc, "cap_exceeded", False):
+                return 502, {"detail": "Gateway request failed.",
+                             "proxy_cap_exceeded": True}
             return status if isinstance(status, int) and status >= 400 else 502, {
                 "detail": "Gateway request failed.",
             }
