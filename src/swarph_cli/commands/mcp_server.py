@@ -13,8 +13,10 @@ A host mounts it with a stdio server entry, e.g. in ``.mcp.json`` /
 
     Host environment supplies ``MESH_GATEWAY_URL``, ``SWARPH_BRAIN_MCP``, and
     ``SWARPH_SELF`` (#578, card #1499). DM tools refuse when ``SWARPH_SELF`` is unset.
+    Alternatively, ``SWARPH_PROXY_SOCKET`` selects credential-free local proxy
+    mode: no gateway URL is needed and the proxy supplies the peer identity.
 
-Six tools are exposed, each backed by a plain, unit-testable helper so the
+Nine tools are exposed, each backed by a plain, unit-testable helper so the
 tool LOGIC is tested without spinning up the stdio transport:
 
 * ``swarph_search(query)``           → :func:`_search` — metaedge.surf semantic search.
@@ -26,6 +28,7 @@ tool LOGIC is tested without spinning up the stdio transport:
   OKF memory navigation (get/list/links) over gbrain.
 * ``swarph_timeline_navigate(op, ...)`` → :func:`_timeline_navigate` — deterministic
   OKF temporal navigation (range/around/since) over the git-backed timeline.
+* ``swarph_dm_unread/reply/thread`` — scoped DM reads, reply and acknowledgement.
 
 The MCP Python SDK (``mcp``) is an OPTIONAL extra. :func:`run_mcp_server`
 fails gracefully with a ``pip install swarph-cli[mcp]`` hint when it's absent;
@@ -83,7 +86,7 @@ def _metaedge_token() -> str | None:
 # --------------------------------------------------------------------------- #
 
 
-def _search(query: str, *, url: str, token: str | None = None) -> list[dict]:
+def _search(query: str, *, url: str, token: str | None = None) -> list[dict] | dict:
     """Search the swarph via metaedge.surf's ``/api/ask`` endpoint.
 
     POSTs ``{"message": query}`` (plus ``"token"`` when given) to
@@ -92,6 +95,8 @@ def _search(query: str, *, url: str, token: str | None = None) -> list[dict]:
     returns ``[]`` so the host AI gets a clean empty result rather than a
     transport exception.
     """
+    if _proxy_mode():
+        return {"error": "proxy mode 0.75.0 has no search verb; credentialed search is unavailable"}
     endpoint = url.rstrip("/") + "/api/ask"
     # Redact the query only. The auth token is the credential this call
     # presents to the search face. Putting it in the dict that
@@ -220,6 +225,8 @@ def _memory_navigate(op: str, slug: str | None = None, type: str | None = None,
     A successful get returns the page object. A zero list is ``{"result": []}``.
     A gateway 4xx/5xx, a JSON-RPC error envelope, or an unrecognised op is an
     error object, not ``[]`` or ``{}``. Never raises."""
+    if _proxy_mode():
+        return _proxy_memory(op, slug, type, tag, limit)
     try:
         url = brain_ask._resolve_endpoint()
         token = brain_ask._resolve_token(None, brain_ask._self_name())
@@ -286,6 +293,107 @@ DM_CEILING = 100        # spec #735: above this, the OLDEST 100 in full + a loud
 DM_GATEWAY_WINDOW = 1000  # GET /messages `limit` max; `n` is the returned count, not a total (#587)
 
 
+_PROXY_VERBS = frozenset({"whoami", "mesh.peers", "mesh.inbox", "mesh.send",
+                          "mesh.mark_read", "memory.get", "memory.list"})
+
+
+def _proxy_mode():
+    # A present but empty socket setting must fail closed, not use credentials.
+    return os.environ.get("SWARPH_PROXY_SOCKET") is not None
+
+
+def _proxy_request(verb, arguments):
+    from swarph_cli import local_proxy
+
+    path = os.environ.get("SWARPH_PROXY_SOCKET", "")
+    if not path or not os.path.isabs(path):
+        raise RuntimeError("proxy mode: SWARPH_PROXY_SOCKET must be an absolute socket path")
+    if verb not in _PROXY_VERBS:
+        raise RuntimeError("proxy mode: unsupported verb")
+    reply = local_proxy.call(path, verb, arguments)
+    status = reply.get("status")
+    if (reply.get("ok") is not True or type(status) is not int
+            or not 200 <= status < 300 or "body" not in reply):
+        code = reply.get("error")
+        if code not in local_proxy.ERRORS:
+            code = "invalid_proxy_response"
+        raise RuntimeError(f"proxy mode: {code} ({verb})")
+    return reply["body"]
+
+
+def _proxy_identity(self_name=None):
+    body = _proxy_request("whoami", {})
+    who = body.get("peer") if isinstance(body, dict) else None
+    if not isinstance(who, str) or not who or body.get("is_root"):
+        raise RuntimeError("proxy mode: proxy did not identify a scoped peer")
+    expected = self_name if self_name is not None else os.environ.get("SWARPH_SELF")
+    if expected is not None and expected != who:
+        raise RuntimeError("proxy mode: declared identity does not match the proxy peer")
+    return who
+
+
+def _proxy_memory(op, slug, type_, tag, limit):
+    if op not in {"get", "list"}:
+        return {"error": "proxy mode 0.75.0 supports memory get/list only"}
+    if op == "get" and not slug:
+        return {"error": "proxy mode: memory get requires a slug"}
+    arguments = {"slug": slug} if op == "get" else {
+        "limit": limit, **({"type": type_} if type_ else {}), **({"tag": tag} if tag else {})}
+    try:
+        body = _proxy_request("memory." + op, arguments)
+        if not isinstance(body, dict) or "result" not in body or "error" in body:
+            raise RuntimeError("proxy mode: invalid memory response")
+        result = body["result"]
+        if op == "get":
+            if not isinstance(result, dict) or not result:
+                raise RuntimeError("proxy mode: memory page not found")
+            return result
+        if isinstance(result, dict):
+            result = result.get("pages")
+        if not isinstance(result, list):
+            raise RuntimeError("proxy mode: invalid memory list")
+        return result or {"result": []}
+    except Exception as exc:
+        return {"error": f"{exc.__class__.__name__}: {exc}"}
+
+
+def _proxy_original(message_id, self_name):
+    if type(message_id) is not int or message_id <= 0:
+        raise RuntimeError("proxy mode: message id must be a positive integer")
+    who = _proxy_identity(self_name)
+    body = _proxy_request("mesh.inbox", {"unread_only": False, "limit": DM_GATEWAY_WINDOW})
+    messages = body.get("messages") if isinstance(body, dict) else None
+    if not isinstance(messages, list):
+        raise RuntimeError("proxy mode: invalid inbox response")
+    inbound = [m for m in messages if m.get("from_node") != who]
+    original = next((m for m in inbound if m.get("id") == message_id), None)
+    if original is None:
+        raise RuntimeError("proxy mode: message not found in the bounded inbound inbox")
+    return who, inbound, original, len(messages) >= DM_GATEWAY_WINDOW
+
+
+def _proxy_reply(message_id, text, kind, self_name):
+    _who, _messages, original, _full = _proxy_original(message_id, self_name)
+    recipient = original.get("from_node")
+    if not recipient:
+        raise RuntimeError("proxy mode: message has no sender")
+    sent = _proxy_request("mesh.send", {
+        "to_node": recipient, "reply_to": message_id, "kind": kind,
+        "content": redact_text(text, caller="mcp_server._dm_reply") or "",
+    })
+    result = {"id": sent.get("id"), "to_node": recipient, "kind": kind,
+              "thread_id": sent.get("thread_id"), "acked": None, "ack_status": 0,
+              "closed_obligations": sent.get("closed_obligations") or [],
+              "note": "proxy mode 0.75.0: reply carries no thread_id; original thread is not preserved"}
+    try:
+        _proxy_request("mesh.mark_read", {"ids": [message_id]})
+    except Exception as exc:
+        result.update(error=f"proxy mode: reply sent but acknowledgement failed: {exc}", reply_sent=True)
+        return result
+    result.update(acked=message_id, ack_status=200)
+    return result
+
+
 def _dm_session(self_name: str | None = None) -> tuple[str, str, str]:
     """(self, gateway, token) for DM MCP tools only.
 
@@ -293,6 +401,8 @@ def _dm_session(self_name: str | None = None) -> tuple[str, str, str]:
     and never a box-owner fallback (#1499). Gateway and brain URLs come from the
     host environment (#578).
     """
+    if _proxy_mode():
+        raise RuntimeError("proxy mode: direct credential sessions are unavailable")
     who = identity.require(self_name, verb="mcp-server", env=identity.SELF_ONLY)
     gw = env_gateway().rstrip("/")
     if not gw:
@@ -380,9 +490,14 @@ def _dm_unread(self_name: str | None = None) -> dict:
     in full and `not_returned` says how many remain.
     """
     try:
-        who, gw, tok = _dm_session(self_name)
-        st, d = _mesh._http_get_json(
-            f"{gw}/messages?to={who}&unread_only=true&limit={DM_GATEWAY_WINDOW}", tok)
+        if _proxy_mode():
+            who = _proxy_identity(self_name)
+            d = _proxy_request("mesh.inbox", {"unread_only": True, "limit": DM_GATEWAY_WINDOW})
+            st = 200
+        else:
+            who, gw, tok = _dm_session(self_name)
+            st, d = _mesh._http_get_json(
+                f"{gw}/messages?to={who}&unread_only=true&limit={DM_GATEWAY_WINDOW}", tok)
         if not (200 <= st < 300):
             return _dm_error(f"gateway {st}: {d.get('detail', d) if isinstance(d, dict) else d}")
         raw = sorted(d.get("messages", []), key=lambda m: int(m.get("id") or 0))
@@ -422,6 +537,8 @@ def _dm_reply(message_id: int, text: str, kind: str = "answer",
     try:
         if not (text or "").strip():
             return {"error": "empty reply text"}
+        if _proxy_mode():
+            return _proxy_reply(message_id, text, kind, self_name)
         who, gw, tok = _dm_session(self_name)
         original, why = _mesh._find_inbox_message(gw, tok, who, int(message_id), DM_GATEWAY_WINDOW)
         if original is None:
@@ -454,6 +571,14 @@ def _dm_thread(message_id: int, self_name: str | None = None) -> dict:
     """The conversation a DM belongs to, full bodies, oldest first. A message with
     no thread_id is returned alone (replies to it are routed by message id)."""
     try:
+        if _proxy_mode():
+            _who, inbound, original, full = _proxy_original(message_id, self_name)
+            tid = original.get("thread_id")
+            messages = [m for m in inbound if m.get("thread_id") == tid] if tid else [original]
+            messages.sort(key=lambda m: int(m.get("id") or 0))
+            return {"thread_id": tid, "messages": [_lean(m) for m in messages],
+                    "n": len(messages), "window_full": full, "inbound_only": True,
+                    "note": "proxy mode 0.75.0: inbound messages only; outbound replies are unavailable"}
         who, gw, tok = _dm_session(self_name)
         original, why = _mesh._find_inbox_message(gw, tok, who, int(message_id), DM_GATEWAY_WINDOW)
         if original is None:
@@ -487,12 +612,15 @@ try:
     mcp = FastMCP("swarph")
 
     @mcp.tool()
-    def swarph_search(query: str) -> list[dict]:
+    def swarph_search(query: str) -> list[dict] | dict:
         """Search the swarph for a capability. Returns the results list.
 
         [] is ambiguous: no matches, or the search could not run (network,
-        parse, or a body without a list of results). There is no error field.
+        parse, or a body without a list of results). Proxy mode refuses search
+        with an error object before reading any search credential.
         """
+        if _proxy_mode():
+            return _search(query, url=_METAEDGE_URL)
         return _search(query, url=_METAEDGE_URL, token=_metaedge_token())
 
     @mcp.tool()
@@ -541,6 +669,8 @@ try:
         traverse: slug, depth (default 1), direction out|in|both (default out).
         A list of edge dicts.
         An unrecognised op returns {"error": ..., "status": 422}.
+        Proxy mode supports get/list only; other operations return an error
+        without resolving credentials or contacting gbrain directly.
         """
         return _memory_navigate(op, slug=slug or None, type=type or None,
                                 tag=tag or None, limit=limit,
@@ -577,12 +707,18 @@ try:
     def swarph_dm_reply(message_id: int, text: str, kind: str = "answer") -> dict:
         """Reply to a DM by id in one call, no content file. Routed to the sender in the
         original's thread. The reply IS the ack: the replied-to message is marked read.
-        Does not close board obligations."""
+        Proxy mode 0.75.0 sends reply_to but no thread_id; the original thread
+        is not preserved. An acknowledgement failure reports the already-sent
+        reply id without retrying the send. Does not close board obligations."""
         return _dm_reply(message_id, text, kind)
 
     @mcp.tool()
     def swarph_dm_thread(message_id: int) -> dict:
-        """The conversation a DM belongs to, full bodies, oldest first."""
+        """The conversation a DM belongs to, full bodies, oldest first.
+
+        Proxy mode 0.75.0 returns inbound messages only, within the most recent
+        1000 inbox messages, and says so explicitly in the result.
+        """
         return _dm_thread(message_id)
 
 except ImportError as exc:  # pragma: no cover - exercised only when SDK absent

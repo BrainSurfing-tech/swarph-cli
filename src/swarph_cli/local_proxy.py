@@ -547,6 +547,9 @@ def call(socket_path: str, verb: str, args: dict):
             result = _json(raw)
             if len(raw) > MAX_LINE or not raw.endswith(b"\n") or not isinstance(result, dict):
                 raise ValueError
+            # Out-of-band refusals may lack an id; a success must match this request.
+            if result.get("ok") is True and result.get("request_id") != request_id:
+                raise ValueError
             return result
     except Exception:
         return failure(request_id, "proxy_unavailable")
