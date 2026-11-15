@@ -262,6 +262,98 @@ def test_make_prints_unproven_status(tmp_path):
     assert "isolation-unproven:" in out.stderr
 
 
+def test_attribution_names_test_pid_destination_and_port():
+    """card #1609: a fabricated unlisted connect is attributed per connect."""
+    sys.path.insert(0, str(PROBE.parent))
+    import egress_probe
+    assert hasattr(egress_probe, "attribution_report"), (
+        "probe has no attribution_report")
+    trace = (
+        '4242 1700000000.100000 execve("/usr/bin/python3", '
+        '["/usr/bin/python3", "-m", "pytest"], 0x7fff) = 0\n'
+        "4242 1700000000.200000 connect(3, {sa_family=AF_INET, "
+        'sin_port=htons(443), sin_addr=inet_addr("168.63.129.16")}, 16) '
+        "= -1 ENETUNREACH (Network is unreachable)\n"
+    )
+    timeline = [
+        (1700000000.000000, "tests/test_clean.py::test_ok"),
+        (1700000000.150000, "tests/test_leak.py::test_leak"),
+    ]
+    snapshot = {4242: {"argv": ["/usr/bin/python3", "-c", "leak()"],
+                       "cwd": "/tmp/fake-repo"}}
+    lines = egress_probe.attribution_report(trace, set(), timeline, snapshot)
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert "168.63.129.16" in line, line
+    assert "port=443" in line, line
+    assert "pid=4242" in line, line
+    assert "tests/test_leak.py::test_leak" in line, line
+    assert "/usr/bin/python3" in line and "leak()" in line, line
+    assert "/tmp/fake-repo" in line, line
+
+
+def test_attribution_outside_pytest_and_unknown_fields():
+    """card #1609: connects before any test are 'outside pytest'."""
+    sys.path.insert(0, str(PROBE.parent))
+    import egress_probe
+    assert hasattr(egress_probe, "attribution_report"), (
+        "probe has no attribution_report")
+    trace = (
+        "99 1700000000.050000 connect(3, {sa_family=AF_INET, "
+        'sin_port=htons(80), sin_addr=inet_addr("203.0.113.99")}, 16) '
+        "= -1 ENETUNREACH (Network is unreachable)\n"
+    )
+    timeline = [(1700000000.500000, "tests/test_late.py::test_late")]
+    lines = egress_probe.attribution_report(trace, set(), timeline, {})
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert "203.0.113.99" in line, line
+    assert "port=80" in line, line
+    assert "pid=99" in line, line
+    assert "outside pytest" in line, line
+    assert "argv=unknown" in line, line
+    assert "cwd=unknown" in line, line
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="bwrap --unshare-net is Linux")
+def test_1609_trace_retained_on_failure_and_removed_on_success(tmp_path, monkeypatch):
+    """card #1609: raw trace lands at EGRESS_PROBE_TRACE_OUT only on failure."""
+    sys.path.insert(0, str(PROBE.parent))
+    import egress_probe
+    trace_out = tmp_path / "retained-trace.txt"
+    monkeypatch.setenv("EGRESS_PROBE_TRACE_OUT", str(trace_out))
+    # Success: a stale file from a previous run must not survive.
+    clean = tmp_path / "clean"
+    (clean / "tests").mkdir(parents=True)
+    (clean / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+    trace_out.write_text("stale trace\n", encoding="utf-8")
+    code = egress_probe.run_pytest(clean, ["tests/test_ok.py"], set())
+    assert code == 0, code
+    assert not trace_out.exists(), "stale trace survived a successful run"
+    # Failure: the planted unlisted connect retains the raw trace.
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_zz_leak.py").write_text(
+        "import socket\n"
+        "def test_leak():\n"
+        "    try:\n"
+        "        socket.create_connection(('203.0.113.60', 443), timeout=1)\n"
+        "    except OSError:\n"
+        "        pass\n",
+        encoding="utf-8")
+    import io
+    from contextlib import redirect_stderr
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        code = egress_probe.run_pytest(tmp_path, ["tests/test_zz_leak.py"], set())
+    assert code == 1, code
+    assert "203.0.113.60" in buf.getvalue(), buf.getvalue()
+    assert "tests/test_zz_leak.py::test_leak" in buf.getvalue(), buf.getvalue()
+    assert trace_out.is_file(), "raw trace was not retained on failure"
+    assert "203.0.113.60" in trace_out.read_text(encoding="utf-8")
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="bwrap --unshare-net is Linux")
 def test_1524_egress_probe_leaves_no_tmp_dirs(tmp_path):
     """Card #1524: all three mkdtemp sites in egress_probe.py (run_script,

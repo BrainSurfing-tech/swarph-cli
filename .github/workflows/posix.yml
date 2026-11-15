@@ -97,8 +97,19 @@ jobs:
       # card #1219 / #1225: the suite except the probe's own tests, with
       # no route out. Fails closed if bwrap cannot prove isolation.
       - name: Runtime egress probe (card #1219)
+        id: egress-probe
         if: matrix.python-version == '3.12'
         run: make egress-probe
+
+      # card #1609: on failure the probe retains its raw trace at
+      # egress-probe-trace.txt; upload it so the red can be attributed.
+      - name: Upload egress probe trace (card #1609)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: egress-probe-trace
+          path: egress-probe-trace.txt
+          if-no-files-found: ignore
 
       - name: Spawn node-id floor (cross-OS command builder must run)
         run: |
