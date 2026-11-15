@@ -331,6 +331,36 @@ It queries a locally-built index at `~/.swarph/codegraph/index.db` (override wit
 
 The same capability is exposed as an **MCP tool** — running `swarph mcp-server` publishes `swarph_codegraph_query` alongside `swarph_search`/`swarph_add`/`swarph_describe` (and the mesh DM tools `swarph_dm_unread`, which returns every unread DM with full bodies in one call without marking them read; `swarph_dm_reply`, which replies by message id and marks that message read; and `swarph_dm_thread`, which returns a DM's whole conversation), so any MCP host's agent auto-discovers it and can reach for code-structure lookups while reading, writing, or debugging code. (Why a tool and not an always-on retrieval lane? Because *intent* to consult code structure lives with the calling agent — which already knows it's working on code — not in a similarity score.)
 
+### MCP tools through a cell proxy
+
+Set `SWARPH_PROXY_SOCKET` to an absolute Unix-socket path in the **MCP server's
+environment**, then run `swarph mcp-server`. This mode requires neither
+`MESH_GATEWAY_URL` nor a peer-token file. DM identity comes from the proxy's
+`whoami`; an explicit `SWARPH_SELF` must match it. An empty or invalid socket
+setting, a down proxy or a refusal produces a tool error, never a direct-call
+or credential fallback.
+
+Compatibility is with the installed **0.75.0** proxy: unread DMs use
+`mesh.inbox` with `unread_only`; replies send to the original sender with
+`reply_to`, then acknowledge via `mesh.mark_read`. That proxy cannot send
+`thread_id`, so a reply does not preserve the original thread. `swarph_dm_thread`
+returns **inbound messages only**, within the last 1000 inbox messages, and
+labels this limitation. If acknowledgement fails after sending, the result
+includes the sent id and `reply_sent: true`; do not resend blindly.
+
+`swarph_memory_navigate` supports `get` and `list` via `memory.get` / `memory.list`.
+Graph operations and credentialed `swarph_search` return an explicit proxy-mode
+error. Local describe, codegraph and timeline tools stay local; installation
+remains refused. The only permitted wire verbs are `whoami`, `mesh.peers`,
+`mesh.inbox`, `mesh.send`, `mesh.mark_read`, `memory.get` and `memory.list`.
+
+This change is **MCP-only**: ordinary `swarph mesh inbox/send/reply` and
+`swarph memory` commands retain their existing direct-gateway behavior. For a
+proxy-only cell's CLI work, including board verbs permitted by its installed
+proxy, use the existing `swarph proxy call` interface instead. Configure the
+cell's MCP entry and operator instructions accordingly; no live configuration
+is changed by installing this code.
+
 ### `swarph gateway`
 
 The **mesh-gateway** is the coordination/DM server every other verb talks to — the peer registry, the DM inbox/outbox, feature aggregation with allowlist + caps, and lane/service control. It used to be a separate deployment; it's now bundled, so any host can stand one up with a single command. It pairs with the client verbs (`mesh`, `spawn`, `daemon`, `watchdog`) and with `brain-ask`/gbrain to form the mesh's coordination plane.
