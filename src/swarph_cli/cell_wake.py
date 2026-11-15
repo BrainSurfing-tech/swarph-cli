@@ -117,6 +117,7 @@ def _read_batch(inbox, cursor):
             or info.st_size < cursor["offset"])
         digest = hashlib.sha256()
         if not rotated:
+            # shortcut: rehash history; use a spool checkpoint if logs outgrow polling.
             remaining = cursor["offset"]
             while remaining:
                 chunk = source.read(min(65536, remaining))
