@@ -18,7 +18,10 @@ This file pins the CONTRACT, not the implementation:
     because a duplicated constant nobody compares is how the two sides diverged
 """
 import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -99,7 +102,14 @@ def test_the_error_lists_the_actual_keys_not_a_vague_rule():
 GATEWAY = Path("/home/ubuntu/mesh-gateway/server.py")
 
 
-@pytest.mark.skipif(not GATEWAY.exists(), reason="mesh-gateway source not on this box")
+def _gateway_available():
+    try:
+        return GATEWAY.exists()
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not _gateway_available(), reason="mesh-gateway source not on this box")
 def test_the_cli_durable_keys_match_the_gateway_the_client_talks_to():
     """>>> THE CHECK THAT WOULD HAVE CAUGHT #146 AT BIRTH. <<<
 
@@ -120,7 +130,7 @@ def test_the_cli_durable_keys_match_the_gateway_the_client_talks_to():
         f"cli={sorted(DURABLE_ANCHOR_KEYS)} gateway={sorted(gateway_keys)}")
 
 
-@pytest.mark.skipif(not GATEWAY.exists(), reason="mesh-gateway source not on this box")
+@pytest.mark.skipif(not _gateway_available(), reason="mesh-gateway source not on this box")
 def test_anchors_pass_the_GATEWAYS_OWN_validator_not_a_local_copy():
     """>>> THE END-TO-END CHECK, AND THE ONLY ONE THAT ACTUALLY PROVES THE FIX. <<<
 
@@ -152,3 +162,66 @@ def test_anchors_pass_the_GATEWAYS_OWN_validator_not_a_local_copy():
     assert not is_durable("memory=x"), (
         "a bare string is what the unpatched CLI sent; if the gateway now accepts it, "
         "this test is measuring the wrong contract")
+
+
+@pytest.mark.parametrize("mode", (
+    "exists-permission", "exists-oserror", "stat-permission", "stat-oserror",
+    "missing", "readable",
+))
+def test_gateway_drift_checks_collect_with_inaccessible_or_readable_source(tmp_path, mode):
+    gateway = tmp_path / "server.py"
+    gateway.write_text('''_DURABLE_ANCHOR_KEYS = frozenset({"memory", "repo", "channel", "feature", "file", "card"})
+def _anchor_is_durable(anchor: dict) -> bool:
+    if not isinstance(anchor, dict) or not (set(anchor) & _DURABLE_ANCHOR_KEYS):
+        return False
+    return True
+''')
+    # A fresh process reevaluates the actual collection-time decorators.
+    probe = r'''
+import errno
+import os
+from pathlib import Path
+import sys
+import pytest
+
+source, fixture, mode = sys.argv[1:]
+gateway = Path("/home/ubuntu/mesh-gateway/server.py")
+original_exists, original_stat, original_read = Path.exists, os.stat, Path.read_text
+
+def failure():
+    if mode.endswith("permission"):
+        return PermissionError(errno.EACCES, "unreadable parent")
+    return OSError(errno.EIO, "inaccessible parent")
+
+def exists(path):
+    if path == gateway and mode.startswith("exists-"):
+        raise failure()
+    return original_exists(path)
+
+def stat(path, *args, **kwargs):
+    if isinstance(path, (str, os.PathLike)) and Path(path) == gateway:
+        if mode.startswith("stat-"):
+            raise failure()
+        if mode == "missing":
+            raise FileNotFoundError(errno.ENOENT, "missing source")
+        return original_stat(Path(fixture), *args, **kwargs)
+    return original_stat(path, *args, **kwargs)
+
+def read(path, *args, **kwargs):
+    return original_read(Path(fixture) if path == gateway else path, *args, **kwargs)
+
+Path.exists, Path.stat, os.stat, Path.read_text = exists, stat, stat, read
+raise SystemExit(pytest.main([
+    source, "-q", "--tb=short", "-k",
+    "test_the_cli_durable_keys_match_the_gateway_the_client_talks_to or "
+    "test_anchors_pass_the_GATEWAYS_OWN_validator_not_a_local_copy",
+]))
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", probe, str(Path(__file__).resolve()), str(gateway), mode],
+        env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        capture_output=True, text=True, timeout=30,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert ("2 passed" if mode == "readable" else "2 skipped") in output, output
