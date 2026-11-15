@@ -59,7 +59,8 @@ def _check_reader(inbox, cell):
 
 def _empty_cursor():
     return {"device": None, "inode": None, "offset": 0,
-            "sha256": hashlib.sha256().hexdigest(), "seen_ids": []}
+            "sha256": hashlib.sha256().hexdigest(), "seen_ids": [],
+            "mtime_ns": None, "ctime_ns": None}
 
 
 def _load_cursor(path):
@@ -71,6 +72,9 @@ def _load_cursor(path):
         if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
             raise ValueError("cursor is not a regular file")
         data = json.load(source)
+    if isinstance(data, dict) and set(data) == {
+            "device", "inode", "offset", "sha256", "seen_ids"}:
+        data = {**data, "mtime_ns": None, "ctime_ns": None}  # pre-#1612 cursor
     if (not isinstance(data, dict) or set(data) != set(_empty_cursor())
             or type(data.get("offset")) is not int
             or data["offset"] < 0 or not isinstance(data.get("seen_ids"), list)
@@ -78,7 +82,7 @@ def _load_cursor(path):
             or not isinstance(data.get("sha256"), str)
             or len(data["sha256"]) != 64
             or any(data.get(k) is not None and type(data.get(k)) is not int
-                   for k in ("device", "inode"))):
+                   for k in ("device", "inode", "mtime_ns", "ctime_ns"))):
         raise ValueError("invalid wake cursor")
     return data
 
@@ -115,6 +119,15 @@ def _read_batch(inbox, cursor):
         rotated = cursor["inode"] is not None and (
             (info.st_dev, info.st_ino) != (cursor["device"], cursor["inode"])
             or info.st_size < cursor["offset"])
+        if (not rotated and cursor["inode"] is not None
+                and info.st_size == cursor["offset"] and cursor["offset"] > 0
+                and cursor.get("mtime_ns") == info.st_mtime_ns
+                and cursor.get("ctime_ns") == info.st_ctime_ns):
+            # Idle poll, file metadata unchanged: prefix cannot have been
+            # rewritten without touching ctime, so skip the O(size) rehash
+            # (~0.20s/poll at 100MB, probe 5480). Copy-truncate/regrow
+            # changes ctime/mtime and still falls through to the rehash.
+            return dict(cursor), False
         digest = hashlib.sha256()
         if not rotated:
             # shortcut: rehash history; use a spool checkpoint if logs outgrow polling.
@@ -144,15 +157,20 @@ def _read_batch(inbox, cursor):
                 identifier = dm.get("id") if isinstance(dm, dict) else None
                 if type(identifier) is not int or identifier <= 0:
                     raise ValueError("invalid DM id")
-            except (ValueError, UnicodeError):
-                # A corrupt complete record still warrants a fixed pull wake.
+            except Exception as exc:
+                # Any per-record failure (bad JSON, invalid id, even a
+                # RecursionError on deeply nested input) marks that one
+                # record corrupt; it still warrants a fixed pull wake.
+                print(f"cell wake: corrupt DM record skipped ({type(exc).__name__})",
+                      file=sys.stderr)
                 pending = True
                 continue
             if identifier not in seen:
                 seen.add(identifier)
                 pending = True
         return {"device": info.st_dev, "inode": info.st_ino, "offset": offset,
-                "sha256": digest.hexdigest(), "seen_ids": sorted(seen)}, pending
+                "sha256": digest.hexdigest(), "seen_ids": sorted(seen),
+                "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns}, pending
 
 
 def _wake(pane):
@@ -187,7 +205,6 @@ def main(argv=None):
         cursor = _load_cursor(cursor_path)
         while True:
             ready = _check_reader(args.inbox, args.cell)
-            _atomic_save(state / "heartbeat.json", {"at": time.time()}, mode=0o644)
             batch = _read_batch(args.inbox, cursor) if ready else None
             if batch is not None:
                 candidate, pending = batch
@@ -196,6 +213,9 @@ def main(argv=None):
                     if candidate != cursor:
                         _atomic_save(cursor_path, candidate)
                         cursor = candidate
+            # Heartbeat only after a completed poll: a crash-looping unit
+            # (e.g. inbox read raising) must not advance it.
+            _atomic_save(state / "heartbeat.json", {"at": time.time()}, mode=0o644)
             if args.once:
                 return 0
             time.sleep(1)
