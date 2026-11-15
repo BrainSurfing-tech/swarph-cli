@@ -357,12 +357,18 @@ class Proxy:
                 raise ProxyError("upstream_error")
             length = response.getheader("Content-Length")
             if length is not None and (not length.isdigit() or int(length) > MAX_LINE):
-                raise ProxyError("upstream_error")
+                exc = ProxyError("upstream_error")
+                if length.isdigit():
+                    exc.cap_exceeded = True
+                raise exc
             raw = response.read(MAX_LINE + 1)
             if expired.is_set():
                 raise ProxyError("upstream_ambiguous")
             if len(raw) > MAX_LINE or length is not None and len(raw) != int(length):
-                raise ProxyError("upstream_error")
+                exc = ProxyError("upstream_error")
+                if len(raw) > MAX_LINE:
+                    exc.cap_exceeded = True
+                raise exc
             result = _json(raw)
             # No allowed response may become a credential-reflection channel.
             if self._token in json.dumps(result, ensure_ascii=False) or _contains_secret(result, self._token):

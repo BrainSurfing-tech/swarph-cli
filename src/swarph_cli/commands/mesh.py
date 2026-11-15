@@ -1728,6 +1728,10 @@ def _persist_wake_stamp(state: "MonitorState") -> None:
 
 _MONITOR_REPLAY_LIMIT = 50   # matches the gateway's 50-message window
 _MONITOR_PIDFILE = "monitor.pid"
+# Card #1617: proxy-mode inbox poll shrink. Only the proxy transport marks a
+# refusal with proxy_cap_exceeded; direct mode never sees it.
+_INBOX_BLOCKED_FILE = "inbox_blocked.json"
+_INBOX_BLOCKED_STATE = "inbox_blocked_oversized_newest"
 
 
 class MonitorSinkError(RuntimeError):
@@ -2881,6 +2885,8 @@ class MonitorState:
         self.cursor_path = self.state_dir / "cursor.json"
         self.ledgers_path = self.state_dir / "ledgers.json"
         self.inbox_log_path = self.state_dir / "inbox.log"
+        self.inbox_blocked_path = self.state_dir / _INBOX_BLOCKED_FILE
+        self._inbox_blocked_logged = self.inbox_blocked_path.exists()
         self.pidfile_path = self.state_dir / _MONITOR_PIDFILE
         self.heartbeat_path = self.state_dir / "drain_heartbeat.json"
         # `observed` is the real dict; `cursor` is what the engine touches. The
@@ -4449,8 +4455,58 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
     # the next poll would vanish from an unread-filtered query and the cell would
     # never be woken. The two mechanisms must stay orthogonal.
     params = {"to": state.self_name, "limit": "50"}
-    url = f"{state.gateway}/messages?{urllib.parse.urlencode(params)}"
-    status, body = _http_get_json(url, state.token)
+
+    def _poll(limit):
+        params["limit"] = str(limit)
+        url = f"{state.gateway}/messages?{urllib.parse.urlencode(params)}"
+        return _http_get_json(url, state.token)
+
+    def _capped(result):
+        return isinstance(result[1], dict) and result[1].get("proxy_cap_exceeded")
+
+    status, body = _poll(50)
+    if _capped((status, body)):
+        # Window bytes grow monotonically with limit, so binary-search the
+        # largest window the proxy accepts; that delivers every DM newer
+        # than the oversized row instead of stranding them behind the cursor.
+        best = None
+        lo, hi = 1, 49
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            print(f"{state.log_prefix} proxy cap: inbox poll limit=50 refused "
+                  f"(upstream_error, status 200); retrying limit={mid}",
+                  file=sys.stderr)
+            probe = _poll(mid)
+            if _capped(probe):
+                hi = mid - 1
+            elif probe[0] >= 400 or probe[0] == 0:
+                status, body = probe
+                best = None
+                break
+            else:
+                best = probe
+                lo = mid + 1
+        if best is not None:
+            status, body = best
+        elif _capped((status, body)):
+            if state.disconnect_since is None:
+                state.disconnect_since = time.time()
+            _write_cursor_atomic(state.inbox_blocked_path, {
+                "state": _INBOX_BLOCKED_STATE, "blocked": True, "limit": 1,
+                "detail": "newest inbox row exceeds the proxy 1 MiB cap even "
+                          "at limit=1; DMs behind it cannot be polled until "
+                          "it leaves the newest window",
+                "last_msg_id": last_id, "iterations": state.iterations,
+                "ts": time.time()})
+            if not state._inbox_blocked_logged:
+                print(f"{state.log_prefix} {_INBOX_BLOCKED_STATE}: newest "
+                      f"inbox row exceeds the proxy cap at limit=1; see "
+                      f"{state.inbox_blocked_path}", file=sys.stderr)
+                state._inbox_blocked_logged = True
+            return
+    if status < 400 and state.inbox_blocked_path.exists():
+        state.inbox_blocked_path.unlink(missing_ok=True)
+        state._inbox_blocked_logged = False
     if status == 0:
         if state.disconnect_since is None:
             state.disconnect_since = time.time()

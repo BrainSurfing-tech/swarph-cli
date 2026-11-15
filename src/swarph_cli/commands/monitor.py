@@ -715,6 +715,14 @@ def _start_detached(state, pidfile: Path, self_name: str, sinks: list, poll_s: i
 
 # ── status ───────────────────────────────────────────────────────────────────
 
+def _read_inbox_blocked(state_dir) -> dict:
+    try:
+        data = json.loads((state_dir / mesh._INBOX_BLOCKED_FILE).read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def _collect(args: argparse.Namespace) -> dict:
     """Everything `status` reports, read from DISK — no gateway, no token.
 
@@ -806,6 +814,8 @@ def _collect(args: argparse.Namespace) -> dict:
             max(r["delivery_gap"] for r in rows) if rows else None
         ),
         "pending_channel_posts": cursor.get("pending_channel_posts", []),
+        **({"inbox_blocked": _read_inbox_blocked(state_dir)}
+           if (state_dir / mesh._INBOX_BLOCKED_FILE).exists() else {}),
     }
 
 
@@ -884,6 +894,10 @@ def _print_status(info: dict, pending: int) -> None:
               "#644 (ORPHAN)")
     print(f"  state: {info['state_dir']}")
     print(f"  observation cursor: last_msg_id={info['observation_cursor']}")
+    if info.get("inbox_blocked"):
+        blocked = info["inbox_blocked"]
+        print(f"  inbox: {blocked.get('state', mesh._INBOX_BLOCKED_STATE)} — "
+              f"{blocked.get('detail', 'newest row exceeds the proxy cap at limit=1')}")
     gap = info.get("delivery_gap")
     if gap is None:
         print("  delivery_gap: CANNOT REPORT (no ledger sink)")
