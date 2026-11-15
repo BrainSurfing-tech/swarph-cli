@@ -27,7 +27,9 @@ This is the same defect family as the other false instruments found the same day
 and its output was read as evidence about it.**
 """
 import builtins
+import datetime
 import io
+import json
 import os
 import pathlib
 import subprocess
@@ -218,6 +220,27 @@ def _hermetic_swarph_env(monkeypatch):
     """
     for name in _SWARPH_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_bench_prices(monkeypatch, tmp_path_factory, _hermetic_swarph_env):
+    """Prices capture their path at import; env/HOME isolation alone is too late.
+
+    Cache/refresh tests explicitly replace this default with their fixtures.
+    """
+    from swarph_cli.bench import prices
+
+    # A fresh process cannot inherit _MAP; an empty on-disk table would fetch.
+    table = {"test-price-control": {"in": 0.0, "out": 0.0}}
+    cache = tmp_path_factory.mktemp("bench-prices") / "llm_prices.json"
+    cache.write_text(json.dumps({
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "prices": table,
+    }), encoding="utf-8")
+    monkeypatch.setenv("SWARPH_BENCH_PRICE_CACHE", str(cache))
+    monkeypatch.setattr(prices, "_CACHE_PATH", str(cache))
+    monkeypatch.setattr(prices, "_MAP", table)
+    monkeypatch.setattr(prices, "_FALLBACK_WARNED", set())
 
 
 #: #1010 strand-only: the suite makes ZERO unmocked tmux calls against
