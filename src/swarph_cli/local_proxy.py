@@ -25,10 +25,11 @@ from .proxy_routes import READ_VERBS, ProxyError, route_for
 UPSTREAM_TIMEOUT = 15
 CLIENT_TIMEOUT = UPSTREAM_TIMEOUT + 5
 MAX_LINE = 1_048_576
-# 0.75.0 re-encodes N gateway bytes: strings grow <=3x under ASCII escaping,
-# numbers <=4.5x (1e15 -> 1000000000000000.0), separators <=2x. Budget 6x
-# per input token plus 256 for the fixed UUID/status/body envelope and LF.
-# Only the client's response bound grows; gateway/request caps stay at N.
+# 0.75.0 re-encodes N gateway bytes with ensure_ascii=True: each gateway byte
+# becomes at most 6 bytes (U+007F, 1 byte to a 6-byte \u007f escape; numbers
+# <=4.5x for 1e15 -> 1000000000000000.0, separators <=2x), plus 256 for the
+# 92-byte fixed UUID/ok/status/body envelope and LF. Only the client's
+# response bound grows; gateway/request caps stay at N.
 MAX_REPLY_LINE = 6 * MAX_LINE + 256
 ERRORS = {
     "verb_not_allowed": "This verb is not available through the proxy.",
