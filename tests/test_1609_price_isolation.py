@@ -24,7 +24,7 @@ def test_subprocess_uses_fixture_prices_without_fetching():
     probe = subprocess.run([sys.executable, "-c", """
 import urllib.request
 def forbidden(*args, **kwargs):
-    raise AssertionError('fixture prices must not fetch')
+    raise SystemExit('fixture prices must not fetch')
 urllib.request.urlopen = forbidden
 from swarph_cli.bench import prices
 assert prices.is_known('test-price-control')
