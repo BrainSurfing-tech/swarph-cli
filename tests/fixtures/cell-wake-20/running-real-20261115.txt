@@ -1,0 +1,32 @@
+  ┃  service.d
+  ┃               └─zz-pilot20.conf
+  ┃       Active: active (running) since Sat 2026-11-14 05:23:50 UTC;
+  ┃   1 day 1h ago
+  ┃   Invocation: 68208d88d8d24a5599bcfb1ec…
+  ┃
+  ┃  Click to expand
+  ┃
+
+     Both running and healthy:
+
+     - Monitor: swarph-monitor@opencode.service — active (running),
+       Main PID 813954, up 1 day 1h. Sinks tmux:opencode and pull
+       both caught up (delivery_gap: 0, last_delivered_id=98469).
+     - Wake: tmux session opencode alive (1 window, attached),
+       monitor supervised by the systemd service.
+
+     ▣  Build · DeepSeek V4 Pro · 12.5s
+
+  ┃
+  ┃  ha deep can you tell me what you understand of swarph so far?
+  ┃
+
+     ▣  Build · DeepSeek V4 Pro
+
+  ┃
+  ┃
+  ┃
+  ┃  Build auto · DeepSeek V4 Pro DeepSeek
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ⬝⬝⬝⬝⬝⬝⬝■  esc interrupt      284.2K (27%) · $1.93  ctrl+p commands
+

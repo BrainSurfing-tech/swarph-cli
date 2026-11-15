@@ -1,0 +1,24 @@
+[Unit]
+Description=Tokenless cell-side wake for %i
+
+[Service]
+Type=simple
+User=cell-%i
+Group=cell-%i
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=SWARPH_CELL_WAKE_PANE=%i:0.0
+UnsetEnvironment=TMUX_TMPDIR TMUX
+ExecStart=/home/cell-%i/.local/bin/swarph monitor wake-from-inbox --cell %i --inbox /var/log/swarph-proxy/%i/monitor/inbox.log --pane ${SWARPH_CELL_WAKE_PANE}
+NoNewPrivileges=yes
+LimitCORE=0
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX
+StateDirectory=swarph-cell-wake/%i
+StateDirectoryMode=0755
+UMask=0077
+Restart=always
+RestartSec=2
+RestartPreventExitStatus=77 78 79 80
+
+[Install]
+WantedBy=multi-user.target
