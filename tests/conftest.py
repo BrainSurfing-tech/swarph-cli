@@ -220,6 +220,21 @@ def _hermetic_swarph_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_bench_prices(monkeypatch, tmp_path, _hermetic_swarph_env):
+    """Prices capture their path at import; env/HOME isolation alone is too late.
+
+    Cache/refresh tests explicitly replace this empty default with their fixtures.
+    """
+    from swarph_cli.bench import prices
+
+    cache = str(tmp_path / "llm_prices.json")
+    monkeypatch.setenv("SWARPH_BENCH_PRICE_CACHE", cache)
+    monkeypatch.setattr(prices, "_CACHE_PATH", cache)
+    monkeypatch.setattr(prices, "_MAP", {})
+    monkeypatch.setattr(prices, "_FALLBACK_WARNED", set())
+
+
 #: #1010 strand-only: the suite makes ZERO unmocked tmux calls against
 #: live panes. MEASURED 2026-10-06 (#1083): test_mesh_sidecar_wake_
 #: survives_read read the LIVE grok:0.0 pane whenever its autouse patch
