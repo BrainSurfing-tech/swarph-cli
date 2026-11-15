@@ -160,6 +160,19 @@ def _text_sends(cell):
     return [e for e in _events(cell) if "-l" in e["argv"]]
 
 
+def test_real_running_turn_defers_until_the_real_idle_screen_returns(pane):
+    running = (FIXTURES / "cell-wake-20/running-real-20261115.txt").read_text()
+    (pane.state / "pane.txt").write_text(running)
+    assert monitor.run_monitor(pane.args) == 0
+    assert not any(e["argv"][0] == "send-keys" for e in _events(pane))
+    assert not (pane.state / "cursor.json").exists()
+    assert (pane.state / "heartbeat.json").exists()
+    (pane.state / "pane.txt").write_text((pane.state / "idle.txt").read_text())
+    assert monitor.run_monitor(pane.args) == 0
+    assert len(_text_sends(pane)) == 1
+    assert json.loads((pane.state / "cursor.json").read_text())["seen_ids"] == [7]
+
+
 def test_real_permission_busy_defers_without_acknowledging_then_recovers(pane):
     busy = (FIXTURES / "pr514-hunt-794/o_B1_permission_real_verbatim.txt").read_text()
     (pane.state / "pane.txt").write_text(busy)

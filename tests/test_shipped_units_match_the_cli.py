@@ -94,6 +94,16 @@ def test_shipped_unit_invokes_a_real_verb(unit, verb, flags):
     )
 
 
+def _parser_options(parser):
+    options = set()
+    for action in parser._actions:
+        options.update(action.option_strings)
+        if isinstance(action, argparse._SubParsersAction):
+            for child in action.choices.values():
+                options.update(_parser_options(child))
+    return options
+
+
 @pytest.mark.parametrize("unit,verb,flags", _swarph_invocations(),
                          ids=lambda v: v if isinstance(v, str) else None)
 def test_shipped_unit_flags_are_accepted_by_the_cli(unit, verb, flags):
@@ -106,6 +116,9 @@ def test_shipped_unit_flags_are_accepted_by_the_cli(unit, verb, flags):
     mod = importlib.import_module(module_path)
 
     declared = set()
+    if verb == "monitor":
+        # Its subcommands share imported argument builders, invisible to source grep.
+        declared.update(_parser_options(mod._build_parser()))
     for obj in vars(mod).values():
         if isinstance(obj, argparse.ArgumentParser):
             declared |= {s for a in obj._actions for s in a.option_strings}
