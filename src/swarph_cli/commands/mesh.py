@@ -4588,8 +4588,16 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
                 # the oversized row was marked read).
                 probe = _unread_probe()
                 if probe is None:
-                    return
-                if probe[0] >= 400 or probe[0] == 0:
+                    # #5613: unread probe capped (oversized row still
+                    # unread) but newest already observed -- carry on
+                    # with the limit-1 result as the window and keep
+                    # the episode active, so the normal tail still
+                    # runs: _monitor_deliver, ledger persistence and
+                    # the drain heartbeat. Returning here starved a
+                    # deferred wake until the next DM arrived.
+                    status, body = one
+                    via_blocked_search = True
+                elif probe[0] >= 400 or probe[0] == 0:
                     status, body = probe
                 else:
                     status, body = probe

@@ -418,6 +418,48 @@ def test_5602_twobig_later_dm_delivered(tmp_path, gateway, capsys):
     _iterate(tmp_path, gateway, state)
 
 
+def test_5613_idle_blocked_polls_run_delivery_heartbeat_ledger(
+        tmp_path, gateway, capsys, monkeypatch):
+    # #5613: after a newer DM is delivered while blocked and the oversized
+    # row stays unread, idle polls must not return early: the delivery
+    # step runs, the drain heartbeat is written, and once the delivered
+    # DM is acknowledged the pull ledger advances to it.
+    gateway.state.messages = [_msg(1), _msg(2), _msg(3, BIG)]
+    state = _new_state(tmp_path, gateway)
+    _iterate(tmp_path, gateway, state)
+    assert (state.state_dir / "inbox_blocked.json").exists()
+    gateway.state.messages.append(_msg(4))
+    _iterate(tmp_path, gateway, state)
+    assert 4 in _inbox_ids(state)
+    capsys.readouterr()
+
+    calls = []
+    real_deliver = mesh._monitor_deliver
+
+    def _spy(deliver_state):
+        calls.append(deliver_state.iterations)
+        return real_deliver(deliver_state)
+
+    monkeypatch.setattr(mesh, "_monitor_deliver", _spy)
+    heartbeat = state.state_dir / "drain_heartbeat.json"
+    for i in range(5):
+        if i == 2:
+            gateway.state.messages = [
+                _msg(1), _msg(2), _msg(3, BIG), _msg(4, read=True)]
+        gateway.calls.clear()
+        before = len(calls)
+        _iterate(tmp_path, gateway, state)
+        assert len(calls) == before + 1  # delivery step ran on idle poll
+        assert len(_message_calls(gateway)) <= 3
+        assert heartbeat.exists()
+        assert json.loads(heartbeat.read_text())["iterations"] == \
+            state.iterations  # heartbeat written this poll
+    assert capsys.readouterr().err == ""
+    assert state.ledger("pull")["last_delivered_id"] == 4
+    on_disk = json.loads(state.ledgers_path.read_text())
+    assert on_disk["pull"]["last_delivered_id"] == 4
+
+
 # ── direct mode untouched ───────────────────────────────────────────────────
 
 def test_direct_mode_never_probes_unread(tmp_path, monkeypatch):
