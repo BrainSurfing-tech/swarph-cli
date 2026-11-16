@@ -231,6 +231,111 @@ def test_d1_idle_blocked_poll_sees_whole_delivered_window(
     assert state.ledger("pull")["last_delivered_id"] == expected
 
 
+MED = "A" * 600_000  # fits alone (<1 MiB), two do not
+
+
+# ── #5628 (a): capped unread probe -> limit-1 row is the window ──────
+
+def test_a_capped_unread_probe_limit1_window_keeps_ledger_at_5(
+        tmp_path, gateway, capsys):
+    gateway.state.messages = [_msg(i, read=True) for i in range(1, 6)]
+    state = _pull_state(tmp_path, gateway)
+    _iterate(tmp_path, gateway, state)
+    assert state.ledger("pull")["last_delivered_id"] == 5
+    gateway.state.messages.append(_msg(6, BIG))
+    _iterate(tmp_path, gateway, state)
+    assert (state.state_dir / "inbox_blocked.json").exists()
+    gateway.state.messages.append(_msg(7))
+    _iterate(tmp_path, gateway, state)
+    assert int(state.observed.get("last_msg_id", 0)) == 7
+    assert state.ledger("pull")["last_delivered_id"] == 5
+    # Idle: newest (7) already observed, remembered window is 1, and the
+    # unread probe is capped (oversized 6 still unread), so the limit-1
+    # row [7] is the window. Feeding [] instead would jump the ledger
+    # to the cursor (7); the row itself is unread, so it must stay 5.
+    for _ in range(2):
+        gateway.calls.clear()
+        capsys.readouterr()
+        _iterate(tmp_path, gateway, state)
+        assert state.ledger("pull")["last_delivered_id"] == 5
+        assert len(_message_calls(gateway)) <= 3
+        assert capsys.readouterr().err == ""
+
+
+# ── #5628 (b): fully blocked (no-window) poll feeds no empty list ────
+
+def test_b_fully_blocked_no_window_poll_keeps_ledger_at_7(
+        tmp_path, gateway, capsys):
+    gateway.state.messages = [_msg(i) for i in range(1, 11)]
+    state = _pull_state(tmp_path, gateway)
+    _iterate(tmp_path, gateway, state)
+    gateway.state.messages = [
+        _msg(i, read=(i <= 7)) for i in range(1, 11)]
+    _iterate(tmp_path, gateway, state)
+    assert state.ledger("pull")["last_delivered_id"] == 7
+    assert int(state.observed.get("last_msg_id", 0)) == 10
+    # Stranded shape: 11, 12 and oversized 13 arrive before one poll.
+    # Every read is capped, so this poll has no window at all; feeding
+    # [] to the pull sink would jump the ledger to the cursor (10).
+    gateway.state.messages += [_msg(11), _msg(12), _msg(13, BIG)]
+    _iterate(tmp_path, gateway, state)
+    blocked = state.state_dir / "inbox_blocked.json"
+    assert blocked.exists()
+    assert state.ledger("pull")["last_delivered_id"] == 7
+    for _ in range(2):
+        gateway.calls.clear()
+        capsys.readouterr()
+        _iterate(tmp_path, gateway, state)
+        assert state.ledger("pull")["last_delivered_id"] == 7
+        assert blocked.exists()
+        assert len(_message_calls(gateway)) <= 3
+        assert capsys.readouterr().err == ""
+
+
+# ── #5628 (c): remembered-window read keeps the blocked episode ─────
+
+def test_c_remembered_window_read_keeps_episode_next_idle_poll(
+        tmp_path, gateway, capsys):
+    state = _blocked_with_4_and_5_delivered(tmp_path, gateway)
+    _iterate(tmp_path, gateway, state)  # idle via remembered window (2)
+    assert state.ledger("pull")["last_delivered_id"] == 0
+    # The wide read unlinks the blocked file, so the episode now lives
+    # only in _inbox_blocked_active. Dropping that flag here would send
+    # the next poll into the window search (many reads, retry logs).
+    gateway.calls.clear()
+    capsys.readouterr()
+    _iterate(tmp_path, gateway, state)
+    assert _limits(gateway) == [50, 1, 2]
+    assert capsys.readouterr().err == ""
+    assert state._inbox_blocked_active is True
+    assert state.ledger("pull")["last_delivered_id"] == 0
+
+
+# ── #5628 (d): remembered window itself capped -> limit-1 fallback ──
+
+def test_d_capped_remembered_window_falls_back_to_limit1_row(
+        tmp_path, gateway, capsys):
+    state = _blocked_with_4_and_5_delivered(tmp_path, gateway)
+    assert state._inbox_blocked_window == 2
+    # The two delivered rows no longer fit one window together (each
+    # still fits alone), so the remembered limit-2 read is capped and
+    # the poll must fall back to the limit-1 row [5], not to no window.
+    gateway.state.messages = [
+        _msg(1), _msg(2), _msg(3, BIG), _msg(4, MED), _msg(5, MED)]
+    heartbeat = state.state_dir / "drain_heartbeat.json"
+    for _ in range(2):
+        gateway.calls.clear()
+        capsys.readouterr()
+        _iterate(tmp_path, gateway, state)
+        # Row 5 is unread: ledger must not move (an empty/capped window
+        # fed onward would jump it to the cursor, 5).
+        assert state.ledger("pull")["last_delivered_id"] == 0
+        assert _limits(gateway) == [50, 1, 2]
+        assert capsys.readouterr().err == ""
+        assert json.loads(heartbeat.read_text())["iterations"] == \
+            state.iterations
+
+
 def test_d1_ledger_at_3_stays_or_advances_with_out_of_order_acks(
         tmp_path, gateway):
     # Ledger legitimately at 3 (DMs 1..3 delivered and acknowledged),
