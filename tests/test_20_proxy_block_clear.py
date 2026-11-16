@@ -176,7 +176,8 @@ def test_blocked_poll_costs_two_reads_and_logs_nothing(tmp_path, gateway, capsys
     gateway.calls.clear()
     _iterate(tmp_path, gateway, state)
     calls = _message_calls(gateway)
-    assert len(calls) <= 2  # the normal read + at most the unread_only probe
+    # #5602 amends #5535 item 2: normal read + limit=1 probe + unread probe.
+    assert len(calls) <= 3
     assert any("unread_only=true" in c for c in calls[1:])
     err = capsys.readouterr().err
     assert err == ""  # no shrink/blocked line repeats within the episode
@@ -324,6 +325,97 @@ def test_item6b_content_length_mismatch_has_no_cap_flag(tmp_path):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+# ── obligation #5602 (rework): blocked monitor deaf to newer DMs ──────────
+
+MED = "A" * 600_000  # fits alone (<1 MiB), two do not
+
+
+def test_5602_newer_dm_delivered_while_blocked(tmp_path, gateway, capsys):
+    gateway.state.messages = [_msg(1), _msg(2), _msg(3, BIG)]
+    state = _new_state(tmp_path, gateway)
+    _iterate(tmp_path, gateway, state)
+    assert (state.state_dir / "inbox_blocked.json").exists()
+    assert _inbox_ids(state) == []
+    _iterate(tmp_path, gateway, state)
+    gateway.state.messages.append(_msg(4))
+    _iterate(tmp_path, gateway, state)
+    assert 4 in _inbox_ids(state)
+    gateway.state.messages += [_msg(i) for i in range(5, 15)]
+    _iterate(tmp_path, gateway, state)
+    assert _inbox_ids(state)[-10:] == list(range(5, 15))
+    _iterate(tmp_path, gateway, state)
+
+
+def test_5602_newer_dm_delivered_after_restart(tmp_path, gateway, capsys):
+    gateway.state.messages = [_msg(1), _msg(2), _msg(3, BIG)]
+    state = _new_state(tmp_path, gateway)
+    _iterate(tmp_path, gateway, state)
+    assert (state.state_dir / "inbox_blocked.json").exists()
+    state = _new_state(tmp_path, gateway)  # restart: new MonitorState, same dir
+    _iterate(tmp_path, gateway, state)
+    gateway.state.messages.append(_msg(4))
+    _iterate(tmp_path, gateway, state)
+    assert 4 in _inbox_ids(state)
+
+
+def test_5602_second_oversized_dm_recorded_again(tmp_path, gateway, capsys):
+    gateway.state.messages = [_msg(1), _msg(2), _msg(3, BIG)]
+    state = _new_state(tmp_path, gateway)
+    _iterate(tmp_path, gateway, state)
+    gateway.state.messages = [_msg(1), _msg(2), _msg(3, BIG, read=True)]
+    _iterate(tmp_path, gateway, state)
+    blocked = state.state_dir / "inbox_blocked.json"
+    assert not blocked.exists()
+    assert _inbox_ids(state) == [1, 2]
+    capsys.readouterr()
+    gateway.state.messages.append(_msg(4, BIG))
+    _iterate(tmp_path, gateway, state)
+    assert blocked.exists()
+    assert json.loads(blocked.read_text())["state"] == "inbox_blocked_oversized_newest"
+    err = capsys.readouterr().err
+    assert err.count("inbox_blocked_oversized_newest") == 1
+    info = monitor._collect(SimpleNamespace(
+        self_name="alice", state_dir=str(state.state_dir)))
+    assert info["inbox_blocked"]["state"] == "inbox_blocked_oversized_newest"
+    _iterate(tmp_path, gateway, state)
+    assert capsys.readouterr().err == ""
+    gateway.state.messages.append(_msg(5))
+    _iterate(tmp_path, gateway, state)
+    assert 5 in _inbox_ids(state)
+
+
+def test_5602_read_dm_delivered_after_markread_clear(tmp_path, gateway, capsys):
+    gateway.state.messages = [_msg(1), _msg(2), _msg(3, BIG)]
+    state = _new_state(tmp_path, gateway)
+    _iterate(tmp_path, gateway, state)
+    gateway.state.messages = [_msg(1), _msg(2), _msg(3, BIG, read=True)]
+    _iterate(tmp_path, gateway, state)
+    assert _inbox_ids(state) == [1, 2]
+    _iterate(tmp_path, gateway, state)
+    gateway.state.messages.append(_msg(4))
+    _iterate(tmp_path, gateway, state)
+    assert 4 in _inbox_ids(state)
+    gateway.state.messages.append(_msg(5, read=True))
+    _iterate(tmp_path, gateway, state)
+    assert 5 in _inbox_ids(state)
+    gateway.state.messages.append(_msg(6))
+    _iterate(tmp_path, gateway, state)
+    assert 6 in _inbox_ids(state)
+
+
+def test_5602_twobig_later_dm_delivered(tmp_path, gateway, capsys):
+    gateway.state.messages = [_msg(1, MED), _msg(2, MED), _msg(3, BIG)]
+    state = _new_state(tmp_path, gateway)
+    _iterate(tmp_path, gateway, state)
+    assert (state.state_dir / "inbox_blocked.json").exists()
+    gateway.state.messages = [_msg(1, MED), _msg(2, MED), _msg(3, BIG, read=True)]
+    _iterate(tmp_path, gateway, state)
+    gateway.state.messages.append(_msg(4))
+    _iterate(tmp_path, gateway, state)
+    assert 4 in _inbox_ids(state)
+    _iterate(tmp_path, gateway, state)
 
 
 # ── direct mode untouched ───────────────────────────────────────────────────
