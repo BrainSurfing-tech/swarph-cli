@@ -2893,6 +2893,12 @@ class MonitorState:
         # a capped poll takes the blocked fast path (#5602: at most 3 reads
         # when idle) and logs nothing new.
         self._inbox_blocked_active = self.inbox_blocked_path.exists()
+        # Card #1635 (D1): size of the largest window the last blocked
+        # search found under the cap. Idle blocked polls ask for this
+        # many rows (not limit=1) so the pull sink sees the whole
+        # delivered window. In-memory only: a restart falls back to
+        # limit=1 until the next search runs.
+        self._inbox_blocked_window = 1
         self.pidfile_path = self.state_dir / _MONITOR_PIDFILE
         self.heartbeat_path = self.state_dir / "drain_heartbeat.json"
         # `observed` is the real dict; `cursor` is what the engine touches. The
@@ -4553,11 +4559,21 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
             else:
                 best = probe
                 lo = mid + 1
+        if best is not None and isinstance(best[1], dict):
+            found = len(best[1].get("messages", []) or [])
+            if found:
+                state._inbox_blocked_window = found
         return best, None
 
     status, body = _poll(50)
     via_unread_probe = False
     via_blocked_search = False
+    # Card #1635 (D2): True when every blocked read was capped, so no
+    # window exists this poll. The tail still runs (delivery step +
+    # drain heartbeat) but the pull sink is not fed an empty window --
+    # PullSink.observe([]) would jump its ledger to the cursor -- and
+    # the blocked file/episode is left untouched.
+    blocked_no_window = False
     if _capped((status, body)) and (
             state._inbox_blocked_active or state.inbox_blocked_path.exists()):
         # Obligation #5602: while blocked, ask limit=1 first (read 2).
@@ -4571,8 +4587,15 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
             if probe is None:
                 if not state.inbox_blocked_path.exists():
                     _declare_blocked()
-                return
-            if probe[0] >= 400 or probe[0] == 0:
+                # Card #1635 (D2): the oversized DM is the newest row
+                # and unread. Do not return: a wake deferred by the
+                # idle guard just before the block must be sent on the
+                # first idle poll after the guard expires. Fall
+                # through to the tail with no window.
+                status, body = 200, {"messages": []}
+                blocked_no_window = True
+                via_blocked_search = True
+            elif probe[0] >= 400 or probe[0] == 0:
                 status, body = probe
             else:
                 status, body = probe
@@ -4583,25 +4606,44 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
             rows = one[1].get("messages", []) if isinstance(one[1], dict) else []
             newest_id = int(rows[0].get("id", 0)) if rows else None
             if rows and newest_id is not None and newest_id <= last_id:
-                # Newest already observed; no search needed. The unread
-                # probe may still deliver older unread rows (e.g. after
-                # the oversized row was marked read).
-                probe = _unread_probe()
-                if probe is None:
-                    # #5613: unread probe capped (oversized row still
-                    # unread) but newest already observed -- carry on
-                    # with the limit-1 result as the window and keep
-                    # the episode active, so the normal tail still
-                    # runs: _monitor_deliver, ledger persistence and
-                    # the drain heartbeat. Returning here starved a
-                    # deferred wake until the next DM arrived.
-                    status, body = one
-                    via_blocked_search = True
-                elif probe[0] >= 400 or probe[0] == 0:
-                    status, body = probe
+                # Newest already observed; no search needed.
+                if state._inbox_blocked_window > 1:
+                    # Card #1635 (D1): ask for the whole delivered
+                    # window the last search found, not only the
+                    # newest row, so the pull sink sees every delivered
+                    # DM's read_at and out-of-order ACKs move its
+                    # ledger exactly as a full window does. This is
+                    # read 3, so the idle poll stays within budget.
+                    wide = _poll(state._inbox_blocked_window)
+                    if _capped(wide):
+                        status, body = one
+                        via_blocked_search = True
+                    elif wide[0] >= 400 or wide[0] == 0:
+                        status, body = wide
+                    else:
+                        status, body = wide
+                        via_blocked_search = True
                 else:
-                    status, body = probe
-                    via_unread_probe = True
+                    # The unread probe may still deliver older unread
+                    # rows (e.g. after the oversized row was marked
+                    # read).
+                    probe = _unread_probe()
+                    if probe is None:
+                        # #5613: unread probe capped (oversized row
+                        # still unread) but newest already observed --
+                        # carry on with the limit-1 result as the
+                        # window and keep the episode active, so the
+                        # normal tail still runs: _monitor_deliver,
+                        # ledger persistence and the drain heartbeat.
+                        # Returning here starved a deferred wake until
+                        # the next DM arrived.
+                        status, body = one
+                        via_blocked_search = True
+                    elif probe[0] >= 400 or probe[0] == 0:
+                        status, body = probe
+                    else:
+                        status, body = probe
+                        via_unread_probe = True
             elif not rows:
                 status, body = one
             else:
@@ -4640,8 +4682,14 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
                 status, body = probe  # real gateway error: normal path
             else:
                 _declare_blocked()
-                return
-    if status < 400 and state.inbox_blocked_path.exists():
+                # Card #1635 (D2): same fall-through as the blocked
+                # fast path -- run the delivery step and heartbeat
+                # on the declaring poll too, with no window.
+                status, body = 200, {"messages": []}
+                blocked_no_window = True
+                via_blocked_search = True
+    if status < 400 and not blocked_no_window and \
+            state.inbox_blocked_path.exists():
         state.inbox_blocked_path.unlink(missing_ok=True)
         state._inbox_blocked_logged = False
     if status < 400 and not via_unread_probe and not via_blocked_search:
@@ -4667,10 +4715,12 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
         return
 
     state.disconnect_since = None
-    window = body.get("messages", [])
+    # Card #1635 (D2): no window this poll -- never feed [] to the
+    # pull sink (its all-read branch jumps the ledger to the cursor).
+    window = None if blocked_no_window else body.get("messages", [])
     messages = [
         m
-        for m in window
+        for m in (window or [])
         if int(m.get("id", 0)) > last_id and m.get("from_node") != state.self_name
     ]
 
@@ -4697,7 +4747,8 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
     # Pull-shaped sinks read the raw window (ACKs live in `read_at`).
     acked = False
     for sink in state.sinks:
-        if sink.keeps_ledger and sink.observe(state, state.ledger(sink.name), window):
+        if window is not None and sink.keeps_ledger and \
+                sink.observe(state, state.ledger(sink.name), window):
             acked = True
     if acked:
         _write_ledgers_atomic(state.ledgers_path, state.ledgers)
