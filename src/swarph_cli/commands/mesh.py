@@ -2887,6 +2887,11 @@ class MonitorState:
         self.inbox_log_path = self.state_dir / "inbox.log"
         self.inbox_blocked_path = self.state_dir / _INBOX_BLOCKED_FILE
         self._inbox_blocked_logged = self.inbox_blocked_path.exists()
+        # Card #1620: a blocked episode can outlive its file -- the file is
+        # removed as soon as the unread_only probe clears the block, while
+        # the oversized row still caps the all-read poll. While this is set,
+        # a capped poll takes the two-read fast path and logs nothing new.
+        self._inbox_blocked_active = self.inbox_blocked_path.exists()
         self.pidfile_path = self.state_dir / _MONITOR_PIDFILE
         self.heartbeat_path = self.state_dir / "drain_heartbeat.json"
         # `observed` is the real dict; `cursor` is what the engine touches. The
@@ -4447,6 +4452,35 @@ def _maybe_rowclear(state: MonitorState) -> str:
     )
 
 
+def _stranded_older_ids(state: MonitorState) -> list:
+    """Card #1620: observed-but-undelivered DM ids, oldest first.
+
+    These are the rows already archived in inbox.log that no ledger sink
+    has caught up to. When an oversized newest row blocks every read that
+    could carry them, they are the deliverable the block is stranding.
+    """
+    delivered = []
+    for sink in state.sinks:
+        if not sink.keeps_ledger:
+            continue
+        led = state.ledgers.get(sink.name)
+        delivered.append(int(led["last_delivered_id"]) if led else 0)
+    floor = min(delivered) if delivered else 0
+    ids = set()
+    try:
+        lines = state.inbox_log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            row_id = int(json.loads(line)["id"])
+        except Exception:
+            continue
+        if row_id > floor:
+            ids.add(row_id)
+    return sorted(ids)
+
+
 def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> None:
     state.iterations += 1
     last_id = int(state.observed.get("last_msg_id", 0))
@@ -4454,22 +4488,47 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
     # flag. Since `mesh inbox` now marks read (INCIDENT 2026-07-10), a DM read before
     # the next poll would vanish from an unread-filtered query and the cell would
     # never be woken. The two mechanisms must stay orthogonal.
-    params = {"to": state.self_name, "limit": "50"}
-
-    def _poll(limit):
-        params["limit"] = str(limit)
+    def _poll(limit, unread_only=False):
+        # The all-read poll must NOT be unread-filtered (see above); the
+        # unread_only probe below is a separate, card-#1620 question asked
+        # only once the typed proxy cap has already fired.
+        params = {"to": state.self_name, "limit": str(limit)}
+        if unread_only:
+            params["unread_only"] = "true"
         url = f"{state.gateway}/messages?{urllib.parse.urlencode(params)}"
         return _http_get_json(url, state.token)
 
     def _capped(result):
         return isinstance(result[1], dict) and result[1].get("proxy_cap_exceeded")
 
+    def _unread_probe():
+        """Card #1620 item 1: if the oversized row has been marked read, an
+        unread-filtered window no longer carries it and fits under the cap.
+        Returns the probe result, or None when it is also capped."""
+        probe = _poll(50, unread_only=True)
+        return None if _capped(probe) else probe
+
     status, body = _poll(50)
-    if _capped((status, body)):
+    via_unread_probe = False
+    if _capped((status, body)) and (
+            state._inbox_blocked_active or state.inbox_blocked_path.exists()):
+        # Card #1620 item 2: while blocked, a poll is the normal read plus
+        # at most this one probe, and it logs nothing new until the state
+        # changes -- no repeated binary search, no repeated log lines.
+        probe = _unread_probe()
+        if probe is None:
+            return
+        if probe[0] >= 400 or probe[0] == 0:
+            status, body = probe  # a real gateway error: normal error path
+        else:
+            status, body = probe
+            via_unread_probe = True
+    elif _capped((status, body)):
         # Window bytes grow monotonically with limit, so binary-search the
         # largest window the proxy accepts; that delivers every DM newer
         # than the oversized row instead of stranding them behind the cursor.
         best = None
+        search_failed = False
         lo, hi = 1, 49
         while lo <= hi:
             mid = (lo + hi) // 2
@@ -4480,33 +4539,59 @@ def _monitor_iteration(state: MonitorState, *, poll_channels: bool = True) -> No
             if _capped(probe):
                 hi = mid - 1
             elif probe[0] >= 400 or probe[0] == 0:
+                # Card #1620 item 4: a real gateway error mid-search is not
+                # a cap. It follows the normal error path below and never
+                # writes the blocked state.
                 status, body = probe
-                best = None
+                search_failed = True
                 break
             else:
                 best = probe
                 lo = mid + 1
         if best is not None:
             status, body = best
-        elif _capped((status, body)):
-            if state.disconnect_since is None:
-                state.disconnect_since = time.time()
-            _write_cursor_atomic(state.inbox_blocked_path, {
-                "state": _INBOX_BLOCKED_STATE, "blocked": True, "limit": 1,
-                "detail": "newest inbox row exceeds the proxy 1 MiB cap even "
-                          "at limit=1; DMs behind it cannot be polled until "
-                          "it leaves the newest window",
-                "last_msg_id": last_id, "iterations": state.iterations,
-                "ts": time.time()})
-            if not state._inbox_blocked_logged:
-                print(f"{state.log_prefix} {_INBOX_BLOCKED_STATE}: newest "
-                      f"inbox row exceeds the proxy cap at limit=1; see "
-                      f"{state.inbox_blocked_path}", file=sys.stderr)
-                state._inbox_blocked_logged = True
-            return
+        elif not search_failed:
+            # Still capped at limit=1. Card #1620 item 1: before declaring
+            # the block, ask the unread-filtered question -- a marked-read
+            # oversized row clears the block with no newer DM needed.
+            probe = _unread_probe()
+            if probe is not None and probe[0] < 400 and probe[0] != 0:
+                status, body = probe
+                via_unread_probe = True
+                state._inbox_blocked_active = True
+            elif probe is not None:
+                status, body = probe  # real gateway error: normal path
+            else:
+                if state.disconnect_since is None:
+                    state.disconnect_since = time.time()
+                stranded = _stranded_older_ids(state)
+                _write_cursor_atomic(state.inbox_blocked_path, {
+                    "state": _INBOX_BLOCKED_STATE, "blocked": True, "limit": 1,
+                    "detail": "newest inbox row exceeds the proxy 1 MiB cap even "
+                              "at limit=1; DMs behind it cannot be polled until "
+                              "it leaves the newest window",
+                    "stranded_older_count": len(stranded),
+                    "stranded_older_ids": stranded,
+                    "last_msg_id": last_id, "iterations": state.iterations,
+                    "ts": time.time()})
+                state._inbox_blocked_active = True
+                if not state._inbox_blocked_logged:
+                    print(f"{state.log_prefix} {_INBOX_BLOCKED_STATE}: newest "
+                          f"inbox row exceeds the proxy cap at limit=1; "
+                          f"{len(stranded)} older undelivered DM(s) stranded "
+                          f"behind it (ids {stranded}); see "
+                          f"{state.inbox_blocked_path}", file=sys.stderr)
+                    state._inbox_blocked_logged = True
+                return
     if status < 400 and state.inbox_blocked_path.exists():
         state.inbox_blocked_path.unlink(missing_ok=True)
         state._inbox_blocked_logged = False
+    if status < 400 and not via_unread_probe:
+        # A successful all-read poll is the only full clear: the oversized
+        # row has left the window. A clear through the unread probe keeps
+        # the episode active (the all-read poll is still capped), so the
+        # next poll stays on the two-read fast path above.
+        state._inbox_blocked_active = False
     if status == 0:
         if state.disconnect_since is None:
             state.disconnect_since = time.time()
