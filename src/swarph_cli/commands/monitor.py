@@ -864,6 +864,10 @@ def _print_status(info: dict, pending: int) -> None:
         print(f"monitor {info['self']}: not running{extra}")
         print(f"  state: {info['state_dir']}")
         print(f"  observation cursor: last_msg_id={info['observation_cursor']}")
+        if info.get("inbox_blocked"):
+            blocked = info["inbox_blocked"]
+            print(f"  inbox: {blocked.get('state', mesh._INBOX_BLOCKED_STATE)} — "
+                  f"{blocked.get('detail', 'newest row exceeds the proxy cap at limit=1')}")
         if info.get("supervision_hold"):
             print("  supervision HOLD present (deliberate `monitor stop`) — the "
                   "watchdog will not revive it; `swarph monitor start` clears "
