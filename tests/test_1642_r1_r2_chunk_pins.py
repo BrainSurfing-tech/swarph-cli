@@ -521,3 +521,218 @@ def test_keep_10000_corpus_differential_and_harness_envelopes(capsys):
         assert rc == 0
         assert out == ""
         assert err == ""
+
+
+# --- #5753 G3: single-pass linear marker scan, no 64-marker cap, mutant kills ---
+
+
+def test_g3_marker_floods_and_grep_cert_prompts_block_under_1s():
+    rng = random.Random(57531)
+    secret = "sk-" + "ant-" + "api03-" + "".join(rng.choice(_ALNUM) for _ in range(95))
+    cli_limit = 1.0 if sys.platform.startswith("linux") else 2.0
+
+    def begin_flood(size: int) -> str:
+        return ("-----BEGIN A-----\n" * (size // 18)) + "-----END A-----\n"
+
+    def end_first_flood(size: int) -> str:
+        return "-----END A-----\n" + ("-----BEGIN A-----\n" * (size // 18))
+
+    def one_begin_many_end(target_len: int) -> str:
+        head = "-----BEGIN A-----\n"
+        end_line = "-----END A-----\n"
+        rem = target_len - len(head)
+        count, tail_rem = divmod(rem, len(end_line))
+        pad = ("log ok!\n" if tail_rem == 8 else "ok!\n") if tail_rem else ""
+        body = head + (end_line * count) + pad
+        assert len(body) == target_len
+        return body
+
+    def grep_cert(size: int) -> str:
+        cert = (
+            "-----BEGIN CERTIFICATE-----\n"
+            + ("certificate body line of plain words only\n" * 20)
+            + "-----END CERTIFICATE-----\n"
+        )
+        grep_line = "certs/ca-bundle/intermediate-0001.pem:1:-----BEGIN CERTIFICATE-----\n"
+        return (grep_line * (size // len(grep_line))) + cert
+
+    cases: list[tuple[str, str]] = []
+    for size, exact in ((420_000, 420_010), (600_000, 600_010), (1_000_000, 1_000_006)):
+        b1 = begin_flood(size)
+        b2 = end_first_flood(size)
+        b3 = one_begin_many_end(exact)
+        assert len(b1) == exact
+        assert len(b2) == exact
+        cases.append((f"begin_flood_{exact}", b1))
+        cases.append((f"end_first_{exact}", b2))
+        cases.append((f"one_begin_many_end_{exact}", b3))
+
+    for size, exact in ((1_000_000, 1_000_834), (2_000_000, 2_000_842)):
+        g = grep_cert(size)
+        assert len(g) == exact
+        cases.append((f"grep_cert_{exact}", g))
+
+    for name, body in cases:
+        prompt = "token " + secret + "\n" + body
+        t0 = time.monotonic()
+        classes, complete = _detect_classes(prompt)
+        scan_took = time.monotonic() - t0
+        assert complete is True, name
+        assert "Anthropic" in classes, (name, classes)
+        assert scan_took < 0.5, (name, scan_took)
+
+        rc, out, err, took = _run_cli(prompt, timeout=5.0)
+        assert rc == 0, name
+        assert took < cli_limit, (name, took)
+        assert err == "", name
+        parsed = json.loads(out)
+        assert parsed["decision"] == "block", name
+        assert "Anthropic" in parsed["reason"], name
+        _assert_no_secret_echo(secret, out, err)
+
+
+def test_g3_marker_prepass_deadline_enforced_with_system_message(capsys, monkeypatch):
+    prompt = ("-----BEGIN A-----\n" * 500) + "-----END A-----\n"
+    pem_calls = 0
+
+    def fake_monotonic() -> float:
+        nonlocal pem_calls
+        if sys._getframe(1).f_code.co_name == "_pem_envelope_classes":
+            pem_calls += 1
+            return 100.0 if pem_calls == 1 else 104.0
+        return 100.0
+
+    monkeypatch.setattr(secret_guard.time, "monotonic", fake_monotonic)
+    rc, out, err = _run({"hook_event_name": "UserPromptSubmit", "prompt": prompt}, capsys)
+    assert rc == 0
+    assert err == ""
+    parsed = json.loads(out)
+    assert "decision" not in parsed
+    assert "not fully scanned" in parsed["systemMessage"]
+
+
+def test_stop_9000_char_repeated_letter_private_key_behind_40_and_70_blocks_blocks():
+    pk_block = (
+        "-----BEGIN " + "PRIVATE KEY-----\n"
+        + ("A" * 64 + "\n") * 140
+        + "-----END " + "PRIVATE KEY-----\n"
+    )
+    assert len(pk_block) > 9_000
+    for n_blocks in (40, 70):
+        prefix = "".join(
+            f"-----BEGIN NOTE {i}-----\nplain words about server logs\n-----END NOTE {i}-----\n"
+            for i in range(n_blocks)
+        )
+        rc, out, err, took = _run_cli(prefix + pk_block, timeout=5.0)
+        assert rc == 0, n_blocks
+        assert took < 2.0, (n_blocks, took)
+        assert err == "", n_blocks
+        parsed = json.loads(out)
+        assert parsed["decision"] == "block", n_blocks
+        assert "PEM private key" in parsed["reason"], n_blocks
+
+    mismatch = (
+        "-----BEGIN " + "RSA PRIVATE KEY-----\n"
+        + "plain words\n"
+        + "-----END CERTIFICATE-----\n"
+    )
+    assert _detect_classes(mismatch) == ([], True)
+
+
+def test_c3_carry_tail_token_snap_prevents_splitting_id_into_false_block(capsys):
+    tok = "msg_01" + "Zx9Qw8" + "Er7Ty6" + "Ui5Op4" + "As3Df2" + "Gh1JkL" + "m3Np5Qr"
+    assert _chunk_classes(tok[6:]) == ["high-entropy secret"]
+    assert _chunk_classes(tok) == []
+
+    line_prefix = "12:00 INFO worker ok check\n"
+    prefix = line_prefix * (1380 // len(line_prefix))
+    while len(prefix) < 1379:
+        prefix += "a"
+    prefix += " "
+    assert len(prefix) == 1380
+
+    # Target len(buf) == 1898 so len(buf) - 512 == 1386 == len(prefix) + len("msg_01").
+    rem = 1898 - len(prefix) - len(tok) - 2
+    tail = ("word " * (rem // 5 + 2))[:rem]
+    buf_part = prefix + tok + " " + tail + "\n"
+    assert len(buf_part) == 1898
+    assert len(buf_part) <= _CHUNK_CHARS
+
+    next_line = ("plain words " * 26)[:300] + "\n"
+    assert len(buf_part) + len(next_line) > _CHUNK_CHARS
+    prompt = buf_part + next_line
+
+    rc, out, err = _run({"hook_event_name": "UserPromptSubmit", "prompt": prompt}, capsys)
+    assert rc == 0
+    assert err == ""
+    assert out == ""
+
+
+def test_p2_pem_cap_8192_keeps_6400_char_block_whole(capsys, monkeypatch):
+    pem_6400 = (
+        "-----BEGIN CUSTOMPEM-----\n"
+        + ("B" * 64 + "\n") * 98
+        + "-----END CUSTOMPEM-----\n"
+    )
+    assert 4096 < len(pem_6400) <= _MAX_PEM_CHARS
+    prompt = ("12:00 INFO log ok\n" * 40) + pem_6400 + ("12:01 INFO tail ok\n" * 10)
+    chunks = list(_iter_chunks(prompt))
+    assert pem_6400 in chunks
+
+    monkeypatch.setenv(
+        "SWARPH_REDACT_CUSTOM_RULES",
+        json.dumps([{
+            "name": "CUSTPEM",
+            "pattern": r"-----BEGIN CUSTOMPEM-----[\s\S]{6000,}?-----END CUSTOMPEM-----",
+        }]),
+    )
+    rc, out, err = _run({"hook_event_name": "UserPromptSubmit", "prompt": prompt}, capsys)
+    assert rc == 0
+    assert err == ""
+    parsed = json.loads(out)
+    assert parsed["decision"] == "block"
+    assert "custom-rule credential" in parsed["reason"]
+
+
+def test_p4_nested_begin_skipped_so_inner_pem_is_kept_whole(capsys, monkeypatch):
+    outer = "-----BEGIN NOTES-----\n" + ("plain words line\n" * 320)
+    inner = (
+        "-----BEGIN CUSTOMPEM-----\n"
+        + ("B" * 64 + "\n") * 50
+        + "-----END CUSTOMPEM-----\n"
+    )
+    assert len(outer) + len(inner) > _MAX_PEM_CHARS
+    assert len(inner) <= _MAX_PEM_CHARS
+    prompt = outer + inner
+    chunks = list(_iter_chunks(prompt))
+    assert inner in chunks
+
+    monkeypatch.setenv(
+        "SWARPH_REDACT_CUSTOM_RULES",
+        json.dumps([{
+            "name": "CUSTPEM",
+            "pattern": r"-----BEGIN CUSTOMPEM-----[\s\S]{3000,}?-----END CUSTOMPEM-----",
+        }]),
+    )
+    rc, out, err = _run({"hook_event_name": "UserPromptSubmit", "prompt": prompt}, capsys)
+    assert rc == 0
+    assert err == ""
+    parsed = json.loads(out)
+    assert parsed["decision"] == "block"
+    assert "custom-rule credential" in parsed["reason"]
+
+
+def test_c2_carry_after_sliced_long_line_catches_next_line_value(capsys):
+    long_line = ("word " * 518) + "pass" + "word:"
+    assert len(long_line) > _CHUNK_CHARS
+    secret_val = "p@ss" + "w0rdX"
+    prompt = long_line + "\n  " + secret_val + "\n"
+    assert _chunk_classes("  " + secret_val) == []
+
+    rc, out, err = _run({"hook_event_name": "UserPromptSubmit", "prompt": prompt}, capsys)
+    assert rc == 0
+    assert err == ""
+    parsed = json.loads(out)
+    assert parsed["decision"] == "block"
+    assert "DSN credential" in parsed["reason"]
+    _assert_no_secret_echo(secret_val, out, err)

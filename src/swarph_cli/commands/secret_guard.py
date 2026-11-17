@@ -89,6 +89,9 @@ Rework #5670 (S chunked scanning; its P4' filter is removed above):
       most ``_MAX_PEM_CHARS`` (8192) characters is kept whole; larger
       ``BEGIN..END`` spans are sliced like ordinary lines so slow lines
       between ``BEGIN`` and ``END`` obey chunking and the time budget.
+      G3 (#5753): the PEM marker pre-pass and unit splitter each run in
+      one single linear pass via ``_PEM_MARKER_SCAN_RE.finditer`` under
+      the shared ``_SCAN_BUDGET_SECONDS`` deadline with no 64-marker cap.
       The first hit blocks. Fail-open ONLY when a
       ``_SCAN_BUDGET_SECONDS`` (~3 s) time budget runs out mid-scan;
       then the hook allows the prompt but emits a ``systemMessage``
@@ -205,6 +208,8 @@ _ENVELOPE_RES = [
     re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL),
     re.compile(r"<channel\s[^>]*\bsource\s*=[^>]*>.*?</channel>", re.DOTALL),
 ]
+_WS_RE = re.compile(r"\s*")
+_PEM_MARKER_SCAN_RE = re.compile(r"-----(BEGIN|END) ([A-Z0-9 ]+)-----")
 _HARNESS_SOURCE_VALUES = {
     "system", "harness", "channel", "task_notification",
     "task-notification", "peer",
@@ -254,15 +259,20 @@ def _is_harness_turn(payload: dict, prompt: str) -> bool:
     # E (#5667): only when the WHOLE prompt is one or more complete
     # envelopes separated by whitespace. Text between envelopes (or
     # around a single one) is not exempt and is scanned normally.
-    rest = prompt.lstrip("\ufeff").lstrip()
+    n = len(prompt)
+    pos = 0
+    while pos < n and prompt[pos] == "\ufeff":
+        pos += 1
+    pos = _WS_RE.match(prompt, pos).end()
+    if pos >= n:
+        return False
     count = 0
-    while rest.strip():
-        rest = rest.lstrip()
+    while pos < n:
         matched = False
         for pat in _ENVELOPE_RES:
-            m = pat.match(rest)
+            m = pat.match(prompt, pos)
             if m:
-                rest = rest[m.end():]
+                pos = _WS_RE.match(prompt, m.end()).end()
                 count += 1
                 matched = True
                 break
@@ -271,79 +281,127 @@ def _is_harness_turn(payload: dict, prompt: str) -> bool:
     return count >= 1
 
 
-def _pem_envelope_classes(text: str) -> list[str]:
-    """Linear scan for any BEGIN..END marker pair that redact's PEM layer
-    flags, even when the body between them exceeds _MAX_PEM_CHARS (R-1, #5744)."""
+def _pem_envelope_classes(
+    text: str, deadline: Optional[float] = None
+) -> tuple[list[str], bool]:
+    """Single-pass linear scan for any BEGIN..END marker pair that redact's PEM
+    layer flags, even when the body between them exceeds _MAX_PEM_CHARS (G3, #5753).
+    """
+    if deadline is None:
+        deadline = time.monotonic() + _SCAN_BUDGET_SECONDS
     if "-----BEGIN " not in text or "-----END " not in text:
-        return []
-    markers: list[str] = []
-    seen_begins: set[str] = set()
-    seen_ends: set[str] = set()
-    pos, n = 0, len(text)
-    while pos < n and len(markers) < 64:
-        b = text.find("-----BEGIN ", pos)
-        e = text.find("-----END ", pos)
-        if b == -1 and e == -1:
-            break
-        if b != -1 and (e == -1 or b < e):
-            close = text.find("-----", b + 11, b + 96)
-            if close != -1:
-                label = text[b + 11:close]
-                hdr = text[b:close + 5]
-                if label and all("A" <= c <= "Z" or "0" <= c <= "9" or c == " " for c in label):
-                    if hdr not in seen_begins:
-                        seen_begins.add(hdr)
-                        markers.append(hdr)
-                pos = close + 5
-            else:
-                pos = b + 11
+        return [], True
+
+    first_begin: dict[str, int] = {}
+    last_end: dict[str, int] = {}
+    for step, m in enumerate(_PEM_MARKER_SCAN_RE.finditer(text)):
+        if (step & 255) == 0 and time.monotonic() > deadline:
+            return [], False
+        kind = m.group(1)
+        label = m.group(2)
+        if kind == "BEGIN":
+            if label not in first_begin:
+                first_begin[label] = m.start()
         else:
-            close = text.find("-----", e + 9, e + 96)
-            if close != -1:
-                label = text[e + 9:close]
-                ftr = text[e:close + 5]
-                if seen_begins and label and all("A" <= c <= "Z" or "0" <= c <= "9" or c == " " for c in label):
-                    if ftr in seen_ends:
-                        markers.remove(ftr)
-                    seen_ends.add(ftr)
-                    markers.append(ftr)
-                pos = close + 5
-            else:
-                pos = e + 9
-    if not seen_begins or not seen_ends:
-        return []
-    return [c for c in _classes_of("\n".join(markers)) if c == "PEM private key"]
+            last_end[label] = m.start()
+
+    if not first_begin or not last_end or min(first_begin.values()) >= max(last_end.values()):
+        return [], True
+
+    labels = sorted(first_begin.keys() | last_end.keys())
+    pk_labels: set[str] = set()
+    batch: list[tuple[str, str]] = []
+    batch_len = 0
+
+    def _flush_batch() -> bool:
+        nonlocal batch, batch_len
+        if not batch:
+            return True
+        if time.monotonic() > deadline:
+            return False
+        if "PEM private key" in _classes_of("\n".join(pair for _, pair in batch)):
+            for lbl, pair in batch:
+                if time.monotonic() > deadline:
+                    return False
+                if "PEM private key" in _classes_of(pair):
+                    pk_labels.add(lbl)
+        batch = []
+        batch_len = 0
+        return True
+
+    for lbl in labels:
+        pair = f"-----BEGIN {lbl}-----\n-----END {lbl}-----"
+        if len(pair) > _CHUNK_CHARS:
+            continue
+        added = len(pair) + (1 if batch else 0)
+        if batch and batch_len + added > _CHUNK_CHARS:
+            if not _flush_batch():
+                return [], False
+            added = len(pair)
+        batch.append((lbl, pair))
+        batch_len += added
+
+    if not _flush_batch():
+        return [], False
+
+    b_hit = min(((pos, lbl) for lbl, pos in first_begin.items() if lbl in pk_labels), default=None)
+    e_hit = max(((pos, lbl) for lbl, pos in last_end.items() if lbl in pk_labels), default=None)
+    if b_hit is not None and e_hit is not None and b_hit[0] < e_hit[0]:
+        if time.monotonic() > deadline:
+            return [], False
+        return [
+            c for c in _classes_of(f"-----BEGIN {b_hit[1]}-----\n-----END {e_hit[1]}-----")
+            if c == "PEM private key"
+        ], True
+    return [], True
 
 
 def _atomic_units(text: str) -> Iterator[tuple[bool, str]]:
-    """Yield ``(is_pem, unit)`` pieces. A kept-whole PEM unit starts at the
-    ``-----BEGIN`` marker itself (not the start of its line, G2 #5744) and
-    spans at most ``_MAX_PEM_CHARS`` chars through ``-----END...-----``."""
-    plain_start = 0
-    scan = 0
+    """Yield ``(is_pem, unit)`` pieces lazily in a single linear pass (G3, #5753).
+
+    A kept-whole PEM unit starts at the ``-----BEGIN`` marker itself (G2, #5744)
+    and spans at most ``_MAX_PEM_CHARS`` chars through ``-----END...-----``.
+    Plain text far behind the scan cursor flushes incrementally so early chunks
+    are scanned without waiting for later markers.
+    """
     n = len(text)
-    while scan < n:
-        b = text.find("-----BEGIN", scan)
-        if b == -1:
-            break
-        e = text.find("-----END", b + 10, b + _MAX_PEM_CHARS)
-        close = text.find("-----", e + 8, b + _MAX_PEM_CHARS + 64) if e != -1 else -1
-        nested = text.find("-----BEGIN", b + 10, e) if close != -1 else -1
-        if close != -1 and nested == -1 and (close + 5 - b) <= _MAX_PEM_CHARS:
-            pem_end = close + 5
-            if pem_end < n and text[pem_end] == "\r":
-                pem_end += 1
-            if pem_end < n and text[pem_end] == "\n":
-                pem_end += 1
-            if b > plain_start:
-                pre_end = b if text[b - 1] == "\n" else min(n, b + _CHUNK_OVERLAP)
-                for line in text[plain_start:pre_end].splitlines(True):
+    plain_start = 0
+    pending_begin: Optional[int] = None
+
+    for m in _PEM_MARKER_SCAN_RE.finditer(text):
+        m_start = m.start()
+        if pending_begin is not None and (m_start - pending_begin) > _MAX_PEM_CHARS:
+            pending_begin = None
+
+        safe_end = pending_begin if pending_begin is not None else m_start
+        if safe_end - plain_start >= _CHUNK_CHARS:
+            nl = text.rfind("\n", plain_start, safe_end)
+            flush_to = (nl + 1) if nl != -1 else safe_end
+            if flush_to > plain_start:
+                for line in text[plain_start:flush_to].splitlines(True):
                     yield False, line
-            yield True, text[b:pem_end]
-            plain_start = pem_end if text[pem_end - 1] == "\n" else max(b + 1, pem_end - _CHUNK_OVERLAP)
-            scan = pem_end
+                plain_start = flush_to
+
+        if m.group(1) == "BEGIN":
+            pending_begin = m_start
         else:
-            scan = nested if nested != -1 else b + 10
+            m_end = m.end()
+            if pending_begin is not None and (m_end - pending_begin) <= _MAX_PEM_CHARS:
+                b = pending_begin
+                pending_begin = None
+                pem_end = m_end
+                if pem_end < n and text[pem_end] == "\r":
+                    pem_end += 1
+                if pem_end < n and text[pem_end] == "\n":
+                    pem_end += 1
+                if b > plain_start:
+                    for line in text[plain_start:b].splitlines(True):
+                        yield False, line
+                yield True, text[b:pem_end]
+                plain_start = pem_end
+            else:
+                pending_begin = None
+
     if plain_start < n:
         for line in text[plain_start:].splitlines(True):
             yield False, line
@@ -403,8 +461,8 @@ def _iter_chunks(text: str) -> Iterator[str]:
         if is_pem:
             if dirty and buf:
                 yield buf
-                buf = ""
-                dirty = False
+            buf = ""
+            dirty = False
             yield unit
             continue
         combined = (buf + unit) if buf else unit
@@ -447,7 +505,9 @@ def _detect_classes(prompt: str) -> tuple[list[str], bool]:
     deadline = time.monotonic() + _SCAN_BUDGET_SECONDS
     if time.monotonic() > deadline:
         return [], False
-    pem_classes = _pem_envelope_classes(prompt)
+    pem_classes, complete = _pem_envelope_classes(prompt, deadline)
+    if not complete:
+        return [], False
     if pem_classes:
         return pem_classes, True
     for chunk in _iter_chunks(prompt):
