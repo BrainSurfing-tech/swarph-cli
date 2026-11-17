@@ -569,6 +569,7 @@ answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not comman
 - `swarph roster` -- the gateway capacity table (card #1061): who builds, who reviews, quota, who is out until when. `swarph roster --peer <peer>`, `swarph roster set <peer> --roles build` (operators only).
 - `swarph rowclear-hook` -- SessionStart hook (card #432): when `source` is `clear`, write the new session id into the role's `<role>.session-id` pin so the next spawn resumes the cleared session.
 - `swarph scan` -- statically scan an artifact for dangerous patterns before publish.
+- `swarph secret-guard` -- Claude Code secret guard hook (`hook`): blocks prompts containing credential material (redact classes only, values never shown) and denies Bash reads of credential files; fails open on crash.
 - `swarph schedule` -- the gateway's scheduled events: create, list, get, enable, disable, delete, fire-now.
 - `swarph subscribe` -- targeted event subscriptions: add, list, cancel, each with `--as <you>` and `--json`. Add takes `--trigger obligation_state|card_stage|time --target <id-or-HH:MMZ>`; `--cell` defaults to yourself and only lab or the commander may name another cell. Expiry defaults to 7 days (30 maximum); choose `--days` or `--expires-at`. CI-status triggers are not included.
 - `swarph service` -- stand up a $0 subscription-LLM HTTP lane.
