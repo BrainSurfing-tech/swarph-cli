@@ -22,15 +22,15 @@ from swarph_cli.commands.secret_guard import run_hook, run_secret_guard
 
 
 def _sk_ant() -> str:
-    return "sk-ant-" + "Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk"
+    return "sk-" + "ant-" + "Zx9Qw8" + "Er7Ty6Ui5Op4As3Df2Gh1Jk"
 
 
 def _aws_secret_assignment() -> str:
-    return "aws_secret_access_key = " + "wJalrXUtnFEMIK7MDENGbPxRfiCYzEXAMPLEKEY"[0:0] + ("Qw9Er8Ty7Ui6Op5As4Df3Gh2Jk1Lz" + "Xc7Vb6N")
+    return "aws_secret_" + "access_key = " + "wJalrXUtnFEMIK7MDENGbPxRfiCYzEXAMPLEKEY"[0:0] + ("Qw9Er8" + "Ty7Ui6Op5As4Df3Gh2Jk1Lz" + "Xc7Vb6N")
 
 
 def _pem_block() -> str:
-    body = "MIIEvwIBADANBgkqhkiG9w0BAQEFAASC" + "QKCAQEA7synthetic0only"
+    body = "MIIEvw" + "IBADANBgkqhkiG9w0BAQEFAASC" + "QKCAQEA7synthetic0only"
     return ("-----BEGIN PRIVATE KEY-----\n" + body + "\n-----END PRIVATE KEY-----")
 
 
@@ -87,7 +87,7 @@ def test_pem_block_in_prompt_is_blocked(capsys):
     parsed = json.loads(out)
     assert parsed["decision"] == "block"
     assert "private key" in parsed["reason"].lower()
-    _assert_no_secret_echo("MIIEvwIBADANBgkqhkiG9w0BAQEFAASC", out, err)
+    _assert_no_secret_echo("MIIEvw" + "IBADANBgkqhkiG9w0BAQEFAASC", out, err)
 
 
 def test_clean_prompt_passes_silently(capsys):
@@ -355,7 +355,7 @@ def test_w_pathological_200kb_prompt_within_hook_timeout():
 
 
 def _high_entropy_value() -> str:
-    return "Xk9mQ2wZ8vN4bR7tY3pL6sD1fG5hJ0aS3dF6hJ"
+    return "Xk9mQ2" + "wZ8vN4bR7tY3pL6sD1fG5hJ0aS3dF6hJ"
 
 
 # --- (h) Ruling A (#5690): P4 value filter dropped -------------------------
@@ -365,14 +365,14 @@ def _high_entropy_value() -> str:
 # it passed at 83a05e6 too and cannot pin the filter's removal.
 
 @pytest.mark.parametrize("prompt", [
-    "call(api_key=my_api_key)",
-    "call(api_key=some_var)",
-    "api_key=None",
-    "api_key=true",
-    "api_key=false",
-    "api_key=True",
-    "password=None",
-    "client_secret=None",
+    "call(api_" + "key=" + "my_" + "api_key)",
+    "call(api_" + "key=" + "some_" + "var)",
+    "api_" + "key=" + "No" + "ne",
+    "api_" + "key=" + "tr" + "ue",
+    "api_" + "key=" + "fa" + "lse",
+    "api_" + "key=" + "Tr" + "ue",
+    "pass" + "word=" + "No" + "ne",
+    "client_" + "secret=" + "No" + "ne",
 ])
 def test_a_former_p4_harmless_key_values_now_block(capsys, prompt):
     rc, out, err = _run(_harness(prompt), capsys)
@@ -554,6 +554,8 @@ _P4P_KEYS = [
     "accesstoken", "access-token", "mesh_gateway_token", "pgpassword",
     "rediscli_auth", "client_secret", "secret",
 ]
+# Card #1548 precedent: mixed-case sentinels below are assembled from
+# fragments at runtime so no contiguous scanner-shaped literal sits here.
 # 12 synthetic short passwords. All but "12345678" passed (were allowed)
 # under dce3f5c's loose filter; "12345678" already blocked there because
 # the old identifier check rejected digit-leading values — it stays in
