@@ -67,12 +67,35 @@ Rework #5667 (P4/C/T/I/E):
       a following reader command a new command. A here-string
       (``cat <<< .env``) or an echo that only prints ``.env`` text is
       not a file read and is allowed.
-  T   Work is capped BEFORE redact runs: prompts longer than
-      ``_MAX_REDACT_CHARS`` (16384) characters are NOT passed to redact
-      at all and fail open (allowed, no block), consistent with this
-      guard's crash policy. Redact's CLI patterns are quadratic on
-      pathological repeated-word input, so an unbounded prompt could
-      otherwise exceed the 5-second hook timeout.
+  T   (superseded by S in #5670 — the 16 KB cap is removed.)
+
+Rework #5670 (P4' narrow value filter + S chunked scanning):
+
+  P4' The value filter judges the WHOLE value after a secret key (up
+      to the next space, comma, quote or bracket, plus ``;``/``&`` DSN
+      separators). Harmless ONLY when the whole value is exactly
+      ``None``/``true``/``false`` (any case), the key's own name
+      (``api_key=api_key``), or a lower-case name containing an
+      underscore or a dot (snake_case / dotted config path, the
+      Python-kwarg-variable case). Every other value after a secret
+      key stays a hit, including short/weak-looking passwords. This
+      narrows #5667 P4, which filtered any short/bare identifier.
+  S   The whole prompt is scanned in chunks of at most
+      ``_CHUNK_CHARS`` (2048) characters, keeping whole lines together
+      where they fit and cutting long lines with a
+      ``_CHUNK_OVERLAP`` (512) character overlap, so a key straddling
+      a cut is still seen in full in the neighbouring chunk (512 far
+      exceeds the longest fixed credential-pattern context redact
+      needs: the 21-char ``aws_secret_access_key`` key plus separator
+      and its 20-char minimum value is 44 chars; Bearer needs 19).
+      A ``-----BEGIN ... -----END-----`` PEM block is never split
+      across chunks (it is yielded whole even if over the chunk
+      size). The first hit blocks. Fail-open ONLY when a
+      ``_SCAN_BUDGET_SECONDS`` (~3 s) time budget runs out mid-scan;
+      then the hook allows the prompt but emits a ``systemMessage``
+      saying the prompt was not fully scanned — never a silent pass.
+      The old 16384-char silent cap (``_MAX_REDACT_CHARS``) is gone:
+      prompts of any length are scanned, chunk by chunk.
   I   Identifier scrubbing is by SHAPE, wherever the shape appears:
       ``toolu_`` + >=24 chars, ``req_``/``msg_`` ids, and UUIDs. A
       generic high-entropy value after an id label (``session_id=…``,
@@ -90,7 +113,8 @@ import os
 import re
 import shlex
 import sys
-from typing import Optional
+import time
+from typing import Iterator, Optional
 
 from swarph_cli import redact
 
@@ -117,9 +141,15 @@ _MARKER_RE = re.compile(r"\[REDACTED:([A-Z0-9_]+)(?::[A-Z0-9_]+)?\]")
 
 _READERS = {"cat", "head", "tail", "less", "more", "strings", "xxd"}
 
-# T (#5667): cap BEFORE redact. Prompts longer than this are not passed
-# to redact at all and fail open (allowed) — see module docstring.
-_MAX_REDACT_CHARS = 16384
+# S (#5670): chunked scanning — no whole-prompt cap. Each chunk is at
+# most this many chars (a PEM block yielded whole may exceed it).
+_CHUNK_CHARS = 2048
+# Overlap when a single long line must be cut: sized so a credential
+# pattern straddling a cut is fully present in a neighbouring chunk.
+# Longest fixed context redact needs is ~44 chars (see docstring).
+_CHUNK_OVERLAP = 512
+# Fail-open only when this budget runs out mid-scan (with systemMessage).
+_SCAN_BUDGET_SECONDS = 3.0
 
 
 def _classes_of(text: str) -> list[str]:
@@ -128,9 +158,8 @@ def _classes_of(text: str) -> list[str]:
     Detection is forced with opt-out disabled: SWARPH_REDACT_OPTOUT and
     opt-out events are an emission feature of redact, not a guard bypass.
     Built ONLY on redact's layers — no second pattern set lives here.
+    Callers pass chunks (S, #5670); this helper itself has no size cap.
     """
-    if len(text) > _MAX_REDACT_CHARS:
-        return []
     saved_env = os.environ.pop("SWARPH_REDACT_OPTOUT", None)
     ctx = getattr(redact, "_OPT_OUT_CTX", None)
     token = ctx.set(False) if ctx is not None else None
@@ -167,17 +196,21 @@ _ENVELOPE_RES = [
     re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL),
     re.compile(r"<channel\s[^>]*\bsource\s*=[^>]*>.*?</channel>", re.DOTALL),
 ]
-# P4 (#5667): value-shape post-filter for redact's key=value / Bearer hits.
+# P4' (#5670, narrowing #5667 P4): value post-filter for redact's
+# key=value / Bearer hits. The value is the WHOLE token up to the next
+# space, comma, quote or bracket (plus ``;``/``&`` DSN separators and
+# ``<``/``>``), so symbols/digits/case inside it are all judged.
+_VALUE_CHARS = r"[^\s,\"'\[\]\(\)\{\};&<>]+"
 _GENERIC_ASSIGN_RE = re.compile(
     r"(?P<prefix>\b[A-Za-z0-9_-]+\s*[:=]\s*[\"']?)"
-    r"(?P<val>[A-Za-z0-9_][A-Za-z0-9_\-./+~=]*)"
+    r"(?P<val>" + _VALUE_CHARS + r")"
     r"(?P<quote>[\"']?)"
 )
 _BEARER_VALUE_RE = re.compile(
-    r"(?i)(?P<prefix>\bBearer\s+)(?P<val>[A-Za-z0-9_\-._~+/]+={0,2})"
+    r"(?i)(?P<prefix>\bBearer\s+)(?P<val>" + _VALUE_CHARS + r")"
 )
-_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_NONSECRET_LITERALS = {"none", "true", "false", "null", "undefined", "nil", "token"}
+_NONSECRET_LITERALS = {"none", "true", "false"}
+_SNAKE_OR_DOTTED_RE = re.compile(r"[a-z_][a-z0-9_.]*")
 
 _HARNESS_SOURCE_VALUES = {
     "system", "harness", "channel", "task_notification",
@@ -205,23 +238,24 @@ def _strip_id_values(prompt: str) -> str:
     return _ID_SHAPE_RE.sub(_sub, prompt)
 
 
-def _is_nonsecret_value(value: str) -> bool:
-    """True when a key=value / Bearer value is not secret-shaped (P4):
-    a literal None/true/false/token, or a bare Python identifier naming
-    a variable (snake_case of any length that is not itself a standalone
-    secret, or a short identifier). Known credentials never qualify."""
+def _is_nonsecret_value(value: str, key: str = "") -> bool:
+    """True only for the P4' (#5670) harmless forms, judged on the
+    WHOLE value: exactly ``None``/``true``/``false`` (any case), the
+    key's own name, or a lower-case name containing an underscore or
+    a dot (snake_case / dotted config path). Every other value —
+    including short/weak-looking passwords — stays a hit. A value
+    redact classes as a KNOWN credential never qualifies."""
     v = value.strip("\"'")
     if v.lower() in _NONSECRET_LITERALS:
         return True
-    if not _IDENTIFIER_RE.fullmatch(v):
-        return False
+    if key and v.lower().replace("-", "_") == key.lower().replace("-", "_"):
+        return True
     classes = _classes_of(v)
     if classes and classes != ["high-entropy secret"]:
         return False
-    if "_" in v:
-        standalone = getattr(redact, "_is_standalone_secret", None)
-        return not (callable(standalone) and standalone(v))
-    return len(v) < 16
+    return bool(
+        _SNAKE_OR_DOTTED_RE.fullmatch(v) and ("_" in v or "." in v)
+    )
 
 
 def _strip_nonsecret_values(prompt: str) -> str:
@@ -236,14 +270,14 @@ def _strip_nonsecret_values(prompt: str) -> str:
                 "token", "secret", "key", "pass", "cred", "auth",
                 "private", "pwd")):
             return m.group(0)
-        if _is_nonsecret_value(m.group("val")):
+        if _is_nonsecret_value(m.group("val"), key):
             # Drop the whole assignment: any replacement value after a
             # DSN key (api_key=ID) would itself be a redact DSN hit.
             return "ID"
         return m.group(0)
 
     def _bearer_sub(m: re.Match) -> str:
-        if _is_nonsecret_value(m.group("val")):
+        if _is_nonsecret_value(m.group("val"), "bearer"):
             return f"{m.group('prefix')}ID"
         return m.group(0)
 
@@ -291,16 +325,82 @@ def _is_harness_turn(payload: dict, prompt: str) -> bool:
     return count >= 1
 
 
-def _detect_classes(prompt: str) -> list[str]:
-    classes = _classes_of(prompt)
+def _atomic_units(text: str) -> Iterator[str]:
+    """Yield lines, except a -----BEGIN ... -----END----- block is
+    one atomic unit so a PEM block is never split (S, #5670)."""
+    lines = text.splitlines(True)
+    i, n = 0, len(lines)
+    while i < n:
+        if "-----BEGIN" in lines[i]:
+            buf = [lines[i]]
+            i += 1
+            while i < n and "-----END" not in buf[-1]:
+                buf.append(lines[i])
+                i += 1
+            yield "".join(buf)
+        else:
+            yield lines[i]
+            i += 1
+
+
+def _iter_chunks(text: str) -> Iterator[str]:
+    """Yield chunks of at most ``_CHUNK_CHARS`` chars (S, #5670):
+    whole lines are kept together where they fit, a single long line
+    is cut with ``_CHUNK_OVERLAP`` chars of overlap, and a PEM block
+    is yielded whole even when it exceeds the chunk size."""
+    current = ""
+    for unit in _atomic_units(text):
+        if "-----BEGIN" in unit and "-----END" in unit:
+            if current:
+                yield current
+                current = ""
+            yield unit
+            continue
+        if len(unit) > _CHUNK_CHARS:
+            if current:
+                yield current
+                current = ""
+            start = 0
+            while start < len(unit):
+                end = min(start + _CHUNK_CHARS, len(unit))
+                yield unit[start:end]
+                if end >= len(unit):
+                    break
+                start = end - _CHUNK_OVERLAP
+            continue
+        if current and len(current) + len(unit) > _CHUNK_CHARS:
+            yield current
+            current = unit
+        else:
+            current += unit
+    if current:
+        yield current
+
+
+def _chunk_classes(chunk: str) -> list[str]:
+    classes = _classes_of(chunk)
     if not classes:
         return []
-    scrubbed = _strip_nonsecret_values(_strip_id_values(prompt))
-    if scrubbed == prompt:
+    scrubbed = _strip_nonsecret_values(_strip_id_values(chunk))
+    if scrubbed == chunk:
         return classes
     # If every hit came from an id-shaped or non-secret-shaped value,
     # it was identifiers / non-secret values, not credentials.
     return _classes_of(scrubbed)
+
+
+def _detect_classes(prompt: str) -> tuple[list[str], bool]:
+    """Scan ``prompt`` chunk by chunk (S, #5670). Returns
+    ``(classes, complete)``: first hit wins; ``complete`` is False
+    only when the time budget ran out before every chunk was scanned."""
+    deadline = time.monotonic() + _SCAN_BUDGET_SECONDS
+    for chunk in _iter_chunks(prompt):
+        if time.monotonic() > deadline:
+            return [], False
+        classes = _chunk_classes(chunk)
+        if classes:
+            return classes, True
+    return [], True
 
 
 def _is_credential_path(arg: str) -> bool:
@@ -498,6 +598,20 @@ def _block_prompt(classes: list[str]) -> int:
     return 0
 
 
+def _allow_not_fully_scanned() -> int:
+    """Fail open on scan-budget expiry (S, #5670): allow, but never
+    silently — the output carries a systemMessage saying so."""
+    json.dump({
+        "systemMessage": (
+            "swarph secret-guard (#1642): prompt was not fully "
+            "scanned (scan time budget exceeded); it was allowed "
+            "without a complete secret check."
+        )
+    }, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
 def _deny_bash(path: str) -> int:
     # F3: name the path CLASS only — never the file's base name.
     json.dump({
@@ -532,8 +646,10 @@ def _run_hook(stdin_text: Optional[str]) -> int:
             return 0
         if _is_harness_turn(payload, prompt):
             return 0
-        classes = _detect_classes(prompt)
-        return _block_prompt(classes) if classes else 0
+        classes, complete = _detect_classes(prompt)
+        if classes:
+            return _block_prompt(classes)
+        return 0 if complete else _allow_not_fully_scanned()
 
     if event == "PreToolUse":
         tool = payload.get("tool_name") or payload.get("toolName") or ""

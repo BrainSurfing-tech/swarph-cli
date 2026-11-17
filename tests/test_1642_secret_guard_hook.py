@@ -417,7 +417,11 @@ def test_c_here_string_and_echo_printing_env_allowed(capsys, command):
     assert out == "", command
 
 
-# --- (j) T: cap before redact ------------------------------------------------
+# --- (j) T (was: cap before redact; now S/#5670 chunked scan) ---------------
+# #5667 asserted these prompts return within 5s because >16 KB prompts
+# were skipped entirely. #5670 removes that cap: the same prompts are
+# now fully scanned in chunks, must still return within 5s via the
+# installed verb, and must not be blocked (they carry no credential).
 
 @pytest.mark.parametrize("word", ["curl", "mysql"])
 def test_t_200kb_repeated_word_prompt_within_5s(word):
@@ -433,6 +437,7 @@ def test_t_200kb_repeated_word_prompt_within_5s(word):
     elapsed = time.monotonic() - start
     assert proc.returncode == 0
     assert elapsed < 5
+    assert '"decision": "block"' not in proc.stdout
 
 
 # --- (k) I: id scrubbing by shape -------------------------------------------
@@ -499,6 +504,189 @@ def test_e_text_between_envelopes_is_scanned_and_blocks(capsys):
     assert rc == 0
     assert json.loads(out)["decision"] == "block"
     _assert_no_secret_echo(secret, out, err)
+
+
+# --- (m) P4' (#5670): narrow whole-value filter -----------------------------
+# Every DSN key redact matches (redact._DSN_KEY_VALUE_RE spellings), plus
+# Bearer and the AWS/assignment-layer keys where redact fires on the value
+# length used. Short values after aws_* keys are not redact hits at all
+# (redact length-gates them at 20+), so those keys are covered below with
+# a redact-matching value, not with the short-password matrix.
+_P4P_KEYS = [
+    "password", "passwd", "pwd", "api_key", "apikey", "api-key",
+    "auth_token", "authtoken", "auth-token", "access_token",
+    "accesstoken", "access-token", "mesh_gateway_token", "pgpassword",
+    "rediscli_auth", "client_secret", "secret",
+]
+# 12 synthetic short passwords. All but "12345678" passed (were allowed)
+# under dce3f5c's loose filter; "12345678" already blocked there because
+# the old identifier check rejected digit-leading values — it stays in
+# the matrix so the narrow filter keeps blocking it.
+_P4P_PASSWORDS = [
+    "p@ss" + "w0rdX",        # symbol as second character
+    "a!bcd" + "efgH",        # symbol as second character, mixed case
+    "Abc12" + "3xy",         # mixed case with digits (8 chars)
+    "Xy9!a" + "bcZ",         # mixed case, digits and symbol (8 chars)
+    "letmein",          # weak lower-case word
+    "abc12345",         # lower-case + digits
+    "hunt" + "er!2A",        # symbol mid-value, mixed case
+    "My_Pas" + "sw0rd",      # mixed case with underscore
+    "Qwerty" + "!23",        # mixed case with symbol
+    "Ab3dEf6h" + "Ij9KlMn",  # 15-char mixed-case password
+    "Ab1Cd2Ef3" + "Gh4Ij5",  # 15-char token string (Bearer length, below)
+    "12345678",         # digits only (already blocked at dce3f5c)
+]
+
+
+@pytest.mark.parametrize("key", _P4P_KEYS)
+@pytest.mark.parametrize("password", _P4P_PASSWORDS)
+def test_p4p_short_password_blocks_under_each_secret_key(capsys, key, password):
+    prompt = f"{key}={password}"
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block", prompt
+    _assert_no_secret_echo(password, out, err)
+
+
+@pytest.mark.parametrize("key", _P4P_KEYS)
+def test_p4p_four_word_passphrase_blocks_under_each_secret_key(capsys, key):
+    prompt = f"{key}=correct horse battery staple"
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block", prompt[:40]
+
+
+@pytest.mark.parametrize("key", _P4P_KEYS)
+@pytest.mark.parametrize("value", [
+    "None", "true", "false", "True",
+])
+def test_p4p_literal_harmless_values_pass_under_each_key(capsys, key, value):
+    rc, out, err = _run(_harness(f"{key}={value}"), capsys)
+    assert rc == 0
+    assert out == "", f"{key}={value}"
+
+
+@pytest.mark.parametrize("key", _P4P_KEYS)
+def test_p4p_own_name_and_variable_harmless_values_pass(capsys, key):
+    for value in (key, "some_var", "my_api_key", "config.api_key",
+                  "settings.mesh_gateway_token"):
+        rc, out, err = _run(_harness(f"{key}={value}"), capsys)
+        assert rc == 0
+        assert out == "", f"{key}={value}"
+
+
+def test_p4p_15char_password_inside_dsn_line_blocks(capsys):
+    prompt = ("host=db.internal " + "pass" + "word="
+              + "Ab3dEf6h" + "Ij9KlMn" + " dbname=app user=svc")
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block"
+    _assert_no_secret_echo("Ab3dEf6h" + "Ij9KlMn", out, err)
+
+
+def test_p4p_password_variable_in_front_of_psql_blocks(capsys):
+    for prompt in (
+        "PGPASS" + "WORD=" + "Xy9!" + "abcZ" + " psql -h db.internal -U svc app",
+        "pgpass" + "word=" + "p@ss" + "w0rdX" + " psql -h db.internal -U svc app",
+    ):
+        rc, out, err = _run(_harness(prompt), capsys)
+        assert rc == 0
+        assert json.loads(out)["decision"] == "block", prompt[:30]
+
+
+def test_p4p_15char_bearer_token_blocks(capsys):
+    secret = "Ab1Cd2" + "Ef3Gh4Ij5"
+    assert len(secret) == 15
+    rc, out, err = _run(
+        _harness(f"Authorization: Bearer {secret}"), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block"
+    _assert_no_secret_echo(secret, out, err)
+
+
+@pytest.mark.parametrize("key", [
+    "aws_secret_access_key", "aws_session_token",
+    "db_password", "private_key", "my_token",
+])
+def test_p4p_assignment_layer_keys_block_on_redact_matching_value(capsys, key):
+    secret = _high_entropy_value()
+    rc, out, err = _run(_harness(f"{key}={secret}"), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block", key
+    _assert_no_secret_echo(secret, out, err)
+
+
+# --- (n) S (#5670): chunked scanning replaces the 16 KB cap ------------------
+
+_LOG_LINE = "2026-01-01 INFO worker processed request ok status=200 duration_ms=12\n"
+
+
+def _log_prompt(size: int, where: str) -> str:
+    secret = "api_" + "key=" + "Abc" + "123xy"
+    base = _LOG_LINE * ((size // len(_LOG_LINE)) + 2)
+    if where == "start":
+        return (secret + " " + base)[:size]
+    if where == "end":
+        return (base[:size - len(secret) - 1] + " " + secret)[:size]
+    mid = size // 2
+    return (base[:mid] + " " + secret + " " + base[mid:])[:size]
+
+
+@pytest.mark.parametrize("size", [16_385, 100_000, 1_000_000])
+@pytest.mark.parametrize("where", ["start", "middle", "end"])
+def test_s_large_log_prompt_blocks_at_any_position(capsys, size, where):
+    prompt = _log_prompt(size, where)
+    assert ("api_" + "key=" + "Abc" + "123xy") in prompt
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block", (size, where)
+
+
+@pytest.mark.parametrize("filler_pairs,key_at", [(1020, 2040), (1022, 2044)])
+def test_s_key_straddling_chunk_boundary_on_long_line_blocks(
+        capsys, filler_pairs, key_at):
+    line = "a " * filler_pairs + "api_" + "key=" + "Abc" + "123xy" + " b" * 1500
+    assert line.index("api_key") == key_at
+    rc, out, err = _run(_harness(line), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block"
+    _assert_no_secret_echo("Abc" + "123xy", out, err)
+
+
+def test_s_chunks_never_exceed_limit_and_pem_stays_whole():
+    pem = ("-----BEGIN " + "PRIVATE KEY-----\n" + "A" * 3000
+           + "\n-----END " + "PRIVATE KEY-----\n")
+    text = "log line ok\n" * 300 + pem + "tail line\n" * 10
+    chunks = list(secret_guard._iter_chunks(text))
+    pem_chunks = [c for c in chunks if "-----" + "BEGIN" in c]
+    assert len(pem_chunks) == 1
+    assert "-----END " + "PRIVATE KEY-----" in pem_chunks[0]
+    for chunk in chunks:
+        if "-----" + "BEGIN" not in chunk:
+            assert len(chunk) <= secret_guard._CHUNK_CHARS
+    plain = list(secret_guard._iter_chunks("x" * 10_000))
+    assert all(len(c) <= secret_guard._CHUNK_CHARS for c in plain)
+
+
+def test_s_pem_block_inside_large_prompt_blocks(capsys):
+    prompt = (_LOG_LINE * 500) + _pem_block() + "\n" + (_LOG_LINE * 500)
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block"
+
+
+def test_s_budget_expiry_fails_open_with_system_message(capsys, monkeypatch):
+    monkeypatch.setattr(secret_guard, "_SCAN_BUDGET_SECONDS", -1.0)
+    rc, out, err = _run(
+        _harness("ordinary prompt with no secret material at all"), capsys)
+    assert rc == 0
+    parsed = json.loads(out)
+    assert "not fully scanned" in parsed["systemMessage"]
+    assert "decision" not in parsed
+
+
+def test_s_no_silent_cap_constant_remains():
+    assert not hasattr(secret_guard, "_MAX_REDACT_CHARS")
 
 
 def test_cli_entrypoint_hook_reads_stdin(capsys, monkeypatch):
