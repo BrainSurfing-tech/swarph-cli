@@ -52,15 +52,15 @@ rather than accidental. Identifier scrubbing (``_strip_id_values``)
 is fail-closed: a value redact classes as a KNOWN credential is never
 scrubbed, so ``request_id: sk-ant-…`` still blocks.
 
-Rework #5667 (P4/C/T/I/E):
+Rework #5667 (C/T/I/E) and ruling A (#5690, drops P4):
 
-  P4  a key=value / Bearer hit whose VALUE is not secret-shaped (a bare
-      Python identifier naming a variable, ``None``/``true``/``false``,
-      or the literal word ``token`` after Bearer) does not block. This is
-      a guard-level post-filter on redact's hits by value shape — redact
-      stays the only credential pattern source, no second pattern set.
-      A secret-shaped value after the same keys still blocks, and a
-      value redact classes as a KNOWN credential is never filtered.
+  P4  REMOVED by commander ruling A (#5690): the guard-level value
+      post-filter added in #5667/#5670 (``_strip_nonsecret_values`` /
+      ``_is_nonsecret_value``) is dropped entirely. Redact's
+      key=value and Bearer layers now block exactly as they did at
+      head 83a05e6 (pre-P4): any value redact marks after a secret
+      key blocks, including snake_case, ``None``/``true``/``false``
+      and the key's own name. No value-shape filter remains.
   C   Bash tokenisation runs shlex with NO comment characters, so a
       ``#`` comment line, a trailing ``#`` comment, or a ``#`` inside a
       word on an earlier line can never swallow the newline that makes
@@ -69,17 +69,8 @@ Rework #5667 (P4/C/T/I/E):
       not a file read and is allowed.
   T   (superseded by S in #5670 — the 16 KB cap is removed.)
 
-Rework #5670 (P4' narrow value filter + S chunked scanning):
+Rework #5670 (S chunked scanning; its P4' filter is removed above):
 
-  P4' The value filter judges the WHOLE value after a secret key (up
-      to the next space, comma, quote or bracket, plus ``;``/``&`` DSN
-      separators). Harmless ONLY when the whole value is exactly
-      ``None``/``true``/``false`` (any case), the key's own name
-      (``api_key=api_key``), or a lower-case name containing an
-      underscore or a dot (snake_case / dotted config path, the
-      Python-kwarg-variable case). Every other value after a secret
-      key stays a hit, including short/weak-looking passwords. This
-      narrows #5667 P4, which filtered any short/bare identifier.
   S   The whole prompt is scanned in chunks of at most
       ``_CHUNK_CHARS`` (2048) characters, keeping whole lines together
       where they fit and cutting long lines with a
@@ -196,22 +187,6 @@ _ENVELOPE_RES = [
     re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL),
     re.compile(r"<channel\s[^>]*\bsource\s*=[^>]*>.*?</channel>", re.DOTALL),
 ]
-# P4' (#5670, narrowing #5667 P4): value post-filter for redact's
-# key=value / Bearer hits. The value is the WHOLE token up to the next
-# space, comma, quote or bracket (plus ``;``/``&`` DSN separators and
-# ``<``/``>``), so symbols/digits/case inside it are all judged.
-_VALUE_CHARS = r"[^\s,\"'\[\]\(\)\{\};&<>]+"
-_GENERIC_ASSIGN_RE = re.compile(
-    r"(?P<prefix>\b[A-Za-z0-9_-]+\s*[:=]\s*[\"']?)"
-    r"(?P<val>" + _VALUE_CHARS + r")"
-    r"(?P<quote>[\"']?)"
-)
-_BEARER_VALUE_RE = re.compile(
-    r"(?i)(?P<prefix>\bBearer\s+)(?P<val>" + _VALUE_CHARS + r")"
-)
-_NONSECRET_LITERALS = {"none", "true", "false"}
-_SNAKE_OR_DOTTED_RE = re.compile(r"[a-z_][a-z0-9_.]*")
-
 _HARNESS_SOURCE_VALUES = {
     "system", "harness", "channel", "task_notification",
     "task-notification", "peer",
@@ -236,53 +211,6 @@ def _strip_id_values(prompt: str) -> str:
         return "ID" if _scrubbable(m.group(0)) else m.group(0)
 
     return _ID_SHAPE_RE.sub(_sub, prompt)
-
-
-def _is_nonsecret_value(value: str, key: str = "") -> bool:
-    """True only for the P4' (#5670) harmless forms, judged on the
-    WHOLE value: exactly ``None``/``true``/``false`` (any case), the
-    key's own name, or a lower-case name containing an underscore or
-    a dot (snake_case / dotted config path). Every other value —
-    including short/weak-looking passwords — stays a hit. A value
-    redact classes as a KNOWN credential never qualifies."""
-    v = value.strip("\"'")
-    if v.lower() in _NONSECRET_LITERALS:
-        return True
-    if key and v.lower().replace("-", "_") == key.lower().replace("-", "_"):
-        return True
-    classes = _classes_of(v)
-    if classes and classes != ["high-entropy secret"]:
-        return False
-    return bool(
-        _SNAKE_OR_DOTTED_RE.fullmatch(v) and ("_" in v or "." in v)
-    )
-
-
-def _strip_nonsecret_values(prompt: str) -> str:
-    """Post-filter redact's generic key=value / Bearer hits by value
-    shape (P4): replace only non-secret-shaped values with ``ID`` so
-    redact no longer fires on them. Secret-shaped values are left
-    untouched and still block. No credential patterns live here."""
-
-    def _assign_sub(m: re.Match) -> str:
-        key = re.split(r"[:=]", m.group("prefix"))[0].strip("\"' ").lower()
-        if not any(word in key for word in (
-                "token", "secret", "key", "pass", "cred", "auth",
-                "private", "pwd")):
-            return m.group(0)
-        if _is_nonsecret_value(m.group("val"), key):
-            # Drop the whole assignment: any replacement value after a
-            # DSN key (api_key=ID) would itself be a redact DSN hit.
-            return "ID"
-        return m.group(0)
-
-    def _bearer_sub(m: re.Match) -> str:
-        if _is_nonsecret_value(m.group("val"), "bearer"):
-            return f"{m.group('prefix')}ID"
-        return m.group(0)
-
-    return _GENERIC_ASSIGN_RE.sub(
-        _assign_sub, _BEARER_VALUE_RE.sub(_bearer_sub, prompt))
 
 
 def _is_harness_turn(payload: dict, prompt: str) -> bool:
@@ -381,11 +309,11 @@ def _chunk_classes(chunk: str) -> list[str]:
     classes = _classes_of(chunk)
     if not classes:
         return []
-    scrubbed = _strip_nonsecret_values(_strip_id_values(chunk))
+    scrubbed = _strip_id_values(chunk)
     if scrubbed == chunk:
         return classes
-    # If every hit came from an id-shaped or non-secret-shaped value,
-    # it was identifiers / non-secret values, not credentials.
+    # If every hit came from an id-shaped value, it was identifiers,
+    # not credentials. (Ruling A: no value-shape post-filter remains.)
     return _classes_of(scrubbed)
 
 

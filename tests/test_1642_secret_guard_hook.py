@@ -8,6 +8,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import secrets
+import string
 import subprocess
 import sys
 import time
@@ -356,7 +358,11 @@ def _high_entropy_value() -> str:
     return "Xk9mQ2wZ8vN4bR7tY3pL6sD1fG5hJ0aS3dF6hJ"
 
 
-# --- (h) P4: non-secret values after secret keys do not block ---------------
+# --- (h) Ruling A (#5690): P4 value filter dropped -------------------------
+# Former P4 harmless forms that are redact key=value hits now BLOCK,
+# exactly as at 83a05e6 (pre-P4). The two old Bearer-phrase cases are
+# deleted, not flipped: "Bearer token" is not a redact hit at all, so
+# it passed at 83a05e6 too and cannot pin the filter's removal.
 
 @pytest.mark.parametrize("prompt", [
     "call(api_key=my_api_key)",
@@ -367,13 +373,40 @@ def _high_entropy_value() -> str:
     "api_key=True",
     "password=None",
     "client_secret=None",
-    "use a Bearer token for authentication",
-    "Authorization: Bearer token",
 ])
-def test_p4_nonsecret_values_pass(capsys, prompt):
+def test_a_former_p4_harmless_key_values_now_block(capsys, prompt):
     rc, out, err = _run(_harness(prompt), capsys)
     assert rc == 0
-    assert out == "", prompt
+    assert json.loads(out)["decision"] == "block", prompt
+
+
+@pytest.mark.parametrize("key", ["api_key", "password", "token"])
+def test_a_40char_value_after_secret_key_blocks(capsys, key):
+    alphabet = string.ascii_letters + string.digits
+    value = "".join(secrets.choice(alphabet) for _ in range(40))
+    assert len(value) == 40
+    rc, out, err = _run(_harness(f"{key}={value}"), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block", key
+    _assert_no_secret_echo(value, out, err)
+
+
+def test_a_bearer_40hex_blocks_bare_and_in_curl(capsys):
+    value = "".join(secrets.choice("0123456789abcdef") for _ in range(40))
+    assert len(value) == 40
+    for prompt in (
+        f"Authorization: Bearer {value}",
+        f"curl -H 'Authorization: Bearer {value}' https://example.invalid",
+    ):
+        rc, out, err = _run(_harness(prompt), capsys)
+        assert rc == 0
+        assert json.loads(out)["decision"] == "block", prompt[:30]
+        _assert_no_secret_echo(value, out, err)
+
+
+def test_a_no_value_filter_remains():
+    assert not hasattr(secret_guard, "_strip_nonsecret_values")
+    assert not hasattr(secret_guard, "_is_nonsecret_value")
 
 
 @pytest.mark.parametrize("prompt_builder", [
@@ -506,7 +539,10 @@ def test_e_text_between_envelopes_is_scanned_and_blocks(capsys):
     _assert_no_secret_echo(secret, out, err)
 
 
-# --- (m) P4' (#5670): narrow whole-value filter -----------------------------
+# --- (m) P4' matrix, kept under ruling A as blocking pins -------------------
+# The short-password / passphrase / Bearer blocking matrix from #5670
+# stays (it asserted BLOCK and still does); only its two harmless-pass
+# tests were flipped above to BLOCK (renamed test_a_*).
 # Every DSN key redact matches (redact._DSN_KEY_VALUE_RE spellings), plus
 # Bearer and the AWS/assignment-layer keys where redact fires on the value
 # length used. Short values after aws_* keys are not redact hits at all
@@ -560,19 +596,23 @@ def test_p4p_four_word_passphrase_blocks_under_each_secret_key(capsys, key):
 @pytest.mark.parametrize("value", [
     "None", "true", "false", "True",
 ])
-def test_p4p_literal_harmless_values_pass_under_each_key(capsys, key, value):
+def test_a_literal_values_now_block_under_each_key(capsys, key, value):
+    # Flipped from test_p4p_literal_harmless_values_pass_under_each_key
+    # (ruling A): these were allowed only by the dropped P4 filter.
     rc, out, err = _run(_harness(f"{key}={value}"), capsys)
     assert rc == 0
-    assert out == "", f"{key}={value}"
+    assert json.loads(out)["decision"] == "block", f"{key}={value}"
 
 
 @pytest.mark.parametrize("key", _P4P_KEYS)
-def test_p4p_own_name_and_variable_harmless_values_pass(capsys, key):
+def test_a_own_name_and_variable_values_now_block(capsys, key):
+    # Flipped from test_p4p_own_name_and_variable_harmless_values_pass
+    # (ruling A): snake_case / dotted / own-name values now block.
     for value in (key, "some_var", "my_api_key", "config.api_key",
                   "settings.mesh_gateway_token"):
         rc, out, err = _run(_harness(f"{key}={value}"), capsys)
         assert rc == 0
-        assert out == "", f"{key}={value}"
+        assert json.loads(out)["decision"] == "block", f"{key}={value}"
 
 
 def test_p4p_15char_password_inside_dsn_line_blocks(capsys):
