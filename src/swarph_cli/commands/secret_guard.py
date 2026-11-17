@@ -271,80 +271,87 @@ def _is_harness_turn(payload: dict, prompt: str) -> bool:
     return count >= 1
 
 
-def _split_inline_pem(line: str) -> Iterator[str]:
-    """Slice a long single line containing inline ``-----BEGIN`` markers so
-    PEM blocks of at most ``_MAX_PEM_CHARS`` stay whole while surrounding
-    or oversized spans remain sliceable (R2, #5735)."""
-    pos, n = 0, len(line)
-    while pos < n:
-        b = line.find("-----BEGIN", pos)
-        if b == -1:
-            yield line[pos:]
-            return
-        e = line.find("-----END", b + 10, b + _MAX_PEM_CHARS)
-        close = line.find("-----", e + 8, b + _MAX_PEM_CHARS + 64) if e != -1 else -1
-        if close != -1 and (close + 5 - b) <= _MAX_PEM_CHARS:
-            pem_end = close + 5
-            if b > pos:
-                yield line[pos:min(n, b + _CHUNK_OVERLAP)]
-            yield line[b:pem_end]
-            if pem_end >= n:
-                return
-            pos = max(b + 1, pem_end - _CHUNK_OVERLAP)
+def _pem_envelope_classes(text: str) -> list[str]:
+    """Linear scan for any BEGIN..END marker pair that redact's PEM layer
+    flags, even when the body between them exceeds _MAX_PEM_CHARS (R-1, #5744)."""
+    if "-----BEGIN " not in text or "-----END " not in text:
+        return []
+    markers: list[str] = []
+    seen_begins: set[str] = set()
+    seen_ends: set[str] = set()
+    pos, n = 0, len(text)
+    while pos < n and len(markers) < 64:
+        b = text.find("-----BEGIN ", pos)
+        e = text.find("-----END ", pos)
+        if b == -1 and e == -1:
+            break
+        if b != -1 and (e == -1 or b < e):
+            close = text.find("-----", b + 11, b + 96)
+            if close != -1:
+                label = text[b + 11:close]
+                hdr = text[b:close + 5]
+                if label and all("A" <= c <= "Z" or "0" <= c <= "9" or c == " " for c in label):
+                    if hdr not in seen_begins:
+                        seen_begins.add(hdr)
+                        markers.append(hdr)
+                pos = close + 5
+            else:
+                pos = b + 11
         else:
-            # BEGIN has no matching END within _MAX_PEM_CHARS: advance past
-            # this BEGIN marker; if no later BEGIN exists, yield line[pos:].
-            nxt = line.find("-----BEGIN", b + 10)
-            if nxt == -1:
-                yield line[pos:]
-                return
-            yield line[pos:min(n, nxt + _CHUNK_OVERLAP)]
-            pos = nxt
+            close = text.find("-----", e + 9, e + 96)
+            if close != -1:
+                label = text[e + 9:close]
+                ftr = text[e:close + 5]
+                if seen_begins and label and all("A" <= c <= "Z" or "0" <= c <= "9" or c == " " for c in label):
+                    if ftr in seen_ends:
+                        markers.remove(ftr)
+                    seen_ends.add(ftr)
+                    markers.append(ftr)
+                pos = close + 5
+            else:
+                pos = e + 9
+    if not seen_begins or not seen_ends:
+        return []
+    return [c for c in _classes_of("\n".join(markers)) if c == "PEM private key"]
 
 
-def _atomic_units(text: str) -> Iterator[str]:
-    """Yield lines, except a ``-----BEGIN ... -----END-----`` block of at
-    most ``_MAX_PEM_CHARS`` chars is kept whole (S #5670, R2 #5735)."""
-    lines = text.splitlines(True)
-    i, n = 0, len(lines)
-    while i < n:
-        line = lines[i]
-        if "-----BEGIN" in line:
-            if "-----END" in line:
-                if len(line) <= _MAX_PEM_CHARS:
-                    yield line
-                else:
-                    yield from _split_inline_pem(line)
-                i += 1
-                continue
-            if len(line) <= _MAX_PEM_CHARS:
-                buf = [line]
-                size = len(line)
-                j = i + 1
-                found_end = False
-                while j < n and size + len(lines[j]) <= _MAX_PEM_CHARS:
-                    nxt_line = lines[j]
-                    if "-----BEGIN" in nxt_line and "-----END" not in nxt_line:
-                        break
-                    buf.append(nxt_line)
-                    size += len(nxt_line)
-                    found_end = "-----END" in nxt_line
-                    j += 1
-                    if found_end:
-                        break
-                if found_end:
-                    yield "".join(buf)
-                    i = j
-                    continue
-        yield line
-        i += 1
+def _atomic_units(text: str) -> Iterator[tuple[bool, str]]:
+    """Yield ``(is_pem, unit)`` pieces. A kept-whole PEM unit starts at the
+    ``-----BEGIN`` marker itself (not the start of its line, G2 #5744) and
+    spans at most ``_MAX_PEM_CHARS`` chars through ``-----END...-----``."""
+    plain_start = 0
+    scan = 0
+    n = len(text)
+    while scan < n:
+        b = text.find("-----BEGIN", scan)
+        if b == -1:
+            break
+        e = text.find("-----END", b + 10, b + _MAX_PEM_CHARS)
+        close = text.find("-----", e + 8, b + _MAX_PEM_CHARS + 64) if e != -1 else -1
+        nested = text.find("-----BEGIN", b + 10, e) if close != -1 else -1
+        if close != -1 and nested == -1 and (close + 5 - b) <= _MAX_PEM_CHARS:
+            pem_end = close + 5
+            if pem_end < n and text[pem_end] == "\r":
+                pem_end += 1
+            if pem_end < n and text[pem_end] == "\n":
+                pem_end += 1
+            if b > plain_start:
+                pre_end = b if text[b - 1] == "\n" else min(n, b + _CHUNK_OVERLAP)
+                for line in text[plain_start:pre_end].splitlines(True):
+                    yield False, line
+            yield True, text[b:pem_end]
+            plain_start = pem_end if text[pem_end - 1] == "\n" else max(b + 1, pem_end - _CHUNK_OVERLAP)
+            scan = pem_end
+        else:
+            scan = nested if nested != -1 else b + 10
+    if plain_start < n:
+        for line in text[plain_start:].splitlines(True):
+            yield False, line
 
 
 def _slice_long(unit: str) -> Iterator[str]:
     """Slice a >``_CHUNK_CHARS`` unit on non-token boundaries within
-    ``_BOUNDARY_WINDOW``, pre-scrubbing oversized id tokens (R1, #5735)."""
-    if any(m.end() - m.start() >= _BOUNDARY_WINDOW for m in _ID_SHAPE_RE.finditer(unit)):
-        unit = _strip_id_values(unit)
+    ``_BOUNDARY_WINDOW`` (R1, #5735)."""
     n = len(unit)
     start = 0
     while start < n:
@@ -368,52 +375,57 @@ def _slice_long(unit: str) -> Iterator[str]:
         start = next_start
 
 
+def _carry_tail(buf: str) -> str:
+    """Carry the last ``_CHUNK_OVERLAP`` chars across a batch flush, snapped
+    backward within ``_BOUNDARY_WINDOW`` so the carry never starts mid-token
+    (R-2, #5744)."""
+    if len(buf) <= _CHUNK_OVERLAP:
+        return buf
+    cut = len(buf) - _CHUNK_OVERLAP
+    if cut > 0 and buf[cut - 1] in _TOKEN_CHARS and buf[cut] in _TOKEN_CHARS:
+        lo = max(0, cut - _BOUNDARY_WINDOW)
+        for k in range(cut, lo - 1, -1):
+            if k == 0 or buf[k - 1] not in _TOKEN_CHARS:
+                cut = k
+                break
+    return buf[cut:]
+
+
 def _iter_chunks(text: str) -> Iterator[str]:
     """Yield chunks of at most ``_CHUNK_CHARS`` chars (S #5670, R1/R2 #5735):
-    whole lines are kept together where they fit (carrying trailing lines up to
-    ``_CHUNK_OVERLAP`` across batch boundaries), a single long line is cut at
-    non-token boundaries with at least ``_CHUNK_OVERLAP`` chars of overlap, and
-    a PEM block of at most ``_MAX_PEM_CHARS`` is yielded whole."""
-    buf_lines: list[str] = []
-    buf_len = 0
+    whole lines are kept together where they fit (carrying the last
+    ``_CHUNK_OVERLAP`` chars across batch boundaries), a single long line is
+    cut at non-token boundaries with at least ``_CHUNK_OVERLAP`` chars of
+    overlap, and a PEM block of at most ``_MAX_PEM_CHARS`` is yielded whole."""
+    buf = ""
     dirty = False
-
-    def _flush() -> Iterator[str]:
-        nonlocal buf_lines, buf_len, dirty
-        if dirty:
-            yield "".join(buf_lines)
-        buf_lines = []
-        buf_len = 0
-        dirty = False
-
-    for unit in _atomic_units(text):
-        if "-----BEGIN" in unit and "-----END" in unit and len(unit) <= _MAX_PEM_CHARS:
-            yield from _flush()
+    for is_pem, unit in _atomic_units(text):
+        if is_pem:
+            if dirty and buf:
+                yield buf
+                buf = ""
+                dirty = False
             yield unit
             continue
-        if len(unit) > _CHUNK_CHARS:
-            yield from _flush()
-            yield from _slice_long(unit)
+        combined = (buf + unit) if buf else unit
+        if len(combined) <= _CHUNK_CHARS:
+            buf = combined
+            dirty = True
             continue
-        if buf_lines and buf_len + len(unit) > _CHUNK_CHARS:
-            if dirty:
-                yield "".join(buf_lines)
-            overlap_budget = min(_CHUNK_OVERLAP, _CHUNK_CHARS - len(unit))
-            carried: list[str] = []
-            carry_len = 0
-            for ln in reversed(buf_lines):
-                if carry_len + len(ln) > overlap_budget:
-                    break
-                carried.append(ln)
-                carry_len += len(ln)
-            carried.reverse()
-            buf_lines = carried
-            buf_len = carry_len
-            dirty = False
-        buf_lines.append(unit)
-        buf_len += len(unit)
-        dirty = True
-    yield from _flush()
+        if len(unit) <= _CHUNK_CHARS and dirty:
+            yield buf
+            carried = _carry_tail(buf) + unit
+            if len(carried) <= _CHUNK_CHARS:
+                buf = carried
+                dirty = True
+                continue
+            combined = carried
+        for piece in _slice_long(combined):
+            yield piece
+        buf = _carry_tail(combined)
+        dirty = False
+    if dirty and buf:
+        yield buf
 
 
 def _chunk_classes(chunk: str) -> list[str]:
@@ -433,6 +445,11 @@ def _detect_classes(prompt: str) -> tuple[list[str], bool]:
     ``(classes, complete)``: first hit wins; ``complete`` is False
     only when the time budget ran out before every chunk was scanned."""
     deadline = time.monotonic() + _SCAN_BUDGET_SECONDS
+    if time.monotonic() > deadline:
+        return [], False
+    pem_classes = _pem_envelope_classes(prompt)
+    if pem_classes:
+        return pem_classes, True
     for chunk in _iter_chunks(prompt):
         if time.monotonic() > deadline:
             return [], False
