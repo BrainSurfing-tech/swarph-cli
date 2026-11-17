@@ -7,6 +7,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
 
 import pytest
 
@@ -180,6 +185,171 @@ def test_handler_crash_fails_open_with_warning(capsys, monkeypatch):
     assert out == ""
     assert "warning" in err.lower()
     _assert_no_secret_echo(secret, out, err)
+
+
+# --- (d) G1: harness turns + ids never block -------------------------------
+
+def _harness(prompt: str) -> dict:
+    return {"hook_event_name": "UserPromptSubmit", "prompt": prompt}
+
+
+def test_g1_task_notification_turn_passes_even_with_secret_shaped_content(capsys):
+    secret = _sk_ant()
+    prompt = (
+        "<task-notification>\n<task-id>task-123</task-id>\n"
+        f"<tool-use-id>toolu_01A2b3C4d5E6f7G8h9I0jKlMnOp</tool-use-id>\n"
+        f"<summary>used {secret}</summary>\n</task-notification>"
+    )
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert out == ""
+
+
+def test_g1_system_reminder_turn_passes(capsys):
+    secret = _sk_ant()
+    prompt = f"<system-reminder>\nreminder mentioning {secret}\n</system-reminder>"
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert out == ""
+
+
+def test_g1_channel_dm_turn_passes(capsys):
+    secret = _sk_ant()
+    prompt = (
+        '<channel source="plugin:swarph:swarph" from_node="peer-a" '
+        'id="msg-1" kind="dm" card="1">\n'
+        f"peer says {secret}\n</channel>"
+    )
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert out == ""
+
+
+def test_g1_unclosed_or_unanchored_envelope_still_blocked(capsys):
+    secret = _sk_ant()
+    for prompt in (
+        f"<task-notification>\nno closing tag {secret}",
+        f"please read <task-notification> {secret} </task-notification>",
+        f'<channel source="plugin:swarph:swarph">\n{secret}',
+    ):
+        rc, out, err = _run(_harness(prompt), capsys)
+        assert rc == 0
+        assert json.loads(out)["decision"] == "block", prompt[:40]
+
+
+def test_g1_payload_source_field_passes(capsys):
+    secret = _sk_ant()
+    payload = {"hook_event_name": "UserPromptSubmit", "prompt": f"use {secret}",
+               "promptSource": "system"}
+    rc, out, err = _run(payload, capsys)
+    assert rc == 0
+    assert out == ""
+
+
+def test_g1_ids_in_typed_prompt_pass(capsys):
+    prompts = [
+        "session 550e8400-e29b-41d4-a716-446655440000 finished ok",
+        "<tool-use-id>toolu_01A2b3C4d5E6f7G8h9I0jKlMnOpQrSt</tool-use-id> done",
+        "request_id: req_8f3kD9s2LpQ7xR4vN6mZ1aBcDeFgHiJkLm failed",
+        '"tool_use_id": "toolu_01A2b3C4d5E6f7G8h9I0jKlMnOpQrSt"',
+        "message id msg_01XyZ9aBcDeFgHiJkLmNoPqRsTuVwXyZ12 delivered",
+    ]
+    for prompt in prompts:
+        rc, out, err = _run(_harness(prompt), capsys)
+        assert rc == 0
+        assert out == "", prompt[:40]
+
+
+def test_g1_id_labelled_known_secret_still_blocked(capsys):
+    secret = _sk_ant()
+    rc, out, err = _run(_harness(f"request_id: {secret}"), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block"
+    _assert_no_secret_echo(secret, out, err)
+
+
+def test_g1_bare_secret_still_blocked(capsys):
+    secret = _sk_ant()
+    rc, out, err = _run(_harness(f"req_ please use {secret}"), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block"
+
+
+# --- (e) F1: redirection + command separators ------------------------------
+
+@pytest.mark.parametrize("command", [
+    "cat < x/.env",
+    "cat <x/.env",
+    "cat < ./prod.env",
+    "< x/.env cat",
+    "echo hi; cat x/.env",
+    "echo hi && cat x/.env",
+    "echo hi || cat x/.env",
+    "echo hi | cat x/.env",
+    "echo hi\ncat x/.env",
+    "echo hi\nsudo cat x/.env",
+    'echo "done"; cat x/.env',
+])
+def test_f1_redirect_and_separator_readers_denied(capsys, command):
+    rc, out, err = _run(_pretool(command), capsys)
+    assert rc == 0
+    parsed = json.loads(out)
+    assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny", command
+
+
+@pytest.mark.parametrize("command", [
+    'echo "; cat x/.env"',
+    "echo '; cat x/.env'",
+    "echo 'line1\ncat x/.env'",
+    'echo "a && cat x/.env"',
+    "grep TOKEN < x/.env",
+])
+def test_f1_quoted_separator_and_non_reader_redirect_pass(capsys, command):
+    rc, out, err = _run(_pretool(command), capsys)
+    assert rc == 0
+    assert out == "", command
+
+
+# --- (f) F3: deny reason names path class only -------------------------------
+
+@pytest.mark.parametrize("command,cls,basename", [
+    ("cat secrets/prod.env", ".env file", "prod.env"),
+    ("cat secrets/deploy.key", "key file", "deploy.key"),
+    ("cat x/auth.json", "auth.json credentials file", "x/auth.json"),
+    ("cat ~/.config/gh/hosts.yml", "gh hosts file", "hosts.yml"),
+])
+def test_f3_deny_reason_names_class_not_basename(capsys, command, cls, basename):
+    rc, out, err = _run(_pretool(command), capsys)
+    assert rc == 0
+    reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert cls in reason
+    if basename not in cls:
+        assert basename not in reason
+
+
+# --- (g) W: wiring + pathological prompt timing ------------------------------
+
+def test_w_wiring_documented_with_fail_open_and_timeout():
+    root = Path(__file__).resolve().parents[1]
+    guide = (root / "src" / "swarph_cli" / "guide" / "GUIDE.md").read_text(
+        encoding="utf-8")
+    assert "swarph secret-guard hook || exit 0" in guide
+    assert "5" in guide.split("swarph secret-guard hook || exit 0")[1][:200]
+
+
+def test_w_pathological_200kb_prompt_within_hook_timeout():
+    prompt = ("xK9mQ2wZ8vN4bR7tY3pL6sD1fG5hJ0a " * 7000)[:200_000]
+    payload = json.dumps(
+        {"hook_event_name": "UserPromptSubmit", "prompt": prompt})
+    src = str(Path(secret_guard.__file__).resolve().parents[2])
+    env = dict(os.environ, PYTHONPATH=src)
+    start = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, "-m", "swarph_cli", "secret-guard", "hook"],
+        input=payload, capture_output=True, text=True, timeout=5, env=env)
+    elapsed = time.monotonic() - start
+    assert proc.returncode == 0
+    assert elapsed < 5
 
 
 def test_cli_entrypoint_hook_reads_stdin(capsys, monkeypatch):
