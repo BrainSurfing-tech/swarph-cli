@@ -48,10 +48,38 @@ check. That is the unavoidable cost of never blocking harness turns
 when the only signal is the envelope; the framing is kept as structural
 as the real payloads allow (anchored at the start, closing tag at the
 end, ``source=`` required on channel) to keep the bypass deliberate
-rather than accidental. Identifier scrubbing (``_strip_id_values``) is
-likewise context-anchored (id-labelled or id-tagged values only) and
-fail-closed: a value redact classes as a KNOWN credential is never
+rather than accidental. Identifier scrubbing (``_strip_id_values``)
+is fail-closed: a value redact classes as a KNOWN credential is never
 scrubbed, so ``request_id: sk-ant-…`` still blocks.
+
+Rework #5667 (P4/C/T/I/E):
+
+  P4  a key=value / Bearer hit whose VALUE is not secret-shaped (a bare
+      Python identifier naming a variable, ``None``/``true``/``false``,
+      or the literal word ``token`` after Bearer) does not block. This is
+      a guard-level post-filter on redact's hits by value shape — redact
+      stays the only credential pattern source, no second pattern set.
+      A secret-shaped value after the same keys still blocks, and a
+      value redact classes as a KNOWN credential is never filtered.
+  C   Bash tokenisation runs shlex with NO comment characters, so a
+      ``#`` comment line, a trailing ``#`` comment, or a ``#`` inside a
+      word on an earlier line can never swallow the newline that makes
+      a following reader command a new command. A here-string
+      (``cat <<< .env``) or an echo that only prints ``.env`` text is
+      not a file read and is allowed.
+  T   Work is capped BEFORE redact runs: prompts longer than
+      ``_MAX_REDACT_CHARS`` (16384) characters are NOT passed to redact
+      at all and fail open (allowed, no block), consistent with this
+      guard's crash policy. Redact's CLI patterns are quadratic on
+      pathological repeated-word input, so an unbounded prompt could
+      otherwise exceed the 5-second hook timeout.
+  I   Identifier scrubbing is by SHAPE, wherever the shape appears:
+      ``toolu_`` + >=24 chars, ``req_``/``msg_`` ids, and UUIDs. A
+      generic high-entropy value after an id label (``session_id=…``,
+      a JSON ``id`` field) is NOT scrubbed and still blocks.
+  E   The text-envelope exemption applies only when the WHOLE prompt
+      is one or more complete envelopes separated by whitespace.
+      Text between envelopes is scanned normally.
 """
 from __future__ import annotations
 
@@ -89,6 +117,10 @@ _MARKER_RE = re.compile(r"\[REDACTED:([A-Z0-9_]+)(?::[A-Z0-9_]+)?\]")
 
 _READERS = {"cat", "head", "tail", "less", "more", "strings", "xxd"}
 
+# T (#5667): cap BEFORE redact. Prompts longer than this are not passed
+# to redact at all and fail open (allowed) — see module docstring.
+_MAX_REDACT_CHARS = 16384
+
 
 def _classes_of(text: str) -> list[str]:
     """Credential classes redact finds in ``text``, in redact's own order.
@@ -97,6 +129,8 @@ def _classes_of(text: str) -> list[str]:
     opt-out events are an emission feature of redact, not a guard bypass.
     Built ONLY on redact's layers — no second pattern set lives here.
     """
+    if len(text) > _MAX_REDACT_CHARS:
+        return []
     saved_env = os.environ.pop("SWARPH_REDACT_OPTOUT", None)
     ctx = getattr(redact, "_OPT_OUT_CTX", None)
     token = ctx.set(False) if ctx is not None else None
@@ -120,31 +154,35 @@ def _classes_of(text: str) -> list[str]:
 
 # --- G1: harness-turn exemption + identifier scrubbing ---------------------
 
-_CHANNEL_OPEN_RE = re.compile(r"<channel\s[^>]*\bsource\s*=")
-_ID_TAG_RE = re.compile(r"<([A-Za-z][A-Za-z0-9_-]*-[Ii][Dd])>([^<]{1,200})</\1>")
-_ID_LABELLED_RE = re.compile(
-    r"(?P<prefix>[\"']?[A-Za-z0-9_-]+[\"']?\s*[:=]\s*[\"'])"
-    r"(?P<val>[A-Za-z0-9_\-./+=]{8,})(?P<quote>[\"'])"
-    r"|(?P<prefix2>[\"']?[A-Za-z0-9_-]+[\"']?\s*[:=]\s*)"
-    r"(?P<val2>[A-Za-z0-9_\-./+=]{8,})"
-    r"|(?P<prefix3>(?i:tool[- ]use[- ]id|request[- ]id|message[- ]id"
-    r"|session[- ]id|prompt[- ]id)\s+[\"'])"
-    r"(?P<val3>[A-Za-z0-9_\-./+=]{8,})(?P<quote3>[\"'])"
-    r"|(?P<prefix4>(?i:tool[- ]use[- ]id|request[- ]id|message[- ]id"
-    r"|session[- ]id|prompt[- ]id)\s+)"
-    r"(?P<val4>[A-Za-z0-9_\-./+=]{8,})"
+# I (#5667): identifier shapes, scrubbed wherever they appear.
+_ID_SHAPE_RE = re.compile(
+    r"\btoolu_[A-Za-z0-9_\-]{24,}\b"
+    r"|\breq_[A-Za-z0-9_\-]{8,}\b"
+    r"|\bmsg_[A-Za-z0-9_\-]{8,}\b"
+    r"|\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
+_ENVELOPE_RES = [
+    re.compile(r"<task-notification>.*?</task-notification>", re.DOTALL),
+    re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL),
+    re.compile(r"<channel\s[^>]*\bsource\s*=[^>]*>.*?</channel>", re.DOTALL),
+]
+# P4 (#5667): value-shape post-filter for redact's key=value / Bearer hits.
+_GENERIC_ASSIGN_RE = re.compile(
+    r"(?P<prefix>\b[A-Za-z0-9_-]+\s*[:=]\s*[\"']?)"
+    r"(?P<val>[A-Za-z0-9_][A-Za-z0-9_\-./+~=]*)"
+    r"(?P<quote>[\"']?)"
+)
+_BEARER_VALUE_RE = re.compile(
+    r"(?i)(?P<prefix>\bBearer\s+)(?P<val>[A-Za-z0-9_\-._~+/]+={0,2})"
+)
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NONSECRET_LITERALS = {"none", "true", "false", "null", "undefined", "nil", "token"}
 
 _HARNESS_SOURCE_VALUES = {
     "system", "harness", "channel", "task_notification",
     "task-notification", "peer",
 }
-
-
-def _is_id_key(key: str) -> bool:
-    k = key.strip("\"'")
-    low = k.lower()
-    return low == "id" or low.endswith("_id") or low.endswith("-id") or k.endswith("Id")
 
 
 def _scrubbable(value: str) -> bool:
@@ -156,33 +194,61 @@ def _scrubbable(value: str) -> bool:
 
 
 def _strip_id_values(prompt: str) -> str:
-    """Replace id-context identifier values with ``ID`` (context-anchored:
-    ``<…-id>…</…-id>`` tags and ``*_id[:=]`` / ``… id `` labels only).
-    Bare tokens are never touched, so a bare secret still blocks."""
+    """Replace identifier-SHAPED values with ``ID`` wherever they appear
+    (I, #5667): ``toolu_``/``req_``/``msg_`` ids and UUIDs. A generic
+    high-entropy value after an id label is not id-shaped, so it is
+    never touched here and still blocks. Fail-closed via _scrubbable."""
 
-    def _tag_sub(m: re.Match) -> str:
-        if _scrubbable(m.group(2)):
-            return f"<{m.group(1)}>ID</{m.group(1)}>"
+    def _sub(m: re.Match) -> str:
+        return "ID" if _scrubbable(m.group(0)) else m.group(0)
+
+    return _ID_SHAPE_RE.sub(_sub, prompt)
+
+
+def _is_nonsecret_value(value: str) -> bool:
+    """True when a key=value / Bearer value is not secret-shaped (P4):
+    a literal None/true/false/token, or a bare Python identifier naming
+    a variable (snake_case of any length that is not itself a standalone
+    secret, or a short identifier). Known credentials never qualify."""
+    v = value.strip("\"'")
+    if v.lower() in _NONSECRET_LITERALS:
+        return True
+    if not _IDENTIFIER_RE.fullmatch(v):
+        return False
+    classes = _classes_of(v)
+    if classes and classes != ["high-entropy secret"]:
+        return False
+    if "_" in v:
+        standalone = getattr(redact, "_is_standalone_secret", None)
+        return not (callable(standalone) and standalone(v))
+    return len(v) < 16
+
+
+def _strip_nonsecret_values(prompt: str) -> str:
+    """Post-filter redact's generic key=value / Bearer hits by value
+    shape (P4): replace only non-secret-shaped values with ``ID`` so
+    redact no longer fires on them. Secret-shaped values are left
+    untouched and still block. No credential patterns live here."""
+
+    def _assign_sub(m: re.Match) -> str:
+        key = re.split(r"[:=]", m.group("prefix"))[0].strip("\"' ").lower()
+        if not any(word in key for word in (
+                "token", "secret", "key", "pass", "cred", "auth",
+                "private", "pwd")):
+            return m.group(0)
+        if _is_nonsecret_value(m.group("val")):
+            # Drop the whole assignment: any replacement value after a
+            # DSN key (api_key=ID) would itself be a redact DSN hit.
+            return "ID"
         return m.group(0)
 
-    def _label_sub(m: re.Match) -> str:
-        prefix = m.group("prefix") or m.group("prefix2") or ""
-        val = m.group("val") or m.group("val2") or ""
-        quote = m.group("quote") or ""
-        if m.group("val3") is not None or m.group("val4") is not None:
-            prefix = m.group("prefix3") or m.group("prefix4") or ""
-            val = m.group("val3") or m.group("val4") or ""
-            quote = m.group("quote3") or ""
-        if m.group("prefix") is not None or m.group("prefix2") is not None:
-            key = re.split(r"[:=]", prefix)[0]
-            if not _is_id_key(key):
-                return m.group(0)
-        if _scrubbable(val):
-            return f"{prefix}ID{quote}"
+    def _bearer_sub(m: re.Match) -> str:
+        if _is_nonsecret_value(m.group("val")):
+            return f"{m.group('prefix')}ID"
         return m.group(0)
 
-    out = _ID_TAG_RE.sub(_tag_sub, prompt)
-    return _ID_LABELLED_RE.sub(_label_sub, out)
+    return _GENERIC_ASSIGN_RE.sub(
+        _assign_sub, _BEARER_VALUE_RE.sub(_bearer_sub, prompt))
 
 
 def _is_harness_turn(payload: dict, prompt: str) -> bool:
@@ -205,25 +271,35 @@ def _is_harness_turn(payload: dict, prompt: str) -> bool:
         val = payload.get(key)
         if isinstance(val, str) and val.strip().lower() in _HARNESS_SOURCE_VALUES:
             return True
-    s = prompt.lstrip("\ufeff").lstrip()
-    stripped = s.rstrip()
-    if s.startswith("<task-notification>") and stripped.endswith("</task-notification>"):
-        return True
-    if s.startswith("<system-reminder>") and stripped.endswith("</system-reminder>"):
-        return True
-    if _CHANNEL_OPEN_RE.match(s) and stripped.endswith("</channel>"):
-        return True
-    return False
+    # E (#5667): only when the WHOLE prompt is one or more complete
+    # envelopes separated by whitespace. Text between envelopes (or
+    # around a single one) is not exempt and is scanned normally.
+    rest = prompt.lstrip("\ufeff").lstrip()
+    count = 0
+    while rest.strip():
+        rest = rest.lstrip()
+        matched = False
+        for pat in _ENVELOPE_RES:
+            m = pat.match(rest)
+            if m:
+                rest = rest[m.end():]
+                count += 1
+                matched = True
+                break
+        if not matched:
+            return False
+    return count >= 1
 
 
 def _detect_classes(prompt: str) -> list[str]:
     classes = _classes_of(prompt)
     if not classes:
         return []
-    scrubbed = _strip_id_values(prompt)
+    scrubbed = _strip_nonsecret_values(_strip_id_values(prompt))
     if scrubbed == prompt:
         return classes
-    # If every hit came from an id-context value, it was identifiers.
+    # If every hit came from an id-shaped or non-secret-shaped value,
+    # it was identifiers / non-secret values, not credentials.
     return _classes_of(scrubbed)
 
 
@@ -292,6 +368,7 @@ def _tokens(command: str) -> list[str]:
             _newlines_to_separators(command), posix=True,
             punctuation_chars="|&;()<>")
         lex.whitespace_split = True
+        lex.commenters = ""  # C (#5667): '#' never starts a comment
         return list(lex)
     except ValueError:
         return command.split()
@@ -344,6 +421,9 @@ def _segment_denial(seg: list[str]) -> Optional[str]:
     i, n = 0, len(seg)
     pre_redirect: Optional[str] = None
     while i < n:
+        if seg[i] in ("<<<", "<<"):
+            i += 2  # here-string / heredoc: target is text, not a file
+            continue
         if seg[i] in _REDIRECTS:
             if seg[i] == "<" and i + 1 < n:
                 pre_redirect = seg[i + 1]
@@ -365,6 +445,9 @@ def _segment_denial(seg: list[str]) -> Optional[str]:
         return pre_redirect
     while i < n:
         tok = seg[i]
+        if tok in ("<<<", "<<"):
+            i += 2  # here-string / heredoc text, not a file argument
+            continue
         if tok in _REDIRECTS:
             op = tok
             i += 1

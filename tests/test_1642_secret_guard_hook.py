@@ -352,6 +352,155 @@ def test_w_pathological_200kb_prompt_within_hook_timeout():
     assert elapsed < 5
 
 
+def _high_entropy_value() -> str:
+    return "Xk9mQ2wZ8vN4bR7tY3pL6sD1fG5hJ0aS3dF6hJ"
+
+
+# --- (h) P4: non-secret values after secret keys do not block ---------------
+
+@pytest.mark.parametrize("prompt", [
+    "call(api_key=my_api_key)",
+    "call(api_key=some_var)",
+    "api_key=None",
+    "api_key=true",
+    "api_key=false",
+    "api_key=True",
+    "password=None",
+    "client_secret=None",
+    "use a Bearer token for authentication",
+    "Authorization: Bearer token",
+])
+def test_p4_nonsecret_values_pass(capsys, prompt):
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert out == "", prompt
+
+
+@pytest.mark.parametrize("prompt_builder", [
+    lambda v: f"api_key={v}",
+    lambda v: f"password={v}",
+    lambda v: f"Authorization: Bearer {v}",
+])
+def test_p4_secret_shaped_value_after_same_keys_still_blocked(capsys, prompt_builder):
+    secret = _high_entropy_value()
+    prompt = prompt_builder(secret)
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block", prompt[:40]
+    _assert_no_secret_echo(secret, out, err)
+
+
+# --- (i) C: shlex with no comment characters --------------------------------
+
+@pytest.mark.parametrize("command", [
+    "# note\ncat x/.env",
+    "echo hi # note\ncat x/.env",
+    "echo a#b\ncat x/.env",
+    "echo foo#bar\ncat x/.env",
+])
+def test_c_comment_and_hash_lines_do_not_hide_reader(capsys, command):
+    rc, out, err = _run(_pretool(command), capsys)
+    assert rc == 0
+    parsed = json.loads(out)
+    assert parsed["hookSpecificOutput"]["permissionDecision"] == "deny", command
+
+
+@pytest.mark.parametrize("command", [
+    "echo .env",
+    "cat <<< .env",
+    "cat <<< 'x/.env'",
+    'cat <<< "x/.env"',
+])
+def test_c_here_string_and_echo_printing_env_allowed(capsys, command):
+    rc, out, err = _run(_pretool(command), capsys)
+    assert rc == 0
+    assert out == "", command
+
+
+# --- (j) T: cap before redact ------------------------------------------------
+
+@pytest.mark.parametrize("word", ["curl", "mysql"])
+def test_t_200kb_repeated_word_prompt_within_5s(word):
+    prompt = ((word + " ") * 50000)[:200_000]
+    payload = json.dumps(
+        {"hook_event_name": "UserPromptSubmit", "prompt": prompt})
+    src = str(Path(secret_guard.__file__).resolve().parents[2])
+    env = dict(os.environ, PYTHONPATH=src)
+    start = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, "-m", "swarph_cli", "secret-guard", "hook"],
+        input=payload, capture_output=True, text=True, timeout=5, env=env)
+    elapsed = time.monotonic() - start
+    assert proc.returncode == 0
+    assert elapsed < 5
+
+
+# --- (k) I: id scrubbing by shape -------------------------------------------
+
+@pytest.mark.parametrize("prompt", [
+    "tool_use_id toolu_01A2b3C4d5E6f7G8h9I0jKlMnOpQrStUv done",
+    "toolu_01A2b3C4d5E6f7G8h9I0jKlMnOpQrStUv done",
+    "request req_8f3kD9s2LpQ7xR4vN6mZ1aBcDeFgHiJkLmNoPq failed",
+    "req_8f3kD9s2LpQ7xR4vN6mZ1aBcDeFgHiJkLmNoPq failed",
+    "msg_01XyZ9aBcDeFgHiJkLmNoPqRsTuVwXyZ12 delivered",
+    "request 550e8400-e29b-41d4-a716-446655440000 finished",
+    "id 550e8400-e29b-41d4-a716-446655440000 finished",
+])
+def test_i_id_shapes_scrubbed_wherever_they_appear(capsys, prompt):
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert out == "", prompt[:50]
+
+
+@pytest.mark.parametrize("prompt_builder", [
+    lambda v: f"session_id={v}",
+    lambda v: f'"id": "{v}"',
+    lambda v: f"session_id: {v}",
+])
+def test_i_generic_high_entropy_after_id_label_still_blocked(capsys, prompt_builder):
+    secret = _high_entropy_value()
+    prompt = prompt_builder(secret)
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block", prompt[:40]
+    _assert_no_secret_echo(secret, out, err)
+
+
+def test_i_known_credential_never_scrubbed_in_id_context(capsys):
+    secret = _sk_ant()
+    for prompt in (f"tool_use_id {secret}", f"request {secret}"):
+        rc, out, err = _run(_harness(prompt), capsys)
+        assert rc == 0
+        assert json.loads(out)["decision"] == "block", prompt[:40]
+        _assert_no_secret_echo(secret, out, err)
+
+
+# --- (l) E: envelope exemption only for whole prompt -------------------------
+
+def test_e_multiple_complete_envelopes_pass(capsys):
+    secret = _sk_ant()
+    prompt = (
+        f"<system-reminder>\nmention {secret}\n</system-reminder>\n\n"
+        f"<task-notification>\nmention {secret}\n</task-notification>"
+    )
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert out == ""
+
+
+def test_e_text_between_envelopes_is_scanned_and_blocks(capsys):
+    secret = _sk_ant()
+    prompt = (
+        "<system-reminder>\nnote\n</system-reminder>\n"
+        f"use {secret} now\n"
+        "<task-notification>\nnote\n</task-notification>"
+    )
+    rc, out, err = _run(_harness(prompt), capsys)
+    assert rc == 0
+    assert json.loads(out)["decision"] == "block"
+    _assert_no_secret_echo(secret, out, err)
+
+
 def test_cli_entrypoint_hook_reads_stdin(capsys, monkeypatch):
     secret = _sk_ant()
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
