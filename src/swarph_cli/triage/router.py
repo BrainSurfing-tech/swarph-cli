@@ -6,8 +6,9 @@
     The sensor may pass a payload into the classifier, but payload text is
     never stored and never logged. The owner map is a DATA file the job
     reads (owners.json + local override), never a code constant. An organ
-    with no map entry is split onto lab-ovh's triage row and counted —
-    never dropped.
+    with no map entry is split onto the configured default owner's triage
+    row and counted — never dropped. With no default owner configured
+    (swarph_cli.escalation, card #1685) it is counted and routed nowhere.
 (2) Sharp/split thresholds live in that same data, written by a PROVEN
     calibration. This module contains NO confidence literal: a rule match
     is sharp without a threshold; a model result is sharp only when the
@@ -43,7 +44,8 @@ import json
 import os
 import re
 
-OWNER_DEFAULT = "lab-ovh"
+from swarph_cli import escalation
+
 ITEM_CAP = 10
 ACCEPT_MAX = 2000
 ROW_TITLE = "{owner} triage"
@@ -85,11 +87,18 @@ def load_owners(default_path: str, local_path: str | None = None) -> dict:
     return data
 
 
+def default_owner() -> "str | None":
+    """Where an unmapped organ or an unresolvable holder goes: the configured
+    escalation target, or None (no owner configured)."""
+    return escalation.target()
+
+
 def organ_owner(owners_map: dict, organ: str):
-    """(owner, unmapped): unknown organs route to lab-ovh and are counted."""
+    """(owner, unmapped): unknown organs route to the default owner and are
+    counted. The owner is None when none is configured."""
     entry = (owners_map.get("owners") or {}).get(organ)
     if not isinstance(entry, dict) or not entry.get("owner"):
-        return OWNER_DEFAULT, True
+        return default_owner(), True
     return entry["owner"], False
 
 

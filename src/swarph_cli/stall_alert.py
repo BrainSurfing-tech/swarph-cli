@@ -8,11 +8,13 @@ at the 30s poll) so a long build is not paged at 3 min.
 Card #989: the surface is one obligation, never a DM to commander by default.
 Card #1135: the row is held by the stalled cell. A valid responsible: key
 escalates to that peer within 2h. An unset, unreadable, or self-naming key
-escalates to lab-ovh within 2h (commander ruling 71915, applied 2026-10-28).
-lab-ovh's own stall is the exception: it is held by the other orchestrator
-and does not escalate to itself. A second stall tick while the row is open
-opens nothing new. A drain closes it. Fail-safe: a failed POST never raises
-and never blocks delivery."""
+escalates to the configured escalation target within 2h (commander ruling
+71915). Card #1685: that target comes from config (swarph_cli.escalation),
+never from this wheel; with none configured there is no second escalation and
+one line says so. The target's own stall is the exception: it is held by the
+configured alternate and does not escalate to itself. A second stall tick while
+the row is open opens nothing new. A drain closes it. Fail-safe: a failed POST
+never raises and never blocks delivery."""
 from __future__ import annotations
 
 import json
@@ -21,21 +23,19 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from swarph_cli import escalation
 from swarph_cli.console_safe import print_safe
 from swarph_cli.redact import encode_outbound_json
 
 _STALL_FIRST = 60  # first alert after this many consecutive deferred ticks
 _CARD = 989
-_HOLDER = "lab-ovh"
-# lab-ovh's own stall cannot escalate to lab-ovh. Another orchestrator holds it.
-_OTHER = "drop-on-meta-edge"
 # Card #1135. The `responsible:` key in the cell's OWN yaml names who the
 # timeout escalates to. This daemon runs inside the stalled cell, so that
 # yaml is local. claude_peers.owner is a Meta-Edge USER id, a person, and is
 # deliberately never read. An unset, unreadable, or self-naming key escalates
-# to RESPONSIBLE_FOR_OWNERLESS (ruling 71915). One constant, not a second path.
+# to the configured escalation target (ruling 71915), or to nobody when none is
+# configured. One lookup, not a second path.
 RESPONSIBLE_YAML_KEY = "responsible"
-RESPONSIBLE_FOR_OWNERLESS = "lab-ovh"
 # (2) Whether the commander also gets a copy at the first alert. Card #989: a DM
 #     to the commander is not a reminder, so the default is no.
 COMMANDER_COPY = False
@@ -43,7 +43,7 @@ COMMANDER_COPY = False
 _TIMEOUT_HOURS = 2
 # The gateway refuses a holder it does not hold with one of these (#510). ONLY
 # these retry with the default: a transient 408/429 (or 400/401/422/5xx) is not
-# "the responsible peer is unknown", and routing it to lab-ovh would let the open
+# "the responsible peer is unknown", and routing it to the target would let the open
 # row suppress the re-mint, so the responsible peer would never be told.
 _REFUSED_HOLDER_CODES = frozenset({403, 404, 409})
 _PREFIX = f"STALL card #{_CARD}"
@@ -131,27 +131,32 @@ def _responsible_from_yaml(self_name: str) -> str | None:
 def _holder_for(self_name: str) -> str:
     """Who holds the first alert: the stalled cell.
 
-    Its own drain closes the row. lab-ovh is not that holder, including for
-    lab-ovh's own stall, which the other orchestrator holds."""
-    if self_name == _HOLDER:
-        return _OTHER
+    Its own drain closes the row. The escalation target is not that holder,
+    including for its own stall, which the configured alternate holds (the
+    stalled cell itself when no alternate is configured)."""
+    if self_name == escalation.target():
+        return escalation.alternate() or self_name
     return self_name
 
 
 def _escalation_for(holder: str, self_name: str) -> str | None:
-    """The timeout target: the responsible peer, else the one constant.
+    """The timeout target: the responsible peer, else the configured target.
 
     A valid responsible: key that names neither the holder nor the stalled
     cell is the target. An unset, unreadable, or self-naming key escalates
-    to RESPONSIBLE_FOR_OWNERLESS, unless that constant is the holder or the
-    stalled cell (lab-ovh's own stall is already held by someone else). A
-    None here omits timeout_hours, and the gateway never sweeps a null
-    timeout_at."""
+    to the configured escalation target, unless that is the holder or the
+    stalled cell (the target's own stall is already held by someone else), or
+    none is configured (one line says so). A None here omits timeout_hours,
+    and the gateway never sweeps a null timeout_at."""
     responsible = _responsible_from_yaml(self_name)
     if responsible and responsible not in (holder, self_name):
         return responsible
-    if RESPONSIBLE_FOR_OWNERLESS not in (holder, self_name):
-        return RESPONSIBLE_FOR_OWNERLESS
+    owner = escalation.target()
+    if owner is None:
+        escalation.say_none("swarph-daemon", "stall escalation target")
+        return None
+    if owner not in (holder, self_name):
+        return owner
     return None
 
 
@@ -218,8 +223,8 @@ def send_stall_alert(gateway: str, token: str, self_name: str,
                      count: int, pending_n: int) -> bool:
     """Open one obligation on card #989 held by the stalled cell.
 
-    The timeout escalates to the cell's responsible peer, or to lab-ovh when
-    that key is unset, unreadable, or names the cell. True when that row is
+    The timeout escalates to the cell's responsible peer, or to the configured
+    escalation target when that key is unset, unreadable, or names the cell. True when that row is
     open (newly or already). False on any error, including a holder the
     gateway refuses: that refusal is not retried, so the next tick can try
     again. Never raises. DMs the commander only when COMMANDER_COPY is on.
@@ -231,7 +236,7 @@ def send_stall_alert(gateway: str, token: str, self_name: str,
         holder = _holder_for(self_name)
         note = ""
         # A refused holder, including _REFUSED_HOLDER_CODES, is not rerouted
-        # to lab-ovh. The next alert tick tries this cell again.
+        # to the target. The next alert tick tries this cell again.
         _ask(gateway, token, self_name, count, pending_n, holder, note)
         if COMMANDER_COPY:
             _request(

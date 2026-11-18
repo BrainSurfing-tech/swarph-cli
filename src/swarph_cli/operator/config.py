@@ -77,11 +77,19 @@ def save_config(
     cfg = OperatorConfig(identity=identity, gateway=gateway, token_file=token_file)
     cfg_path = path or CONFIG_PATH
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    payload: dict[str, Any] = {
+    # Card #1685: the escalation keys (swarph_cli.escalation) live in this file too.
+    # Re-saving identity/gateway/token_file must not erase them.
+    payload: dict[str, Any] = {}
+    try:
+        old = json.loads(cfg_path.read_text(encoding="utf-8"))
+        payload = old if isinstance(old, dict) else {}
+    except (OSError, ValueError):
+        pass
+    payload.update({
         "identity": cfg.identity,
         "gateway": cfg.gateway,
         "token_file": cfg.token_file,
-    }
+    })
     cfg_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     try:
         cfg_path.chmod(0o600)

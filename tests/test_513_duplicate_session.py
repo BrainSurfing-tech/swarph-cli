@@ -9,6 +9,9 @@ from __future__ import annotations
 import json
 
 import swarph_cli.duplicate_session as ds
+import pytest
+
+pytestmark = pytest.mark.usefixtures("lab_routing")  # card #1685: today's routing, declared
 
 
 def _monitor(cell, *extra):

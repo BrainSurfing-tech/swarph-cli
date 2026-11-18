@@ -5,9 +5,12 @@ A record is {source_organ, type, confidence, owner_hint, evidence,
 item_id, sharp, security}. Routing per the seven rulings:
 
 - stuck-work owner is the per-item blocking holder (owner_hint); an
-  unresolvable holder routes to lab-ovh and is counted (ruling 1).
-- other organs route via the owner map; unmapped organs route to lab-ovh
-  and are counted, never dropped (ruling 1).
+  unresolvable holder routes to the configured default owner and is counted
+  (ruling 1).
+- other organs route via the owner map; unmapped organs route to the default
+  owner and are counted, never dropped (ruling 1). With no default owner
+  configured (card #1685) the item is counted and routed nowhere; one line
+  says so.
 - needed-row-closed-race: no DM, no append, footer +1 (ruling 3).
 - split: footer split count per organ (ruling 2).
 - confident-benign: footer count + weekly sample, never a slot (ruling 5).
@@ -19,7 +22,9 @@ item_id, sharp, security}. Routing per the seven rulings:
 """
 from __future__ import annotations
 
-from .router import OWNER_DEFAULT, organ_owner
+from swarph_cli import escalation
+
+from .router import default_owner, organ_owner
 from .sensor import ORGAN_STUCK
 
 TYPE_CLOSED_RACE = "needed-row-closed-race"
@@ -66,9 +71,14 @@ def _route_one(store, owners_map, record, dm_sender, summary):
 
     owner, fell_back = _resolve_owner(owners_map, organ, record)
     if fell_back or record.get("unmapped"):
-        # unresolvable holder or unmapped organ: routed to lab-ovh AND
-        # counted (ruling 1).
+        # unresolvable holder or unmapped organ: routed to the default owner
+        # AND counted (ruling 1).
         store.count_unmapped(organ)
+
+    if owner is None:
+        escalation.say_none("swarph-triage", "default owner")
+        summary["unrouted"] = summary.get("unrouted", 0) + 1
+        return "unrouted"
 
     outcome = store.append_item(
         owner, item_id, item_type, security_first=security)
@@ -88,13 +98,13 @@ def _route_one(store, owners_map, record, dm_sender, summary):
 
 def _resolve_owner(owners_map: dict, organ: str, record: dict):
     """(owner, fell_back). Stuck-work: the per-item blocking holder;
-    unresolvable (None or non-peer) routes to lab-ovh. Other organs:
-    the owner map (unmapped -> lab-ovh)."""
+    unresolvable (None or non-peer) routes to the default owner. Other
+    organs: the owner map (unmapped -> default owner)."""
     if organ == ORGAN_STUCK:
         hint = record.get("owner_hint")
         is_peer = record.get("holder_is_peer", False)
         if hint and is_peer:
             return hint, False
-        return OWNER_DEFAULT, True
+        return default_owner(), True
     owner, unmapped = organ_owner(owners_map, organ)
     return owner, unmapped

@@ -21,6 +21,9 @@ from swarph_cli.cell import session_state_path
 from swarph_cli.commands import spawn
 from swarph_cli.commands import mesh
 from swarph_shared.cell import Cell
+import pytest
+
+pytestmark = pytest.mark.usefixtures("lab_routing")  # card #1685: today's routing, declared
 
 
 class TmuxSink:

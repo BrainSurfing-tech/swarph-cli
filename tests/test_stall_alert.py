@@ -2,6 +2,8 @@ import pytest
 
 import swarph_cli.stall_alert as st
 
+pytestmark = pytest.mark.usefixtures("lab_routing")  # card #1685: today's routing, declared
+
 
 @pytest.fixture(autouse=True)
 def _isolated_cells_dir(tmp_path, monkeypatch):
@@ -220,9 +222,11 @@ def test_first_alert_names_the_stalled_cell_and_notifies_its_responsible_peer(mo
 
 
 def test_responsible_peer_is_the_one_constant(monkeypatch):
-    """An ownerless stall is held by the cell. The one constant is who the
-    timeout escalates to, so flipping it moves that target and not the holder."""
-    assert st.RESPONSIBLE_FOR_OWNERLESS == "lab-ovh"
+    """An ownerless stall is held by the cell. The one configured escalation target
+    (a constant in the wheel before card #1685, so the test id is kept) is who the
+    timeout escalates to, so changing it moves that target and not the holder."""
+    from swarph_cli import escalation
+    assert escalation.target() == "lab-ovh"
     board = _Board()
     monkeypatch.setattr(st.urllib.request, "urlopen", board.handle)
     assert st.send_stall_alert("http://gw", "tok", "cell-x", 60, 1) is True
@@ -233,7 +237,7 @@ def test_responsible_peer_is_the_one_constant(monkeypatch):
 
     board2 = _Board()
     monkeypatch.setattr(st.urllib.request, "urlopen", board2.handle)
-    monkeypatch.setattr(st, "RESPONSIBLE_FOR_OWNERLESS", "science-claude")
+    monkeypatch.setenv("SWARPH_ESCALATION_TARGET", "science-claude")
     assert st.send_stall_alert("http://gw", "tok", "cell-y", 60, 1) is True
     body = _ask_body(board2)
     assert body["holder"] == "cell-y"
@@ -327,7 +331,7 @@ def test_responsible_key_in_own_yaml_is_the_holder_at_the_first_alert(monkeypatc
 
 def _assert_falls_back(body, cell="cell-x"):
     assert body["holder"] == cell
-    assert body["fallback_target"] == st.RESPONSIBLE_FOR_OWNERLESS
+    assert body["fallback_target"] == "lab-ovh"
     assert body["fallback_target"] != cell
     assert body["timeout_hours"] == st._TIMEOUT_HOURS
 
@@ -509,8 +513,8 @@ def test_no_minted_row_escalates_to_its_own_holder(monkeypatch, _isolated_cells_
         assert row["holder"] == cell
     if responsible and responsible not in (row["holder"], cell):
         assert row["fallback_target"] == responsible
-    elif st.RESPONSIBLE_FOR_OWNERLESS not in (row["holder"], cell):
-        assert row["fallback_target"] == st.RESPONSIBLE_FOR_OWNERLESS
+    elif "lab-ovh" not in (row["holder"], cell):
+        assert row["fallback_target"] == "lab-ovh"
     else:
         assert row["fallback_target"] is None
 

@@ -47,6 +47,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
+from swarph_cli import escalation
 from swarph_cli.redact import encode_outbound_json
 
 from swarph_cli.console_safe import print_safe
@@ -58,7 +59,6 @@ CARD = 513
 # backoff: the row is raised once and closed when the duplicate is gone. The
 # throttle exists only to bound `ps` spawns.
 CHECK_EVERY = 4
-_OTHER = "drop-on-meta-edge"  # lab-ovh's own alert goes to the other orchestrator
 _PREFIX = f"DUPLICATE-SESSION card #{CARD}"
 _PROC_ROOT: "str | os.PathLike | None" = "/proc"
 _USE_DEFAULT_PROC = object()
@@ -358,13 +358,15 @@ def _live(gateway: str, token: str, cell: str) -> list[dict]:
     return live
 
 
-def _holder_for(cell: str) -> str:
+def _holder_for(cell: str) -> "str | None":
     """Who can receive this alarm. Never the cell itself: it cannot be told
     what it cannot receive (card #513).
 
     The responsible peer, read through stall_alert's yaml rule, when that
-    peer is someone else. Otherwise lab-ovh's own alarm goes to the other
-    orchestrator and every other cell's alarm goes to lab-ovh. This is not
+    peer is someone else. Otherwise the configured escalation target's own
+    alarm goes to the configured alternate and every other cell's alarm goes
+    to the target (card #1685: both from config, neither from this wheel).
+    None when config names nobody for this cell. This is not
     stall_alert._holder_for: card #1135 holds a stall row by the stalled
     cell, and that holder would fail the receive rule here. Any failure
     falls back, never raises."""
@@ -375,7 +377,8 @@ def _holder_for(cell: str) -> str:
             return responsible
     except Exception:  # noqa: BLE001 - a routing nicety must never break the alarm
         pass
-    return _OTHER if cell == "lab-ovh" else "lab-ovh"
+    target = escalation.target()
+    return escalation.alternate() if cell == target else target
 
 
 def _ask(gateway: str, token: str, cell: str, pids: list[int], holder: str) -> None:
@@ -392,7 +395,11 @@ def send_duplicate_alert(gateway: str, token: str, cell: str, pids: list[int]) -
         gateway = gateway.rstrip("/")
         if _live(gateway, token, cell):
             return True
-        _ask(gateway, token, cell, pids, _holder_for(cell))
+        holder = _holder_for(cell)
+        if holder is None:
+            escalation.say_none("swarph-monitor", "duplicate-session alert target")
+            return False
+        _ask(gateway, token, cell, pids, holder)
         return True
     except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as exc:
         print_safe(f"[swarph-monitor] duplicate-session alert POST failed: {exc}",

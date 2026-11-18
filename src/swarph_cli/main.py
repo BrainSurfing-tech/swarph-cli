@@ -67,7 +67,7 @@ Phase 5.5 onboard/ratify + Phase 5.6 daemon + Phase 7 spawn ready.
 Layer-2 mesh bridge ships as `swarph mesh`; REPL /inbox /reply
 slash commands (Phase 5.6b) ship in subsequent releases.
 
-Spec: https://github.com/darw007d/hedge-fund-mcp/blob/main/research/swarph_cli/PLAN.md
+Docs: https://github.com/BrainSurfing-tech/swarph-cli/blob/main/docs/architecture-overview.md
 """
 
 # Known verb keywords that route to their own handler. Order matters
