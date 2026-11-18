@@ -89,16 +89,19 @@ Rework #5670 (S chunked scanning; its P4' filter is removed above):
       most ``_MAX_PEM_CHARS`` (8192) characters is kept whole; larger
       ``BEGIN..END`` spans are sliced like ordinary lines so slow lines
       between ``BEGIN`` and ``END`` obey chunking and the time budget.
-      G3 (#5753) & #1678 (R1-R4): the PEM marker pre-pass and unit splitter
-      each scan markers in one pass via ``_PEM_MARKER_SCAN_RE.finditer``
-      (with a ``(?=-----)`` lookahead so adjacent markers sharing five
-      dashes both match) under the shared ``_SCAN_BUDGET_SECONDS``
-      deadline with no 64-marker cap. ``_detect_classes`` scans the
-      first chunk before running ``_pem_envelope_classes`` (R2), and
-      ``_pem_envelope_classes`` evaluates single-label pairs up to
-      ``_MAX_PEM_CHARS`` (R4), checks the smaller marker side first, and
-      stops after 32 batches on a side once a private-key label is found
-      on that side (R2). The first hit blocks. Fail-open ONLY when a
+      G3 (#5753) & #1678 (R1-R4, #5867): the PEM marker pre-pass and
+      unit splitter each scan markers in one pass via
+      ``_PEM_MARKER_SCAN_RE.finditer`` (with a ``(?=-----)`` lookahead
+      so adjacent markers sharing five dashes both match) under the
+      shared ``_SCAN_BUDGET_SECONDS`` deadline with no 64-marker cap.
+      ``_detect_classes`` scans all chunks via ``_iter_chunks`` first
+      before invoking ``_pem_envelope_classes`` for oversized
+      ``> _MAX_PEM_CHARS`` PEM spans, and ``_pem_envelope_classes``
+      evaluates single-label pairs up to ``_MAX_PEM_CHARS`` (R4),
+      checks the smaller marker side first, tracks actually
+      ``classified`` labels before filtering the second side, and
+      classifies every label on a side without a 32-batch stop. The
+      first hit blocks. Fail-open ONLY when a
       ``_SCAN_BUDGET_SECONDS`` (~3 s) time budget runs out mid-scan;
       then the hook allows the prompt but emits a ``systemMessage``
       saying the prompt was not fully scanned — never a silent pass.
@@ -365,6 +368,7 @@ def _pem_envelope_classes(
         return [], True
 
     pk_labels: set[str] = set()
+    classified: set[str] = set()
     batch: list[tuple[str, str]] = []
     batch_len = 0
 
@@ -380,14 +384,14 @@ def _pem_envelope_classes(
                     return False
                 if "PEM private key" in _classes_of(pair):
                     pk_labels.add(lbl)
+        classified.update(lbl for lbl, _ in batch)
         batch = []
         batch_len = 0
         return True
 
-    def _classify_labels(ordered_labels: list[str], side_keys: set[str]) -> bool:
+    def _classify_labels(labels_to_check: list[str]) -> bool:
         nonlocal batch, batch_len
-        batches_flushed = 0
-        for lbl in ordered_labels:
+        for lbl in labels_to_check:
             pair = f"-----BEGIN {lbl}-----\n-----END {lbl}-----"
             if len(pair) > _MAX_PEM_CHARS:
                 continue
@@ -395,37 +399,29 @@ def _pem_envelope_classes(
             if batch and batch_len + added > _CHUNK_CHARS:
                 if not _flush_batch():
                     return False
-                batches_flushed += 1
-                if batches_flushed >= 32 and (pk_labels & side_keys):
-                    return True
                 added = len(pair)
             batch.append((lbl, pair))
             batch_len += added
             if batch_len >= _CHUNK_CHARS:
                 if not _flush_batch():
                     return False
-                batches_flushed += 1
-                if batches_flushed >= 32 and (pk_labels & side_keys):
-                    return True
         return _flush_batch()
 
-    begin_ordered = [lbl for lbl, _ in sorted(first_begin.items(), key=lambda kv: kv[1])]
-    end_ordered = [lbl for lbl, _ in sorted(last_end.items(), key=lambda kv: kv[1], reverse=True)]
-    if len(begin_ordered) <= len(end_ordered):
-        if not _classify_labels(begin_ordered, set(first_begin.keys())):
+    begin_labels = sorted(first_begin.keys())
+    end_labels = sorted(last_end.keys())
+    if len(begin_labels) <= len(end_labels):
+        if not _classify_labels(begin_labels):
             return [], False
         if not (pk_labels & set(first_begin.keys())):
             return [], True
-        rem_end = [lbl for lbl in end_ordered if lbl not in first_begin]
-        if not _classify_labels(rem_end, set(last_end.keys())):
+        if not _classify_labels([lbl for lbl in end_labels if lbl not in classified]):
             return [], False
     else:
-        if not _classify_labels(end_ordered, set(last_end.keys())):
+        if not _classify_labels(end_labels):
             return [], False
         if not (pk_labels & set(last_end.keys())):
             return [], True
-        rem_begin = [lbl for lbl in begin_ordered if lbl not in last_end]
-        if not _classify_labels(rem_begin, set(first_begin.keys())):
+        if not _classify_labels([lbl for lbl in begin_labels if lbl not in classified]):
             return [], False
 
     b_hit = min(((pos, lbl) for lbl, pos in first_begin.items() if lbl in pk_labels), default=None)
@@ -589,25 +585,17 @@ def _detect_classes(prompt: str) -> tuple[list[str], bool]:
     deadline = time.monotonic() + _SCAN_BUDGET_SECONDS
     if time.monotonic() > deadline:
         return [], False
-    chunks = _iter_chunks(prompt)
-    first_chunk = next(chunks, None)
-    if first_chunk is not None:
-        if time.monotonic() > deadline:
-            return [], False
-        first_classes = _chunk_classes(first_chunk)
-        if first_classes:
-            return first_classes, True
-    pem_classes, complete = _pem_envelope_classes(prompt, deadline)
-    if not complete:
-        return [], False
-    if pem_classes:
-        return pem_classes, True
-    for chunk in chunks:
+    for chunk in _iter_chunks(prompt):
         if time.monotonic() > deadline:
             return [], False
         classes = _chunk_classes(chunk)
         if classes:
             return classes, True
+    pem_classes, complete = _pem_envelope_classes(prompt, deadline)
+    if not complete:
+        return [], False
+    if pem_classes:
+        return pem_classes, True
     return [], True
 
 

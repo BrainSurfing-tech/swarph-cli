@@ -891,3 +891,39 @@ def test_1678_r4_crafted_marker_layouts_in_process(capsys):
         parsed = json.loads(out)
         assert parsed["decision"] == "block"
         assert "PEM private key" in parsed["reason"]
+
+
+def test_1678_5866_earlystop_layouts_1_1d_2_3_block(capsys):
+    upnum = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+    def b36(i: int) -> str:
+        out = ""
+        for _ in range(5):
+            out = upnum[i % 36] + out
+            i //= 36
+        return out
+
+    words = "plain words about a server rack and its logs\n"
+    body = ("A" * 64 + "\n") * 140
+    b_rsa = "-----BEGIN " + "RSA PRIVATE KEY-----\n"
+    e_rsa = "-----END " + "RSA PRIVATE KEY-----\n"
+    block = "-----BEGIN " + "EC PRIVATE KEY-----\n" + body + "-----END " + "EC PRIVATE KEY-----\n"
+    long_lbl = lambda i: ("NOTE " * 197).strip() + " " + b36(i)
+    jb_long = lambda n: "".join(f"-----BEGIN {long_lbl(i)}-----\n" for i in range(n))
+    je_long = lambda n: "".join(f"-----END {long_lbl(i)}-----\n" for i in range(n))
+    jb_short = lambda n: "".join(f"-----BEGIN N{b36(i)}-----\n" for i in range(n))
+    je_short = lambda n: "".join(f"-----END E{b36(i)}-----\n" for i in range(n))
+
+    layouts = [
+        je_short(45) + b_rsa + jb_long(40) + block,
+        je_short(2005) + b_rsa + jb_short(2000) + block,
+        jb_short(45) + block + je_long(40) + e_rsa,
+        je_short(45).replace("\n", "\n" + words) + b_rsa + words + jb_long(40).replace("\n", "\n" + words) + block,
+    ]
+    for prompt in layouts:
+        rc, out, err = _run({"hook_event_name": "UserPromptSubmit", "prompt": prompt}, capsys)
+        assert rc == 0
+        assert err == ""
+        parsed = json.loads(out)
+        assert parsed["decision"] == "block"
+        assert "PEM private key" in parsed["reason"]

@@ -373,3 +373,95 @@ def test_r4_four_crafted_marker_layouts_block_as_child_process():
         parsed = json.loads(out)
         assert parsed["decision"] == "block", name
         assert "PEM private key" in parsed["reason"], name
+
+
+# --- #5866 / #5867: gate (no 32-batch early stop) and budget (chunks first) ---
+
+
+def test_5866_gate_all_earlystop_layouts_and_controls_block_as_child_process():
+    body = ("A" * 64 + "\n") * 140
+    assert len(body) == 9_100
+    b_rsa = "-----BEGIN " + "RSA PRIVATE KEY-----\n"
+    e_rsa = "-----END " + "RSA PRIVATE KEY-----\n"
+    b_ec = "-----BEGIN " + "EC PRIVATE KEY-----\n"
+    e_ec = "-----END " + "EC PRIVATE KEY-----\n"
+    e_openssh = "-----END " + "OPENSSH PRIVATE KEY-----\n"
+    block = b_ec + body + e_ec
+
+    def long_label(i: int) -> str:
+        return ("NOTE " * 197).strip() + " " + _b36(i)
+
+    def junk_begin_long(n: int) -> str:
+        return "".join(f"-----BEGIN {long_label(i)}-----\n" for i in range(n))
+
+    def junk_end_long(n: int) -> str:
+        return "".join(f"-----END {long_label(i)}-----\n" for i in range(n))
+
+    def junk_begin_short(n: int) -> str:
+        return "".join(f"-----BEGIN N{_b36(i)}-----\n" for i in range(n))
+
+    def junk_end_short(n: int) -> str:
+        return "".join(f"-----END E{_b36(i)}-----\n" for i in range(n))
+
+    layouts = {
+        "0_control_block_alone": _WORDS + "\n" + block,
+        "1_stray_rsa_begin_40_long_begins_then_block": (
+            junk_end_short(45) + b_rsa + junk_begin_long(40) + block
+        ),
+        "1a_control_no_stray_begin": junk_end_short(45) + junk_begin_long(40) + block,
+        "1b_control_10_long_begins": junk_end_short(15) + b_rsa + junk_begin_long(10) + block,
+        "1c_control_stray_own_label": junk_end_short(45) + b_ec + junk_begin_long(40) + block,
+        "1d_stray_rsa_begin_2000_short_begins_then_block": (
+            junk_end_short(2005) + b_rsa + junk_begin_short(2000) + block
+        ),
+        "2_block_then_40_long_ends_then_stray_rsa_end": (
+            junk_begin_short(45) + block + junk_end_long(40) + e_rsa
+        ),
+        "2a_control_no_stray_end": junk_begin_short(45) + block + junk_end_long(40),
+        "2b_control_10_long_ends": junk_begin_short(15) + block + junk_end_long(10) + e_rsa,
+        "3_words_between_every_marker_line": (
+            junk_end_short(45).replace("\n", "\n" + _WORDS + "\n")
+            + b_rsa
+            + _WORDS
+            + "\n"
+            + junk_begin_long(40).replace("\n", "\n" + _WORDS + "\n")
+            + block
+        ),
+        "symmetric_hybrid_both_sides_stray_and_40_long_labels": (
+            b_rsa + junk_begin_long(40) + block + junk_end_long(40) + e_openssh
+        ),
+    }
+
+    for name, prompt in layouts.items():
+        rc, out, err, took = _run_cli(prompt, timeout=5.0)
+        assert rc == 0, name
+        assert took < 5.0, (name, took)
+        assert err == "", name
+        parsed = json.loads(out)
+        assert parsed["decision"] == "block", name
+        assert "PEM private key" in parsed["reason"], name
+
+
+def test_5866_budget_300_distinct_4070_char_curl_u_labels_last_line_key_blocks_as_child_process():
+    key = _sk_ant(58661)
+    unit = "CURL U "
+    n = 4070
+    prefix_4064 = (unit * ((n - 6) // len(unit) + 1))[: n - 6].rstrip()
+    labels = [f"{prefix_4064} {_b36(i)}" for i in range(300)]
+    assert all(len(lbl) == 4070 for lbl in labels)
+
+    body = (
+        "".join(f"-----BEGIN {lbl}-----\n" for lbl in labels)
+        + "".join(f"-----END {lbl}-----\n" for lbl in labels)
+    )
+    prompt = body + f"token {key}\n"
+    assert len(prompt) == 2_451_715
+
+    rc, out, err, took = _run_cli(prompt, timeout=10.0)
+    assert rc == 0
+    assert took < 5.0, f"budget 300x4070 CURL U last-line key took {took:.3f}s (>= 5.0s)"
+    assert err == ""
+    parsed = json.loads(out)
+    assert parsed["decision"] == "block"
+    assert "Anthropic" in parsed["reason"]
+    _assert_no_secret_echo(key, out, err)
