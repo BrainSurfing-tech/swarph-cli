@@ -73,15 +73,26 @@ Rework #5670 (S chunked scanning; its P4' filter is removed above):
 
   S   The whole prompt is scanned in chunks of at most
       ``_CHUNK_CHARS`` (2048) characters, keeping whole lines together
-      where they fit and cutting long lines with a
+      where they fit (carrying trailing lines up to ``_CHUNK_OVERLAP``
+      across line-batch boundaries) and cutting long lines with a
       ``_CHUNK_OVERLAP`` (512) character overlap, so a key straddling
       a cut is still seen in full in the neighbouring chunk (512 far
       exceeds the longest fixed credential-pattern context redact
       needs: the 21-char ``aws_secret_access_key`` key plus separator
       and its 20-char minimum value is 44 chars; Bearer needs 19).
-      A ``-----BEGIN ... -----END-----`` PEM block is never split
-      across chunks (it is yielded whole even if over the chunk
-      size). The first hit blocks. Fail-open ONLY when a
+      R1 (#5735): long-line cuts snap backward within
+      ``_BOUNDARY_WINDOW`` (256) to non-token boundaries (with
+      oversized-id pre-scrub) so generated ``toolu_``/``msg_``/``req_``
+      and UUID identifiers never split mid-token into false
+      high-entropy fragments.
+      R2 (#5735): a ``-----BEGIN ... -----END-----`` PEM unit of at
+      most ``_MAX_PEM_CHARS`` (8192) characters is kept whole; larger
+      ``BEGIN..END`` spans are sliced like ordinary lines so slow lines
+      between ``BEGIN`` and ``END`` obey chunking and the time budget.
+      G3 (#5753): the PEM marker pre-pass and unit splitter each run in
+      one single linear pass via ``_PEM_MARKER_SCAN_RE.finditer`` under
+      the shared ``_SCAN_BUDGET_SECONDS`` deadline with no 64-marker cap.
+      The first hit blocks. Fail-open ONLY when a
       ``_SCAN_BUDGET_SECONDS`` (~3 s) time budget runs out mid-scan;
       then the hook allows the prompt but emits a ``systemMessage``
       saying the prompt was not fully scanned — never a silent pass.
@@ -133,7 +144,7 @@ _MARKER_RE = re.compile(r"\[REDACTED:([A-Z0-9_]+)(?::[A-Z0-9_]+)?\]")
 _READERS = {"cat", "head", "tail", "less", "more", "strings", "xxd"}
 
 # S (#5670): chunked scanning — no whole-prompt cap. Each chunk is at
-# most this many chars (a PEM block yielded whole may exceed it).
+# most this many chars (a kept-whole PEM block may exceed it up to _MAX_PEM_CHARS).
 _CHUNK_CHARS = 2048
 # Overlap when a single long line must be cut: sized so a credential
 # pattern straddling a cut is fully present in a neighbouring chunk.
@@ -141,6 +152,16 @@ _CHUNK_CHARS = 2048
 _CHUNK_OVERLAP = 512
 # Fail-open only when this budget runs out mid-scan (with systemMessage).
 _SCAN_BUDGET_SECONDS = 3.0
+# R2 (#5735): cap kept-whole PEM units at 8 KB (a 51-line PEM key is ~3.4 KB;
+# an 8192-bit RSA key is ~6.4 KB). Larger BEGIN..END spans are sliced like
+# ordinary lines so a slow line inside BEGIN..END cannot bypass chunking/budget.
+_MAX_PEM_CHARS = 8192
+# R1 (#5735): snap long-line cuts to non-token boundaries within this window
+# so id-shaped tokens (toolu_/req_/msg_/UUID) are never cut mid-token.
+_BOUNDARY_WINDOW = 256
+_TOKEN_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/+-_.="
+)
 
 
 def _classes_of(text: str) -> list[str]:
@@ -187,6 +208,8 @@ _ENVELOPE_RES = [
     re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL),
     re.compile(r"<channel\s[^>]*\bsource\s*=[^>]*>.*?</channel>", re.DOTALL),
 ]
+_WS_RE = re.compile(r"\s*")
+_PEM_MARKER_SCAN_RE = re.compile(r"-----(BEGIN|END) ([A-Z0-9 ]+)-----")
 _HARNESS_SOURCE_VALUES = {
     "system", "harness", "channel", "task_notification",
     "task-notification", "peer",
@@ -236,15 +259,20 @@ def _is_harness_turn(payload: dict, prompt: str) -> bool:
     # E (#5667): only when the WHOLE prompt is one or more complete
     # envelopes separated by whitespace. Text between envelopes (or
     # around a single one) is not exempt and is scanned normally.
-    rest = prompt.lstrip("\ufeff").lstrip()
+    n = len(prompt)
+    pos = 0
+    while pos < n and prompt[pos] == "\ufeff":
+        pos += 1
+    pos = _WS_RE.match(prompt, pos).end()
+    if pos >= n:
+        return False
     count = 0
-    while rest.strip():
-        rest = rest.lstrip()
+    while pos < n:
         matched = False
         for pat in _ENVELOPE_RES:
-            m = pat.match(rest)
+            m = pat.match(prompt, pos)
             if m:
-                rest = rest[m.end():]
+                pos = _WS_RE.match(prompt, m.end()).end()
                 count += 1
                 matched = True
                 break
@@ -253,56 +281,209 @@ def _is_harness_turn(payload: dict, prompt: str) -> bool:
     return count >= 1
 
 
-def _atomic_units(text: str) -> Iterator[str]:
-    """Yield lines, except a -----BEGIN ... -----END----- block is
-    one atomic unit so a PEM block is never split (S, #5670)."""
-    lines = text.splitlines(True)
-    i, n = 0, len(lines)
-    while i < n:
-        if "-----BEGIN" in lines[i]:
-            buf = [lines[i]]
-            i += 1
-            while i < n and "-----END" not in buf[-1]:
-                buf.append(lines[i])
-                i += 1
-            yield "".join(buf)
+def _pem_envelope_classes(
+    text: str, deadline: Optional[float] = None
+) -> tuple[list[str], bool]:
+    """Single-pass linear scan for any BEGIN..END marker pair that redact's PEM
+    layer flags, even when the body between them exceeds _MAX_PEM_CHARS (G3, #5753).
+    """
+    if deadline is None:
+        deadline = time.monotonic() + _SCAN_BUDGET_SECONDS
+    if "-----BEGIN " not in text or "-----END " not in text:
+        return [], True
+
+    first_begin: dict[str, int] = {}
+    last_end: dict[str, int] = {}
+    for step, m in enumerate(_PEM_MARKER_SCAN_RE.finditer(text)):
+        if (step & 255) == 0 and time.monotonic() > deadline:
+            return [], False
+        kind = m.group(1)
+        label = m.group(2)
+        if kind == "BEGIN":
+            if label not in first_begin:
+                first_begin[label] = m.start()
         else:
-            yield lines[i]
-            i += 1
+            last_end[label] = m.start()
+
+    if not first_begin or not last_end or min(first_begin.values()) >= max(last_end.values()):
+        return [], True
+
+    labels = sorted(first_begin.keys() | last_end.keys())
+    pk_labels: set[str] = set()
+    batch: list[tuple[str, str]] = []
+    batch_len = 0
+
+    def _flush_batch() -> bool:
+        nonlocal batch, batch_len
+        if not batch:
+            return True
+        if time.monotonic() > deadline:
+            return False
+        if "PEM private key" in _classes_of("\n".join(pair for _, pair in batch)):
+            for lbl, pair in batch:
+                if time.monotonic() > deadline:
+                    return False
+                if "PEM private key" in _classes_of(pair):
+                    pk_labels.add(lbl)
+        batch = []
+        batch_len = 0
+        return True
+
+    for lbl in labels:
+        pair = f"-----BEGIN {lbl}-----\n-----END {lbl}-----"
+        if len(pair) > _CHUNK_CHARS:
+            continue
+        added = len(pair) + (1 if batch else 0)
+        if batch and batch_len + added > _CHUNK_CHARS:
+            if not _flush_batch():
+                return [], False
+            added = len(pair)
+        batch.append((lbl, pair))
+        batch_len += added
+
+    if not _flush_batch():
+        return [], False
+
+    b_hit = min(((pos, lbl) for lbl, pos in first_begin.items() if lbl in pk_labels), default=None)
+    e_hit = max(((pos, lbl) for lbl, pos in last_end.items() if lbl in pk_labels), default=None)
+    if b_hit is not None and e_hit is not None and b_hit[0] < e_hit[0]:
+        if time.monotonic() > deadline:
+            return [], False
+        return [
+            c for c in _classes_of(f"-----BEGIN {b_hit[1]}-----\n-----END {e_hit[1]}-----")
+            if c == "PEM private key"
+        ], True
+    return [], True
+
+
+def _atomic_units(text: str) -> Iterator[tuple[bool, str]]:
+    """Yield ``(is_pem, unit)`` pieces lazily in a single linear pass (G3, #5753).
+
+    A kept-whole PEM unit starts at the ``-----BEGIN`` marker itself (G2, #5744)
+    and spans at most ``_MAX_PEM_CHARS`` chars through ``-----END...-----``.
+    Plain text far behind the scan cursor flushes incrementally so early chunks
+    are scanned without waiting for later markers.
+    """
+    n = len(text)
+    plain_start = 0
+    pending_begin: Optional[int] = None
+
+    for m in _PEM_MARKER_SCAN_RE.finditer(text):
+        m_start = m.start()
+        if pending_begin is not None and (m_start - pending_begin) > _MAX_PEM_CHARS:
+            pending_begin = None
+
+        safe_end = pending_begin if pending_begin is not None else m_start
+        if safe_end - plain_start >= _CHUNK_CHARS:
+            nl = text.rfind("\n", plain_start, safe_end)
+            flush_to = (nl + 1) if nl != -1 else safe_end
+            if flush_to > plain_start:
+                for line in text[plain_start:flush_to].splitlines(True):
+                    yield False, line
+                plain_start = flush_to
+
+        if m.group(1) == "BEGIN":
+            pending_begin = m_start
+        else:
+            m_end = m.end()
+            if pending_begin is not None and (m_end - pending_begin) <= _MAX_PEM_CHARS:
+                b = pending_begin
+                pending_begin = None
+                pem_end = m_end
+                if pem_end < n and text[pem_end] == "\r":
+                    pem_end += 1
+                if pem_end < n and text[pem_end] == "\n":
+                    pem_end += 1
+                if b > plain_start:
+                    for line in text[plain_start:b].splitlines(True):
+                        yield False, line
+                yield True, text[b:pem_end]
+                plain_start = pem_end
+            else:
+                pending_begin = None
+
+    if plain_start < n:
+        for line in text[plain_start:].splitlines(True):
+            yield False, line
+
+
+def _slice_long(unit: str) -> Iterator[str]:
+    """Slice a >``_CHUNK_CHARS`` unit on non-token boundaries within
+    ``_BOUNDARY_WINDOW`` (R1, #5735)."""
+    n = len(unit)
+    start = 0
+    while start < n:
+        end = min(start + _CHUNK_CHARS, n)
+        if end < n and unit[end - 1] in _TOKEN_CHARS and unit[end] in _TOKEN_CHARS:
+            lo = max(start + _CHUNK_CHARS - _BOUNDARY_WINDOW, start + _CHUNK_OVERLAP + 1)
+            for k in range(end, lo - 1, -1):
+                if unit[k - 1] not in _TOKEN_CHARS:
+                    end = k
+                    break
+        yield unit[start:end]
+        if end >= n:
+            break
+        next_start = end - _CHUNK_OVERLAP
+        if next_start > 0 and unit[next_start - 1] in _TOKEN_CHARS and unit[next_start] in _TOKEN_CHARS:
+            lo = max(start + 1, next_start - _BOUNDARY_WINDOW)
+            for k in range(next_start, lo - 1, -1):
+                if unit[k - 1] not in _TOKEN_CHARS:
+                    next_start = k
+                    break
+        start = next_start
+
+
+def _carry_tail(buf: str) -> str:
+    """Carry the last ``_CHUNK_OVERLAP`` chars across a batch flush, snapped
+    backward within ``_BOUNDARY_WINDOW`` so the carry never starts mid-token
+    (R-2, #5744)."""
+    if len(buf) <= _CHUNK_OVERLAP:
+        return buf
+    cut = len(buf) - _CHUNK_OVERLAP
+    if cut > 0 and buf[cut - 1] in _TOKEN_CHARS and buf[cut] in _TOKEN_CHARS:
+        lo = max(0, cut - _BOUNDARY_WINDOW)
+        for k in range(cut, lo - 1, -1):
+            if k == 0 or buf[k - 1] not in _TOKEN_CHARS:
+                cut = k
+                break
+    return buf[cut:]
 
 
 def _iter_chunks(text: str) -> Iterator[str]:
-    """Yield chunks of at most ``_CHUNK_CHARS`` chars (S, #5670):
-    whole lines are kept together where they fit, a single long line
-    is cut with ``_CHUNK_OVERLAP`` chars of overlap, and a PEM block
-    is yielded whole even when it exceeds the chunk size."""
-    current = ""
-    for unit in _atomic_units(text):
-        if "-----BEGIN" in unit and "-----END" in unit:
-            if current:
-                yield current
-                current = ""
+    """Yield chunks of at most ``_CHUNK_CHARS`` chars (S #5670, R1/R2 #5735):
+    whole lines are kept together where they fit (carrying the last
+    ``_CHUNK_OVERLAP`` chars across batch boundaries), a single long line is
+    cut at non-token boundaries with at least ``_CHUNK_OVERLAP`` chars of
+    overlap, and a PEM block of at most ``_MAX_PEM_CHARS`` is yielded whole."""
+    buf = ""
+    dirty = False
+    for is_pem, unit in _atomic_units(text):
+        if is_pem:
+            if dirty and buf:
+                yield buf
+            buf = ""
+            dirty = False
             yield unit
             continue
-        if len(unit) > _CHUNK_CHARS:
-            if current:
-                yield current
-                current = ""
-            start = 0
-            while start < len(unit):
-                end = min(start + _CHUNK_CHARS, len(unit))
-                yield unit[start:end]
-                if end >= len(unit):
-                    break
-                start = end - _CHUNK_OVERLAP
+        combined = (buf + unit) if buf else unit
+        if len(combined) <= _CHUNK_CHARS:
+            buf = combined
+            dirty = True
             continue
-        if current and len(current) + len(unit) > _CHUNK_CHARS:
-            yield current
-            current = unit
-        else:
-            current += unit
-    if current:
-        yield current
+        if len(unit) <= _CHUNK_CHARS and dirty:
+            yield buf
+            carried = _carry_tail(buf) + unit
+            if len(carried) <= _CHUNK_CHARS:
+                buf = carried
+                dirty = True
+                continue
+            combined = carried
+        for piece in _slice_long(combined):
+            yield piece
+        buf = _carry_tail(combined)
+        dirty = False
+    if dirty and buf:
+        yield buf
 
 
 def _chunk_classes(chunk: str) -> list[str]:
@@ -322,6 +503,13 @@ def _detect_classes(prompt: str) -> tuple[list[str], bool]:
     ``(classes, complete)``: first hit wins; ``complete`` is False
     only when the time budget ran out before every chunk was scanned."""
     deadline = time.monotonic() + _SCAN_BUDGET_SECONDS
+    if time.monotonic() > deadline:
+        return [], False
+    pem_classes, complete = _pem_envelope_classes(prompt, deadline)
+    if not complete:
+        return [], False
+    if pem_classes:
+        return pem_classes, True
     for chunk in _iter_chunks(prompt):
         if time.monotonic() > deadline:
             return [], False
