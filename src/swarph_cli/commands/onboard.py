@@ -805,8 +805,26 @@ def _join_record(canonical: str, token_path: Path) -> Optional[dict]:
     return payload
 
 
-def _argv_has_gateway(argv: list[str]) -> bool:
-    return any(arg == "--gateway" or arg.startswith("--gateway=") for arg in argv)
+def _usable_sidecar_gateway(value: str) -> Optional[str]:
+    """Join's URL shape check, after outer whitespace is removed.
+
+    A newline or any other control character is refused, as is a value that
+    is not an http(s) URL. Non-tailnet HTTP stays usable: join already accepted
+    the URL it wrote, and a saved sidecar is not a new cleartext decision.
+    """
+    text = value.strip()
+    if not text or any(ord(ch) <= 32 for ch in text):
+        return None
+    try:
+        url = urllib.parse.urlsplit(text)
+        url.port
+    except ValueError:
+        return None
+    if (url.scheme not in {"http", "https"} or not url.hostname or url.username
+            or url.password or url.query or url.fragment
+            or url.path not in {"", "/"}):
+        return None
+    return text.rstrip("/")
 
 
 def run_onboard(argv: list[str]) -> int:
@@ -907,8 +925,20 @@ def run_onboard(argv: list[str]) -> int:
     # typo'd name reports the typo, not a missing env var.
     if join_saved:
         print_safe("[4/6] join already registered this peer; not registering a second time")
-        if not _argv_has_gateway(argv) and not env_gateway():
-            args.gateway = str(join_record["gateway"]).strip().rstrip("/")
+        given = (args.gateway or "").strip().rstrip("/")
+        sidecar_gateway = _usable_sidecar_gateway(str(join_record["gateway"]))
+        if not given:
+            if sidecar_gateway is None:
+                print_safe(
+                    "swarph onboard: the gateway saved by join is not a usable http(s) URL",
+                    file=sys.stderr,
+                )
+                return 1
+            args.gateway = sidecar_gateway
+        else:
+            args.gateway = given
+            if given != sidecar_gateway:
+                print_safe("The given gateway differs from the gateway saved by join.")
     else:
         args.gateway = require_gateway(getattr(args, "gateway", ""))
         print_safe(f"[4/6] POST {args.gateway}/peers/register")
