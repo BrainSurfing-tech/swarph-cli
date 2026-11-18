@@ -157,15 +157,30 @@ def script_imports_swarph_cli(argv: list[str], read_text) -> bool:
     return False
 
 
-def discover_units(list_running, main_pid, cmdline, read_text) -> list[str]:
+def discover_units(list_running, main_pid, cmdline, read_text, pid_uid=None, own_uid=None, skipped=None) -> list[str]:
+    """Units whose running process imports swarph_cli AND runs as the installing user.
+
+    release.sh installs with `pip install --user` as the user running it, so only that
+    user's processes can load the new code. A unit running as another user (card #20's
+    proxy-opencode units load /opt/swarph-proxy, a root-owned venv with its own install
+    step) would be restarted onto unchanged code and then fail the version check. When
+    pid_uid and own_uid are given, such units are left out and named in `skipped`.
+    """
     found = []
     for unit in list_running():
         pid = main_pid(unit)
         if not pid or pid == "0":
             continue
         argv = cmdline(pid)
-        if script_imports_swarph_cli(argv, read_text):
-            found.append(unit)
+        if not script_imports_swarph_cli(argv, read_text):
+            continue
+        if pid_uid is not None and own_uid is not None:
+            uid = pid_uid(pid)
+            if uid != own_uid:
+                if skipped is not None:
+                    skipped.append((unit, uid))
+                continue
+        found.append(unit)
     return found
 
 
@@ -199,9 +214,25 @@ def _read_text(path: str) -> str:
     return open(path, encoding="utf-8", errors="replace").read()
 
 
+def _pid_uid(pid: str) -> int | None:
+    """Real uid of a process, from /proc/<pid>/status (readable for every pid)."""
+    try:
+        for line in open(f"/proc/{pid}/status", encoding="utf-8", errors="replace"):
+            if line.startswith("Uid:"):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
 def _cmd_discover() -> int:
-    for unit in discover_units(_running_swarph_units, _main_pid, _cmdline, _read_text):
+    skipped: list[tuple[str, int | None]] = []
+    for unit in discover_units(_running_swarph_units, _main_pid, _cmdline, _read_text,
+                               pid_uid=_pid_uid, own_uid=os.getuid(), skipped=skipped):
         print(unit)
+    for unit, uid in skipped:
+        print(f"release: not restarting {unit}: it runs as uid {uid}, not the installing uid {os.getuid()}; "
+              "a pip --user install cannot change its code", file=sys.stderr)
     return 0
 
 
