@@ -736,3 +736,158 @@ def test_c2_carry_after_sliced_long_line_catches_next_line_value(capsys):
     assert parsed["decision"] == "block"
     assert "DSN credential" in parsed["reason"]
     _assert_no_secret_echo(secret_val, out, err)
+
+
+# --- #1678 R1-R4 fast in-process pins (mutants_5785 N1-N12, R2-R4) ---------
+
+
+def test_1678_r1_stray_marker_bookkeeping_n1_n2_n3_n4_pins(capsys):
+    b_pk = "-----BEGIN " + "PRIVATE KEY-----"
+    e_pk = "-----END " + "PRIVATE KEY-----"
+    b_rsa = "-----BEGIN " + "RSA PRIVATE KEY-----"
+    e_rsa = "-----END " + "RSA PRIVATE KEY-----"
+    words = "plain words about a server rack and its logs \n"
+    big = ("A" * 64 + "\n") * 140
+
+    layouts = [
+        # N1 & N2: stray END, then 9,100-char block, then stray BEGIN
+        e_pk + "\n" + (words * 5) + b_pk + "\n" + big + e_pk + "\n" + (words * 5) + b_pk + "\n",
+        # N3: 9,100-char block, words, then stray BEGIN RSA PRIVATE KEY
+        b_pk + "\n" + big + e_pk + "\n" + (words * 40) + b_rsa + "\n",
+        # N4: stray END RSA PRIVATE KEY, words, then 9,100-char block
+        e_rsa + "\n" + (words * 40) + b_pk + "\n" + big + e_pk + "\n",
+    ]
+    for prompt in layouts:
+        rc, out, err = _run({"hook_event_name": "UserPromptSubmit", "prompt": prompt}, capsys)
+        assert rc == 0
+        assert err == ""
+        parsed = json.loads(out)
+        assert parsed["decision"] == "block"
+        assert "PEM private key" in parsed["reason"]
+
+
+def test_1678_r1_prepass_budget_pins_n5_n6_n7(capsys, monkeypatch):
+    # N5: marker loop budget check at step 256 before min(first_begin) >= max(last_end)
+    prompt_n5 = "-----END A-----\n" + ("-----BEGIN A-----\n" * 300)
+    calls_n5 = 0
+
+    def mono_n5() -> float:
+        nonlocal calls_n5
+        if sys._getframe(1).f_code.co_name == "_pem_envelope_classes":
+            calls_n5 += 1
+            return 100.0 if calls_n5 == 1 else 104.0
+        return 100.0
+
+    monkeypatch.setattr(secret_guard.time, "monotonic", mono_n5)
+    assert secret_guard._pem_envelope_classes(prompt_n5, 103.0) == ([], False)
+
+    # N6 & N7: budget expiry inside _flush_batch on <=2,048-char prompt
+    prompt_n6 = "-----BEGIN NOTE-----\n-----END NOTE-----\n"
+    flush_calls = 0
+    orig_classes_of = secret_guard._classes_of
+    batch_classes_calls = 0
+
+    def spy_classes_of(text: str) -> list[str]:
+        nonlocal batch_classes_calls
+        if "NOTE" in text:
+            batch_classes_calls += 1
+        return orig_classes_of(text)
+
+    def mono_n6() -> float:
+        nonlocal flush_calls
+        caller = sys._getframe(1).f_code.co_name
+        if caller == "_flush_batch":
+            flush_calls += 1
+            return 104.0
+        return 100.0
+
+    monkeypatch.setattr(secret_guard, "_classes_of", spy_classes_of)
+    monkeypatch.setattr(secret_guard.time, "monotonic", mono_n6)
+    assert secret_guard._pem_envelope_classes(prompt_n6, 103.0) == ([], False)
+    assert flush_calls == 1
+    assert batch_classes_calls == 0
+
+    rc, out, err = _run({"hook_event_name": "UserPromptSubmit", "prompt": prompt_n6}, capsys)
+    assert rc == 0
+    parsed = json.loads(out)
+    assert "decision" not in parsed
+    assert "not fully scanned" in parsed["systemMessage"]
+
+
+def test_1678_r1_chunk_streaming_and_pem_carry_pins_n9_n10_n11_n12(capsys, monkeypatch):
+    # N9: dirty=False carry from sliced long line before PEM block must NOT glue across PEM
+    long_line = ("word " * 450) + "pass" + "word:"
+    assert len(long_line) > _CHUNK_CHARS
+    pem_note = "-----BEGIN NOTE-----\nplain words\n-----END NOTE-----\n"
+    secret_val = "p@ss" + "w0rdX"
+    prompt_n9 = long_line + "\n" + pem_note + "  " + secret_val + "\n"
+    assert _chunk_classes("  " + secret_val) == []
+    rc, out, err = _run({"hook_event_name": "UserPromptSubmit", "prompt": prompt_n9}, capsys)
+    assert rc == 0
+    assert out == ""
+
+    # N11: streamed plain text cuts at '\n', never mid-line at the marker
+    text_n11 = ("word " * 500) + "\npartial_before_begin-----BEGIN A-----\nrest\n"
+    units_n11 = list(secret_guard._atomic_units(text_n11))
+    assert any(u == "partial_before_begin-----BEGIN A-----\n" for _, u in units_n11)
+
+    # N10 & N12: _atomic_units streams before subsequent markers are pulled
+    orig_scan = secret_guard._PEM_MARKER_SCAN_RE
+
+    class _CountingScan:
+        def __init__(self, limit: int) -> None:
+            self.limit = limit
+            self.seen = 0
+
+        def finditer(self, s: str):
+            for m in orig_scan.finditer(s):
+                self.seen += 1
+                if self.seen > self.limit:
+                    raise AssertionError(f"pulled marker #{self.seen} before streaming")
+                yield m
+
+    text_n10 = ("x" * 3000) + "\n-----BEGIN A-----\n" + ("y" * 3000) + "\n-----BEGIN B-----\n"
+    monkeypatch.setattr(secret_guard, "_PEM_MARKER_SCAN_RE", _CountingScan(1))
+    first_n10 = next(_iter_chunks(text_n10))
+    assert len(first_n10) == _CHUNK_CHARS
+
+    text_n12 = (
+        "-----BEGIN NOTES-----\n"
+        + ("word " * 1900)
+        + "\n-----END NOTES-----\n"
+        + ("word " * 500)
+        + "\n-----BEGIN X-----\n"
+    )
+    monkeypatch.setattr(secret_guard, "_PEM_MARKER_SCAN_RE", _CountingScan(2))
+    first_n12 = next(_iter_chunks(text_n12))
+    assert len(first_n12) <= _CHUNK_CHARS
+
+
+def test_1678_r3_channel_envelope_bounded_in_process(capsys):
+    secret = _sk_ant()
+    open_heavy = "<channel " + ("source=x " * 5_000) + ">\n" + ("plain words " * 2_000) + f"\ntoken {secret}\n"
+    t0 = time.monotonic()
+    rc, out, err = _run({"hook_event_name": "UserPromptSubmit", "prompt": open_heavy}, capsys)
+    took = time.monotonic() - t0
+    assert rc == 0
+    assert took < 1.0
+    assert json.loads(out)["decision"] == "block"
+
+
+def test_1678_r4_crafted_marker_layouts_in_process(capsys):
+    big = ("A" * 64 + "\n") * 140
+    b_pk = "-----BEGIN " + "PRIVATE KEY-----"
+    e_pk = "-----END " + "PRIVATE KEY-----"
+    long_lbl = ("RSA " * 272).strip() + " PRIVATE KEY"
+    layouts = [
+        "-----END CERTIFICATE-----BEGIN " + "PRIVATE KEY-----\n" + big + e_pk + "\n",
+        "-----BEGIN NOTES -----BEGIN " + "PRIVATE KEY-----\n" + big + e_pk + "\n",
+        b_pk + "\n" + big + "-----BEGIN X-----END " + "PRIVATE KEY-----\n",
+        f"-----BEGIN {long_lbl}-----\n" + big + f"-----END {long_lbl}-----\n",
+    ]
+    for prompt in layouts:
+        rc, out, err = _run({"hook_event_name": "UserPromptSubmit", "prompt": prompt}, capsys)
+        assert rc == 0
+        parsed = json.loads(out)
+        assert parsed["decision"] == "block"
+        assert "PEM private key" in parsed["reason"]
