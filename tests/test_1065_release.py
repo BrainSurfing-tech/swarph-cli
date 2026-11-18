@@ -789,6 +789,7 @@ def test_discover_skips_units_running_as_another_user(tmp_path):
     assert skipped2 == [("swarph-monitor@x.service", None)]
 
 
+@pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="reads /proc (Linux); release.sh runs on the Linux box only")
 def test_pid_uid_reads_the_real_uid_of_this_process():
     import os
     assert _mod._pid_uid(str(os.getpid())) == os.getuid()
