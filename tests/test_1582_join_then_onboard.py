@@ -4,6 +4,8 @@ Scratch HOME and a fake gateway only. No live token is read or printed.
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from swarph_cli.commands import join, onboard
@@ -30,8 +32,15 @@ def test_onboard_help_states_the_order(capsys):
     assert _ORDER in capsys.readouterr().out
 
 
-def test_successful_join_ends_on_the_onboard_step(monkeypatch, tmp_path, capsys):
+def _home(monkeypatch, tmp_path):
+    # Path.home() reads HOME on POSIX and USERPROFILE on Windows.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX credential storage; Windows is refused first")
+def test_successful_join_ends_on_the_onboard_step(monkeypatch, tmp_path, capsys):
+    _home(monkeypatch, tmp_path)
     monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
 
     def fake_request(url, method, path, body=None, token=None, timeout=15):
@@ -71,7 +80,7 @@ def test_successful_join_ends_on_the_onboard_step(monkeypatch, tmp_path, capsys)
 
 def test_onboard_uses_the_join_token_and_does_not_register_again(
         monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _home(monkeypatch, tmp_path)
     monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
     monkeypatch.delenv("SWARPH_SELF", raising=False)
     token_path = tmp_path / ".config" / "swarph" / "new-cell.peer_token"
@@ -101,7 +110,7 @@ def test_onboard_uses_the_join_token_and_does_not_register_again(
 
 
 def test_onboard_without_a_join_token_still_registers(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _home(monkeypatch, tmp_path)
     monkeypatch.setenv("MESH_GATEWAY_TOKEN", "operator-token")
     monkeypatch.delenv("SWARPH_SELF", raising=False)
     calls = []
