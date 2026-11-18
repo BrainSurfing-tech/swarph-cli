@@ -113,7 +113,11 @@ def _remove_ours(path, info):
 
 
 def run_join(argv):
-    parser = argparse.ArgumentParser(prog="swarph join", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="swarph join",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__.rstrip() + "\nJoin first on a new machine, then onboard.",
+    )
     parser.add_argument("gateway")
     parser.add_argument("--name", required=True)
     parser.add_argument("--allow-unsafe-http", action="store_true", help="UNSAFE: permit non-tailnet cleartext HTTP")
@@ -203,6 +207,8 @@ def run_join(argv):
         else:
             print("No interactive answers were supplied; no handshake was sent. Send your own answers to " + witness + ".")
         print(f"Use explicit identity: swarph mesh peers --as {args.name} --gateway {shlex.quote(args.gateway.rstrip('/'))} --token-file {shlex.quote(str(token_path))}")
+        print(f"swarph onboard {args.name}")
+        print("Onboard adds the cell scaffold and the handshake to a witness, then ratify.")
         return 0
     except (JoinError, OSError, ValueError, KeyboardInterrupt) as exc:
         print("swarph join: " + (str(exc) if isinstance(exc, JoinError) else "local storage failure or cancellation; do not retry blindly; ask the operator to check any in-flight pickup"), file=sys.stderr)
