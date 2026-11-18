@@ -465,3 +465,136 @@ def test_5866_budget_300_distinct_4070_char_curl_u_labels_last_line_key_blocks_a
     assert parsed["decision"] == "block"
     assert "Anthropic" in parsed["reason"]
     _assert_no_secret_echo(key, out, err)
+
+
+# --- #5885 / #5892: G1 (pre-pass after first chunk) & G2 (alphabetical traps) --
+
+
+def _b36_4(i: int) -> str:
+    out = ""
+    while True:
+        out = _UPNUM[i % 36] + out
+        i //= 36
+        if not i:
+            return out.rjust(4, "0")
+
+
+def _alpha_trap_layouts() -> tuple[str, str, str, list[str]]:
+    body = ("A" * 64 + "\n") * 140
+    b_dsa = "-----BEGIN " + "DSA PRIVATE KEY-----\n"
+    e_dsa = "-----END " + "DSA PRIVATE KEY-----\n"
+    b_rsa = "-----BEGIN " + "RSA PRIVATE KEY-----\n"
+    e_rsa = "-----END " + "RSA PRIVATE KEY-----\n"
+    long_labels = [("NOTE " * 197).strip() + " " + _b36_4(i) for i in range(40)]
+    all_labels = ["DSA PRIVATE KEY"] + long_labels + ["RSA PRIVATE KEY"]
+    layout_a = (
+        "".join(f"-----END E{_b36_4(i)}-----\n" for i in range(45))
+        + b_dsa
+        + "".join(f"-----BEGIN {lbl}-----\n" for lbl in long_labels)
+        + b_rsa
+        + body
+        + e_rsa
+    )
+    layout_b = (
+        "".join(f"-----BEGIN N{_b36_4(i)}-----\n" for i in range(45))
+        + b_rsa
+        + body
+        + e_rsa
+        + "".join(f"-----END {lbl}-----\n" for lbl in long_labels)
+        + e_dsa
+    )
+    layout_c = (
+        "".join(f"-----END E{_b36_4(i)}-----\n" for i in range(45))
+        + "".join(f"-----BEGIN {lbl}-----\n" for lbl in long_labels)
+        + b_rsa
+        + body
+        + e_rsa
+    )
+    return layout_a, layout_b, layout_c, all_labels
+
+
+def test_5885_g1_order_layouts_and_near_limit_cases_block_under_1s_as_child_process():
+    def lines(unit: str, n: int, width: int = 8000) -> str:
+        line = (unit * (width // len(unit) + 1))[:width]
+        return (line + "\n") * (n // (width + 1))
+
+    def pk_block(body: int) -> str:
+        return (
+            "-----BEGIN " + "PRIVATE KEY-----\n"
+            + ("A" * 64 + "\n") * (body // 65)
+            + "-----END " + "PRIVATE KEY-----\n"
+        )
+
+    flood_unit = "-eyJ"
+    words_unit = "the quick brown fox reads logs from server rack nine "
+
+    cases: list[tuple[str, str]] = []
+    for n, expected_len in ((1_200_000, 1_192_149), (1_600_000, 1_592_199), (2_400_000, 2_392_299)):
+        fill = lines(flood_unit, n)
+        assert len(fill) == expected_len
+        cases.append((f"flood_{expected_len}_then_pk9100", fill + pk_block(9100)))
+        cases.append((f"pk9100_then_flood_{expected_len}", pk_block(9100) + fill))
+    cases.append(("flood_1592199_then_pk2990", lines(flood_unit, 1_600_000) + pk_block(2990)))
+
+    for n, expected_len in (
+        (4_000_000, 3_992_499),
+        (4_500_000, 4_496_562),
+        (5_000_000, 4_992_624),
+        (6_000_000, 5_992_749),
+    ):
+        fill = lines(words_unit, n)
+        assert len(fill) == expected_len
+        cases.append((f"words_{expected_len}_then_pk9100", fill + pk_block(9100)))
+        cases.append((f"pk9100_then_words_{expected_len}", pk_block(9100) + fill))
+    fill_words_5m = lines(words_unit, 5_000_000)
+    cases.append(("words_4992624_then_pk2990", fill_words_5m + pk_block(2990)))
+    cases.append(("pk2990_then_words_4992624", pk_block(2990) + fill_words_5m))
+
+    for name, prompt in cases:
+        rc, out, err, took = _run_cli(prompt, timeout=5.0)
+        assert rc == 0, name
+        assert took < 1.0, f"G1 {name} took {took:.3f}s (>= 1.0s)"
+        assert err == "", name
+        parsed = json.loads(out)
+        assert parsed["decision"] == "block", name
+        assert "PEM private key" in parsed["reason"], name
+
+
+def test_5885_g2_alphabetical_trap_layouts_block_as_child_process():
+    layout_a, layout_b, layout_c, _ = _alpha_trap_layouts()
+    for name, prompt in (
+        ("A_45_end_stray_dsa_begin_40_long_begins_rsa_block", layout_a),
+        ("B_mirror_45_begin_rsa_block_40_long_ends_stray_dsa_end", layout_b),
+        ("C_control_no_stray_dsa", layout_c),
+    ):
+        rc, out, err, took = _run_cli(prompt, timeout=5.0)
+        assert rc == 0, name
+        assert took < 1.0, f"G2 {name} took {took:.3f}s (>= 1.0s)"
+        assert err == "", name
+        parsed = json.loads(out)
+        assert parsed["decision"] == "block", name
+        assert "PEM private key" in parsed["reason"], name
+
+
+def test_5885_g2_prepass_never_leaves_first_side_label_unclassified(monkeypatch):
+    layout_a, layout_b, _, all_labels = _alpha_trap_layouts()
+    assert len(all_labels) == 42
+
+    orig_classes_of = secret_guard._classes_of
+    seen_texts: list[str] = []
+
+    def spy_classes_of(text: str) -> list[str]:
+        seen_texts.append(text)
+        return orig_classes_of(text)
+
+    monkeypatch.setattr(secret_guard, "_classes_of", spy_classes_of)
+
+    for name, prompt in (("layout_a", layout_a), ("layout_b", layout_b)):
+        seen_texts.clear()
+        state: dict = {}
+        classes, complete = _pem_envelope_classes(prompt, time.monotonic() + 60.0, _state=state)
+        assert (classes, complete) == (["PEM private key"], True), name
+        combined_seen = "\n".join(seen_texts)
+        for lbl in all_labels:
+            assert lbl in combined_seen, f"{name} never sent {lbl!r} to _classes_of"
+            assert lbl in state["classified"], f"{name} left {lbl!r} unclassified"

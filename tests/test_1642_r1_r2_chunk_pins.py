@@ -927,3 +927,76 @@ def test_1678_5866_earlystop_layouts_1_1d_2_3_block(capsys):
         parsed = json.loads(out)
         assert parsed["decision"] == "block"
         assert "PEM private key" in parsed["reason"]
+
+
+def test_1678_5885_g2_alphabetical_trap_and_unclassified_label_pins(capsys, monkeypatch):
+    upnum = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+    def b36_4(i: int) -> str:
+        out = ""
+        while True:
+            out = upnum[i % 36] + out
+            i //= 36
+            if not i:
+                return out.rjust(4, "0")
+
+    body = ("A" * 64 + "\n") * 140
+    b_dsa = "-----BEGIN " + "DSA PRIVATE KEY-----\n"
+    e_dsa = "-----END " + "DSA PRIVATE KEY-----\n"
+    b_rsa = "-----BEGIN " + "RSA PRIVATE KEY-----\n"
+    e_rsa = "-----END " + "RSA PRIVATE KEY-----\n"
+    long_labels = [("NOTE " * 197).strip() + " " + b36_4(i) for i in range(40)]
+    all_labels = ["DSA PRIVATE KEY"] + long_labels + ["RSA PRIVATE KEY"]
+
+    layout_a = (
+        "".join(f"-----END E{b36_4(i)}-----\n" for i in range(45))
+        + b_dsa
+        + "".join(f"-----BEGIN {lbl}-----\n" for lbl in long_labels)
+        + b_rsa
+        + body
+        + e_rsa
+    )
+    layout_b = (
+        "".join(f"-----BEGIN N{b36_4(i)}-----\n" for i in range(45))
+        + b_rsa
+        + body
+        + e_rsa
+        + "".join(f"-----END {lbl}-----\n" for lbl in long_labels)
+        + e_dsa
+    )
+    layout_c = (
+        "".join(f"-----END E{b36_4(i)}-----\n" for i in range(45))
+        + "".join(f"-----BEGIN {lbl}-----\n" for lbl in long_labels)
+        + b_rsa
+        + body
+        + e_rsa
+    )
+
+    for prompt in (layout_a, layout_b, layout_c):
+        rc, out, err = _run({"hook_event_name": "UserPromptSubmit", "prompt": prompt}, capsys)
+        assert rc == 0
+        assert err == ""
+        parsed = json.loads(out)
+        assert parsed["decision"] == "block"
+        assert "PEM private key" in parsed["reason"]
+
+    orig_classes_of = secret_guard._classes_of
+    seen_texts: list[str] = []
+
+    def spy_classes_of(text: str) -> list[str]:
+        seen_texts.append(text)
+        return orig_classes_of(text)
+
+    monkeypatch.setattr(secret_guard, "_classes_of", spy_classes_of)
+
+    for prompt in (layout_a, layout_b):
+        seen_texts.clear()
+        state: dict = {}
+        classes, complete = secret_guard._pem_envelope_classes(
+            prompt, time.monotonic() + 60.0, _state=state
+        )
+        assert (classes, complete) == (["PEM private key"], True)
+        combined_seen = "\n".join(seen_texts)
+        for lbl in all_labels:
+            assert lbl in combined_seen
+            assert lbl in state["classified"]
