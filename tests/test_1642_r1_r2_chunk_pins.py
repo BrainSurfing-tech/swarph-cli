@@ -136,13 +136,16 @@ def _dashed_msg_token(rng: random.Random, length: int) -> str:
 def _generate_ed25519_pem(rng: random.Random) -> str:
     openssl = shutil.which("openssl")
     if openssl:
-        proc = subprocess.run(
-            [openssl, "genpkey", "-algorithm", "ed25519"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if proc.returncode == 0 and "PRIVATE KEY-----" in proc.stdout:
+        try:
+            proc = subprocess.run(
+                [openssl, "genpkey", "-algorithm", "ed25519"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:  # a slow shared runner (2026-11-18): build the key below instead
+            proc = None
+        if proc is not None and proc.returncode == 0 and "PRIVATE KEY-----" in proc.stdout:
             return proc.stdout
     raw_seed = bytes(rng.randrange(256) for _ in range(32))
     der = b"\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x70\x04\x22\x04\x20" + raw_seed
