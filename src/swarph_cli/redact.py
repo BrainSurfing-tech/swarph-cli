@@ -140,8 +140,8 @@ _PEM_RE = re.compile(
 _GITHUB_RE = re.compile(r"(?:gh[opusr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 _ANTHROPIC_RE = re.compile(r"sk-ant-[A-Za-z0-9\-_]{8,}\b")
 _OPENAI_RE = re.compile(
-    r"(?:sk-(?:proj-|svcacct-)[A-Za-z0-9\-_]{16,}"
-    r"|sk-[A-Za-z0-9_]{40,})\b")
+    r"(?:sk-(?:proj-|svcacct-)[A-Za-z0-9\-_]{16,}\b"
+    r"|sk-[A-Za-z0-9_]{20,}(?![A-Za-z0-9_])(?![-][A-Za-z0-9]))")
 _XAI_RE = re.compile(r"xai-[A-Za-z0-9\-_]{16,}\b")
 _GCP_RE = re.compile(r"AIza[0-9A-Za-z\-_]{35}\b")
 _GCP_FINAL_RE = re.compile(
