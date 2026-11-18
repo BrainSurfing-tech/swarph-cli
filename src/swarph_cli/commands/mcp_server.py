@@ -653,16 +653,18 @@ def _dm_thread(message_id: int, self_name: str | None = None) -> dict:
 def _ask_commander(question: str, options: list[str] | None = None, card: int | None = None) -> dict:
     """Propose a decision to the commander. Success is {id, status}, the two fields
     `swarph commander ask` prints. Any refusal (401, 403, 409, 503
-    commander_not_configured, 429, 422) or transport failure is
-    {"error": "gateway <status>: <detail>", "status": <int>}, never a success
-    shape. Never raises."""
+    commander_not_configured, 429, 422), a transport failure, or a 2xx reply with
+    no integer id is {"error": "...", "status": <int>}, never a success shape.
+    Never raises."""
     try:
         _who, gw, tok = _dm_session()
         # `swarph commander ask` strips and drops blank labels; keep labels whole.
         body = commander.ask_body(question, [o.strip() for o in options or [] if o.strip()], card)
         status, payload = commander.post_request(gw, tok, body)
         if status in (200, 201):
-            return {"id": payload.get("id"), "status": payload.get("status")}
+            if commander.confirmed_id(payload) is None:  # a 2xx with no id proposed nothing
+                return {"error": commander.unconfirmed(status), "status": status}
+            return {"id": payload["id"], "status": payload.get("status")}
         detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
         return {"error": redact_text(f"gateway {status}: {detail}", caller="mcp_server._ask_commander"),
                 "status": status}
@@ -805,13 +807,15 @@ try:
         commander answers on the phone or the cockpit, and no tool here reads the
         answer, decides, withdraws or lists requests.
 
-        question: the decision needed. options: the choices to pick from, optional
-        like the CLI's --options (the gateway takes 2 to 6 labels of 1 to 80
-        characters). card: the board card it concerns, optional. Posts as this
-        cell (SWARPH_SELF), type=decision.
+        question: the decision needed, at most 360 characters. options: the
+        choices to pick from, optional like the CLI's --options: 0 to 6 options of
+        at most 40 characters each (the deployed gateway's limits, mesh-gateway
+        commander_queue.py). card: the board card it concerns, optional. Posts as
+        this cell (SWARPH_SELF), type=decision.
         Success is {id, status}. A refusal or failure is {"error": ..., "status":
         N}: 401 bad token, 403 not allowed, 409 conflict, 429 too many open
-        questions, 503 commander_not_configured. An error is never a proposal."""
+        questions, 503 commander_not_configured; so is a 2xx reply with no integer
+        id. An error is never a proposal."""
         return _ask_commander(question, options, card)
 
 except ImportError as exc:  # pragma: no cover - exercised only when SDK absent

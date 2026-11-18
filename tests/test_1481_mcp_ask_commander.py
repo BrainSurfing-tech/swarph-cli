@@ -227,6 +227,77 @@ def test_no_gateway_configured_is_an_error(monkeypatch):
     assert sent == []
 
 
+# --- R1 (plan-review #5862): a 2xx reply with no integer id proposed nothing --
+
+NO_ID = [
+    (200, {}),
+    (201, {}),
+    (200, {"status": "pending"}),
+    (201, {"id": None, "status": "pending"}),
+    (201, {"id": "7", "status": "pending"}),
+    (201, {"id": 7.0, "status": "pending"}),
+    (201, {"id": True, "status": "pending"}),  # bool is an int subclass
+    (201, [{"id": 7, "status": "pending"}]),
+]
+HEAD = "a" * 40
+CLI_VERBS = {
+    "ask": ["commander", "ask", "--question", "q?", "--options", "a,b"],
+    "merge_pr": ["commander", "request", "merge_pr", "--repo", "o/r", "--pr", "12", "--head", HEAD],
+    "release_finish": ["commander", "request", "release_finish", "--version", "0.9.0",
+                       "--pr", "12", "--head", HEAD],
+}
+
+
+def _cli(verb):
+    return main(CLI_VERBS[verb] + ["--gateway", GW, "--as", "cell-a"])
+
+
+@pytest.mark.parametrize("status,body", NO_ID)
+def test_tool_2xx_without_an_integer_id_is_a_typed_error(monkeypatch, status, body):
+    _wire(monkeypatch, (status, body))
+    out = mcp_server._ask_commander(*ASK)
+    assert out == {"error": f"gateway {status} returned no request id; the proposal is not confirmed",
+                   "status": status}
+
+
+@needs_sdk
+def test_registered_tool_2xx_without_an_id_is_a_typed_error(monkeypatch):
+    _wire(monkeypatch, (200, {}))
+    out = _tool_result("swarph_ask_commander", {"question": "q", "options": ["a", "b"]})
+    assert out["status"] == 200 and "no request id" in out["error"] and "id" not in out
+
+
+@pytest.mark.parametrize("verb", CLI_VERBS)
+@pytest.mark.parametrize("status,body", NO_ID)
+def test_cli_2xx_without_an_integer_id_exits_nonzero_with_one_line(monkeypatch, capsys, verb, status, body):
+    _wire(monkeypatch, (status, body))
+    assert _cli(verb) == 1
+    io_ = capsys.readouterr()
+    assert io_.out == ""  # never "commander request #None None"
+    assert io_.err == f"swarph commander: gateway {status} returned no request id; the proposal is not confirmed\n"
+
+
+@pytest.mark.parametrize("verb", CLI_VERBS)
+@pytest.mark.parametrize("status", (200, 201))
+def test_cli_well_formed_reply_is_unchanged(monkeypatch, capsys, verb, status):
+    _wire(monkeypatch, (status, {"id": 7, "status": "pending"}))
+    assert _cli(verb) == 0
+    io_ = capsys.readouterr()
+    assert (io_.out, io_.err) == ("commander request #7 pending\n", "")
+
+
+# --- R2: the docstring states the deployed gateway's limits -----------------
+
+
+@needs_sdk
+def test_description_states_the_deployed_gateway_limits():
+    tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+    desc = " ".join(tools["swarph_ask_commander"].description.split())
+    for fact in ("at most 360 characters", "0 to 6 options", "at most 40 characters"):
+        assert fact in desc, fact
+    assert "1 to 80" not in desc and "2 to 6" not in desc  # the card's old figures
+
+
 # --- (d) no token value in any output --------------------------------------
 
 

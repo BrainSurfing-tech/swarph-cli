@@ -44,6 +44,18 @@ def post_request(gateway: str, token: str, body: dict) -> tuple[int, dict]:
     return mesh_cmd._post_json(f"{gateway.rstrip('/')}/commander/requests", body, token)
 
 
+def confirmed_id(payload) -> int | None:
+    """The queue id of an accepted proposal, or None when a 2xx reply carries no
+    integer id (200 with an empty object, a list, a null or string id). That is
+    not a confirmation. bool is an int subclass, so it is refused by type."""
+    rid = payload.get("id") if isinstance(payload, dict) else None
+    return rid if type(rid) is int else None
+
+
+def unconfirmed(status: int) -> str:
+    return f"gateway {status} returned no request id; the proposal is not confirmed"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="swarph commander")
     sub = p.add_subparsers(dest="command", required=True)
@@ -170,6 +182,9 @@ def run_commander(argv: list[str]) -> int:
                             version=args.version, card=args.card)
     status, payload = post_request(gw, token, body)
     if status in (200, 201):
+        if confirmed_id(payload) is None:
+            print(f"swarph commander: {unconfirmed(status)}", file=sys.stderr)
+            return 1
         print(f"commander request #{payload.get('id')} {payload.get('status')}")
         return 0
     detail = payload.get("detail") if isinstance(payload, dict) else payload
