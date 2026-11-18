@@ -12,7 +12,9 @@ import inspect
 import io
 import json
 import secrets
+import string
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -305,7 +307,7 @@ KNOWN_STATUSES = ("pending", "answered", "approved", "rejected", "executed", "fa
 # Not echoed: carries a token, is not a lowercase word, or is not a string at all.
 UNSAFE_STATUS = [
     f"Authorization: Bearer {LEAK}", f"token={LEAK}", LEAK, f"pending {LEAK}", TOKEN,
-    "PENDING", "pending\nforged: line", "x" * 25, "pending-2", "", None, 7, ["pending"], {"a": 1},
+    "PENDING", "pending\nforged: line", "x" * 25, "pending-2", 7, ["pending"], {"a": 1},
 ]
 
 
@@ -407,6 +409,316 @@ def test_cli_ordinary_refusals_print_exactly_what_main_prints(monkeypatch, capsy
 def test_tool_ordinary_refusals_are_unchanged(monkeypatch, status, body):
     _wire(monkeypatch, (status, body))
     assert mcp_server._ask_commander(*ASK) == {"error": f"gateway {status}: {body['detail']}", "status": status}
+
+
+# --- F1 (validate #5911): a FRAGMENT of the caller's token is still a credential ---------------
+# The gateway mints swp_ + 43 url-safe characters. A refusal that echoes the last 24 characters,
+# the first half or any other run of 8 or more must not reach the caller.
+
+def _swp() -> str:
+    return "swp_" + secrets.token_urlsafe(32)
+
+
+def _leaks(shown: str, tok: str, k: int = 8) -> bool:
+    """True when any run of k characters of tok appears in shown. Written apart from the scrub."""
+    return any(tok[i:i + k] in shown for i in range(len(tok) - k + 1))
+
+
+@pytest.fixture
+def tok(monkeypatch):
+    t = _swp()
+    monkeypatch.setattr("swarph_cli.commands.mesh._resolve_token", lambda *a, **k: t)
+    return t
+
+
+def _fragments(t: str) -> dict:
+    h = len(t) // 2
+    return {"prefix": t[:20], "suffix": t[-20:], "middle": t[12:32], "first_half": t[:h],
+            "second_half": t[h:], "last_24": t[-24:], "run_of_8": t[20:28]}
+
+
+# How the gateway might carry a fragment in the `detail` field.
+SHAPES = {
+    "bare": lambda f: f,
+    "glued_to_text": lambda f: f"rejected:{f}xyz",
+    "url_quoted": lambda f: urllib.parse.quote(f, safe=""),
+    "inside_a_dict": lambda f: {"input": f, "loc": ["body", "question"]},
+    "inside_a_list_of_dicts": lambda f: [{"loc": ["body"], "msg": f"bad {f}"}],
+}
+
+
+def test_every_run_of_8_or_more_is_removed_at_every_length_and_position():
+    leaks = []
+    for _ in range(200):  # fresh tokens, as in the validate sweep
+        t = _swp()
+        for n in range(8, 41):
+            for start in (0, (len(t) - n) // 2, len(t) - n):
+                shown = commander.safe_text(f"gateway 403: {t[start:start + n]}", t)
+                if _leaks(shown, t):
+                    leaks.append((n, start))
+    assert leaks == []
+
+
+def test_a_run_of_7_is_below_the_bar_and_a_run_of_8_is_not():
+    t = "swp_" + "Qx7Lm2Vb9Zk4Rt8Wn3Pd6Hs1Jc5Gf0Ya-Eu_Bo"
+    assert commander.safe_text(f"see {t[4:11]}", t) == f"see {t[4:11]}"
+    assert commander.safe_text(f"see {t[4:12]}", t) == "see [REDACTED]"
+
+
+@pytest.mark.parametrize("status,_body", REFUSALS)
+def test_tool_refusal_detail_carries_no_fragment_of_the_token(monkeypatch, tok, status, _body):
+    bad = []
+    for fname, frag in _fragments(tok).items():
+        for sname, shape in SHAPES.items():
+            _wire(monkeypatch, (status, {"detail": shape(frag)}))
+            out = mcp_server._ask_commander(*ASK)
+            if _leaks(json.dumps(out), tok) or not out.get("error", "").startswith(f"gateway {status}: "):
+                bad.append((fname, sname))
+    assert bad == []
+
+
+@pytest.mark.parametrize("verb", CLI_VERBS)
+@pytest.mark.parametrize("status", [401, 403, 422])
+def test_cli_refusal_detail_carries_no_fragment_of_the_token(monkeypatch, capsys, tok, verb, status):
+    bad = []
+    for fname, frag in _fragments(tok).items():
+        for sname, shape in SHAPES.items():
+            _wire(monkeypatch, (status, {"detail": shape(frag)}))
+            assert _cli(verb) == 1
+            io_ = capsys.readouterr()
+            if io_.out or _leaks(io_.err, tok) or not io_.err.startswith("swarph commander: "):
+                bad.append((fname, sname))
+    assert bad == []
+
+
+def _lowercase_run_token():
+    run = "".join(secrets.choice(string.ascii_lowercase) for _ in range(20))
+    return f"swp_{secrets.token_urlsafe(8)}{run}{secrets.token_urlsafe(16)}", run
+
+
+def test_a_status_that_is_a_fragment_of_the_token_is_not_echoed(monkeypatch, capsys):
+    t, run = _lowercase_run_token()
+    monkeypatch.setattr("swarph_cli.commands.mesh._resolve_token", lambda *a, **k: t)
+    for n in (8, 14, 20):
+        _wire(monkeypatch, (201, {"id": 7, "status": run[:n]}))
+        assert mcp_server._ask_commander(*ASK) == {"id": 7, "status": "unknown"}
+        for verb in CLI_VERBS:
+            assert _cli(verb) == 0
+            assert capsys.readouterr().out == "commander request #7 unknown\n"
+
+
+def test_a_url_quoted_fragment_of_a_token_with_reserved_characters_is_removed():
+    t = "swp_" + secrets.token_urlsafe(10) + "/+=" + secrets.token_urlsafe(10) + "/" + secrets.token_urlsafe(10)
+    quoted = urllib.parse.quote(t, safe="")
+    assert quoted != t
+    for start in (0, 6, len(quoted) - 24):
+        assert not _leaks(commander.safe_text(f"x {quoted[start:start + 24]}", quoted), quoted)
+        assert not _leaks(commander.safe_text(f"x {quoted[start:start + 24]}", t), quoted)
+
+
+def test_the_scrub_leaves_ordinary_replies_alone():
+    ordinary = [f"swarph commander: {b['detail']}" for _s, b in REFUSALS] + [
+        "swarph commander: needs_sso", "swarph commander: not_pending", "swarph commander: digest_mismatch",
+        "gateway 409: commander request 7 is approved, not pending", "ValueError: bad json", *KNOWN_STATUSES,
+    ]
+    for _ in range(200):
+        t = _swp()
+        assert [commander.safe_text(x, t) for x in ordinary] == ordinary
+        assert [commander.safe_status(x, t) for x in KNOWN_STATUSES] == list(KNOWN_STATUSES)
+
+
+# --- R2: a missing or null status is not a secret; main prints it, so the CLI still does ------
+
+@pytest.mark.parametrize("verb", CLI_VERBS)
+@pytest.mark.parametrize("body", [{"id": 7}, {"id": 7, "status": None}, {"id": 7, "status": ""}])
+def test_cli_missing_or_null_status_prints_what_main_prints(monkeypatch, capsys, verb, body):
+    _wire(monkeypatch, (201, body))
+    assert _cli(verb) == 0
+    # main: print(f"commander request #{payload.get('id')} {payload.get('status')}")
+    assert capsys.readouterr().out == f"commander request #7 {body.get('status')}\n"
+
+
+@pytest.mark.parametrize("body", [{"id": 7}, {"id": 7, "status": None}])
+def test_tool_missing_or_null_status_is_null_not_unknown(monkeypatch, body):
+    _wire(monkeypatch, (201, body))
+    assert mcp_server._ask_commander(*ASK) == {"id": 7, "status": None}
+
+
+# --- R1 and G2: one printable line, and a token split by whitespace or a control character -------
+
+ESCAPE = "\x1b[2J\x1b[31mAPPROVED"
+
+
+@pytest.mark.parametrize("verb", CLI_VERBS)
+@pytest.mark.parametrize("detail", [ESCAPE, "refused\ngranted_at=1999", "a\r\nb\tc\u2028d\x00e\x07f"])
+def test_cli_refusal_detail_is_one_printable_line(monkeypatch, capsys, verb, detail):
+    _wire(monkeypatch, (403, {"detail": detail}))
+    assert _cli(verb) == 1
+    io_ = capsys.readouterr()
+    assert io_.out == "" and io_.err.count("\n") == 1 and io_.err.startswith("swarph commander: ")
+    assert all(ch.isprintable() for ch in io_.err[:-1])
+
+
+@pytest.mark.parametrize("detail", [ESCAPE, "refused\ngranted_at=1999", "a\r\nb\tc\u2028d\x00e\x07f"])
+def test_tool_error_is_one_printable_line(monkeypatch, detail):
+    _wire(monkeypatch, (403, {"detail": detail}))
+    err = mcp_server._ask_commander(*ASK)["error"]
+    assert err.startswith("gateway 403: ") and all(ch.isprintable() for ch in err)
+
+
+SEPARATORS = (" ", "\n", "\r\n", "\t", "\x1b[0m", "\u200b", " and ")
+
+
+def test_a_token_split_by_whitespace_or_a_control_character_is_still_removed(monkeypatch, capsys, tok):
+    bad = []
+    for sep in SEPARATORS:
+        for cut in (5, 8, 20, 30, 39):
+            detail = tok[:cut] + sep + tok[cut:]
+            _wire(monkeypatch, (403, {"detail": detail}))
+            if _leaks(json.dumps(mcp_server._ask_commander(*ASK)), tok):
+                bad.append(("tool", sep, cut))
+            for verb in CLI_VERBS:
+                assert _cli(verb) == 1
+                if _leaks(capsys.readouterr().err, tok):
+                    bad.append((verb, sep, cut))
+    assert bad == []
+
+
+def test_the_sweep_holds_for_a_split_token_too():
+    leaks = []
+    for _ in range(100):
+        t = _swp()
+        for cut in range(4, 40):
+            for sep in (" ", "\n"):
+                if _leaks(commander.safe_text(f"gateway 403: {t[:cut]}{sep}{t[cut:]}", t), t):
+                    leaks.append((cut, sep))
+    assert leaks == []
+
+
+def _has_all_three(run: str) -> bool:
+    return any(c.isdigit() for c in run) and any(c.isupper() for c in run) and any(c.islower() for c in run)
+
+
+def _foreign_token() -> str:
+    """Another peer's token as the gateway mints one. The credential-like rule needs upper, lower
+    and a digit in a run; a random 24-character slice lacks one about 1.7% of the time (a whole
+    token 0.07%), so the draw keeps the slices the tests use inside the rule, not at its edge."""
+    while True:
+        t = _swp()
+        if all(_has_all_three(r) for r in (t, t[:32], t[-32:], t[:24], t[-24:])):
+            return t
+
+
+def test_another_peers_token_in_a_refusal_is_removed_whole_or_cut_to_24_or_more(monkeypatch, capsys, tok):
+    leaks = []
+    for _ in range(100):
+        f = _foreign_token()
+        for shown in (f, f"x{f}y", f[:32], f[-32:], f[:24], f[-24:], f"Authorization: Bearer {f}",
+                      f'{{"token": "{f}"}}'):
+            if _leaks(commander.safe_text(f"gateway 403: {shown}", tok), f, 24):
+                leaks.append(shown[:6])
+    assert leaks == []
+
+
+# --- G1: `swarph commander authorization check` prints key=value lines that scripts read ------
+
+def _check_cli():
+    return main(["commander", "authorization", "check", "merge", "--gateway", GW, "--as", "cell-a"])
+
+
+def _row(**over):
+    row = {"id": 3, "status": "active", "text": "merge any PR that passed both reviews",
+           "granted_at": "2026-11-18T00:00:00+00:00"}
+    return {"authorizations": [{**row, **over}]}
+
+
+def test_check_prints_an_ordinary_row_exactly_as_main_does(monkeypatch, capsys):
+    _wire(monkeypatch, (200, _row()))
+    assert _check_cli() == 0
+    io_ = capsys.readouterr()
+    # main: f"id={id}\ntext={text or ''}\ngranted_at={granted_at or ''}\n"
+    assert (io_.out, io_.err) == (
+        "id=3\ntext=merge any PR that passed both reviews\ngranted_at=2026-11-18T00:00:00+00:00\n", "")
+
+
+@pytest.mark.parametrize("over,expect", [
+    ({"granted_at": None}, "id=3\ntext=merge any PR that passed both reviews\ngranted_at=\n"),
+    ({"granted_at": ""}, "id=3\ntext=merge any PR that passed both reviews\ngranted_at=\n"),
+    ({"text": None}, "id=3\ntext=\ngranted_at=2026-11-18T00:00:00+00:00\n"),
+    ({"id": None}, "id=None\ntext=merge any PR that passed both reviews\ngranted_at=2026-11-18T00:00:00+00:00\n"),
+    ({"granted_at": "2026-11-18T00:00:00.123456+00:00"},
+     "id=3\ntext=merge any PR that passed both reviews\ngranted_at=2026-11-18T00:00:00.123456+00:00\n"),
+    ({"granted_at": "2026-11-18T00:00:00Z"},
+     "id=3\ntext=merge any PR that passed both reviews\ngranted_at=2026-11-18T00:00:00Z\n"),
+])
+def test_check_empty_and_null_fields_print_as_main_does(monkeypatch, capsys, over, expect):
+    _wire(monkeypatch, (200, _row(**over)))
+    assert _check_cli() == 0
+    assert capsys.readouterr().out == expect
+
+
+def test_check_never_prints_a_token_from_any_field(monkeypatch, capsys, tok):
+    foreign = _foreign_token()
+    cases = {
+        "own, text after Bearer": _row(text=f"Authorization: Bearer {tok}"),
+        "own, text bare": _row(text=tok),
+        "own, last 24 of text": _row(text=f"see {tok[-24:]}"),
+        "own, first half of text": _row(text=tok[:len(tok) // 2]),
+        "own, granted_at": _row(granted_at=tok),
+        "own, granted_at after a timestamp": _row(granted_at=f"2026-11-18T00:00:00+00:00 {tok}"),
+        "own, string id": _row(id=f"3 {tok}"),
+        "own, text split by a space": _row(text=f"{tok[:20]} {tok[20:]}"),
+        "foreign, text": _row(text=foreign),
+        "foreign, text after Bearer": _row(text=f"Authorization: Bearer {foreign}"),
+        "foreign, granted_at": _row(granted_at=foreign),
+        "foreign, string id": _row(id=foreign),
+    }
+    bad = []
+    for name, body in cases.items():
+        _wire(monkeypatch, (200, body))
+        assert _check_cli() == 0
+        shown = capsys.readouterr().out
+        if _leaks(shown, tok) or _leaks(shown, foreign, 24):
+            bad.append(name)
+    assert bad == []
+
+
+@pytest.mark.parametrize("text", [
+    ESCAPE + "\ngranted_at=1999", "ok\ngranted_at=1999", "ok\r\nid=1", "ok\u2028granted_at=1999", "ok\x00\x07\x1b[2J",
+])
+def test_check_text_cannot_forge_a_line_or_carry_an_escape(monkeypatch, capsys, text):
+    _wire(monkeypatch, (200, _row(text=text)))
+    assert _check_cli() == 0
+    out = capsys.readouterr().out
+    lines = out.split("\n")
+    assert lines[-1] == "" and len(lines) == 4
+    assert [ln.split("=", 1)[0] for ln in lines[:3]] == ["id", "text", "granted_at"]
+    assert lines[2] == "granted_at=2026-11-18T00:00:00+00:00"
+    assert all(ch.isprintable() for ch in out.replace("\n", ""))
+
+
+@pytest.mark.parametrize("bad_id", ["3", 3.0, 3.5, True, [3], {"a": 1}, "3\ngranted_at=1999"])
+def test_check_id_must_be_an_integer(monkeypatch, capsys, bad_id):
+    _wire(monkeypatch, (200, _row(id=bad_id)))
+    assert _check_cli() == 0
+    assert capsys.readouterr().out.startswith("id=unknown\ntext=")
+
+
+@pytest.mark.parametrize("granted", ["1999", "now", "2026-11-18", "x\ngranted_at=1999", ["2026"], 7, True,
+                                     "2026-11-18T00:00:00+00:00\nid=1", "2026-11-18T00:00:00+00:00 extra"])
+def test_check_granted_at_must_be_a_timestamp(monkeypatch, capsys, granted):
+    _wire(monkeypatch, (200, _row(granted_at=granted)))
+    assert _check_cli() == 0
+    assert capsys.readouterr().out.endswith("\ngranted_at=unknown\n")
+
+
+def test_check_picks_the_highest_integer_id_and_does_not_crash_on_mixed_ids(monkeypatch, capsys):
+    rows = [{"id": "x", "status": "active", "text": "a", "granted_at": ""},
+            {"id": 5, "status": "active", "text": "b", "granted_at": ""},
+            {"id": 2, "status": "active", "text": "c", "granted_at": ""}]
+    _wire(monkeypatch, (200, {"authorizations": rows}))
+    assert _check_cli() == 0
+    assert capsys.readouterr().out == "id=5\ntext=b\ngranted_at=\n"
 
 
 # --- (d) no token value in any output --------------------------------------
