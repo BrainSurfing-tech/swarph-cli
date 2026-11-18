@@ -16,7 +16,7 @@ A host mounts it with a stdio server entry, e.g. in ``.mcp.json`` /
     Alternatively, ``SWARPH_PROXY_SOCKET`` selects credential-free local proxy
     mode: no gateway URL is needed and the proxy supplies the peer identity.
 
-Nine tools are exposed, each backed by a plain, unit-testable helper so the
+Ten tools are exposed, each backed by a plain, unit-testable helper so the
 tool LOGIC is tested without spinning up the stdio transport:
 
 * ``swarph_search(query)``           → :func:`_search` — metaedge.surf semantic search.
@@ -29,6 +29,8 @@ tool LOGIC is tested without spinning up the stdio transport:
 * ``swarph_timeline_navigate(op, ...)`` → :func:`_timeline_navigate` — deterministic
   OKF temporal navigation (range/around/since) over the git-backed timeline.
 * ``swarph_dm_unread/reply/thread`` — scoped DM reads, reply and acknowledgement.
+* ``swarph_ask_commander(question, options, card)`` → :func:`_ask_commander` — propose
+  a decision (type=decision only) to the commander queue (card #1481, phase 1).
 
 The MCP Python SDK (``mcp``) is an OPTIONAL extra. :func:`run_mcp_server`
 fails gracefully with a ``pip install swarph-cli[mcp]`` hint when it's absent;
@@ -50,7 +52,7 @@ import urllib.request
 from swarph_cli import identity
 from swarph_cli.commands import add
 from swarph_cli.commands import codegraph
-from swarph_cli.commands import brain_ask, memory, timeline
+from swarph_cli.commands import brain_ask, commander, memory, timeline
 from swarph_cli.commands import mesh as _mesh
 from swarph_cli import gateway_default
 from swarph_cli.gateway_default import env_gateway
@@ -638,6 +640,37 @@ def _dm_thread(message_id: int, self_name: str | None = None) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Commander ask — card #1481 phase 1: a cell PROPOSES a decision, nothing more.
+# --------------------------------------------------------------------------- #
+#
+# One POST to /commander/requests with type=decision, built and sent by the same
+# code as `swarph commander ask`. Deliberately absent, by spec (F2, item 7): any
+# verb that decides, answers, withdraws, lists or reads results, and the typed
+# merge_pr / release_finish requests the desktop executor acts on. The identity
+# is the declared SWARPH_SELF, never an argument, so a cell proposes as itself.
+
+
+def _ask_commander(question: str, options: list[str] | None = None, card: int | None = None) -> dict:
+    """Propose a decision to the commander. Success is {id, status}, the two fields
+    `swarph commander ask` prints. Any refusal (401, 403, 409, 503
+    commander_not_configured, 429, 422) or transport failure is
+    {"error": "gateway <status>: <detail>", "status": <int>}, never a success
+    shape. Never raises."""
+    try:
+        _who, gw, tok = _dm_session()
+        # `swarph commander ask` strips and drops blank labels; keep labels whole.
+        body = commander.ask_body(question, [o.strip() for o in options or [] if o.strip()], card)
+        status, payload = commander.post_request(gw, tok, body)
+        if status in (200, 201):
+            return {"id": payload.get("id"), "status": payload.get("status")}
+        detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
+        return {"error": redact_text(f"gateway {status}: {detail}", caller="mcp_server._ask_commander"),
+                "status": status}
+    except Exception as exc:
+        return {"error": redact_text(f"{type(exc).__name__}: {exc}", caller="mcp_server._ask_commander")}
+
+
+# --------------------------------------------------------------------------- #
 # FastMCP server — thin @tool wrappers over the helpers above
 # --------------------------------------------------------------------------- #
 #
@@ -765,6 +798,22 @@ try:
         """
         return _dm_thread(message_id)
 
+    @mcp.tool()
+    def swarph_ask_commander(question: str, options: list[str] | None = None,
+                             card: int | None = None) -> dict:
+        """Ask the commander to decide, with options. This only PROPOSES: the
+        commander answers on the phone or the cockpit, and no tool here reads the
+        answer, decides, withdraws or lists requests.
+
+        question: the decision needed. options: the choices to pick from, optional
+        like the CLI's --options (the gateway takes 2 to 6 labels of 1 to 80
+        characters). card: the board card it concerns, optional. Posts as this
+        cell (SWARPH_SELF), type=decision.
+        Success is {id, status}. A refusal or failure is {"error": ..., "status":
+        N}: 401 bad token, 403 not allowed, 409 conflict, 429 too many open
+        questions, 503 commander_not_configured. An error is never a proposal."""
+        return _ask_commander(question, options, card)
+
 except ImportError as exc:  # pragma: no cover - exercised only when SDK absent
     mcp = None
     _MCP_IMPORT_ERROR = exc
@@ -829,8 +878,8 @@ def run_mcp_server(argv) -> int:
             "Run an MCP (stdio) server exposing swarph_search / swarph_add / "
             "swarph_describe / swarph_codegraph_query / swarph_memory_navigate / "
             "swarph_timeline_navigate and the DM tools swarph_dm_unread / "
-            "swarph_dm_reply / swarph_dm_thread (#735) so any MCP host's AI "
-            "gets the swarph toolbelt."
+            "swarph_dm_reply / swarph_dm_thread (#735) and swarph_ask_commander "
+            "(#1481) so any MCP host's AI gets the swarph toolbelt."
         ),
     )
     parser.add_argument(

@@ -39,6 +39,11 @@ def request_body(kind: str, *, repo: str | None, pr: int | None,
     return body
 
 
+def post_request(gateway: str, token: str, body: dict) -> tuple[int, dict]:
+    """The one POST that proposes to the commander queue, shared by the CLI and MCP."""
+    return mesh_cmd._post_json(f"{gateway.rstrip('/')}/commander/requests", body, token)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="swarph commander")
     sub = p.add_subparsers(dest="command", required=True)
@@ -163,7 +168,7 @@ def run_commander(argv: list[str]) -> int:
             return 2
         body = request_body(args.type, repo=args.repo, pr=args.pr, head=args.head,
                             version=args.version, card=args.card)
-    status, payload = mesh_cmd._post_json(f"{gw}/commander/requests", body, token)
+    status, payload = post_request(gw, token, body)
     if status in (200, 201):
         print(f"commander request #{payload.get('id')} {payload.get('status')}")
         return 0
