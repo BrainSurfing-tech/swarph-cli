@@ -95,15 +95,18 @@ Rework #5670 (S chunked scanning; its P4' filter is removed above):
       so adjacent markers sharing five dashes both match) under the
       shared ``_SCAN_BUDGET_SECONDS`` deadline with no 64-marker cap.
       ``_detect_classes`` scans the first chunk via ``_iter_chunks``,
-      then runs a ``_PREPASS_SLICE_SECONDS`` (0.25 s) Phase 1 slice of
-      ``_pem_envelope_classes`` for oversized ``> _MAX_PEM_CHARS`` PEM
-      spans; if Phase 1 pauses on many distinct labels, remaining chunks
-      run first and Phase 2 resumes ``_pem_envelope_classes`` afterwards.
-      ``_pem_envelope_classes`` evaluates single-label pairs up to
-      ``_MAX_PEM_CHARS`` (R4), checks the smaller marker side first, tracks
-      actually ``classified`` labels before filtering the second side,
-      and classifies every label on a side without a 32-batch stop. The
-      first hit blocks. Fail-open ONLY when a
+      then runs Phase A of ``_pem_envelope_classes`` for oversized
+      ``> _MAX_PEM_CHARS`` PEM spans TO THE END before the remaining
+      chunks (#5926): Phase A classifies main's label set (single-label
+      pairs of at most ``_CHUNK_CHARS``) and defers the longer pairs
+      (``_CHUNK_CHARS`` < pair <= ``_MAX_PEM_CHARS``, R4) to Phase B,
+      which resumes from the saved ``_state`` after chunks 2..N. So a
+      flood of distinct labels costs the same budget as on main, and the
+      R4 pairs main never classified only ever cost budget after every
+      chunk has been scanned. ``_pem_envelope_classes`` checks the
+      smaller marker side first, tracks actually ``classified`` labels
+      before filtering the second side, and classifies every label on a
+      side without a 32-batch stop. The first hit blocks. Fail-open ONLY when a
       ``_SCAN_BUDGET_SECONDS`` (~3 s) time budget runs out mid-scan;
       then the hook allows the prompt but emits a ``systemMessage``
       saying the prompt was not fully scanned — never a silent pass.
@@ -165,8 +168,6 @@ _CHUNK_CHARS = 2048
 _CHUNK_OVERLAP = 512
 # Fail-open only when this budget runs out mid-scan (with systemMessage).
 _SCAN_BUDGET_SECONDS = 3.0
-# Initial time slice for the PEM pre-pass after the first chunk (G1, #5892).
-_PREPASS_SLICE_SECONDS = 0.25
 # R2 (#5735): cap kept-whole PEM units at 8 KB (a 51-line PEM key is ~3.4 KB;
 # an 8192-bit RSA key is ~6.4 KB). Larger BEGIN..END spans are sliced like
 # ordinary lines so a slow line inside BEGIN..END cannot bypass chunking/budget.
@@ -348,11 +349,16 @@ def _pem_envelope_classes(
     text: str,
     deadline: Optional[float] = None,
     *,
-    _pause_at: Optional[float] = None,
+    _defer_long: bool = False,
     _state: Optional[dict] = None,
 ) -> tuple[list[str], bool]:
     """Scan for any BEGIN..END marker pair that redact's PEM layer flags,
     even when the body between them exceeds _MAX_PEM_CHARS (G3 #5753, R2/R4 #1678).
+
+    ``_defer_long`` (Phase A, #5926) classifies only main's label set — pairs
+    of at most ``_CHUNK_CHARS`` — and records longer pairs in
+    ``_state["deferred"]``; a later call with the same ``_state`` (Phase B)
+    skips the marker scan and classifies what was deferred.
     """
     if deadline is None:
         deadline = time.monotonic() + _SCAN_BUDGET_SECONDS
@@ -378,12 +384,13 @@ def _pem_envelope_classes(
 
     pk_labels: set[str] = _state["pk_labels"] if resuming else set()
     classified: set[str] = _state["classified"] if resuming else set()
+    deferred: set[str] = set()
     if _state is not None:
         _state["first_begin"] = first_begin
         _state["last_end"] = last_end
         _state["pk_labels"] = pk_labels
         _state["classified"] = classified
-        _state["paused"] = False
+        _state["deferred"] = deferred
 
     batch: list[tuple[str, str]] = []
     batch_len = 0
@@ -405,13 +412,6 @@ def _pem_envelope_classes(
         batch_len = 0
         return True
 
-    def _should_pause() -> bool:
-        if _pause_at is not None and time.monotonic() > _pause_at and time.monotonic() <= deadline:
-            if _state is not None:
-                _state["paused"] = True
-            return True
-        return False
-
     def _classify_labels(labels_to_check: list[str]) -> bool:
         nonlocal batch, batch_len
         for lbl in labels_to_check:
@@ -421,50 +421,35 @@ def _pem_envelope_classes(
             if len(pair) > _MAX_PEM_CHARS:
                 classified.add(lbl)
                 continue
+            if _defer_long and len(pair) > _CHUNK_CHARS:
+                deferred.add(lbl)
+                continue
             added = len(pair) + (1 if batch else 0)
             if batch and batch_len + added > _CHUNK_CHARS:
                 if not _flush_batch():
                     return False
-                if _should_pause():
-                    return True
                 added = len(pair)
             batch.append((lbl, pair))
             batch_len += added
             if batch_len >= _CHUNK_CHARS:
                 if not _flush_batch():
                     return False
-                if _should_pause():
-                    return True
-        if not _flush_batch():
-            return False
-        if _should_pause():
-            return True
-        return True
+        return _flush_batch()
 
     begin_labels = sorted(first_begin.keys())
     end_labels = sorted(last_end.keys())
     if len(begin_labels) <= len(end_labels):
-        if not _classify_labels(begin_labels):
-            return [], False
-        if _state is not None and _state.get("paused"):
-            return [], True
-        if not (pk_labels & set(first_begin.keys())):
-            return [], True
-        if not _classify_labels([lbl for lbl in end_labels if lbl not in classified]):
-            return [], False
-        if _state is not None and _state.get("paused"):
-            return [], True
+        first, second, first_pos = begin_labels, end_labels, first_begin
     else:
-        if not _classify_labels(end_labels):
-            return [], False
-        if _state is not None and _state.get("paused"):
-            return [], True
-        if not (pk_labels & set(last_end.keys())):
-            return [], True
-        if not _classify_labels([lbl for lbl in begin_labels if lbl not in classified]):
-            return [], False
-        if _state is not None and _state.get("paused"):
-            return [], True
+        first, second, first_pos = end_labels, begin_labels, last_end
+    if not _classify_labels(first):
+        return [], False
+    # A fully classified side with no private-key label rules out a block;
+    # a deferred label on it does not, so the bail waits for Phase B.
+    if not deferred and not (pk_labels & set(first_pos)):
+        return [], True
+    if not _classify_labels(second):
+        return [], False
 
     b_hit = min(((pos, lbl) for lbl, pos in first_begin.items() if lbl in pk_labels), default=None)
     e_hit = max(((pos, lbl) for lbl, pos in last_end.items() if lbl in pk_labels), default=None)
@@ -635,21 +620,22 @@ def _detect_classes(prompt: str) -> tuple[list[str], bool]:
         first_classes = _chunk_classes(first_chunk)
         if first_classes:
             return first_classes, True
+    # Phase A (#5926): main's label set runs to the end BEFORE the chunks;
+    # only the R4 pairs main never classified wait for Phase B.
     pem_state: dict = {}
-    pause_at = min(deadline, time.monotonic() + _PREPASS_SLICE_SECONDS)
     pem_classes, complete = _pem_envelope_classes(
-        prompt, deadline, _pause_at=pause_at, _state=pem_state
+        prompt, deadline, _defer_long=True, _state=pem_state
     )
     if not complete or pem_classes:
         chunks = iter(())
-        pem_state["paused"] = False
+        pem_state["deferred"] = set()
     for chunk in chunks:
         if time.monotonic() > deadline:
             return [], False
         classes = _chunk_classes(chunk)
         if classes:
             return classes, True
-    if pem_state.get("paused"):
+    if pem_state.get("deferred"):
         pem_classes, complete = _pem_envelope_classes(
             prompt, deadline, _state=pem_state
         )

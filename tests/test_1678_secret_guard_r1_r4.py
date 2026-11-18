@@ -598,3 +598,125 @@ def test_5885_g2_prepass_never_leaves_first_side_label_unclassified(monkeypatch)
         for lbl in all_labels:
             assert lbl in combined_seen, f"{name} never sent {lbl!r} to _classes_of"
             assert lbl in state["classified"], f"{name} left {lbl!r} unclassified"
+
+
+# --- #5926 (plan-review #5919 G1 + R): main's label set runs BEFORE the chunks --
+
+
+def _prepass_5919_layout(k: int, long: bool, words: int) -> str:
+    """drop's prepass_5919.py layout: K distinct labels on BEGIN and END
+    lines (4,065 chars each when ``long``), ``words`` chars of 8,000-char
+    word lines, then a 9,100-char private-key block LAST."""
+
+    def lab(i: int) -> str:
+        return (("NOTE " * 812).strip() + " " + _b36(i)) if long else "N" + _b36(i)
+
+    line = (("the quick brown fox reads logs from server rack nine " * 160)[:8000]) + "\n"
+    return (
+        "".join(f"-----BEGIN {lab(i)}-----\n" for i in range(k))
+        + "".join(f"-----END {lab(i)}-----\n" for i in range(k))
+        + line * (words // len(line))
+        + "-----BEGIN " + "RSA PRIVATE KEY-----\n" + ("A" * 64 + "\n") * 140
+        + "-----END " + "RSA PRIVATE KEY-----\n"
+    )
+
+
+def _deferred_only_layouts() -> dict[str, str]:
+    """A 1,099-char private-key label (R4 layout 4a: pair 2,229 > _CHUNK_CHARS,
+    so main never classifies it) around a 9,100-char body LAST, behind words
+    and, in one layout, three 4,065-char non-key labels. Phase A defers every
+    label here, the chunks slice the body, so only Phase B can block."""
+    pk_label = ("RSA " * 272).strip() + " PRIVATE KEY"
+    assert len(pk_label) == 1_099
+    body = ("A" * 64 + "\n") * 140
+    block = f"-----BEGIN {pk_label}-----\n" + body + f"-----END {pk_label}-----\n"
+    words = (_WORDS + "\n") * 4_000
+    junk = [("NOTE " * 812).strip() + " " + _b36(i) for i in range(3)]
+    return {
+        "4a_block_last_after_200k_words": words + block,
+        "4a_block_last_after_three_long_labels_and_200k_words": (
+            "".join(f"-----BEGIN {lbl}-----\n" for lbl in junk)
+            + "".join(f"-----END {lbl}-----\n" for lbl in junk)
+            + words
+            + block
+        ),
+    }
+
+
+def test_5926_g1_prepass_5919_label_floods_block_last_as_child_process():
+    rows = [
+        ("200_long_labels_2m_words", 200, True, 2_000_000, 2.0),
+        ("300_long_labels_1m_words", 300, True, 1_000_000, 2.0),
+        ("600_long_labels_no_words", 600, True, 0, 2.0),
+        # main itself needs ~1.6 s here: a block proves the 3 s budget held.
+        ("60000_short_labels_no_words", 60_000, False, 0, 5.0),
+    ]
+    for name, k, long, words, cap in rows:
+        prompt = _prepass_5919_layout(k, long, words)
+        rc, out, err, took = _run_cli(prompt, timeout=10.0)
+        assert rc == 0, name
+        assert err == "", name
+        assert out.strip(), f"{name}: hook allowed silently (no output)"
+        parsed = json.loads(out)
+        assert parsed.get("decision") == "block", (name, out[:120])
+        assert "PEM private key" in parsed["reason"], name
+        assert took < cap, f"{name} took {took:.3f}s (>= {cap}s)"
+
+
+def test_5926_r_phase_b_resume_blocks_deferred_pk_label_last_as_child_process():
+    # Red when the Phase B resume call in _detect_classes is removed.
+    for name, prompt in _deferred_only_layouts().items():
+        rc, out, err, took = _run_cli(prompt, timeout=10.0)
+        assert rc == 0, name
+        assert err == "", name
+        assert out.strip(), f"{name}: hook allowed silently (no output)"
+        parsed = json.loads(out)
+        assert parsed.get("decision") == "block", (name, out[:120])
+        assert "PEM private key" in parsed["reason"], name
+        assert took < 3.0, f"{name} took {took:.3f}s (>= 3.0s)"
+
+
+def test_5926_phase_a_is_mains_label_set_and_phase_b_matches_one_call(monkeypatch):
+    far = time.monotonic() + 600.0
+    body = ("A" * 64 + "\n") * 140
+    short_pk = ("-----BEGIN " + "EC PRIVATE KEY-----\n" + body + "-----END " + "EC PRIVATE KEY-----\n")
+    long_990 = [("NOTE " * 197).strip() + " " + _b36(i) for i in range(40)]
+    layouts = dict(_deferred_only_layouts())
+    layouts["prepass_5919_5_long_labels_then_block"] = _prepass_5919_layout(5, True, 0)
+    layouts["prepass_5919_300_short_labels_then_block"] = _prepass_5919_layout(300, False, 0)
+    layouts["alpha_trap_a"], layouts["alpha_trap_b"], _, _ = (*_alpha_trap_layouts(),)
+    layouts["earlystop_1_stray_pk_begin_40_990_labels"] = (
+        "".join(f"-----END E{_b36(i)}-----\n" for i in range(45))
+        + "-----BEGIN " + "RSA PRIVATE KEY-----\n"
+        + "".join(f"-----BEGIN {lbl}-----\n" for lbl in long_990)
+        + short_pk
+    )
+    layouts["control_stray_begin_no_block"] = (
+        "-----BEGIN " + "RSA PRIVATE KEY-----\n"
+        + "".join(f"-----BEGIN {lbl}-----\n" for lbl in long_990[:20])
+        + "".join(f"-----END E{_b36(i)}-----\n" for i in range(30))
+    )
+
+    orig = secret_guard._classes_of
+    seen: list[str] = []
+    monkeypatch.setattr(secret_guard, "_classes_of", lambda t: (seen.append(t), orig(t))[1])
+
+    deferred_somewhere = 0
+    for name, text in layouts.items():
+        ref = _pem_envelope_classes(text, far)
+        state: dict = {}
+        seen.clear()
+        phase_a = _pem_envelope_classes(text, far, _defer_long=True, _state=state)
+        assert phase_a[1] is True, name
+        # Phase A sends redact only main's label set: nothing over one chunk.
+        assert all(len(t) <= _CHUNK_CHARS for t in seen), name
+        for lbl in state["deferred"]:
+            pair_len = len(f"-----BEGIN {lbl}-----\n-----END {lbl}-----")
+            assert _CHUNK_CHARS < pair_len <= secret_guard._MAX_PEM_CHARS, (name, pair_len)
+        deferred_somewhere += bool(state["deferred"])
+        if phase_a[0]:
+            assert phase_a == ref, name
+            continue
+        phase_b = _pem_envelope_classes(text, far, _state=state) if state["deferred"] else phase_a
+        assert phase_b == ref, name
+    assert deferred_somewhere >= 3
