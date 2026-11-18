@@ -664,9 +664,10 @@ def _ask_commander(question: str, options: list[str] | None = None, card: int | 
         body = commander.ask_body(question, [o.strip() for o in options or [] if o.strip()], card)
         status, payload = commander.post_request(gw, tok, body)
         if status in (200, 201):
-            if commander.confirmed_id(payload) is None:  # a 2xx with no id proposed nothing
+            rid = commander.confirmed_id(payload)
+            if rid is None:  # a 2xx with no id proposed nothing
                 return {"error": commander.unconfirmed(status), "status": status}
-            return {"id": payload["id"], "status": commander.safe_status(payload.get("status"))}
+            return {"id": rid, "status": commander.safe_status(payload.get("status"), tok)}
         detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
         return {"error": commander.safe_text(f"gateway {status}: {detail}", tok), "status": status}
     except Exception as exc:

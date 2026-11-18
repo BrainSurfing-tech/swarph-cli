@@ -307,7 +307,7 @@ KNOWN_STATUSES = ("pending", "answered", "approved", "rejected", "executed", "fa
 # Not echoed: carries a token, is not a lowercase word, or is not a string at all.
 UNSAFE_STATUS = [
     f"Authorization: Bearer {LEAK}", f"token={LEAK}", LEAK, f"pending {LEAK}", TOKEN,
-    "PENDING", "pending\nforged: line", "x" * 25, "pending-2", 7, ["pending"], {"a": 1},
+    "PENDING", "pending\nforged: line", "x" * 25, "pending-2", "", 7, ["pending"], {"a": 1},
 ]
 
 
@@ -527,21 +527,53 @@ def test_the_scrub_leaves_ordinary_replies_alone():
         assert [commander.safe_status(x, t) for x in KNOWN_STATUSES] == list(KNOWN_STATUSES)
 
 
-# --- R2: a missing or null status is not a secret; main prints it, so the CLI still does ------
+# --- R2: a missing or null status is "None", as main printed it; any other unsafe value is "unknown" ------
 
 @pytest.mark.parametrize("verb", CLI_VERBS)
-@pytest.mark.parametrize("body", [{"id": 7}, {"id": 7, "status": None}, {"id": 7, "status": ""}])
+@pytest.mark.parametrize("body", [{"id": 7}, {"id": 7, "status": None}])
 def test_cli_missing_or_null_status_prints_what_main_prints(monkeypatch, capsys, verb, body):
     _wire(monkeypatch, (201, body))
     assert _cli(verb) == 0
     # main: print(f"commander request #{payload.get('id')} {payload.get('status')}")
-    assert capsys.readouterr().out == f"commander request #7 {body.get('status')}\n"
+    assert capsys.readouterr().out == f"commander request #7 {body.get('status')}\n" == "commander request #7 None\n"
 
 
 @pytest.mark.parametrize("body", [{"id": 7}, {"id": 7, "status": None}])
-def test_tool_missing_or_null_status_is_null_not_unknown(monkeypatch, body):
+def test_tool_missing_or_null_status_is_the_string_none(monkeypatch, body):
     _wire(monkeypatch, (201, body))
-    assert mcp_server._ask_commander(*ASK) == {"id": 7, "status": None}
+    assert mcp_server._ask_commander(*ASK) == {"id": 7, "status": "None"}
+
+
+def test_safe_status_maps_none_to_none_and_every_other_unsafe_value_to_unknown():
+    assert commander.safe_status(None) == "None" and commander.safe_status(None, TOKEN) == "None"
+    assert [commander.safe_status(v, TOKEN) for v in UNSAFE_STATUS] == ["unknown"] * len(UNSAFE_STATUS)
+    assert commander.safe_status("None") == "unknown"  # a gateway's own "None" is not a word of the set
+
+
+# --- a gateway id is printed only after the integer check (tool and all three verbs) -------------
+
+HOSTILE_IDS = [
+    f"Authorization: Bearer {LEAK}", LEAK, TOKEN, f"token={LEAK}", "7\nforged: line", "\x1b[2J7",
+    "7", 7.0, True, None, [7], {"a": LEAK},
+]
+
+
+@pytest.mark.parametrize("rid", HOSTILE_IDS, ids=range(len(HOSTILE_IDS)))
+def test_a_non_integer_id_is_never_echoed_by_the_tool(monkeypatch, rid):
+    _wire(monkeypatch, (201, {"id": rid, "status": "pending"}))
+    out = mcp_server._ask_commander(*ASK)
+    assert out == {"error": commander.unconfirmed(201), "status": 201}
+    assert LEAK not in json.dumps(out) and TOKEN not in json.dumps(out) and "forged" not in json.dumps(out)
+
+
+@pytest.mark.parametrize("verb", CLI_VERBS)
+@pytest.mark.parametrize("rid", HOSTILE_IDS, ids=range(len(HOSTILE_IDS)))
+def test_a_non_integer_id_is_never_echoed_by_the_cli(monkeypatch, capsys, verb, rid):
+    _wire(monkeypatch, (201, {"id": rid, "status": "pending"}))
+    assert _cli(verb) == 1
+    io_ = capsys.readouterr()
+    assert io_.out == ""
+    assert io_.err == f"swarph commander: {commander.unconfirmed(201)}\n"
 
 
 # --- R1 and G2: one printable line, and a token split by whitespace or a control character -------

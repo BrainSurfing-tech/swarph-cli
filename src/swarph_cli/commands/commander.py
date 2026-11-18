@@ -88,10 +88,10 @@ def scrub_token(text: str, token, k: int = 8) -> str:
 
 def safe_status(value, token=""):
     """A reply's status as it may be shown: a short lowercase word that carries no
-    fragment of the caller's token, else "unknown". None and "" are returned as
-    they came: `swarph commander ask` already prints them, and neither holds a secret."""
-    if value is None or value == "":
-        return value
+    fragment of the caller's token. A missing or null status is "None", which is what
+    `swarph commander ask` printed before; any other value is "unknown", never echoed."""
+    if value is None:
+        return "None"
     ok = isinstance(value, str) and _STATUS_WORD.fullmatch(value) and scrub_token(value, token) == value
     return value if ok else "unknown"
 
@@ -260,10 +260,11 @@ def run_commander(argv: list[str]) -> int:
                             version=args.version, card=args.card)
     status, payload = post_request(gw, token, body)
     if status in (200, 201):
-        if confirmed_id(payload) is None:
+        rid = confirmed_id(payload)
+        if rid is None:
             print(f"swarph commander: {unconfirmed(status)}", file=sys.stderr)
             return 1
-        print(f"commander request #{payload.get('id')} {safe_status(payload.get('status'), token)}")
+        print(f"commander request #{rid} {safe_status(payload.get('status'), token)}")
         return 0
     detail = payload.get("detail") if isinstance(payload, dict) else payload
     print(safe_text(f"swarph commander: {detail}", token), file=sys.stderr)
