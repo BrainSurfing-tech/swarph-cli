@@ -298,6 +298,111 @@ def test_description_states_the_deployed_gateway_limits():
     assert "1 to 80" not in desc and "2 to 6" not in desc  # the card's old figures
 
 
+# --- S1/S2 (second-seat review #5897): a gateway-supplied string is never echoed
+
+LEAK = secrets.token_urlsafe(32)  # a second credential the gateway puts in a reply; never the caller's own
+KNOWN_STATUSES = ("pending", "answered", "approved", "rejected", "executed", "failed", "stale", "withdrawn")
+# Not echoed: carries a token, is not a lowercase word, or is not a string at all.
+UNSAFE_STATUS = [
+    f"Authorization: Bearer {LEAK}", f"token={LEAK}", LEAK, f"pending {LEAK}", TOKEN,
+    "PENDING", "pending\nforged: line", "x" * 25, "pending-2", "", None, 7, ["pending"], {"a": 1},
+]
+
+
+@pytest.mark.parametrize("status", KNOWN_STATUSES + ("queued_for_review",))
+def test_tool_echoes_a_known_or_lowercase_word_status(monkeypatch, status):
+    _wire(monkeypatch, (201, {"id": 7, "status": status}))
+    assert mcp_server._ask_commander(*ASK) == {"id": 7, "status": status}
+
+
+@pytest.mark.parametrize("status", UNSAFE_STATUS)
+def test_tool_never_echoes_any_other_status(monkeypatch, status):
+    _wire(monkeypatch, (201, {"id": 7, "status": status, "note": f"Authorization: Bearer {LEAK}"}))
+    out = mcp_server._ask_commander(*ASK)
+    assert out == {"id": 7, "status": "unknown"}
+    assert LEAK not in json.dumps(out) and TOKEN not in json.dumps(out)
+
+
+@needs_sdk
+def test_registered_tool_does_not_echo_a_bearer_in_status(monkeypatch):
+    _wire(monkeypatch, (201, {"id": 7, "status": f"Authorization: Bearer {LEAK}"}))
+    out = _tool_result("swarph_ask_commander", {"question": "q", "options": ["a", "b"]})
+    assert out == {"id": 7, "status": "unknown"}
+
+
+# redact_text catches these shapes every time. A bare foreign token it misses 1 time in 5, so the
+# bare case is only pinned for the caller's own bearer, which is removed by exact match.
+LEAKY_DETAILS = [
+    f"Authorization: Bearer {LEAK}", f"forbidden token={LEAK}", f"bad credential {TOKEN}",
+    f"Bearer {TOKEN}", [f"Authorization: Bearer {LEAK}"],
+]
+
+
+@pytest.mark.parametrize("detail", LEAKY_DETAILS)
+def test_tool_refusal_detail_carries_no_part_of_a_token(monkeypatch, detail):
+    _wire(monkeypatch, (403, {"detail": detail}))
+    out = mcp_server._ask_commander(*ASK)
+    assert out["status"] == 403 and out["error"].startswith("gateway 403: ")
+    assert LEAK not in json.dumps(out) and TOKEN not in json.dumps(out)
+
+
+def _token_redact_text_misses() -> str:
+    from swarph_cli.redact import redact_text
+    while True:
+        tok = secrets.token_urlsafe(32)
+        if tok in redact_text(f"bad credential {tok}", caller="test"):
+            return tok
+
+
+@pytest.mark.parametrize("verb", [None, *CLI_VERBS])  # None is the MCP tool
+def test_own_bearer_is_removed_even_where_redact_text_misses_it(monkeypatch, capsys, verb):
+    tok = _token_redact_text_misses()
+    monkeypatch.setattr("swarph_cli.commands.mesh._resolve_token", lambda *a, **k: tok)
+    _wire(monkeypatch, (403, {"detail": f"bad credential {tok}"}))
+    if verb is None:
+        shown = json.dumps(mcp_server._ask_commander(*ASK))
+    else:
+        assert _cli(verb) == 1
+        io_ = capsys.readouterr()
+        shown = io_.out + io_.err
+    assert "bad credential" in shown and tok not in shown
+
+
+@pytest.mark.parametrize("verb", CLI_VERBS)
+@pytest.mark.parametrize("status", UNSAFE_STATUS)
+def test_cli_success_never_prints_an_unsafe_status(monkeypatch, capsys, verb, status):
+    _wire(monkeypatch, (201, {"id": 7, "status": status}))
+    assert _cli(verb) == 0
+    io_ = capsys.readouterr()
+    assert (io_.out, io_.err) == ("commander request #7 unknown\n", "")
+
+
+@pytest.mark.parametrize("verb", CLI_VERBS)
+@pytest.mark.parametrize("detail", LEAKY_DETAILS)
+def test_cli_refusal_detail_prints_no_part_of_a_token(monkeypatch, capsys, verb, detail):
+    _wire(monkeypatch, (403, {"detail": detail}))
+    assert _cli(verb) == 1
+    io_ = capsys.readouterr()
+    assert io_.out == "" and io_.err.startswith("swarph commander: ") and io_.err.count("\n") == 1
+    assert LEAK not in io_.err and TOKEN not in io_.err
+
+
+@pytest.mark.parametrize("verb", CLI_VERBS)
+@pytest.mark.parametrize("status,body", REFUSALS)
+def test_cli_ordinary_refusals_print_exactly_what_main_prints(monkeypatch, capsys, verb, status, body):
+    _wire(monkeypatch, (status, body))
+    assert _cli(verb) == 1
+    io_ = capsys.readouterr()
+    # main: print(f"swarph commander: {payload.get('detail')}", file=sys.stderr)
+    assert (io_.out, io_.err) == ("", f"swarph commander: {body['detail']}\n")
+
+
+@pytest.mark.parametrize("status,body", REFUSALS)
+def test_tool_ordinary_refusals_are_unchanged(monkeypatch, status, body):
+    _wire(monkeypatch, (status, body))
+    assert mcp_server._ask_commander(*ASK) == {"error": f"gateway {status}: {body['detail']}", "status": status}
+
+
 # --- (d) no token value in any output --------------------------------------
 
 

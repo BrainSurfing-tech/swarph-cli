@@ -655,7 +655,9 @@ def _ask_commander(question: str, options: list[str] | None = None, card: int | 
     `swarph commander ask` prints. Any refusal (401, 403, 409, 503
     commander_not_configured, 429, 422), a transport failure, or a 2xx reply with
     no integer id is {"error": "...", "status": <int>}, never a success shape.
-    Never raises."""
+    Never raises. The result never carries a gateway string beyond a short lowercase
+    status; error text has the caller's bearer and secret shapes removed."""
+    tok = ""
     try:
         _who, gw, tok = _dm_session()
         # `swarph commander ask` strips and drops blank labels; keep labels whole.
@@ -664,12 +666,11 @@ def _ask_commander(question: str, options: list[str] | None = None, card: int | 
         if status in (200, 201):
             if commander.confirmed_id(payload) is None:  # a 2xx with no id proposed nothing
                 return {"error": commander.unconfirmed(status), "status": status}
-            return {"id": payload["id"], "status": payload.get("status")}
+            return {"id": payload["id"], "status": commander.safe_status(payload.get("status"))}
         detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
-        return {"error": redact_text(f"gateway {status}: {detail}", caller="mcp_server._ask_commander"),
-                "status": status}
+        return {"error": commander.safe_text(f"gateway {status}: {detail}", tok), "status": status}
     except Exception as exc:
-        return {"error": redact_text(f"{type(exc).__name__}: {exc}", caller="mcp_server._ask_commander")}
+        return {"error": commander.safe_text(f"{type(exc).__name__}: {exc}", tok)}
 
 
 # --------------------------------------------------------------------------- #

@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from swarph_cli.commands import mesh as mesh_cmd
+from swarph_cli.redact import redact_text
 
 
 def ask_body(question: str, options: list[str], card: int | None) -> dict:
@@ -54,6 +56,27 @@ def confirmed_id(payload) -> int | None:
 
 def unconfirmed(status: int) -> str:
     return f"gateway {status} returned no request id; the proposal is not confirmed"
+
+
+# The gateway's request statuses (mesh-gateway 4989daa, server.py): pending 4040,
+# answered 4133, approved 4135, rejected 4137, executed/failed/stale 4165,
+# withdrawn 4212. All are short lowercase words, so one pattern admits them and
+# a future status; anything else in a reply is never echoed.
+_STATUS_WORD = re.compile(r"[a-z][a-z_]{0,23}")
+
+
+def safe_status(value) -> str:
+    """A reply's status as it may be shown: a short lowercase word, else "unknown"."""
+    return value if isinstance(value, str) and _STATUS_WORD.fullmatch(value) else "unknown"
+
+
+def safe_text(text: str, token: str) -> str:
+    """Gateway-supplied text as it may be shown: the caller's own bearer removed
+    exactly (redact_text alone misses about 1 in 5 bare tokens), then the
+    secret shapes redact_text knows. Ordinary text passes through unchanged."""
+    if len(token) >= 16:  # a real credential; a short test token would mangle words
+        text = text.replace(token, "[REDACTED]")
+    return redact_text(text, caller="commander") or ""
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -185,8 +208,8 @@ def run_commander(argv: list[str]) -> int:
         if confirmed_id(payload) is None:
             print(f"swarph commander: {unconfirmed(status)}", file=sys.stderr)
             return 1
-        print(f"commander request #{payload.get('id')} {payload.get('status')}")
+        print(f"commander request #{payload.get('id')} {safe_status(payload.get('status'))}")
         return 0
     detail = payload.get("detail") if isinstance(payload, dict) else payload
-    print(f"swarph commander: {detail}", file=sys.stderr)
+    print(safe_text(f"swarph commander: {detail}", token), file=sys.stderr)
     return 1
