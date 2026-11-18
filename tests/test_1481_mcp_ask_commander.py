@@ -17,7 +17,7 @@ import urllib.request
 
 import pytest
 
-from swarph_cli.commands import mcp_server
+from swarph_cli.commands import commander, mcp_server
 from swarph_cli.main import main
 
 GW = "http://gw.test:8788"
@@ -348,10 +348,16 @@ def test_tool_refusal_detail_carries_no_part_of_a_token(monkeypatch, detail):
 
 def _token_redact_text_misses() -> str:
     from swarph_cli.redact import redact_text
-    while True:
+    for _ in range(5000):  # redact_text misses about 1 in 5 today
         tok = secrets.token_urlsafe(32)
         if tok in redact_text(f"bad credential {tok}", caller="test"):
             return tok
+    pytest.skip("redact_text now catches every bare token; the exact-match removal is no longer load-bearing")
+
+
+@pytest.mark.parametrize("token", [None, "", "short", b"x" * 40, 7])
+def test_safe_text_tolerates_a_token_that_is_not_a_usable_credential(token):
+    assert commander.safe_text("swarph commander: needs_sso", token) == "swarph commander: needs_sso"
 
 
 @pytest.mark.parametrize("verb", [None, *CLI_VERBS])  # None is the MCP tool

@@ -74,7 +74,7 @@ def safe_text(text: str, token: str) -> str:
     """Gateway-supplied text as it may be shown: the caller's own bearer removed
     exactly (redact_text alone misses about 1 in 5 bare tokens), then the
     secret shapes redact_text knows. Ordinary text passes through unchanged."""
-    if len(token) >= 16:  # a real credential; a short test token would mangle words
+    if isinstance(token, str) and len(token) >= 16:  # a real credential; a short one would mangle words
         text = text.replace(token, "[REDACTED]")
     return redact_text(text, caller="commander") or ""
 
