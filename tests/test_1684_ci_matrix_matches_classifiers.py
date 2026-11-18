@@ -8,6 +8,12 @@ a classified Python version or OS with no CI leg, and a CI leg with no classifie
 It also requires every classified Python version on the posix leg (the full range
 runs there; macOS and Windows run a decided subset).
 
+One OS is TESTED BUT NOT CLAIMED on purpose. Decision D3 of the v1.0 plan (commander,
+2026-11-18 12:16Z: "drop the windows classifier"): WSL2 carries the full flow, and native
+Windows stays experimental (`swarph join` refuses it, and the Windows legs skip about
+1,066 tests). The Windows legs keep running, the classifier is not shipped, and the check
+fails if the classifier comes back or if the Windows legs disappear.
+
 The check is a pure function, so the mutants below prove each break turns it red.
 """
 import re
@@ -29,6 +35,8 @@ RUNNER_CLASSIFIER = {
     "windows": "Operating System :: Microsoft :: Windows",
 }
 PY_CLASSIFIER = re.compile(r"^Programming Language :: Python :: (3\.\d+)$")
+# Run in CI, deliberately not claimed in pyproject (D3, see the module docstring).
+TESTED_NOT_CLAIMED = frozenset({"Operating System :: Microsoft :: Windows"})
 
 
 def _load():
@@ -77,7 +85,9 @@ def mismatches(pyproject, workflows):
     out += [f"python {v} is classified but no CI leg runs it" for v in sorted(claimed_versions - ci_versions)]
     out += [f"python {v} has a CI leg but no classifier" for v in sorted(ci_versions - claimed_versions)]
     out += [f"{c!r} is classified but no CI leg runs it" for c in sorted(claimed_oses - ci_oses)]
-    out += [f"{c!r} has a CI leg but no classifier" for c in sorted(ci_oses - claimed_oses)]
+    out += [f"{c!r} has a CI leg but no classifier" for c in sorted(ci_oses - claimed_oses - TESTED_NOT_CLAIMED)]
+    out += [f"{c!r} is tested but not claimed by decision D3, yet it is classified" for c in sorted(claimed_oses & TESTED_NOT_CLAIMED)]
+    out += [f"{c!r} is tested but not claimed by decision D3, yet no CI leg runs it" for c in sorted(TESTED_NOT_CLAIMED - ci_oses)]
     out += [
         f"python {v} is classified but the posix leg does not run it"
         for v in sorted(claimed_versions - per_workflow.get("posix", set()))
@@ -111,6 +121,10 @@ def _drop_windows_leg(py, wf):
     wf["windows"]["jobs"] = {}
 
 
+def _claim_windows(py, wf):
+    py["project"]["classifiers"].append("Operating System :: Microsoft :: Windows")
+
+
 def _drop_314_classifier(py, wf):
     py["project"]["classifiers"].remove("Programming Language :: Python :: 3.14")
 
@@ -136,7 +150,8 @@ MUTANTS = [
     (_drop_posix_314, "python 3.14 is classified but the posix leg does not run it"),
     (_add_windows_315, "python 3.15 has a CI leg but no classifier"),
     (_drop_macos_classifier, "'Operating System :: MacOS' has a CI leg but no classifier"),
-    (_drop_windows_leg, "'Operating System :: Microsoft :: Windows' is classified but no CI leg"),
+    (_drop_windows_leg, "'Operating System :: Microsoft :: Windows' is tested but not claimed by decision D3, yet no CI leg"),
+    (_claim_windows, "'Operating System :: Microsoft :: Windows' is tested but not claimed by decision D3, yet it is classified"),
     (_drop_314_classifier, "python 3.14 has a CI leg but no classifier"),
     (_classify_39, "python 3.9 is classified but no CI leg"),
     (_macos_only_315, "python 3.15 is classified but the posix leg does not run it"),
