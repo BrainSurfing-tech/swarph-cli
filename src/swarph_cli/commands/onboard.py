@@ -787,6 +787,28 @@ def _print_checklist(peer: str, gateway: str) -> int:
     return 1
 
 
+def _join_record(canonical: str, token_path: Path) -> Optional[dict]:
+    """Sidecar ``join`` writes, only when it names this peer and this token file."""
+    sidecar = token_path.with_name(f"{canonical}.join.json")
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    gateway = payload.get("gateway")
+    if (payload.get("name") != canonical
+            or payload.get("token_file") != str(token_path)
+            or not isinstance(gateway, str)
+            or not gateway.strip()):
+        return None
+    return payload
+
+
+def _argv_has_gateway(argv: list[str]) -> bool:
+    return any(arg == "--gateway" or arg.startswith("--gateway=") for arg in argv)
+
+
 def run_onboard(argv: list[str]) -> int:
     """Entry point invoked by ``swarph_cli.main`` verb dispatch.
 
@@ -840,27 +862,42 @@ def run_onboard(argv: list[str]) -> int:
     capabilities = dict(_parse_capability(c) for c in args.capability) if args.capability else {
         "can_claim_tasks": True
     }
-    print_safe(f"[2/6] prepare peer-registry row (caps={capabilities})")
+    # The saved-by-join path is the sidecar join writes, not the token file.
+    # onboard's own capture, `swarph mesh register`, and a hand placement after
+    # `swarph mesh mint` all write `<name>.peer_token` and must still register.
+    join_token_path = (Path.home() / ".config" / "swarph"
+                       / f"{canonical}.peer_token")
+    join_record = None
+    if not args.token_file and join_token_path.is_file():
+        try:
+            from swarph_cli.tokens import read_token_file
+            saved_token = read_token_file(join_token_path)
+        except RuntimeError:
+            saved_token = ""
+        if saved_token:
+            join_record = _join_record(canonical, join_token_path)
+    join_saved = join_record is not None
+    skipped_flags = []
+    if join_saved and args.url:
+        skipped_flags.append("--url")
+    if join_saved and args.capability:
+        skipped_flags.append("--capability")
+    if skipped_flags:
+        verb = "are" if len(skipped_flags) > 1 else "is"
+        print_safe(f"[2/6] {' and '.join(skipped_flags)} {verb} not applied")
+    else:
+        print_safe(f"[2/6] prepare peer-registry row (caps={capabilities})")
 
     # ── Step 3: resolve MESH_GATEWAY_TOKEN ───────────────────────────
     print_safe("[3/6] resolve MESH_GATEWAY_TOKEN")
     # target_peer=canonical: rung 4 must know WHICH peer is being registered, so a
     # cell's own per-peer token is refused for onboarding anyone but itself (#467b).
-    join_token_path = (Path.home() / ".config" / "swarph"
-                       / f"{canonical}.peer_token")
-    join_saved = False
-    if not args.token_file and join_token_path.is_file():
-        try:
-            from swarph_cli.tokens import read_token_file
-            join_saved = bool(read_token_file(join_token_path))
-        except RuntimeError:
-            join_saved = False
     token = _resolve_token(args.token_file, target_peer=canonical)
     if not token:
         print_safe("swarph onboard: empty token", file=sys.stderr)
         return 1
     if join_saved:
-        print_safe(f"Using the peer token saved by join for {canonical}.")
+        print_safe(f"Found the peer token saved by join for {canonical}.")
     else:
         print_safe("      ok")
 
@@ -870,7 +907,8 @@ def run_onboard(argv: list[str]) -> int:
     # typo'd name reports the typo, not a missing env var.
     if join_saved:
         print_safe("[4/6] join already registered this peer; not registering a second time")
-        args.gateway = getattr(args, "gateway", "") or ""
+        if not _argv_has_gateway(argv) and not env_gateway():
+            args.gateway = str(join_record["gateway"]).strip().rstrip("/")
     else:
         args.gateway = require_gateway(getattr(args, "gateway", ""))
         print_safe(f"[4/6] POST {args.gateway}/peers/register")

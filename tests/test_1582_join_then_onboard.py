@@ -4,6 +4,7 @@ Scratch HOME and a fake gateway only. No live token is read or printed.
 """
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -78,15 +79,27 @@ def test_successful_join_ends_on_the_onboard_step(monkeypatch, tmp_path, capsys)
     assert saved.strip() == _TOKEN
 
 
+def _write_join(tmp_path, gateway="http://100.64.0.1:8788", token=_TOKEN, name="new-cell"):
+    token_path = tmp_path / ".config" / "swarph" / f"{name}.peer_token"
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(token + "\n")
+    token_path.chmod(0o600)
+    sidecar = token_path.with_name(f"{name}.join.json")
+    sidecar.write_text(json.dumps({
+        "name": name,
+        "gateway": gateway,
+        "token_file": str(token_path),
+    }) + "\n")
+    return token_path
+
+
 def test_onboard_uses_the_join_token_and_does_not_register_again(
         monkeypatch, tmp_path, capsys):
     _home(monkeypatch, tmp_path)
     monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
     monkeypatch.delenv("SWARPH_SELF", raising=False)
-    token_path = tmp_path / ".config" / "swarph" / "new-cell.peer_token"
-    token_path.parent.mkdir(parents=True)
-    token_path.write_text(_TOKEN + "\n")
-    token_path.chmod(0o600)
+    _write_join(tmp_path)
     posted = []
 
     def forbid_post(*args, **kwargs):
@@ -103,9 +116,11 @@ def test_onboard_uses_the_join_token_and_does_not_register_again(
     out = capsys.readouterr().out
     assert rc == 0
     assert posted == []
-    assert "Using the peer token saved by join for new-cell." in out
+    assert "Found the peer token saved by join for new-cell." in out
     assert "not registering a second time" in out
     assert _TOKEN not in out
+    env = (tmp_path / "swarph_state" / "new-cell" / ".env.example").read_text()
+    assert "MESH_GATEWAY_URL=http://100.64.0.1:9\n" in env
     assert (tmp_path / "swarph_state" / "new-cell" / "inbox.log").is_file()
 
 
@@ -137,5 +152,155 @@ def test_onboard_without_a_join_token_still_registers(monkeypatch, tmp_path, cap
     assert rc == 0
     assert any(method == "POST" and url.endswith("/peers/register")
                for method, url in calls)
-    assert "Using the peer token saved by join" not in out
+    assert "Found the peer token saved by join" not in out
+    assert "operator-token" not in out
+
+
+def test_token_file_without_a_sidecar_still_registers(monkeypatch, tmp_path, capsys):
+    _home(monkeypatch, tmp_path)
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "operator-token")
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    token_path = tmp_path / ".config" / "swarph" / "new-cell.peer_token"
+    token_path.parent.mkdir(parents=True)
+    token_path.write_text(_TOKEN + "\n")
+    token_path.chmod(0o600)
+    calls = []
+
+    def fake_get(url, token):
+        if url.endswith("/peers/new-cell"):
+            return 404, {}
+        if url.endswith("/peers"):
+            return 200, {"peers": [{"name": "lab-ovh", "ratified": True}]}
+        return 404, {}
+
+    def fake_post(url, payload, token):
+        calls.append((url, payload, token))
+        return 200, {"registered_unratified": True, "token_status": "deferred"}
+
+    monkeypatch.setattr(onboard, "_get_json", fake_get)
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    monkeypatch.setattr("swarph_shared.verify_subscription_setup", lambda: True)
+    rc = onboard.run_onboard([
+        "new-cell", "--gateway", "http://100.64.0.1:9",
+        "--url", "http://new-cell:9", "--capability", "provider=codex",
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    posted = [item for item in calls if item[0].endswith("/peers/register")]
+    assert len(posted) == 1
+    assert posted[0][1]["url"] == "http://new-cell:9"
+    assert posted[0][1]["capabilities"]["provider"] == "codex"
+    assert posted[0][2] == _TOKEN
+    assert "not applied" not in out
+    assert "Found the peer token saved by join" not in out
+    assert _TOKEN not in out
+
+
+def test_sidecar_supplies_the_gateway_when_flag_and_env_are_empty(
+        monkeypatch, tmp_path, capsys):
+    _home(monkeypatch, tmp_path)
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    _write_join(tmp_path, gateway="http://100.64.0.1:8788")
+    posted = []
+    monkeypatch.setattr(onboard, "_post_json", lambda *a, **k: posted.append(a))
+    monkeypatch.setattr(onboard, "_get_json", lambda *a, **k: (500, {}))
+    monkeypatch.setattr("swarph_shared.verify_subscription_setup", lambda: True)
+    rc = onboard.run_onboard(["new-cell"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert posted == []
+    env = (tmp_path / "swarph_state" / "new-cell" / ".env.example").read_text()
+    assert "MESH_GATEWAY_URL=http://100.64.0.1:8788\n" in env
+    assert "MESH_GATEWAY_URL=\n" not in env
+    assert _TOKEN not in out
+    assert _TOKEN not in env
+
+
+def test_skipped_url_and_capability_are_named(
+        monkeypatch, tmp_path, capsys):
+    _home(monkeypatch, tmp_path)
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    _write_join(tmp_path)
+    monkeypatch.setattr(onboard, "_post_json", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no post")))
+    monkeypatch.setattr(onboard, "_get_json", lambda *a, **k: (500, {}))
+    monkeypatch.setattr("swarph_shared.verify_subscription_setup", lambda: True)
+    rc = onboard.run_onboard([
+        "new-cell", "--url", "http://new-cell:9", "--capability", "provider=codex",
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "--url and --capability are not applied" in out
+    assert _TOKEN not in out
+
+
+def test_token_file_flag_wins_over_the_saved_join_file(monkeypatch, tmp_path, capsys):
+    _home(monkeypatch, tmp_path)
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    _write_join(tmp_path)
+    explicit = tmp_path / "operator.token"
+    explicit.write_text("operator-token\n")
+    explicit.chmod(0o600)
+    calls = []
+
+    def fake_get(url, token):
+        if url.endswith("/peers/new-cell"):
+            return 404, {}
+        if url.endswith("/peers"):
+            return 200, {"peers": [{"name": "lab-ovh", "ratified": True}]}
+        return 404, {}
+
+    def fake_post(url, payload, token):
+        calls.append((url, token))
+        return 200, {"registered_unratified": True, "token_status": "deferred"}
+
+    monkeypatch.setattr(onboard, "_get_json", fake_get)
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    monkeypatch.setattr("swarph_shared.verify_subscription_setup", lambda: True)
+    rc = onboard.run_onboard([
+        "new-cell", "--gateway", "http://100.64.0.1:9",
+        "--token-file", str(explicit),
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    posted = [item for item in calls if item[0].endswith("/peers/register")]
+    assert posted and posted[0][1] == "operator-token"
+    assert "Found the peer token saved by join" not in out
+    assert "operator-token" not in out
+    assert _TOKEN not in out
+
+
+def test_empty_token_file_is_not_a_saved_join(monkeypatch, tmp_path, capsys):
+    _home(monkeypatch, tmp_path)
+    monkeypatch.setenv("MESH_GATEWAY_TOKEN", "operator-token")
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    token_path = _write_join(tmp_path, token="")
+    token_path.write_text("\n")
+    calls = []
+
+    def fake_get(url, token):
+        if url.endswith("/peers/new-cell"):
+            return 404, {}
+        if url.endswith("/peers"):
+            return 200, {"peers": [{"name": "lab-ovh", "ratified": True}]}
+        return 404, {}
+
+    def fake_post(url, payload, token):
+        calls.append((url, token))
+        return 200, {"registered_unratified": True, "token_status": "deferred"}
+
+    monkeypatch.setattr(onboard, "_get_json", fake_get)
+    monkeypatch.setattr(onboard, "_post_json", fake_post)
+    monkeypatch.setattr("swarph_shared.verify_subscription_setup", lambda: True)
+    rc = onboard.run_onboard(["new-cell", "--gateway", "http://100.64.0.1:9"])
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert rc == 0
+    posted = [item for item in calls if item[0].endswith("/peers/register")]
+    assert posted and posted[0][1] == "operator-token"
+    assert "Found the peer token saved by join" not in out
+    assert "not registering a second time" not in out
     assert "operator-token" not in out
