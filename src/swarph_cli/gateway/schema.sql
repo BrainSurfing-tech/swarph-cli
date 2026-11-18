@@ -501,3 +501,43 @@ INSERT OR IGNORE INTO groups (name,description,kind,created_by,created_at) VALUE
   ('execute-grant','board + lane execute','role','system','bootstrap'),
   ('metas','meta-edge scope','role','system','bootstrap');
 INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (12, CURRENT_TIMESTAMP);
+
+-- card #1645: the commander's request queue and the cockpit credential store,
+-- ported from mesh-gateway 4989daa (schema.sql v29 lines 794-817 and v42 lines
+-- 971-980, verbatim). NOT a schema_version bump: fork numbers 1-12 mirror mesh
+-- 1-12, 13 already names another mesh migration and 42 would claim 13-41. Table
+-- presence is the marker. Gateway-local authority: hashes only, never mirrored.
+CREATE TABLE IF NOT EXISTS commander_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  proposer TEXT NOT NULL,
+  type TEXT NOT NULL,
+  params TEXT NOT NULL,
+  card_id INTEGER,
+  head_sha TEXT,
+  question TEXT,
+  options TEXT,
+  status TEXT NOT NULL,
+  decided_at TEXT,
+  answer TEXT,
+  result TEXT,
+  created_at TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL,
+  why TEXT,
+  decided_by TEXT,
+  decided_via TEXT,
+  executed_at TEXT,
+  executed_by TEXT,
+  result_detail TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS commander_requests_one_pending
+  ON commander_requests(dedupe_key) WHERE status = 'pending';
+CREATE TABLE IF NOT EXISTS cockpit_credentials (
+  credential_id TEXT PRIMARY KEY,
+  token_sha256 TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  minted_by TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS cockpit_credentials_one_active
+  ON cockpit_credentials((1)) WHERE revoked_at IS NULL;
