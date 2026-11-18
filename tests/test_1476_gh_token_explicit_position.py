@@ -432,26 +432,36 @@ def test_non_allowlisted_prefix_is_denied_not_rewritten(
     assert "updatedInput" not in output
 
 
-def test_targets_gh_env_prefix_no_redos():
-    """#4467 blocker 2: disjoint _ENVPFX alternatives stay linear."""
+def _fastest_of(fn, arg, runs=5):
+    """(result, fastest seconds) over `runs` timed calls after one warm-up call.
+
+    A super-linear regex makes EVERY call slow, so the fastest call still trips the
+    bound; one call slowed by a loaded CI runner (0.16-0.18 s on shared py3.11 legs,
+    2026-11-18) no longer does.
+    """
     import time
 
+    result = fn(arg)
+    best = float("inf")
+    for _ in range(runs):
+        start = time.perf_counter()
+        fn(arg)
+        best = min(best, time.perf_counter() - start)
+    return result, best
+
+
+def test_targets_gh_env_prefix_no_redos():
+    """#4467 blocker 2: disjoint _ENVPFX alternatives stay linear."""
     command = "A=$(x) " * 22
-    start = time.perf_counter()
-    result = ghid.targets_gh(command)
-    elapsed = time.perf_counter() - start
+    result, elapsed = _fastest_of(ghid.targets_gh, command)
     assert result is False
     assert elapsed < 0.1, f"targets_gh took {elapsed:.3f}s"
 
 
 def test_targets_gh_sudo_option_arg_no_redos():
     """#4469: a sudo option argument must not start with '-', so flags stay linear."""
-    import time
-
     command = "sudo" + (" -a" * 30) + " zz"
-    start = time.perf_counter()
-    result = ghid.targets_gh(command)
-    elapsed = time.perf_counter() - start
+    result, elapsed = _fastest_of(ghid.targets_gh, command)
     assert result is False
     assert elapsed < 0.1, f"targets_gh took {elapsed:.3f}s"
 
@@ -464,12 +474,8 @@ def test_targets_gh_sudo_option_arg_no_redos():
 ])
 def test_targets_gh_wrapper_name_as_option_arg_no_redos(piece):
     """A wrapper name is not an option argument, so n=20 stays under 0.1s."""
-    import time
-
     command = piece * 20
-    start = time.perf_counter()
-    result = ghid.targets_gh(command)
-    elapsed = time.perf_counter() - start
+    result, elapsed = _fastest_of(ghid.targets_gh, command)
     assert result is False
     assert elapsed < 0.1, f"targets_gh took {elapsed:.3f}s on {piece!r} * 20"
 

@@ -947,7 +947,8 @@ def test_seeded_heredoc_shapes_have_linear_work_and_no_small_input_refusal(monke
         if fragment in tried:
             continue
         tried.add(fragment)
-        syntax = subprocess.run(["bash", "-n"], input=fragment, text=True, capture_output=True, timeout=3)
+        syntax = subprocess.run(["bash", "-n"], input=fragment, text=True, capture_output=True,
+                                timeout=15 if os.environ.get("CI") == "true" else 3)  # shared CI, as _fresh_hook
         if syntax.returncode or syntax.stderr:
             continue
         syntax_accepted += 1
