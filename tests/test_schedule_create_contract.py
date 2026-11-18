@@ -210,7 +210,21 @@ def stat(path, *args, **kwargs):
 def read(path, *args, **kwargs):
     return original_read(Path(fixture) if path == gateway else path, *args, **kwargs)
 
+# Python 3.14: Path.exists calls os.path.exists, which on Windows is C code that
+# never reads the patched os.stat, so the gateway path looked absent (card #1684).
+original_os_exists = os.path.exists
+
+def os_exists(path):
+    if isinstance(path, (str, os.PathLike)) and Path(path) == gateway:
+        try:
+            stat(path)
+        except OSError:
+            return False
+        return True
+    return original_os_exists(path)
+
 Path.exists, Path.stat, os.stat, Path.read_text = exists, stat, stat, read
+os.path.exists = os_exists
 raise SystemExit(pytest.main([
     source, "-q", "--tb=short", "-k",
     "test_the_cli_durable_keys_match_the_gateway_the_client_talks_to or "
