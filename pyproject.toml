@@ -120,6 +120,9 @@ gateway = [
     # B1 Meta-Edge identity: verify RS256 SSO JWTs (the gateway TRUSTS, never
     # signs). [crypto] pulls in `cryptography` for RSA signature verification.
     "PyJWT[crypto]>=2.8",
+    # card #1645: JCS (RFC 8785) bytes are the commander queue's digest contract;
+    # the exact pin matches mesh-gateway and swarph-desktop.
+    "rfc8785==0.1.4",
 ]
 # `swarph service serve` stands up a $0 subscription-LLM HTTP lane. Same
 # FastAPI/uvicorn stack as the gateway, behind its own extra so the core

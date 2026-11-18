@@ -33,7 +33,7 @@ def test_serve_missing_deps_returns_2_with_hint(capsys, monkeypatch):
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
-        if name in ("fastapi", "uvicorn"):
+        if name in ("fastapi", "uvicorn", "rfc8785"):
             raise ImportError(f"No module named {name!r}")
         return real_import(name, *args, **kwargs)
 
@@ -44,6 +44,24 @@ def test_serve_missing_deps_returns_2_with_hint(capsys, monkeypatch):
     assert "swarph-cli[gateway]" in err
 
 
+def test_serve_missing_rfc8785_alone_returns_2_with_hint(capsys, monkeypatch):
+    """card #1645: the commander queue imports rfc8785 at module load, so an
+    old environment under an upgraded wheel must fail at the gate, not in
+    uvicorn's traceback."""
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "rfc8785":
+            raise ImportError("No module named 'rfc8785'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with patch.dict("sys.modules", {"uvicorn": MagicMock(), "fastapi": MagicMock()}):
+        rc = gw.run_gateway(["serve"])
+    assert rc == 2
+    assert "swarph-cli[gateway]" in capsys.readouterr().err
+
+
 # --- serve dispatch (uvicorn.run mocked) -----------------------------------
 
 def test_serve_calls_uvicorn_with_app_host_port(monkeypatch):
@@ -51,7 +69,8 @@ def test_serve_calls_uvicorn_with_app_host_port(monkeypatch):
     fake_uvicorn = MagicMock()
     fake_fastapi = MagicMock()
     with patch.dict(
-        "sys.modules", {"uvicorn": fake_uvicorn, "fastapi": fake_fastapi}
+        "sys.modules", {"uvicorn": fake_uvicorn, "fastapi": fake_fastapi,
+                        "rfc8785": MagicMock()}
     ):
         rc = gw.run_gateway(["serve", "--host", "127.0.0.1", "--port", "9999"])
 
@@ -73,7 +92,8 @@ def test_serve_honors_explicit_token_and_db(monkeypatch):
     fake_uvicorn = MagicMock()
     fake_fastapi = MagicMock()
     with patch.dict(
-        "sys.modules", {"uvicorn": fake_uvicorn, "fastapi": fake_fastapi}
+        "sys.modules", {"uvicorn": fake_uvicorn, "fastapi": fake_fastapi,
+                        "rfc8785": MagicMock()}
     ):
         rc = gw.run_gateway(
             ["serve", "--token", "tok_explicit", "--db", "/tmp/gw.db"]

@@ -1,0 +1,39 @@
+[
+  {
+    "name": "V1",
+    "post_id": 99673,
+    "canonical": "{\"id\":1234,\"params\":{\"head_sha\":\"87b4cb0a6f2d9e1c3b5a7f0e8d6c4b2a19f7e5d3\",\"pr\":748,\"repo\":\"BrainSurfing-tech/swarph-cli\"},\"type\":\"merge_pr\"}",
+    "sha256": "6dca4f1869a5453595578540dda98efb1344674417373f1314f16606d77a969f"
+  },
+  {
+    "name": "V3",
+    "post_id": 99673,
+    "canonical": "{\"id\":1236,\"params\":{\"before\":[{\"app_id\":15368,\"context\":\"pytest (py3.12)\"},{\"app_id\":15368,\"context\":\"pytest (py3.13)\"},{\"app_id\":15368,\"context\":\"pytest (py3.14)\"}],\"branch\":\"main\",\"checks\":[{\"app_id\":15368,\"context\":\"pytest (py3.14)\"},{\"app_id\":15368,\"context\":\"two-gateways parity ratchet\"}],\"repo\":\"BrainSurfing-tech/mesh-gateway\"},\"type\":\"required_checks\"}",
+    "sha256": "c23e30f30ed6339c79829f59d5a5df9c08287158a6b44e6082630095ec3e2ca4"
+  },
+  {
+    "name": "V4",
+    "post_id": 99682,
+    "canonical": "{\"id\":1237,\"params\":{\"needs_sso\":false,\"options\":[\"oui\",\"non\"],\"question\":\"Déployer \\\"0.84.0\\\" depuis C:\\\\swarph/bin ? 🚀\"},\"type\":\"decision\"}",
+    "sha256": "bcb0d63a5130f6349eefb14e443576c2b6f6ccd245abdbace8490165cc10a82b"
+  },
+  {
+    "name": "V5",
+    "post_id": 99685,
+    "canonical": "{\"id\":1237,\"params\":{\"needs_sso\":false,\"options\":[\"a \\\"quoted\\\" one\",\"back\\\\slash\",\"a/b\"],\"question\":\"Chemin C:\\\\tmp et « guillemets » 😀 ?\"},\"type\":\"decision\"}",
+    "sha256": "707bea717c787a3875ccfaeaf4dff634b288a862b85078f2d067c441fa3bd758"
+  },
+  {
+    "name": "V6",
+    "post_id": 99716,
+    "canonical": "{\"id\":1238,\"params\":{\"before\":[{\"app_id\":4242,\"context\":\"unit tests (py3.12)\"},{\"app_id\":4242,\"context\":\"unit tests (py3.14)\"}],\"branch\":\"main\",\"checks\":[{\"app_id\":4242,\"context\":\"unit tests (py3.14)\"},{\"app_id\":4242,\"context\":\"lint\"}],\"repo\":\"example-org/example-repo\"},\"type\":\"required_checks\"}",
+    "sha256": "0dbec962431013b10d8b9ad0baf29659aa71ba756834a610c1a3798659381484"
+  },
+  {
+    "name": "V7",
+    "post_id": null,
+    "note": "neutral needs_sso vector added by card #1645 (fold F6); V2 of post 99673 is not in this public file",
+    "canonical": "{\"id\":1235,\"params\":{\"needs_sso\":true,\"options\":[\"yes\",\"no\",\"later\"],\"question\":\"Enable the cockpit for the example tenant? The confirmation expires after 15 min.\"},\"type\":\"decision\"}",
+    "sha256": "d5b2e83663e1d874ebe0e51af0cf1dc353821b115c50145ea8dd7de28d46a6ec"
+  }
+]

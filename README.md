@@ -400,6 +400,30 @@ $ swarph gateway serve --host 100.x.y.z --port 8788   # expose on a tailnet IP
 
 `--token` sets the bearer (`MESH_GATEWAY_TOKEN`) for the served process; omit it and an existing env token is used, or a fresh one is minted and printed once so you can hand it to the mesh cells. `--db PATH` points the gateway at a specific SQLite file (`MESH_DB_PATH`). Run without the extra and the verb prints a `pip install "swarph-cli[gateway]"` hint and exits.
 
+#### Commander queue and cockpit (card #1645)
+
+The gateway hosts the **commander request queue** (`/commander/requests`, card #1297) and the **cockpit** (card #1630): cells propose a `decision` (a question with up to 6 options) from their per-peer token, the commander answers it, and a scoped `swck_` **cockpit credential** lets a small client (for example a desktop or mobile cockpit) read the queue and answer the questions that do not need the SSO session. The wire contract is card #1630 Appendix A with A.1-A.4 (list, detail and decide are byte-identical to the deployed mesh-gateway). The **request row is the record** of a decision; the DM the proposer receives (`from_node=commander`, kind `answer`) is a doorbell, not the record. Peer names and every `from_node` must be kebab-case (`^[a-z][a-z0-9-]{0,62}[a-z0-9]$`, 422 otherwise; new in this release for `swarph gateway serve`), and the name `commander` can neither register nor post a message: only the gateway writes it.
+
+**The queue is off until you name a commander.** With `META_EDGE_COMMANDER_SUB` unset, all eight `/commander/*` routes answer `503 {"error":"commander_not_configured"}`. The commander is the holder of a verified RS256 identity JWT whose `sub` equals that value: a peer token, the shared token and a `cell-join` JWT are never the commander. **Decisions only:** `merge_pr` and `release_finish` are refused with `400 {"error":"action_not_supported","type":...}`; this gateway has no merger and no release executor. A `card_id` is refused with 404 (no board here).
+
+**Run your own gateway as commander with your own RS256 key** (the only supported way for a third party; the swarph meta-edge issuer is not offered as a root for someone else's commander):
+
+```bash
+$ openssl genrsa -out commander.pem 2048 && openssl rsa -in commander.pem -pubout -out commander.pub   # private key stays OFF the gateway box
+$ export META_EDGE_PUBLIC_KEY_FILE=$PWD/commander.pub META_EDGE_ISSUER=my-gateway META_EDGE_AUDIENCE=swarph-gateway
+$ export META_EDGE_COMMANDER_SUB=julien                           # the sub you will sign
+$ swarph gateway serve --host 100.x.y.z
+# on your own machine, sign a short-lived identity JWT (any RS256 signer; PyJWT shown)
+$ python -c 'import jwt,time; print(jwt.encode({"iss":"my-gateway","aud":"swarph-gateway","sub":"julien","iat":int(time.time()),"exp":int(time.time())+900}, open("commander.pem").read(), algorithm="RS256"))'
+$ curl -s -X POST http://100.x.y.z:8788/commander/cockpit-credential -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{}'   # 201 {credential, credential_id, expires_at}, shown once
+```
+
+Cap `exp` (minutes, not days: the gateway requires `exp`, `iss`, `aud` and `sub` and pins RS256). **Revocation is replacing the key file**: a new `commander.pub` invalidates every JWT signed with the old private key at the next request (the key is read per request; no restart). A cell gets the per-peer token that `POST /commander/requests` needs from `POST /peers/register` on a fresh gateway (zero ratified peers) or by `swarph onboard`. The optional static `MESH_GATEWAY_COMMANDER_TOKEN` can read all rows, post a result and revoke the cockpit credential; it can never decide or mint, and when it equals `MESH_GATEWAY_TOKEN` it counts as unset.
+
+**Mint without an issuer:** `swarph gateway cockpit-credential mint|revoke [--db PATH]` writes the same row as the HTTP mint (SHA-256 only, one active credential, 30-day expiry) by a local database write on the gateway box. Like `bootstrap-ratify` it refuses without a tty and a typed `yes`, and it refuses a database whose schema version is above 12 (another gateway's database). The credential is printed once to stdout and logged nowhere.
+
+Cockpit limits worth knowing: a `swck_` bearer on any route other than `GET /commander/requests`, `GET /commander/requests/{id}` and `POST /commander/requests/{id}/decide` gets `403 {"error":"cockpit_not_allowed"}` before any lookup; `decide` requires the row's `digest` (SHA-256 over the RFC 8785 bytes of `{"id","type","params"}`, pinned to `rfc8785==0.1.4`) and refuses a stale one with `409 {"error":"digest_mismatch"}`. Two limits on byte-identity with the deployed gateway: a body with no `decision` field gets FastAPI's 422, whose body follows the installed pydantic; and on Python 3.10 the mint's `expires_at` fraction must have 0, 3 or 6 digits (`datetime.fromisoformat` before 3.11), otherwise `400 bad_expires_at`.
+
 ### `swarph service`
 
 Turn a *subscription* LLM CLI into a **$0 HTTP lane** the mesh can call — `swarph service serve --provider <claude|codex|gemini>` runs a small FastAPI app exposing `POST /delegate` (bearer-authed) + `GET /health`:
