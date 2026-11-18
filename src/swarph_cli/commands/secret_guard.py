@@ -89,10 +89,24 @@ Rework #5670 (S chunked scanning; its P4' filter is removed above):
       most ``_MAX_PEM_CHARS`` (8192) characters is kept whole; larger
       ``BEGIN..END`` spans are sliced like ordinary lines so slow lines
       between ``BEGIN`` and ``END`` obey chunking and the time budget.
-      G3 (#5753): the PEM marker pre-pass and unit splitter each run in
-      one single linear pass via ``_PEM_MARKER_SCAN_RE.finditer`` under
-      the shared ``_SCAN_BUDGET_SECONDS`` deadline with no 64-marker cap.
-      The first hit blocks. Fail-open ONLY when a
+      G3 (#5753) & #1678 (R1-R4, #5867): the PEM marker pre-pass and
+      unit splitter each scan markers in one pass via
+      ``_PEM_MARKER_SCAN_RE.finditer`` (with a ``(?=-----)`` lookahead
+      so adjacent markers sharing five dashes both match) under the
+      shared ``_SCAN_BUDGET_SECONDS`` deadline with no 64-marker cap.
+      ``_detect_classes`` scans the first chunk via ``_iter_chunks``,
+      then runs Phase A of ``_pem_envelope_classes`` for oversized
+      ``> _MAX_PEM_CHARS`` PEM spans TO THE END before the remaining
+      chunks (#5926): Phase A classifies main's label set (single-label
+      pairs of at most ``_CHUNK_CHARS``) and defers the longer pairs
+      (``_CHUNK_CHARS`` < pair <= ``_MAX_PEM_CHARS``, R4) to Phase B,
+      which resumes from the saved ``_state`` after chunks 2..N. So a
+      flood of distinct labels costs the same budget as on main, and the
+      R4 pairs main never classified only ever cost budget after every
+      chunk has been scanned. ``_pem_envelope_classes`` checks the
+      smaller marker side first, tracks actually ``classified`` labels
+      before filtering the second side, and classifies every label on a
+      side without a 32-batch stop. The first hit blocks. Fail-open ONLY when a
       ``_SCAN_BUDGET_SECONDS`` (~3 s) time budget runs out mid-scan;
       then the hook allows the prompt but emits a ``systemMessage``
       saying the prompt was not fully scanned — never a silent pass.
@@ -103,7 +117,9 @@ Rework #5670 (S chunked scanning; its P4' filter is removed above):
       generic high-entropy value after an id label (``session_id=…``,
       a JSON ``id`` field) is NOT scrubbed and still blocks.
   E   The text-envelope exemption applies only when the WHOLE prompt
-      is one or more complete envelopes separated by whitespace.
+      is one or more complete envelopes separated by whitespace, using
+      bounded non-backtracking matchers (``_MAX_CHANNEL_TAG_CHARS = 4096``
+      for ``<channel ...>`` opening tags, R3 #1678).
       Text between envelopes is scanned normally.
 """
 from __future__ import annotations
@@ -203,13 +219,61 @@ _ID_SHAPE_RE = re.compile(
     r"|\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
     r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
+_MAX_CHANNEL_TAG_CHARS = 4096
+_CHANNEL_SOURCE_RE = re.compile(r"\bsource\s*=")
+
+
+class _SpanMatch:
+    __slots__ = ("_end",)
+
+    def __init__(self, end: int) -> None:
+        self._end = end
+
+    def end(self) -> int:
+        return self._end
+
+
+class _FixedEnvelopeMatcher:
+    __slots__ = ("_open", "_close")
+
+    def __init__(self, open_tag: str, close_tag: str) -> None:
+        self._open = open_tag
+        self._close = close_tag
+
+    def match(self, prompt: str, pos: int) -> Optional[_SpanMatch]:
+        if not prompt.startswith(self._open, pos):
+            return None
+        close = prompt.find(self._close, pos + len(self._open))
+        if close == -1:
+            return None
+        return _SpanMatch(close + len(self._close))
+
+
+class _ChannelEnvelopeMatcher:
+    def match(self, prompt: str, pos: int) -> Optional[_SpanMatch]:
+        if not prompt.startswith("<channel", pos):
+            return None
+        after = pos + 8
+        if after >= len(prompt) or not prompt[after].isspace():
+            return None
+        gt = prompt.find(">", after + 1, after + 1 + _MAX_CHANNEL_TAG_CHARS)
+        if gt == -1:
+            return None
+        if _CHANNEL_SOURCE_RE.search(prompt, after + 1, gt) is None:
+            return None
+        close = prompt.find("</channel>", gt + 1)
+        if close == -1:
+            return None
+        return _SpanMatch(close + 10)
+
+
 _ENVELOPE_RES = [
-    re.compile(r"<task-notification>.*?</task-notification>", re.DOTALL),
-    re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL),
-    re.compile(r"<channel\s[^>]*\bsource\s*=[^>]*>.*?</channel>", re.DOTALL),
+    _FixedEnvelopeMatcher("<task-notification>", "</task-notification>"),
+    _FixedEnvelopeMatcher("<system-reminder>", "</system-reminder>"),
+    _ChannelEnvelopeMatcher(),
 ]
 _WS_RE = re.compile(r"\s*")
-_PEM_MARKER_SCAN_RE = re.compile(r"-----(BEGIN|END) ([A-Z0-9 ]+)-----")
+_PEM_MARKER_SCAN_RE = re.compile(r"-----(BEGIN|END) ([A-Z0-9 ]+)(?=-----)")
 _HARNESS_SOURCE_VALUES = {
     "system", "harness", "channel", "task_notification",
     "task-notification", "peer",
@@ -282,19 +346,29 @@ def _is_harness_turn(payload: dict, prompt: str) -> bool:
 
 
 def _pem_envelope_classes(
-    text: str, deadline: Optional[float] = None
+    text: str,
+    deadline: Optional[float] = None,
+    *,
+    _defer_long: bool = False,
+    _state: Optional[dict] = None,
 ) -> tuple[list[str], bool]:
-    """Single-pass linear scan for any BEGIN..END marker pair that redact's PEM
-    layer flags, even when the body between them exceeds _MAX_PEM_CHARS (G3, #5753).
+    """Scan for any BEGIN..END marker pair that redact's PEM layer flags,
+    even when the body between them exceeds _MAX_PEM_CHARS (G3 #5753, R2/R4 #1678).
+
+    ``_defer_long`` (Phase A, #5926) classifies only main's label set — pairs
+    of at most ``_CHUNK_CHARS`` — and records longer pairs in
+    ``_state["deferred"]``; a later call with the same ``_state`` (Phase B)
+    skips the marker scan and classifies what was deferred.
     """
     if deadline is None:
         deadline = time.monotonic() + _SCAN_BUDGET_SECONDS
-    if "-----BEGIN " not in text or "-----END " not in text:
+    resuming = _state is not None and "first_begin" in _state
+    if not resuming and ("-----BEGIN " not in text or "-----END " not in text):
         return [], True
 
-    first_begin: dict[str, int] = {}
-    last_end: dict[str, int] = {}
-    for step, m in enumerate(_PEM_MARKER_SCAN_RE.finditer(text)):
+    first_begin: dict[str, int] = _state["first_begin"] if resuming else {}
+    last_end: dict[str, int] = _state["last_end"] if resuming else {}
+    for step, m in enumerate(() if resuming else _PEM_MARKER_SCAN_RE.finditer(text)):
         if (step & 255) == 0 and time.monotonic() > deadline:
             return [], False
         kind = m.group(1)
@@ -308,8 +382,16 @@ def _pem_envelope_classes(
     if not first_begin or not last_end or min(first_begin.values()) >= max(last_end.values()):
         return [], True
 
-    labels = sorted(first_begin.keys() | last_end.keys())
-    pk_labels: set[str] = set()
+    pk_labels: set[str] = _state["pk_labels"] if resuming else set()
+    classified: set[str] = _state["classified"] if resuming else set()
+    deferred: set[str] = set()
+    if _state is not None:
+        _state["first_begin"] = first_begin
+        _state["last_end"] = last_end
+        _state["pk_labels"] = pk_labels
+        _state["classified"] = classified
+        _state["deferred"] = deferred
+
     batch: list[tuple[str, str]] = []
     batch_len = 0
 
@@ -325,23 +407,48 @@ def _pem_envelope_classes(
                     return False
                 if "PEM private key" in _classes_of(pair):
                     pk_labels.add(lbl)
+        classified.update(lbl for lbl, _ in batch)
         batch = []
         batch_len = 0
         return True
 
-    for lbl in labels:
-        pair = f"-----BEGIN {lbl}-----\n-----END {lbl}-----"
-        if len(pair) > _CHUNK_CHARS:
-            continue
-        added = len(pair) + (1 if batch else 0)
-        if batch and batch_len + added > _CHUNK_CHARS:
-            if not _flush_batch():
-                return [], False
-            added = len(pair)
-        batch.append((lbl, pair))
-        batch_len += added
+    def _classify_labels(labels_to_check: list[str]) -> bool:
+        nonlocal batch, batch_len
+        for lbl in labels_to_check:
+            if lbl in classified:
+                continue
+            pair = f"-----BEGIN {lbl}-----\n-----END {lbl}-----"
+            if len(pair) > _MAX_PEM_CHARS:
+                classified.add(lbl)
+                continue
+            if _defer_long and len(pair) > _CHUNK_CHARS:
+                deferred.add(lbl)
+                continue
+            added = len(pair) + (1 if batch else 0)
+            if batch and batch_len + added > _CHUNK_CHARS:
+                if not _flush_batch():
+                    return False
+                added = len(pair)
+            batch.append((lbl, pair))
+            batch_len += added
+            if batch_len >= _CHUNK_CHARS:
+                if not _flush_batch():
+                    return False
+        return _flush_batch()
 
-    if not _flush_batch():
+    begin_labels = sorted(first_begin.keys())
+    end_labels = sorted(last_end.keys())
+    if len(begin_labels) <= len(end_labels):
+        first, second, first_pos = begin_labels, end_labels, first_begin
+    else:
+        first, second, first_pos = end_labels, begin_labels, last_end
+    if not _classify_labels(first):
+        return [], False
+    # A fully classified side with no private-key label rules out a block;
+    # a deferred label on it does not, so the bail waits for Phase B.
+    if not deferred and not (pk_labels & set(first_pos)):
+        return [], True
+    if not _classify_labels(second):
         return [], False
 
     b_hit = min(((pos, lbl) for lbl, pos in first_begin.items() if lbl in pk_labels), default=None)
@@ -385,7 +492,7 @@ def _atomic_units(text: str) -> Iterator[tuple[bool, str]]:
         if m.group(1) == "BEGIN":
             pending_begin = m_start
         else:
-            m_end = m.end()
+            m_end = m.end() + 5
             if pending_begin is not None and (m_end - pending_begin) <= _MAX_PEM_CHARS:
                 b = pending_begin
                 pending_begin = None
@@ -505,17 +612,37 @@ def _detect_classes(prompt: str) -> tuple[list[str], bool]:
     deadline = time.monotonic() + _SCAN_BUDGET_SECONDS
     if time.monotonic() > deadline:
         return [], False
-    pem_classes, complete = _pem_envelope_classes(prompt, deadline)
-    if not complete:
-        return [], False
-    if pem_classes:
-        return pem_classes, True
-    for chunk in _iter_chunks(prompt):
+    chunks = _iter_chunks(prompt)
+    first_chunk = next(chunks, None)
+    if first_chunk is not None:
+        if time.monotonic() > deadline:
+            return [], False
+        first_classes = _chunk_classes(first_chunk)
+        if first_classes:
+            return first_classes, True
+    # Phase A (#5926): main's label set runs to the end BEFORE the chunks;
+    # only the R4 pairs main never classified wait for Phase B.
+    pem_state: dict = {}
+    pem_classes, complete = _pem_envelope_classes(
+        prompt, deadline, _defer_long=True, _state=pem_state
+    )
+    if not complete or pem_classes:
+        chunks = iter(())
+        pem_state["deferred"] = set()
+    for chunk in chunks:
         if time.monotonic() > deadline:
             return [], False
         classes = _chunk_classes(chunk)
         if classes:
             return classes, True
+    if pem_state.get("deferred"):
+        pem_classes, complete = _pem_envelope_classes(
+            prompt, deadline, _state=pem_state
+        )
+    if not complete:
+        return [], False
+    if pem_classes:
+        return pem_classes, True
     return [], True
 
 

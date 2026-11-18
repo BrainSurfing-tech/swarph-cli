@@ -269,7 +269,7 @@ def test_every_registered_tool_is_in_the_auth_inventory():
     assert {t.name for t in asyncio.run(m.mcp.list_tools())} == {
         "swarph_search", "swarph_add", "swarph_describe", "swarph_codegraph_query",
         "swarph_memory_navigate", "swarph_timeline_navigate", "swarph_dm_unread",
-        "swarph_dm_reply", "swarph_dm_thread",
+        "swarph_dm_reply", "swarph_dm_thread", "swarph_ask_commander",
     }
 
 
