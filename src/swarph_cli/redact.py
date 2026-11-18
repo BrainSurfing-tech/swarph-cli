@@ -126,23 +126,35 @@ _PEM_RE = re.compile(
     re.DOTALL,
 )
 
-# Known secret patterns
-_GITHUB_RE = re.compile(r"\b(?:gh[opusr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
-_ANTHROPIC_RE = re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{8,}\b")
-_OPENAI_RE = re.compile(r"\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9\-_]{16,}\b")
-_XAI_RE = re.compile(r"\bxai-[A-Za-z0-9\-_]{16,}\b")
-_GCP_RE = re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b")
+# Known secret patterns.
+#
+# Card #1657: the provider patterns below carry NO left word-boundary.
+# Their prefixes (sk-ant-, ghp_/github_pat_, xai-, AIza, xox[baprs]-,
+# AKIA/ASIA, eyJ...eyJ) are unambiguous - they cannot begin ordinary
+# prose - so a key glued to a letter, digit, underscore or a literal
+# backslash escape on the left is the same credential and must flag.
+# Patterns whose left side is a dictionary word (Bearer, the key names
+# in _DSN_KEY_VALUE_RE / _SECRET_ASSIGN_RE, the CLI command words in
+# the mysql/docker/sshpass/curl patterns) KEEP their \b: there the
+# word itself must stand alone, and the prefix is not distinctive.
+_GITHUB_RE = re.compile(r"(?:gh[opusr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
+_ANTHROPIC_RE = re.compile(r"sk-ant-[A-Za-z0-9\-_]{8,}\b")
+_OPENAI_RE = re.compile(
+    r"(?:sk-(?:proj-|svcacct-)[A-Za-z0-9\-_]{16,}"
+    r"|sk-[A-Za-z0-9_]{20,})\b")
+_XAI_RE = re.compile(r"xai-[A-Za-z0-9\-_]{16,}\b")
+_GCP_RE = re.compile(r"AIza[0-9A-Za-z\-_]{35}\b")
 _GCP_FINAL_RE = re.compile(
-    r"(?:\bAIza[0-9A-Za-z\-_]{34}(?:-|[0-9A-Za-z_](?![0-9A-Za-z_]))"
+    r"(?:AIza[0-9A-Za-z\-_]{34}(?:-|[0-9A-Za-z_](?![0-9A-Za-z_]))"
     r"|(?<=[0-9A-Za-z_])AIza[0-9A-Za-z\-_]{34}[0-9A-Za-z_](?![0-9A-Za-z_])"
     r"|(?<=\w)AIza[0-9A-Za-z\-_]{34}-)"
 )
-_SLACK_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{8,}\b")
-_AWS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
+_SLACK_RE = re.compile(r"xox[baprs]-[A-Za-z0-9\-]{8,}\b")
+_AWS_KEY_RE = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 _AWS_SECRET_RE = re.compile(
     r"(?i)\b(aws_secret_access_key|aws_session_token)\b(\s*[:=]\s*)(['\"]?)(?!\[REDACTED)[A-Za-z0-9/+=]{20,}\3"
 )
-_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]{4,}\.eyJ[A-Za-z0-9_\-]{4,}(?:\.[A-Za-z0-9_\-]{4,})?\b")
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]{4,}\.eyJ[A-Za-z0-9_\-]{4,}(?:\.[A-Za-z0-9_\-]{4,})?\b")
 _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)(?!\[REDACTED)[A-Za-z0-9\-._~+/]{12,}=*")
 
 # URI & DSN credentials
