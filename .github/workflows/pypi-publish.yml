@@ -1,9 +1,23 @@
+# Card #1684. A v* tag push publishes to PyPI, then creates a GitHub Release that
+# carries the wheel, the sdist and SHA256SUMS (the same files PyPI got).
+#
+# workflow_dispatch is a DRY RUN and nothing else: it builds, then runs the release
+# job up to the upload, and prints the release body and the asset list. The publish
+# job and `gh release create` are gated on a tag push, not on the dry_run input, so
+# no dispatch can publish or create a tag, whatever the input says.
+
 name: Publish to PyPI
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Always a dry run. Uploads happen only on a v* tag push."
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -12,13 +26,22 @@ jobs:
   build:
     name: Build distribution
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
+      - name: Refuse a dispatch that asks for a real publish
+        if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+        run: |
+          echo "workflow_dispatch is a dry run only; a release comes from a v* tag push"
+          exit 1
+
       - name: Checkout release tag
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
       - name: Verify release tag descends from main
+        if: github.event_name != 'workflow_dispatch'
         run: |
           git fetch origin main
           git merge-base --is-ancestor HEAD origin/main || {
@@ -32,6 +55,7 @@ jobs:
           python-version: "3.12"
 
       - name: Verify tag matches package version
+        id: version
         run: |
           version="$(python - <<'PY'
           import tomllib
@@ -40,7 +64,8 @@ jobs:
               print(tomllib.load(file)["project"]["version"])
           PY
           )"
-          test "${GITHUB_REF_NAME#v}" = "$version" || {
+          # A dispatch dry run has no tag to compare; every other trigger must match its tag.
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch || test "${GITHUB_REF_NAME#v}" = "$version" || {
             echo "Tag $GITHUB_REF_NAME does not match package version $version"
             exit 1
           }
@@ -59,6 +84,7 @@ jobs:
             echo "__version__ ($dunder) does not match pyproject version ($version)"
             exit 1
           }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Build and validate distribution
         run: |
@@ -76,6 +102,7 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -93,3 +120,61 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist/
+
+  release:
+    name: GitHub Release
+    needs: [build, publish]
+    # publish is skipped on a dispatch dry run and must not skip this job with it;
+    # a failed publish must (no Release for a version PyPI never got).
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.publish.result == 'success' || needs.publish.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - name: Download distribution
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Build SHA256SUMS and the release body
+        run: |
+          set -euo pipefail
+          # Exactly one wheel and one sdist: the Release carries what PyPI got.
+          shopt -s nullglob
+          wheels=(dist/*.whl); sdists=(dist/*.tar.gz); all=(dist/*)
+          [ "${#wheels[@]}" -eq 1 ] && [ "${#sdists[@]}" -eq 1 ] && [ "${#all[@]}" -eq 2 ] || {
+            echo "expected exactly one wheel and one sdist in dist/"; ls -l dist; exit 1
+          }
+          (cd dist && sha256sum -- * > ../SHA256SUMS && sha256sum -c ../SHA256SUMS)
+          {
+            echo "swarph-cli ${VERSION}"
+            echo
+            echo "PyPI: https://pypi.org/project/swarph-cli/${VERSION}/"
+            echo
+            echo "The wheel and the sdist attached here are the files uploaded to PyPI."
+            echo "To verify, download all three files and run: sha256sum -c SHA256SUMS"
+            echo
+            echo "SHA256:"
+            echo
+            sed 's/^/    /' SHA256SUMS
+          } > release-body.md
+          echo "--- release body ---"; cat release-body.md
+          echo "--- assets ---"; ls -l "${wheels[@]}" "${sdists[@]}" SHA256SUMS
+          { echo "## Release assets for v${VERSION}"; echo; cat release-body.md; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dry run stops here
+        if: github.event_name != 'push'
+        run: |
+          echo "dry run (${GITHUB_EVENT_NAME}): not creating release v${VERSION}; no PyPI upload, no tag"
+
+      - name: Create the GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        # --verify-tag: the tag must already exist; gh never creates one here.
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.whl dist/*.tar.gz SHA256SUMS \
+            --verify-tag --title "swarph-cli ${VERSION}" --notes-file release-body.md
