@@ -1534,13 +1534,17 @@ def _render_plist(template: str, *, peer: str, gateway: str, home: str,
                   swarph_bin: str, log_dir: str) -> str:
     """Substitute the launchd placeholders. Any __PLACEHOLDER__ left standing
     means a substitution was missed, and a plist carrying one must not be
-    written - launchd would run it verbatim and fail obscurely."""
+    written - launchd would run it verbatim and fail obscurely. Values go
+    through the launchd renderer's XML escape first: a home with an
+    ampersand or a gateway URL with a query string must still parse."""
+    from swarph_cli.launchd_render import _xml_escape
+
     out = (template
-           .replace("__PEER__", peer)
-           .replace("__SWARPH_BIN__", swarph_bin)
-           .replace("__HOME__", home)
-           .replace("__GATEWAY__", gateway)
-           .replace("__LOG_DIR__", log_dir))
+           .replace("__PEER__", _xml_escape(peer))
+           .replace("__SWARPH_BIN__", _xml_escape(swarph_bin))
+           .replace("__HOME__", _xml_escape(home))
+           .replace("__GATEWAY__", _xml_escape(gateway))
+           .replace("__LOG_DIR__", _xml_escape(log_dir)))
     left = sorted(set(re.findall(r"__[A-Z_]+__", out)))
     if left:
         raise RuntimeError(
@@ -1562,6 +1566,16 @@ def _cmd_install_unit_darwin(args: argparse.Namespace, gateway: str) -> int:
     if not peer:
         print("swarph monitor install-unit: --as <peer> is required on macOS "
               "- the peer names the launchd Label and the agent file.",
+              file=sys.stderr)
+        return 2
+    # The name reaches a file name, a directory and the plist, so it is
+    # validated against the shared peer-name rule BEFORE anything is
+    # built from it - a traversal or markup name must create nothing.
+    from swarph_shared.cell import PEER_NAME_RE
+
+    if not PEER_NAME_RE.match(peer):
+        print(f"swarph monitor install-unit: --as {peer!r} is not a valid "
+              f"peer name (must match {PEER_NAME_RE.pattern})",
               file=sys.stderr)
         return 2
     home = args.home or str(Path.home())
