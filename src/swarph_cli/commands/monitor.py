@@ -1573,7 +1573,7 @@ def _cmd_install_unit_darwin(args: argparse.Namespace, gateway: str) -> int:
     # built from it - a traversal or markup name must create nothing.
     from swarph_shared.cell import PEER_NAME_RE
 
-    if not PEER_NAME_RE.match(peer):
+    if not PEER_NAME_RE.fullmatch(peer):
         print(f"swarph monitor install-unit: --as {peer!r} is not a valid "
               f"peer name (must match {PEER_NAME_RE.pattern})",
               file=sys.stderr)

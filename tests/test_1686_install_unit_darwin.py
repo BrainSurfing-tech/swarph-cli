@@ -70,7 +70,7 @@ BAD_PEERS = [
     "x/../../../../outside/evil", "a/b", "/abs", "a&b", "a<b",
     "p</string><string>--deliver</string><string>tmux:evil",
     "p</string></array><key>ProgramArguments</key><array><string>/bin/sh",
-    "a b", "..", "-rf", "a" * 300,
+    "a b", "..", "-rf", "a" * 300, "abc\n", "smoke-peer\n",
 ]
 
 
