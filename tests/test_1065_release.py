@@ -763,6 +763,39 @@ def test_discover_keeps_units_whose_script_imports_swarph_cli(tmp_path):
     assert script_imports_swarph_cli(["python3", "-m", "swarph_cli"], lambda p: "")
 
 
+def test_discover_skips_units_running_as_another_user(tmp_path):
+    """Card #20 P4: proxy-opencode's units import swarph_cli from /opt/swarph-proxy. A pip --user
+    install by the releasing user cannot change them, so restarting them would only fail the
+    version check. They are left out and named; the releasing user's units stay."""
+    script = tmp_path / "swarph"
+    script.write_text("from swarph_cli.main import main\n")
+    units = {"swarph-monitor@cursor-lin.service": ("1", 1000),
+             "swarph-monitor@opencode.service": ("2", 990),
+             "swarph-proxy@opencode.service": ("3", 990),
+             "swarph-monitor-gemini-researcher.service": ("4", 1000)}
+    pid_to_uid = {pid: uid for pid, uid in units.values()}
+    skipped = []
+    found = discover_units(lambda: list(units), lambda u: units[u][0],
+                           lambda pid: ["/usr/bin/python3", str(script), "monitor"],
+                           lambda p: Path(p).read_text(),
+                           pid_uid=pid_to_uid.get, own_uid=1000, skipped=skipped)
+    assert found == ["swarph-monitor@cursor-lin.service", "swarph-monitor-gemini-researcher.service"]
+    assert skipped == [("swarph-monitor@opencode.service", 990), ("swarph-proxy@opencode.service", 990)]
+    # An unreadable uid is not the installing uid: left out, never restarted blind.
+    skipped2 = []
+    assert discover_units(lambda: ["swarph-monitor@x.service"], lambda u: "9",
+                          lambda pid: ["/usr/bin/python3", str(script)], lambda p: Path(p).read_text(),
+                          pid_uid=lambda pid: None, own_uid=1000, skipped=skipped2) == []
+    assert skipped2 == [("swarph-monitor@x.service", None)]
+
+
+@pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="reads /proc (Linux); release.sh runs on the Linux box only")
+def test_pid_uid_reads_the_real_uid_of_this_process():
+    import os
+    assert _mod._pid_uid(str(os.getpid())) == os.getuid()
+    assert _mod._pid_uid("0") is None
+
+
 def test_bump_rewrites_only_the_version_field():
     assert bump_text("pyproject", "9.9.9", 'version = "0.0.1"\n') == 'version = "9.9.9"\n'
     assert bump_text("init", "9.9.9", '__version__ = "0.0.1"\n') == '__version__ = "9.9.9"\n'
