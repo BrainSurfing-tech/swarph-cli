@@ -168,6 +168,12 @@ _SWARPH_ENV = (
     # them sets them itself; the box's values must not become the suite's.
     "SWARPH_SELFCHECK_UNIT_DIRS",
     "SWARPH_SELFCHECK_SYSTEM_CRON_PATHS",
+    # card #1685: who an alert escalates to. The wheel names no peer; a test that
+    # wants today's lab routing asks for the `lab_routing` fixture below.
+    "SWARPH_ESCALATION_TARGET",
+    "SWARPH_ESCALATION_ALTERNATE",
+    "SWARPH_ROWCLEAR_OPT_IN",
+    "SWARPH_TRIAGE_OWNERS_FILE",
 )
 
 
@@ -221,6 +227,25 @@ def _hermetic_swarph_env(monkeypatch):
     """
     for name in _SWARPH_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_no_target_line(monkeypatch):
+    """The "no target configured" line prints once per process; a test must see it
+    again."""
+    from swarph_cli import escalation
+
+    monkeypatch.setattr(escalation, "_SAID", set())
+
+
+@pytest.fixture
+def lab_routing(monkeypatch):
+    """Card #1685: today's routing, declared. Before #1685 the wheel hardcoded these
+    peers; lab's deploy now sets these three (plus a local triage owner map, see
+    the PR body). Tests that route through the triage owner map pass their own."""
+    monkeypatch.setenv("SWARPH_ESCALATION_TARGET", "lab-ovh")
+    monkeypatch.setenv("SWARPH_ESCALATION_ALTERNATE", "drop-on-meta-edge")
+    monkeypatch.setenv("SWARPH_ROWCLEAR_OPT_IN", "drop-on-meta-edge")
 
 
 @pytest.fixture(autouse=True)

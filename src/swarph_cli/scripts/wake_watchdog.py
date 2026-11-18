@@ -763,9 +763,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="write state and list unwatched cells; do not send")
     p.add_argument("--as", dest="sender", default="",
                    help="cell the alert is sent as; the unit sets this")
+    from swarph_cli import escalation
     p.add_argument("--escalate",
-                   default=os.environ.get("WAKE_WATCHDOG_ESCALATE", "drop-on-meta-edge"),
-                   help="awake peer who also gets the outage DM (default: drop-on-meta-edge)")
+                   default=os.environ.get("WAKE_WATCHDOG_ESCALATE",
+                                          escalation.alternate() or ""),
+                   help="awake peer who also gets the outage DM (default: "
+                        "$WAKE_WATCHDOG_ESCALATE, else $SWARPH_ESCALATION_ALTERNATE or "
+                        "operator.json \"escalation_alternate\"; with none, no escalation)")
     p.add_argument("--token-file", default="",
                    help="bearer token file for the service identity; the path is passed through, never the value")
     args = p.parse_args(argv)
@@ -789,6 +793,9 @@ def main(argv: list[str] | None = None) -> int:
     alert = scan(cells, cmdlines, state, now, timers=timers, crontab=crontab)
     sender = args.sender.strip()
     escalate = (args.escalate or "").strip()
+    if not escalate:
+        escalation.say_none("wake_watchdog", "escalation peer",
+                            escalation.ENV_ALTERNATE, escalation.KEY_ALTERNATE)
     if not args.dry_run and escalate and sender and escalate == sender:
         print("wake_watchdog: escalation peer equals the sender; refusing to send",
               file=sys.stderr)
@@ -807,11 +814,11 @@ def main(argv: list[str] | None = None) -> int:
     token_file = (args.token_file or "").strip()
     for name in reported:
         print(f"writer-down {name}", flush=True)
-        if args.dry_run or not sender:
+        if args.dry_run or not sender or not escalate:
             continue
         owned = bool(state.get(name, {}).get("systemd_owned"))
         sent = mesh_send(
-            swarph, escalate or "", sender,
+            swarph, escalate, sender,
             writer_alert(name, recorded_supervisor(root, name), owned=owned),
             "")
         if sent == 0:

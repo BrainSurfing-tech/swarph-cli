@@ -3,8 +3,10 @@
 The monitor types ``/clear`` into an opted-in role cell's tmux pane only
 when the cell holds no live row, the pane reads idle, and no DM is owed.
 ``SWARPH_ROWCLEAR`` is ``off`` (default), ``shadow`` (log a would-clear,
-type nothing), or ``live``. v1 opt-in is drop-on-meta-edge only: a cell
-that owns a project keeps its context (design_1007 / optin_owners).
+type nothing), or ``live``. Only cells named by config opt in
+($SWARPH_ROWCLEAR_OPT_IN or operator.json "rowclear_opt_in", card #1685):
+a cell that owns a project keeps its context (design_1007 / optin_owners).
+With nothing configured no cell opts in and one line says so.
 
 v1.1 (#1362): a taken row whose step needs are UNMET is waiting, not
 working — it does not count as live. Needs state comes from the card's
@@ -24,6 +26,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
+from swarph_cli import escalation
 from swarph_cli.cell import (
     CellError,
     _read_session_sidecar,
@@ -32,13 +35,10 @@ from swarph_cli.cell import (
     validate_uuid_str,
 )
 
-# v1. Further cells join only by their own or the commander's opt-in.
-OPT_IN = frozenset({"drop-on-meta-edge"})
-
 # Gateway statuses are open, closed, and fallback_fired. ``open`` is a
 # live row (taken or offered). ``closed`` and ``fallback_fired`` are
-# finished and do not block: drop-on-meta-edge holds a fallback_fired
-# row that would otherwise make the only opted-in cell never clear.
+# finished and do not block: an opted-in cell holding a fallback_fired
+# row would otherwise never clear.
 # Any other status fails closed — a status this code does not know must
 # not look like an empty cell.
 _LIVE = "open"
@@ -215,7 +215,11 @@ def maybe_rowclear(
     mode = mode_from_env()
     if mode == "off":
         return "off"
-    if state.self_name not in OPT_IN:
+    opted_in = escalation.rowclear_opt_in()
+    if not opted_in:
+        escalation.say_none("rowclear", "opt-in cell",
+                            escalation.ENV_ROWCLEAR_OPT_IN, escalation.KEY_ROWCLEAR_OPT_IN)
+    if state.self_name not in opted_in:
         return "not-opted-in"
 
     live = _live_row_count(state, http_get)

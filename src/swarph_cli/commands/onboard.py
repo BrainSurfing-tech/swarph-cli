@@ -43,15 +43,14 @@ from swarph_cli.redact import encode_outbound_json
 _HANDSHAKE_TEMPLATE = """\
 # Handshake DM — {peer}
 
-> **Manual step.** Per PLAN.md §15.1, the contract phase is preserved
-> as a manual artifact so your own-words acknowledgement reflects active
-> understanding, not provisioning. Edit each section below in your own
-> words. Generic boilerplate will be flagged + rejected by the witness.
+> **Manual step.** The contract phase is preserved as a manual artifact
+> so your own-words acknowledgement reflects active understanding, not
+> provisioning. Edit each section below in your own words. Generic
+> boilerplate will be flagged + rejected by the witness.
 
 ## 1. DM SEMANTICS
 
-> Reference: hedge-fund-mcp `CLAUDE.md` Science Claude Mesh Bootstrap
-> section, "DM semantics: AI-to-AI is the default…"
+> Reference: `swarph guide dms`. AI-to-AI is the default.
 
 [your own-words ack here — what does AI-to-AI-by-default mean for
 how you'll handle routine peer DMs vs. ones crossing a privilege
@@ -59,23 +58,20 @@ boundary?]
 
 ## 2. Framing-contagion
 
-> Reference: auto-memory `project_peer_name_canonical.md`. Your
-> canonical name in the registry is `{peer}`.
+> Your canonical name in the registry is `{peer}`.
 
 [your own-words ack — how will you stay canonical + flag wrong-name
 DMs you receive?]
 
 ## 3. Transparency-by-default
 
-> Reference: swarph paper main draft §3.7.
-
 [your own-words ack — what does transparency-by-default look like
 when you slip? When do you DM peers vs. self-fix?]
 
 ## 4. Mesh-secrets out-of-band
 
-> Reference: hedge-fund-mcp `CLAUDE.md` Critical operational rules,
-> "Mesh secrets out-of-band only" bullet.
+> Reference: `swarph secret-guard`, which blocks credential material in
+> prompts. Mesh secrets travel out-of-band only.
 
 [your own-words ack — what counts as a mesh secret + what's your
 fallback channel when you must convey one?]
@@ -85,13 +81,13 @@ fallback channel when you must convey one?]
 **To send:**
 
 ```
-swarph "$(<{tmp_path})" --provider <your-llm> --caller {peer}.handshake.witness-{witness}
+swarph "$(<{tmp_path})" --provider <your-llm> --caller {caller}
 ```
 
 Or paste the rendered text into a DM via the gateway's
-``POST /messages`` API to your witness peer (default
-``science-claude``). The witness will read both this DM AND any
-imported session JSONL (§17.2a flow), then run
+``POST /messages`` API to your witness peer{witness_note}. The witness
+will read both this DM AND any
+imported session JSONL (`swarph import`), then run
 ``swarph ratify {peer}`` to flip ``ratified=true``.
 
 **Status:** registered_unratified=true. You can read inbox + send
@@ -1112,9 +1108,14 @@ def run_onboard(argv: list[str]) -> int:
     # %TEMP% path on Windows) so the write doesn't land on a nonexistent
     # '\tmp\' dir on Windows.
     tmp_path = Path(tempfile.gettempdir()) / f"{canonical}-handshake.md"
+    # Card #1685: no default witness. `swarph ratify` already reads $SWARPH_WITNESS;
+    # the handshake names that peer when it is set and none otherwise.
+    witness = os.environ.get("SWARPH_WITNESS", "").strip()
     tmp_path.write_text(
         _HANDSHAKE_TEMPLATE.format(
-            peer=canonical, witness="science-claude", tmp_path=tmp_path
+            peer=canonical, tmp_path=tmp_path,
+            caller=f"{canonical}.handshake" + (f".witness-{witness}" if witness else ""),
+            witness_note=f" (``{witness}``)" if witness else "",
         ),
         encoding="utf-8",
     )

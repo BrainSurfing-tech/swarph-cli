@@ -12,6 +12,9 @@ from datetime import datetime, timezone
 from swarph_cli.commands import triage as triage_cmd
 from swarph_cli.triage import backend as backend
 from swarph_cli.triage import router as router
+import pytest
+
+pytestmark = pytest.mark.usefixtures("lab_routing")  # card #1685: today's routing, declared
 
 NOW = 1_790_000_000.0
 HOLDER = "holder-rowan"

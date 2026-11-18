@@ -27,6 +27,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
+from swarph_cli import escalation as _escalation
 from swarph_cli.commands import sweep as _sweep
 from swarph_cli.triage import backend as _backend
 from swarph_cli.triage import job as _job
@@ -272,9 +273,13 @@ def _build_parser():
                    help="print routing; send/record/append/create nothing")
     p.add_argument("--state-file", default=None,
                    help="one-a-day DM state (default shares the sweep's)")
-    p.add_argument("--owners-file", default=None,
+    p.add_argument("--owners-file",
+                   default=_escalation.setting(_escalation.ENV_TRIAGE_OWNERS,
+                                               _escalation.KEY_TRIAGE_OWNERS),
                    help="local owner-map override (PROVEN calibration "
-                        "writes here; deep-merges over shipped owners.json)")
+                        "writes here; deep-merges over shipped owners.json; "
+                        "default: $SWARPH_TRIAGE_OWNERS_FILE or operator.json "
+                        "\"triage_owners_file\")")
     p.add_argument("--project-id", type=int, default=None,
                    help="board project for triage-row cards (default: "
                         "project_id from the owner map, 9)")

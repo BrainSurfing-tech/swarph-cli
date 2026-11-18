@@ -17,6 +17,8 @@ from swarph_cli.commands import triage as _triage_cmd
 from swarph_cli.triage import backend as _backend
 from swarph_cli.triage import router as _router
 
+pytestmark = pytest.mark.usefixtures("lab_routing")  # card #1685: today's routing, declared
+
 NOW = 1_790_000_000.0
 
 

@@ -18,6 +18,8 @@ from swarph_cli.triage import router as _router
 from swarph_cli.triage import sensor as _sensor
 from swarph_cli.triage.rows import TriageStore
 
+pytestmark = pytest.mark.usefixtures("lab_routing")  # card #1685: today's routing, declared
+
 OWNERS = os.path.join(os.path.dirname(_router.__file__), "owners.json")
 NOW = 1_790_000_000.0
 
