@@ -115,6 +115,9 @@ _SWARPH_ENV = (
     # credentials
     "MESH_GATEWAY_TOKEN",
     "MESH_GATEWAY_COMMANDER_TOKEN",
+    # card #1645: the commander sub turns the queue on; a configured box's
+    # value must not make the suite's queue live.
+    "META_EDGE_COMMANDER_SUB",
     "SWARPH_BRAIN_TOKEN",
     "SWARPH_SERVICE_TOKEN",
     "SWARPH_METAEDGE_TOKEN",

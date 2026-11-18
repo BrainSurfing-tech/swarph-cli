@@ -25,6 +25,11 @@ an explicit, audited act by the human commander on the gateway box, not a
 migration accident. It self-destroys: it refuses when any ratified peer
 already exists.
 
+``cockpit-credential mint|revoke`` (card #1645) is the same shape: a local,
+audited, human-only write to the ``cockpit_credentials`` table, for a
+commander who runs no RS256 issuer. It refuses a database whose schema
+version is above 12, so it can never mint on a mesh-gateway database.
+
 Bare ``swarph gateway`` prints help.
 """
 
@@ -32,12 +37,17 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import os
 import secrets
 import socket
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+# The fork's own schema numbers end at 12; a higher number is another gateway's
+# database (mesh-gateway stamps 13 and up), where this verb must never write.
+_FORK_SCHEMA_MAX = 12
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -91,6 +101,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="extra audit text appended to the bootstrap reason",
     )
+
+    cockpit = sub.add_parser(
+        "cockpit-credential",
+        help="mint or revoke the cockpit credential by a local DB write "
+        "(human commander on the gateway box, audited; card #1645)",
+    )
+    cockpit.add_argument("action", choices=("mint", "revoke"))
+    cockpit.add_argument(
+        "--db",
+        default=None,
+        help="path to the gateway SQLite DB (default: $MESH_DB_PATH or "
+        "~/.swarph/mesh.db)",
+    )
     return p
 
 
@@ -100,6 +123,7 @@ def _serve(args: argparse.Namespace) -> int:
     # install hint instead of a traceback.
     try:
         import fastapi  # noqa: F401
+        import rfc8785  # noqa: F401  # card #1645: the queue's digest bytes
         import uvicorn  # noqa: F401
     except ImportError:
         sys.stderr.write(
@@ -263,6 +287,97 @@ def _bootstrap_ratify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cockpit_credential(args: argparse.Namespace) -> int:
+    """card #1645 (Q1, fold F3): mint or revoke the cockpit credential locally.
+
+    Same row as the HTTP mint (hash only, one active credential, 30-day
+    expiry), same gates as bootstrap-ratify (a tty and a typed 'yes'), and
+    one more: the database must be this fork's (schema version at most 12).
+    The raw value is printed ONCE to stdout and written nowhere else.
+    """
+    db_path = (
+        args.db
+        or os.environ.get("MESH_DB_PATH")
+        or os.path.expanduser("~/.swarph/mesh.db")
+    )
+    verb = f"swarph gateway cockpit-credential {args.action}"
+    if not os.path.exists(db_path):
+        sys.stderr.write(
+            f"{verb}: no gateway DB at {db_path}\n"
+            "  Run this on the gateway box, or pass --db / set MESH_DB_PATH.\n"
+        )
+        return 2
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        try:
+            version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+            conn.execute("SELECT 1 FROM cockpit_credentials LIMIT 1")
+        except sqlite3.OperationalError as e:
+            sys.stderr.write(
+                f"{verb}: refusing — {db_path} has no cockpit table ({e}).\n"
+                "  Start `swarph gateway serve` once at this version to apply the schema.\n"
+            )
+            return 2
+        if version is None or version > _FORK_SCHEMA_MAX:
+            sys.stderr.write(
+                f"{verb}: refusing — {db_path} is at schema v{version}, above "
+                f"v{_FORK_SCHEMA_MAX}: it belongs to another gateway, not to "
+                "`swarph gateway serve`.\n"
+            )
+            return 2
+        if not sys.stdin.isatty():
+            sys.stderr.write(
+                f"{verb}: refusing — this is the human commander's act.\n"
+                "  Run it interactively on the gateway box (no pipes, no "
+                "scripts, no cells).\n"
+            )
+            return 2
+        operator = f"{getpass.getuser()}@{socket.gethostname()}"
+        active = conn.execute(
+            "SELECT credential_id FROM cockpit_credentials WHERE revoked_at IS NULL"
+        ).fetchone()
+        if args.action == "revoke" and active is None:
+            sys.stderr.write(f"{verb}: no active cockpit credential in {db_path}.\n")
+            return 2
+        print(f"Cockpit credential {args.action} on {db_path}:")
+        if active is not None:
+            print(f"  - revokes the active credential {active['credential_id']}")
+        if args.action == "mint":
+            print("  - mints a new credential (30-day expiry), stores its SHA-256 only,"
+                  " prints the value once")
+        print(f"  - performed by {operator}")
+        if input("Type 'yes' to confirm: ").strip().lower() != "yes":
+            print("aborted — nothing written.")
+            return 1
+        now = datetime.now(timezone.utc)
+        stamp = now.isoformat(timespec="microseconds")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "UPDATE cockpit_credentials SET revoked_at=? WHERE revoked_at IS NULL", (stamp,))
+            if args.action == "mint":
+                raw = "swck_" + secrets.token_urlsafe(32)
+                credential_id = "ck_" + secrets.token_hex(4)
+                expiry = (now + timedelta(days=30)).isoformat(timespec="microseconds")
+                conn.execute(
+                    "INSERT INTO cockpit_credentials VALUES(?,?,?,?,NULL,?)",
+                    (credential_id, hashlib.sha256(raw.encode()).hexdigest(), stamp, expiry,
+                     f"local:{operator}"))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+    if args.action == "mint":
+        print(f"{credential_id} expires {expiry}. The credential, shown once:")
+        print(raw)
+    else:
+        print(f"{active['credential_id']} revoked at {stamp}.")
+    return 0
+
+
 def run_gateway(argv: list) -> int:
     """Entry point invoked by ``swarph_cli.main`` verb dispatch."""
     parser = _build_parser()
@@ -272,6 +387,8 @@ def run_gateway(argv: list) -> int:
         return _serve(args)
     if args.command == "bootstrap-ratify":
         return _bootstrap_ratify(args)
+    if args.command == "cockpit-credential":
+        return _cockpit_credential(args)
 
     # bare `swarph gateway` (no subcommand) — print help.
     parser.print_help()

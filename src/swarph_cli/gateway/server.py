@@ -54,9 +54,12 @@ import jwt  # PyJWT — B1 Meta-Edge RS256 identity-token verification (gateway 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.routing import Match
 
+from . import commander_queue
 from .feature_registry import aggregate_features, apply_allowlist, apply_caps
 
 # =====================================================================
@@ -170,6 +173,50 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+# card #1645: the commander queue's refusals and the cockpit allow-list, ported
+# verbatim from mesh-gateway 4989daa server.py:476-514 (card #1630).
+class _CommanderRefusal(HTTPException):
+    """Appendix A errors are top-level objects, not FastAPI's detail wrapper."""
+
+
+@app.exception_handler(_CommanderRefusal)
+async def _commander_refusal_response(request, exc):
+    return JSONResponse(status_code=exc.status_code, content=exc.detail)
+
+
+def _commander_refuse(http_status: int, error: str, **fields):
+    raise _CommanderRefusal(http_status, {"error": error, **fields})
+
+
+class _CockpitAllowlist(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        parts = request.headers.get("authorization", "").split(None, 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip().startswith("swck_"):
+            return await call_next(request)
+        token = parts[1].strip()
+        allowed = {("GET", "/commander/requests"),
+                   ("GET", "/commander/requests/{request_id}"),
+                   ("POST", "/commander/requests/{request_id}/decide")}
+        route = next((route for route in app.routes if route.matches(request.scope)[0] == Match.FULL), None)
+        # Refuse before lookup, including unknown URLs and methods: no validity oracle.
+        if route is None or (request.method, route.path) not in allowed:
+            return JSONResponse(status_code=403, content={"error": "cockpit_not_allowed"})
+        with _conn() as c:
+            row = c.execute("SELECT * FROM cockpit_credentials WHERE token_sha256=?",
+                            (hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
+        error = ("unknown" if row is None else "revoked" if row["revoked_at"] else
+                 "expired" if datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc) else None)
+        if error:
+            return JSONResponse(status_code=401, content={"error": "cockpit_credential_" + error})
+        request.state.cockpit_id = row["credential_id"]
+        return await call_next(request)
+
+
+# Starlette's last-added middleware runs first, before the generic credential resolver.
+# This must stay the LAST add_middleware call in this module.
+app.add_middleware(_CockpitAllowlist)
 
 
 # =====================================================================
@@ -1059,6 +1106,16 @@ async def health() -> dict:
 # PEERS
 # =====================================================================
 
+def _require_peer_name(value: str, field: str) -> None:
+    """card #1645 (security review): peer names and message senders must match
+    PEER_NAME_RE (ASCII kebab-case, the mesh naming convention). An allow-list,
+    not a lookalike denylist: a Cyrillic or fullwidth 'commander' cannot exist,
+    so the reserved-name compare below each call site is a plain ASCII ==.
+    Used by register and by message_post so the two paths cannot disagree."""
+    if not PEER_NAME_RE.fullmatch(value):
+        raise HTTPException(422, f"{field} must match {PEER_NAME_RE.pattern}")
+
+
 class PeerRegisterRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
     url: str = Field(..., min_length=1, max_length=256)
@@ -1078,6 +1135,12 @@ async def peers_register(req: PeerRegisterRequest,
     name. capabilities dict is the JSON snapshot from claude-service /health.
     """
     ctx = _authorize(authorization)
+    # card #1645 (fold F2): 'commander' is the queue's notify sender, never a
+    # peer. A registered peer of that name could sign a DM as the commander.
+    # The request row, not the DM, is the record of a decision.
+    _require_peer_name(req.name, "name")
+    if req.name == "commander":
+        raise HTTPException(400, "the name 'commander' is reserved; it is not a peer")
     # #472: bind the caller to the name it registers. Without this, any
     # per-peer-authenticated caller could register ANY name and be handed a
     # freshly minted credential for it. Ported from the deployed gateway
@@ -2263,6 +2326,14 @@ def _find_idempotent_message(
 async def message_post(req: MessagePostRequest,
                         authorization: Optional[str] = Header(None)) -> dict:
     auth = _authorize(authorization)
+    # card #1645 (security review, fold F2): the sender must be a valid peer
+    # name, and 'commander' is the sender of the queue's own notify DMs
+    # (_commander_notify writes it by direct INSERT). No caller may post as
+    # it, whatever the caller-binding enforce flag says; the shared token is
+    # unbound and would otherwise pass. DM and channel posts both come here.
+    _require_peer_name(req.from_node, "from_node")
+    if req.from_node == "commander":
+        raise HTTPException(403, "from_node 'commander' is reserved for the gateway's own notifications")
     # Caller-binding on from_node stays as before. ASPIRATIONAL-UNTIL-C5: with the
     # shared token (today's 100% of traffic) auth.peer is None → this is a no-op,
     # exactly like the channels create/join gates. Real closure is C5 (per-peer
@@ -3608,6 +3679,11 @@ async def task_unblock(task_pk: int, req: TaskUnblockRequest,
     """Clear `not_before` gate + ensure status is pending. Drops a
     `claude_messages` row as audit trail."""
     auth = _authorize(authorization)
+    # card #1645: this route also writes a claude_messages row with a
+    # caller-supplied from_node; same allow-list and reserved name as message_post.
+    _require_peer_name(req.posted_by, "posted_by")
+    if req.posted_by == "commander":
+        raise HTTPException(403, "posted_by 'commander' is reserved for the gateway's own notifications")
     _check_caller_binding(auth, req.posted_by, field="posted_by", site="task_unblock")
     now = _utcnow_iso()
     with _conn() as c:
@@ -4867,3 +4943,439 @@ async def peer_grants(peer: str, authorization: Optional[str] = Header(None)) ->
         except sqlite3.OperationalError:
             pass
     return {"peer": peer, "groups": groups, "grants": grants}
+
+
+# =====================================================================
+# COMMANDER QUEUE AND COCKPIT (card #1645)
+# =====================================================================
+# Ported from mesh-gateway 4989daa server.py:3778-4221 (cards #1297 and
+# #1630). The wire contract is #1630 Appendix A with A.1-A.4. Fork-only
+# differences, each named in the spec (card #1645 post 100318, section 3.1)
+# and the rulings (post 100349): the queue is OFF until META_EDGE_COMMANDER_SUB
+# is set (503 commander_not_configured on every route); the commander is the
+# verified identity JWT whose sub equals that value; decisions only (merge_pr
+# and release_finish are refused with a typed error); no board, so card_id is
+# refused; notify is DM-only; withdraw writes a six-digit fraction.
+
+
+def _commander_configured() -> None:
+    """D1: a stock `swarph gateway serve` has no commander. Checked first in
+    every handler, before any credential is read."""
+    if not os.environ.get("META_EDGE_COMMANDER_SUB", "").strip():
+        _commander_refuse(503, "commander_not_configured")
+
+
+def _commander_presented(authorization: Optional[str]) -> bool:
+    """The static commander credential, read at request time so a test can set
+    MESH_GATEWAY_COMMANDER_TOKEN after import. The shared token is not this
+    credential: D6, a commander token equal to the shared token counts as
+    unset, because `swarph gateway serve` hands the shared token to every cell."""
+    expected = os.environ.get("MESH_GATEWAY_COMMANDER_TOKEN", "") or COMMANDER_TOKEN
+    shared = os.environ.get("MESH_GATEWAY_TOKEN", "") or AUTH_TOKEN
+    if not expected or secrets.compare_digest(expected, shared):
+        return False
+    if not authorization or not authorization.startswith("Bearer "):
+        return False
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        return False
+    return secrets.compare_digest(token, expected)
+
+
+# Decisions only (ruling 100349, Q3): a third-party gateway has no merger and
+# no release executor, so the action types are refused with a typed error.
+_COMMANDER_TYPES = frozenset({"decision"})
+_COMMANDER_ACTION_TYPES = frozenset({"merge_pr", "release_finish"})
+_COMMANDER_COLUMNS = (
+    "id", "proposer", "type", "params", "card_id", "head_sha", "question",
+    "options", "status", "decided_at", "answer", "result", "created_at",
+    "why", "decided_by", "decided_via", "executed_at", "executed_by", "result_detail",
+)
+
+
+class CommanderRequestBody(BaseModel):
+    type: str
+    question: Any = None
+    options: Any = None
+    card_id: Optional[int] = None
+    repo: Any = None
+    pr: Any = None
+    head_sha: Any = None
+    version: Any = None
+    why: Any = None
+    needs_sso: Any = False
+
+
+class CommanderDecideBody(BaseModel):
+    decision: Any
+    answer: Any = None
+    digest: Any = None
+
+
+class CommanderResultBody(BaseModel):
+    status: str
+    result: Any = None
+    result_detail: Any = None
+
+
+def _commander_params(body: CommanderRequestBody) -> dict:
+    if body.type in _COMMANDER_ACTION_TYPES:
+        _commander_refuse(400, "action_not_supported", type=body.type)
+    if body.type not in _COMMANDER_TYPES:
+        raise HTTPException(400, f"unknown commander request type {body.type!r}")
+    question = body.question.strip() if isinstance(body.question, str) else ""
+    if not question:
+        raise HTTPException(400, "decision requires a question")
+    options = body.options if body.options is not None else []
+    if not isinstance(options, list) or any(
+            not isinstance(item, str) or not item.strip() for item in options):
+        raise HTTPException(400, "options must be a list of strings")
+    params = {"question": question, "options": [item.strip() for item in options],
+              "needs_sso": body.needs_sso}
+    if not commander_queue.decision_fits(params):
+        raise HTTPException(400, "decision exceeds cockpit character or length limits")
+    return params
+
+
+def _commander_public(row) -> dict:
+    d = {key: row[key] for key in _COMMANDER_COLUMNS}
+    d["params"] = json.loads(d["params"])
+    if d["options"]:
+        d["options"] = json.loads(d["options"])
+    d["summary"] = commander_queue.summary(d["id"], d["type"], d["params"])
+    d["digest"] = commander_queue.digest(d["id"], d["type"], d["params"])
+    d["needs_sso"] = (d["params"].get("needs_sso", False)
+                      if d["type"] == "decision" else True)
+    d["result_detail"] = json.loads(d["result_detail"]) if d["result_detail"] else None
+    return d
+
+
+def _commander_notify(c, row, status: str) -> None:
+    """DM the proposer (kind=answer) on every status change. D3/D7: no board
+    here, so no card-thread note; the text is short and sliced, not JSON-bounded.
+    The DM is a doorbell: the request row is the record."""
+    text = (f"commander request #{row['id']} ({row['type']}) is {status}; "
+            f"decided_by={row['decided_by']}; decided_via={row['decided_via']}")[:1000]
+    now = _utcnow_iso()
+    proposer = row["proposer"]
+    if c.execute("SELECT 1 FROM claude_peers WHERE name = ?", (proposer,)).fetchone():
+        c.execute(
+            "INSERT INTO claude_messages (from_node, to_node, kind, content, created_at) "
+            "VALUES ('commander', ?, 'answer', ?, ?)",
+            (proposer, text, now))
+
+
+def _decide_is_commander(auth) -> bool:
+    """D2: the commander is a verified identity JWT whose sub is
+    META_EDGE_COMMANDER_SUB, read at request time. A cell-join JWT, a peer
+    token and the static commander token are never this credential."""
+    expected = os.environ.get("META_EDGE_COMMANDER_SUB", "").strip()
+    return bool(expected) and auth.kind == "user_identity" and auth.user == expected
+
+
+def _commander_require_credential(authorization: Optional[str]) -> str:
+    """Result still accepts the static commander credential, and also the
+    commander's SSO session, so the desktop executor can report a result
+    without holding that static token. A missing bearer is 401. A cell is 403.
+    Decide does not use this; it calls _decide_is_commander only."""
+    if _commander_presented(authorization):
+        return "static:commander"
+    auth = _authorize(authorization)
+    if _decide_is_commander(auth):
+        return "sso:" + auth.user
+    raise HTTPException(403, "cells cannot decide")
+
+
+class CockpitMintBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expires_at: Any = None
+
+
+class CockpitRevokeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    credential_id: Optional[str] = None
+
+
+@app.post("/commander/cockpit-credential", status_code=201)
+async def mint_cockpit_credential(body: CockpitMintBody,
+                                  authorization: Optional[str] = Header(None)) -> dict:
+    _commander_configured()
+    auth = _authorize(authorization)
+    if not _decide_is_commander(auth):
+        raise HTTPException(403, "mint requires the commander's SSO session")
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(days=30)
+    if "expires_at" in body.model_fields_set:
+        value = body.expires_at
+        try:
+            if not isinstance(value, str) or not re.fullmatch(
+                    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", value):
+                raise ValueError()
+            expires = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+            if not now < expires <= now + timedelta(days=30):
+                raise ValueError()
+        except ValueError:
+            _commander_refuse(400, "bad_expires_at")
+    raw = "swck_" + secrets.token_urlsafe(32)
+    credential_id = "ck_" + secrets.token_hex(4)
+    stamp, expiry = now.isoformat(timespec="microseconds"), expires.isoformat(timespec="microseconds")
+    with _conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            c.execute("UPDATE cockpit_credentials SET revoked_at=? WHERE revoked_at IS NULL", (stamp,))
+            c.execute("INSERT INTO cockpit_credentials VALUES(?,?,?,?,NULL,?)",
+                      (credential_id, hashlib.sha256(raw.encode()).hexdigest(), stamp, expiry, "sso:" + auth.user))
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    return {"credential": raw, "credential_id": credential_id, "expires_at": expiry}
+
+
+@app.post("/commander/cockpit-credential/revoke")
+async def revoke_cockpit_credential(body: CockpitRevokeBody,
+                                    authorization: Optional[str] = Header(None)) -> dict:
+    _commander_configured()
+    _commander_require_credential(authorization)
+    with _conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            row = c.execute("SELECT credential_id FROM cockpit_credentials WHERE revoked_at IS NULL" +
+                            (" AND credential_id=?" if body.credential_id is not None else ""),
+                            (body.credential_id,) if body.credential_id is not None else ()).fetchone()
+            if not row:
+                _commander_refuse(404, "not_found")
+            now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+            c.execute("UPDATE cockpit_credentials SET revoked_at=? WHERE credential_id=?", (now, row[0]))
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    return {"credential_id": row[0], "revoked_at": now}
+
+
+@app.post("/commander/requests", status_code=201)
+async def post_commander_request(body: CommanderRequestBody,
+                                 authorization: Optional[str] = Header(None)) -> dict:
+    _commander_configured()
+    auth = _authorize(authorization)
+    if not auth.peer:
+        raise HTTPException(400, "a commander request must come from a peer token")
+    params = _commander_params(body)
+    if body.why is not None and not commander_queue.text_ok(body.why, 1000, nonempty=False):
+        raise HTTPException(400, "why exceeds cockpit character or length limits")
+    # D8 (security review): the dedupe key is scoped to the proposer, so one
+    # peer can neither learn another peer's pending id from the 409 nor block
+    # it by filing first. Mesh keys on type+params alone.
+    key = auth.peer + "\n" + body.type + "\n" + json.dumps(params, sort_keys=True, separators=(",", ":"))
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat(timespec="microseconds")
+    with _conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            # D3: this gateway has no board, so every card is unknown.
+            if body.card_id is not None:
+                raise HTTPException(404, f"card {body.card_id} not found")
+            dup = c.execute(
+                "SELECT id FROM commander_requests WHERE dedupe_key = ? AND proposer = ? AND status = 'pending'",
+                (key, auth.peer)).fetchone()
+            if dup:
+                raise HTTPException(409, f"duplicate pending commander request {dup['id']}")
+            if c.execute("SELECT COUNT(*) FROM commander_requests WHERE proposer=? AND status='pending'",
+                         (auth.peer,)).fetchone()[0] >= 5:
+                raise HTTPException(429, "at most 5 pending requests per peer")
+            if c.execute("SELECT COUNT(*) FROM commander_requests WHERE proposer=? AND created_at>=?",
+                         (auth.peer, (now_dt - timedelta(hours=1)).isoformat(timespec="microseconds"))).fetchone()[0] >= 10:
+                raise HTTPException(429, "at most 10 requests per hour per peer")
+            cur = c.execute(
+                "INSERT INTO commander_requests "
+                "(proposer, type, params, card_id, head_sha, question, options, "
+                " status, created_at, dedupe_key, why) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+                (auth.peer, body.type, json.dumps(params, sort_keys=True),
+                 body.card_id, params.get("head_sha"),
+                 params.get("question"),
+                 json.dumps(params["options"]) if body.type == "decision" else None,
+                 now, key, body.why))
+            row = c.execute(
+                "SELECT * FROM commander_requests WHERE id = ?", (cur.lastrowid,)).fetchone()
+            prefix = commander_queue.digest(row["id"], row["type"], params)[:16]
+            for pending in c.execute("SELECT id,type,params FROM commander_requests WHERE status='pending' AND id!=?",
+                                     (row["id"],)):
+                if commander_queue.digest(pending["id"], pending["type"], json.loads(pending["params"]))[:16] == prefix:
+                    raise HTTPException(409, "pending digest prefix collision")
+            _commander_notify(c, row, "pending")
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    return _commander_public(row)
+
+
+@app.get("/commander/requests")
+async def list_commander_requests(request: Request, status: Optional[str] = None,
+                                  authorization: Optional[str] = Header(None)) -> dict:
+    _commander_configured()
+    peer = _commander_read_peer(request, authorization)
+    clauses, args = [], []
+    if peer:
+        clauses.append("proposer=?")
+        args.append(peer)
+    if status:
+        clauses.append("status=?")
+        args.append(status)
+    with _conn() as c:
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = c.execute("SELECT * FROM commander_requests" + where + " ORDER BY id", args).fetchall()
+    return {"requests": [_commander_public(r) for r in rows]}
+
+
+def _commander_read_peer(request: Request, authorization: Optional[str]) -> Optional[str]:
+    if getattr(request.state, "cockpit_id", None) or _commander_presented(authorization):
+        return None
+    auth = _authorize(authorization)
+    if auth.peer:
+        return auth.peer
+    if _decide_is_commander(auth):
+        return None
+    raise HTTPException(403, "queue reads require a peer, cockpit, or commander credential")
+
+
+@app.get("/commander/requests/{request_id}")
+async def get_commander_request(request_id: int, request: Request,
+                                authorization: Optional[str] = Header(None)) -> dict:
+    _commander_configured()
+    peer = _commander_read_peer(request, authorization)
+    with _conn() as c:
+        row = c.execute("SELECT * FROM commander_requests WHERE id = ?", (request_id,)).fetchone()
+        if not row or peer and row["proposer"] != peer:
+            return JSONResponse(status_code=404, content={"error": "not_found"})
+    return _commander_public(row)
+
+
+@app.post("/commander/requests/{request_id}/decide")
+async def decide_commander_request(request_id: int, body: CommanderDecideBody, request: Request,
+                                   authorization: Optional[str] = Header(None)) -> dict:
+    _commander_configured()
+    cockpit_id = getattr(request.state, "cockpit_id", None)
+    if cockpit_id:
+        decided_by, decided_via = "cockpit:" + cockpit_id, "cockpit"
+    else:
+        auth = _authorize(authorization)
+        if not _decide_is_commander(auth):
+            raise HTTPException(403, "decide requires the commander's SSO session")
+        decided_by, decided_via = "sso:" + auth.user, "sso"
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with _conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            row = c.execute(
+                "SELECT * FROM commander_requests WHERE id = ?", (request_id,)).fetchone()
+            if not row:
+                _commander_refuse(404, "not_found")
+            params = json.loads(row["params"])
+            if cockpit_id:
+                if row["type"] != "decision":
+                    _commander_refuse(403, "cockpit_not_allowed")
+                if params.get("needs_sso", False) or not commander_queue.decision_fits(params):
+                    _commander_refuse(403, "needs_sso")
+            op = body.decision.strip() if isinstance(body.decision, str) else ""
+            answer = None
+            if row["type"] == "decision":
+                if op != "answer":
+                    _commander_refuse(400, "bad_decision")
+                answer = body.answer.strip() if isinstance(body.answer, str) else ""
+                if not commander_queue.text_ok(answer, 1000):
+                    _commander_refuse(400, "bad_answer")
+                status = "answered"
+            elif op == "approve":
+                status = "approved"
+            elif op == "reject":
+                status = "rejected"
+            else:
+                _commander_refuse(400, "bad_decision")
+            if not isinstance(body.digest, str) or not re.fullmatch(r"[0-9a-f]{64}", body.digest):
+                _commander_refuse(400, "digest_required")
+            if row["status"] != "pending":
+                _commander_refuse(409, "not_pending", status=row["status"])
+            if not secrets.compare_digest(body.digest, commander_queue.digest(request_id, row["type"], params)):
+                _commander_refuse(409, "digest_mismatch")
+            c.execute(
+                "UPDATE commander_requests SET status = ?, answer = ?, decided_at = ?, decided_by = ?, decided_via = ? "
+                "WHERE id = ?",
+                (status, answer, now, decided_by, decided_via, request_id))
+            row = c.execute(
+                "SELECT * FROM commander_requests WHERE id = ?", (request_id,)).fetchone()
+            _commander_notify(c, row, status)
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    return _commander_public(row)
+
+
+@app.post("/commander/requests/{request_id}/result")
+async def result_commander_request(request_id: int, body: CommanderResultBody,
+                                   authorization: Optional[str] = Header(None)) -> dict:
+    """The executor reports executed, failed, or stale. Cells cannot."""
+    _commander_configured()
+    executed_by = _commander_require_credential(authorization)
+    if body.status not in ("executed", "failed", "stale"):
+        raise HTTPException(400, "result status must be executed, failed, or stale")
+    if "result_detail" in body.model_fields_set:
+        raise HTTPException(400, "result_detail input is not defined before step 3")
+    if body.result is not None and (not isinstance(body.result, str) or len(body.result) > 4000):
+        raise HTTPException(400, "result must be at most 4000 characters")
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    with _conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            row = c.execute(
+                "SELECT * FROM commander_requests WHERE id = ?", (request_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, f"commander request {request_id} not found")
+            if row["status"] != "approved":
+                raise HTTPException(
+                    409, f"commander request {request_id} is {row['status']}, not approved")
+            c.execute(
+                "UPDATE commander_requests SET status = ?, result = ?, executed_at = ?, executed_by = ? "
+                "WHERE id = ?",
+                (body.status, (body.result or "").strip() or None, now, executed_by, request_id))
+            row = c.execute(
+                "SELECT * FROM commander_requests WHERE id = ?", (request_id,)).fetchone()
+            _commander_notify(c, row, body.status)
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    return _commander_public(row)
+
+
+@app.post("/commander/requests/{request_id}/withdraw")
+async def withdraw_commander_request(request_id: int,
+                                     authorization: Optional[str] = Header(None)) -> dict:
+    _commander_configured()
+    auth = _authorize(authorization)
+    with _conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            row = c.execute(
+                "SELECT * FROM commander_requests WHERE id = ?", (request_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, f"commander request {request_id} not found")
+            if not auth.peer or auth.peer != row["proposer"]:
+                raise HTTPException(403, "only the proposer can withdraw")
+            if row["status"] != "pending":
+                raise HTTPException(409, f"commander request {request_id} is {row['status']}")
+            # D5: six fraction digits, as every other queue timestamp (A.1).
+            c.execute(
+                "UPDATE commander_requests SET status = 'withdrawn', decided_at = ? WHERE id = ?",
+                (datetime.now(timezone.utc).isoformat(timespec="microseconds"), request_id))
+            row = c.execute(
+                "SELECT * FROM commander_requests WHERE id = ?", (request_id,)).fetchone()
+            _commander_notify(c, row, "withdrawn")
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    return _commander_public(row)
