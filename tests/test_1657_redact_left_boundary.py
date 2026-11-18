@@ -193,18 +193,46 @@ def test_bare_sk_shapes_main_flags_still_flag():
             assert redact.redact_text(text) != text
 
 
+def _timed_sub(pattern, line, cap=2.0):
+    """Run a pattern sub with a hard cap: a quadratic regression must
+    FAIL this test in about cap seconds, not hang the whole file."""
+    import threading
+
+    box = {}
+
+    def go():
+        start = time.perf_counter()
+        pattern.sub("[REDACTED]", line)
+        box["elapsed"] = time.perf_counter() - start
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(cap)
+    assert not t.is_alive(), f"pattern sub exceeded the {cap}s cap"
+    return box["elapsed"]
+
+
 def test_changed_patterns_stay_linear_at_a_megabyte():
     cases = {
         "eyJ no dot": ("eyJ" * 333_334, redact._JWT_RE),
         "eyJabcd no dot": ("eyJabcd" * 142_858, redact._JWT_RE),
         "ghp_ accented end": ("ghp_" * 250_000 + "é", redact._GITHUB_RE),
+        "eyJ dash flood": (("eyJ" + "a" * 19 + "-") * 43479,
+                           redact._URI_SCHEME_RE),
     }
     for name, (line, pattern) in cases.items():
         assert len(line) >= 1_000_000, name
-        start = time.perf_counter()
-        pattern.sub("[REDACTED]", line)
-        elapsed = time.perf_counter() - start
+        elapsed = _timed_sub(pattern, line)
         assert elapsed < 0.5, (name, f"{elapsed:.3f}s")
+
+
+def test_truncated_anthropic_example_in_a_comment_does_not_flag():
+    # A comment naming the admin-key prefix, truncated with a dash and
+    # an ellipsis, is documentation about keys, not a key.
+    line = "the admin-key prefix sk-ant-api03-AbCdEfGh-… is named here"
+    assert redact.redact_text(line) == line
+    key = "sk-" + "ant-" + "api03-" + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+    assert redact.redact_text(f"real {key} here") != f"real {key} here"
 
 
 def test_redact_stays_linear_on_a_megabyte_line():

@@ -147,8 +147,8 @@ _GITHUB_RE = re.compile(
     r"(?:" + _SHORT_LEFT + r"gh[opusr]_[A-Za-z0-9_]{20,}"
     r"|github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])")
 _ANTHROPIC_RE = re.compile(
-    r"(?:sk-ant-api03-[A-Za-z0-9\-_]{8,}"
-    r"|" + _SHORT_LEFT + r"sk-ant-[A-Za-z0-9\-_]{8,})(?![A-Za-z0-9_])")
+    r"(?:sk-ant-api03-|" + _SHORT_LEFT + r"sk-ant-)"
+    r"[A-Za-z0-9\-_]{7,}[A-Za-z0-9_](?![A-Za-z0-9_\-])")
 _OPENAI_RE = re.compile(
     r"(?:sk-(?:proj-|svcacct-)[A-Za-z0-9\-_]{16,}"
     r"|(?:(?<![A-Za-z0-9])|(?<=\\[nt]))"
@@ -166,13 +166,13 @@ _AWS_SECRET_RE = re.compile(
     r"(?i)\b(aws_secret_access_key|aws_session_token)\b(\s*[:=]\s*)(['\"]?)(?!\[REDACTED)[A-Za-z0-9/+=]{20,}\3"
 )
 _JWT_RE = re.compile(
-    r"eyJ[A-Za-z0-9_\-]{4,128}\.eyJ[A-Za-z0-9_\-]{4,2048}"
+    r"eyJ(?:(?!eyJ)[A-Za-z0-9_\-]){4,}\.eyJ[A-Za-z0-9_\-]{4,}"
     r"(?:\.[A-Za-z0-9_\-]{4,})?\b")
 _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)(?!\[REDACTED)[A-Za-z0-9\-._~+/]{12,}=*")
 
 # URI & DSN credentials
 _URI_SCHEME_RE = re.compile(
-    r"\b([a-zA-Z][a-zA-Z0-9+.\-]*://[^/\s:@]+:)(?!\[REDACTED)([^@\s/]+)(@[^\s/]+)"
+    r"\b([a-zA-Z][a-zA-Z0-9+.\-]{0,31}://[^/\s:@]+:)(?!\[REDACTED)([^@\s/]+)(@[^\s/]+)"
 )
 _URI_SCHEMELESS_RE = re.compile(
     r"(?<!\[)(?<![a-zA-Z0-9/._\-:])(?!(?:REDACTED|CUSTOM):)([a-zA-Z0-9._\-]+:)(?!\[REDACTED)([^@\s:/]{2,})(@(?:localhost|(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?)\b"
