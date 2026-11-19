@@ -143,6 +143,7 @@ _AWS_SECRET_RE = re.compile(
     r"(?i)\b(aws_secret_access_key|aws_session_token)\b(\s*[:=]\s*)(['\"]?)(?!\[REDACTED)[A-Za-z0-9/+=]{20,}\3"
 )
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]{4,}\.eyJ[A-Za-z0-9_\-]{4,}(?:\.[A-Za-z0-9_\-]{4,})?\b")
+_JWT_RESTART_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]*-eyJ")
 _JWT_HEAD_RUN_RE = re.compile(r"(?<![A-Za-z0-9_\-])[A-Za-z0-9_\-]{7,}(?=\.eyJ)")
 _JWT_START_RE = re.compile(r"\beyJ")
 _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)(?!\[REDACTED)[A-Za-z0-9\-._~+/]{12,}=*")
@@ -239,8 +240,8 @@ def _replace_secret_assignment(m: re.Match) -> str:
 def _replace_jwts(text: str) -> str:
     if ".eyJ" not in text:
         return text
-    if "-" not in text:
-        # Without dashes, each segment already has at most one word-boundary start.
+    if "-eyJ" not in text or not _JWT_RESTART_RE.search(text):
+        # The native scan is already linear if no segment has two starts.
         return _JWT_RE.sub("[REDACTED:JWT]", text)
     parts = []
     copied_until = 0
