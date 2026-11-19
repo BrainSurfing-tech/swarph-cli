@@ -161,7 +161,9 @@ def test_tailnet_http_needs_no_friction_flag(tmp_path, gateway, monkeypatch, cap
     monkeypatch.setattr(sys, "stdin", io.StringIO())
     assert run_join([f"http://{host}:{port}", "--name", "new-peer"]) == 0
     assert len(calls) == 3
-    assert "encrypted tunnel, not TLS" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "encrypted tunnel, not TLS" in out
+    assert sum(line.startswith("swarph onboard ") for line in out.splitlines()) == 1
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX credential storage")
@@ -201,6 +203,10 @@ def test_interactive_answers_go_only_to_chosen_witness_without_secrets(tmp_path,
     output = capsys.readouterr()
     assert TOKEN not in output.out + output.err
     assert DEVICE not in output.out + output.err
+    # Card #1700 G1: a person answering at a terminal gets the next step too.
+    token_file = str(tmp_path / ".config/swarph/new-peer.peer_token")
+    assert [shlex.split(line) for line in output.out.splitlines() if line.startswith("swarph onboard ")] == [
+        ["swarph", "onboard", "new-peer", "--gateway", url, "--token-file", token_file]]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX credential storage")
