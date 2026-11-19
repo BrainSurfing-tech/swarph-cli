@@ -99,7 +99,8 @@ gateway-refused until ratified.
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="swarph onboard",
-        description="Phase 5.5 mechanics-phase peer onboarding per PLAN.md §15.4.",
+        description="Phase 5.5 mechanics-phase peer onboarding per PLAN.md §15.4. "
+                    "On a new machine, run swarph join first, then swarph onboard.",
     )
     p.add_argument("peer", help="canonical peer name (e.g. razorpeter)")
     p.add_argument(
