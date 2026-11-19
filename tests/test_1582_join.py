@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import shlex
 import socket
 import threading
 import time
@@ -283,3 +284,43 @@ def test_invalid_new_peer_names_are_refused_before_http(tmp_path, gateway, name)
     assert result.returncode == 1
     assert "invalid peer name" in result.stderr
     assert calls == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX credential storage")
+@pytest.mark.parametrize("ambient", [False, True], ids=["no-ambient", "other-ambient"])
+def test_printed_onboard_line_registers_at_joins_gateway_with_joins_token(tmp_path, gateway, ambient):
+    """Card #1700: the line join prints, run verbatim in a shell, finishes onboarding
+    with join's gateway and token, whatever MESH_GATEWAY_URL/TOKEN and SWARPH_SELF say."""
+    url, calls, responses = gateway
+    responses["/peers/register"] = {"registered_unratified": True, "token_status": "existing"}
+    result = run_cli(tmp_path, "join", url, "--name", "new-peer", "--allow-unsafe-http")
+    assert result.returncode == 0, result.stderr
+    lines = [line for line in result.stdout.splitlines() if line.startswith("swarph onboard ")]
+    assert len(lines) == 1, result.stdout
+    # Explicit token file: today the resolver finds it anyway, but not by contract.
+    token_file = str(tmp_path / ".config/swarph/new-peer.peer_token")
+    assert shlex.split(lines[0]) == ["swarph", "onboard", "new-peer", "--gateway", url,
+                                     "--token-file", token_file]
+    calls.clear()
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("MESH_GATEWAY_URL", "MESH_GATEWAY_TOKEN", "SWARPH_SELF")}
+    env["HOME"] = str(tmp_path)
+    other = "W" * 43
+    if ambient:  # nothing listens on port 9: a request sent there fails the run
+        env.update(MESH_GATEWAY_URL="http://127.0.0.1:9", MESH_GATEWAY_TOKEN=other,
+                   SWARPH_SELF="wrong-ambient-cell")
+    script = f'swarph() {{ {shlex.quote(sys.executable)} -m swarph_cli.main "$@"; }}\n{lines[0]}\n'
+    onboard = subprocess.run(["bash", "-c", script], env=env, text=True,
+                             capture_output=True, timeout=20)
+    assert onboard.returncode == 0, onboard.stdout + onboard.stderr
+    registers = [c for c in calls if c[:2] == ("POST", "/peers/register")]
+    assert len(registers) == 1 and registers[0][2]["name"] == "new-peer"
+    assert {header for _, _, _, header in calls} == {"Bearer " + TOKEN}
+    assert other not in onboard.stdout + onboard.stderr
+
+
+@pytest.mark.parametrize("verb", ["join", "onboard"])
+def test_help_states_join_then_onboard(tmp_path, verb):
+    result = run_cli(tmp_path, verb, "--help")
+    assert result.returncode == 0, result.stderr
+    assert "On a new machine, run swarph join first, then swarph onboard." in " ".join(result.stdout.split())
