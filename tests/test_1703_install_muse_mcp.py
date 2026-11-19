@@ -15,7 +15,7 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="bash script")
 # Fake muse: `mcp get <name> --json` and `mcp add-json <name> <json> --user`
 # over $HOME/.config/muse/settings.json; an existing name is refused, as Muse does.
 FAKE_MUSE = r'''import json, os, sys
-path = os.path.join(os.environ["HOME"], ".config", "muse", "settings.json")
+path = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.environ["HOME"], ".config"), "muse", "settings.json")
 data = json.load(open(path)) if os.path.exists(path) else {}
 servers = data.setdefault("mcpServers", {})
 args = sys.argv[1:]
@@ -81,10 +81,14 @@ def test_rerun_is_a_no_op_and_other_values_are_refused(env):
 @pytest.mark.parametrize("cell, gateway", [
     ("Meta;rm", GATEWAY), ("meta-muse-", GATEWAY), ("", GATEWAY),
     ("meta-muse", "ftp://x"), ("meta-muse", "http://a b"), ("meta-muse", ""),
+    ("a" * 65, GATEWAY), ("\u00e1bc", GATEWAY),
+    ("meta-muse", "http://user:pw@host:8788"), ("meta-muse", "http://host:8788/?token=t"),
+    ("meta-muse", "http://host:8788/#frag"),
 ])
 def test_invalid_input_refused_before_any_write(env, cell, gateway):
     environ, settings, _ = env
-    result = run(environ, cell, gateway)
+    # A UTF-8 locale must not widen [a-z] to accented letters.
+    result = run({**environ, "LC_ALL": "en_US.UTF-8"}, cell, gateway)
     assert result.returncode == 1
     assert not settings.exists()
 
@@ -94,3 +98,54 @@ def test_gateway_defaults_to_mesh_gateway_url(env):
     result = run({**environ, "MESH_GATEWAY_URL": GATEWAY}, "meta-muse")
     assert result.returncode == 0, result.stderr
     assert json.loads(settings.read_text())["mcpServers"]["swarph"]["env"]["MESH_GATEWAY_URL"] == GATEWAY
+
+
+def test_sixty_four_character_name_is_accepted(env):
+    environ, settings, _ = env
+    assert run(environ, "a" * 64, GATEWAY).returncode == 0
+
+
+def _seed(settings, entry):
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"mcpServers": {"swarph": entry}}))
+
+
+@pytest.mark.parametrize("change", [
+    {"mode": None}, {"mode": "required"}, {"command": "/other/swarph"},
+    {"args": ["channel-serve"]}, {"enabled": False},
+], ids=["no-mode", "mode-required", "other-command", "other-args", "disabled"])
+def test_entry_differing_in_one_key_is_refused_unchanged(env, change):
+    environ, settings, swarph = env
+    entry = {"type": "stdio", "command": swarph, "args": ["mcp-server"],
+             "env": {"SWARPH_SELF": "meta-muse", "MESH_GATEWAY_URL": GATEWAY}, "mode": "optional"}
+    for key, value in change.items():
+        if value is None:
+            entry.pop(key)
+        else:
+            entry[key] = value
+    _seed(settings, entry)
+    before = settings.read_bytes()
+    result = run(environ, "meta-muse", GATEWAY)
+    assert result.returncode == 1 and "not replacing" in result.stderr
+    assert settings.read_bytes() == before
+
+
+def test_command_is_absolute_with_a_relative_path_entry(env, tmp_path):
+    environ, settings, swarph = env
+    bindir = Path(swarph).parent
+    result = subprocess.run(["bash", str(SCRIPT), "meta-muse", GATEWAY], cwd=bindir.parent,
+                            env={**environ, "PATH": f"{bindir.name}:/usr/bin:/bin"},
+                            text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(settings.read_text())["mcpServers"]["swarph"]["command"] == swarph
+
+
+def test_follows_xdg_config_home_and_reruns_cleanly(env, tmp_path):
+    environ, settings, _ = env
+    xdg = tmp_path / "xdg"
+    environ = {**environ, "XDG_CONFIG_HOME": str(xdg)}
+    assert run(environ, "meta-muse", GATEWAY).returncode == 0
+    written = xdg / "muse" / "settings.json"
+    assert written.exists() and not settings.exists()
+    again = run(environ, "meta-muse", GATEWAY)
+    assert again.returncode == 0 and "nothing to do" in again.stdout, again.stderr
