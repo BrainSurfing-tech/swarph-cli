@@ -71,6 +71,8 @@ BAD_PEERS = [
     "p</string><string>--deliver</string><string>tmux:evil",
     "p</string></array><key>ProgramArguments</key><array><string>/bin/sh",
     "a b", "..", "-rf", "a" * 300, "abc\n", "smoke-peer\n",
+    "smoke-peer ", "smoke-peer\t", "smoke-peer\r", " smoke-peer",
+    "Smoke-Peer",
 ]
 
 
