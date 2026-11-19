@@ -148,7 +148,9 @@ _GITHUB_RE = re.compile(
     r"|github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])")
 _ANTHROPIC_RE = re.compile(
     r"(?:sk-ant-api03-|" + _SHORT_LEFT + r"sk-ant-)"
-    r"[A-Za-z0-9\-_]{7,}[A-Za-z0-9_](?![A-Za-z0-9_\-])")
+    r"(?=[A-Za-z0-9\-_]{23,}[A-Za-z0-9_])"
+    r"(?:(?![a-zA-Z][a-zA-Z0-9+.\-]{0,31}://)"
+    r"(?!--[a-zA-Z][a-zA-Z0-9+.\-]{0,31}://)[A-Za-z0-9_\-])+")
 _OPENAI_RE = re.compile(
     r"(?:sk-(?:proj-|svcacct-)[A-Za-z0-9\-_]{16,}"
     r"|(?:(?<![A-Za-z0-9])|(?<=\\[nt]))"
@@ -166,13 +168,14 @@ _AWS_SECRET_RE = re.compile(
     r"(?i)\b(aws_secret_access_key|aws_session_token)\b(\s*[:=]\s*)(['\"]?)(?!\[REDACTED)[A-Za-z0-9/+=]{20,}\3"
 )
 _JWT_RE = re.compile(
-    r"eyJ(?:(?!eyJ)[A-Za-z0-9_\-]){4,}\.eyJ[A-Za-z0-9_\-]{4,}"
-    r"(?:\.[A-Za-z0-9_\-]{4,})?\b")
+    r"eyJ(?:(?!eyJ)[A-Za-z0-9_\-]){4,}"
+    r"\.eyJ(?:(?![a-zA-Z][a-zA-Z0-9+.\-]{0,31}://)[A-Za-z0-9_\-]){4,}"
+    r"(?:\.(?:(?![a-zA-Z][a-zA-Z0-9+.\-]{0,31}://)[A-Za-z0-9_\-]){4,})?\b")
 _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)(?!\[REDACTED)[A-Za-z0-9\-._~+/]{12,}=*")
 
 # URI & DSN credentials
 _URI_SCHEME_RE = re.compile(
-    r"\b([a-zA-Z][a-zA-Z0-9+.\-]{0,31}://[^/\s:@]+:)(?!\[REDACTED)([^@\s/]+)(@[^\s/]+)"
+    r"([a-zA-Z][a-zA-Z0-9+.\-]{0,31}://[^/\s:@]+:)(?!\[REDACTED)([^@\s/]+)(@[^\s/|]+)"
 )
 _URI_SCHEMELESS_RE = re.compile(
     r"(?<!\[)(?<![a-zA-Z0-9/._\-:])(?!(?:REDACTED|CUSTOM):)([a-zA-Z0-9._\-]+:)(?!\[REDACTED)([^@\s:/]{2,})(@(?:localhost|(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?)\b"
@@ -335,17 +338,29 @@ def redact_text(
     # Layer 2: PEM Private Keys
     out = _PEM_RE.sub("[REDACTED:PEM_PRIVATE_KEY]", out)
 
-    # Layer 3: Known Secret Patterns
-    out = _GITHUB_RE.sub("[REDACTED:GITHUB_TOKEN]", out)
-    out = _ANTHROPIC_RE.sub("[REDACTED:ANTHROPIC_KEY]", out)
-    out = _OPENAI_RE.sub("[REDACTED:API_KEY]", out)
-    out = _XAI_RE.sub("[REDACTED:API_KEY]", out)
-    out = _GCP_RE.sub("[REDACTED:GCP_API_KEY]", out)
-    out = _SLACK_RE.sub("[REDACTED:SLACK_TOKEN]", out)
-    out = _AWS_KEY_RE.sub("[REDACTED:AWS_KEY]", out)
+    # Layer 3: Known Secret Patterns. Each provider pattern runs only
+    # when its literal prefix occurs in the text (science-claude's
+    # prefilter, #6026): a pattern whose prefix is absent cannot match,
+    # and skipping it keeps ordinary text at main's cost.
+    if "gh" in out or "github_pat_" in out:
+        out = _GITHUB_RE.sub("[REDACTED:GITHUB_TOKEN]", out)
+    if "sk-ant-" in out:
+        out = _ANTHROPIC_RE.sub("[REDACTED:ANTHROPIC_KEY]", out)
+    if "sk-" in out:
+        out = _OPENAI_RE.sub("[REDACTED:API_KEY]", out)
+    if "xai-" in out:
+        out = _XAI_RE.sub("[REDACTED:API_KEY]", out)
+    if "AIza" in out:
+        out = _GCP_RE.sub("[REDACTED:GCP_API_KEY]", out)
+    if "xox" in out:
+        out = _SLACK_RE.sub("[REDACTED:SLACK_TOKEN]", out)
+    if "AKIA" in out or "ASIA" in out:
+        out = _AWS_KEY_RE.sub("[REDACTED:AWS_KEY]", out)
     out = _AWS_SECRET_RE.sub(r"\1\2[REDACTED:AWS_SECRET]", out)
-    out = _JWT_RE.sub("[REDACTED:JWT]", out)
-    out = _BEARER_RE.sub(r"\1[REDACTED:BEARER_TOKEN]", out)
+    if "eyJ" in out:
+        out = _JWT_RE.sub("[REDACTED:JWT]", out)
+    if "earer" in out or "EARER" in out:
+        out = _BEARER_RE.sub(r"\1[REDACTED:BEARER_TOKEN]", out)
 
     # Layer 4: URI & DSN Credentials
     out = _URI_SCHEME_RE.sub(r"\1[REDACTED:URI_CREDENTIAL]\3", out)
@@ -362,7 +377,8 @@ def redact_text(
     # Layer 6: Shannon Entropy Scoring
     out = _SECRET_ASSIGN_RE.sub(_replace_secret_assignment, out)
     out = _replace_standalone_tokens(out)
-    out = _GCP_FINAL_RE.sub("[REDACTED:GCP_API_KEY]", out)
+    if "AIza" in out:
+        out = _GCP_FINAL_RE.sub("[REDACTED:GCP_API_KEY]", out)
 
     return out
 
