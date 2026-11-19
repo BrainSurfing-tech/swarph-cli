@@ -35,10 +35,14 @@ def test_join_refuses_onboard_aliases_before_any_request(name, monkeypatch, tmp_
     if isinstance(mapped, str) and mapped != name:
         assert rc == 1
         assert calls == []
-        assert name in captured.err
-        assert mapped in captured.err
-        assert "onboard alias" in captured.err
-        assert "choose another name" in captured.err
+        if os.name == "nt":
+            assert "native Windows" in captured.err
+            assert "onboard alias" not in text
+        else:
+            assert name in captured.err
+            assert mapped in captured.err
+            assert "onboard alias" in captured.err
+            assert "choose another name" in captured.err
     else:
         assert "onboard alias" not in text
         if os.name != "nt":
