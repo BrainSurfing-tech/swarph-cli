@@ -128,17 +128,17 @@ def run_join(argv):
     reservations = []
     token_saved = config_saved = False
     try:
-        if not _NEW_PEER.fullmatch(args.name):
-            raise JoinError("invalid peer name")
-        # Onboard maps these names onto another peer. Read the table at run
-        # time so a new alias is refused without a hand-kept list.
-        from swarph_shared.peer_registry import KNOWN_ALIASES
-        mapped = KNOWN_ALIASES.get(args.name)
-        if isinstance(mapped, str) and mapped != args.name:
-            raise JoinError(args.name + " is an onboard alias for " + mapped
-                            + "; join the canonical name")
         if os.name == "nt":
             raise JoinError("native Windows credential storage is unsupported; use Linux or WSL")
+        if not _NEW_PEER.fullmatch(args.name):
+            raise JoinError("invalid peer name")
+        # Onboard maps these names onto another peer. Read the live table so a
+        # key added after import is refused, with no hand-kept list.
+        import swarph_shared.peer_registry as peer_registry
+        mapped = peer_registry.KNOWN_ALIASES.get(args.name)
+        if isinstance(mapped, str) and mapped != args.name:
+            raise JoinError(args.name + " is an onboard alias for " + mapped
+                            + "; choose another name")
         url, tailnet = _gateway(args.gateway, args.allow_unsafe_http)
         if tailnet:
             print("Transport: the tailnet's encrypted tunnel, not TLS.")
@@ -209,8 +209,12 @@ def run_join(argv):
             content = "Handshake for " + args.name + "\n" + "\n".join(
                 question + "\n" + answer for question, answer in zip(_QUESTIONS, answers))
             content = redact_text(content.replace(token, "<REDACTED>").replace(device, "<REDACTED>"))
-            status, _, _ = _request(url, "POST", "/messages", {
-                "from_node": args.name, "to_node": witness, "kind": "status", "content": content}, token)
+            try:
+                status, _, _ = _request(url, "POST", "/messages", {
+                    "from_node": args.name, "to_node": witness, "kind": "status", "content": content}, token)
+            except JoinError:
+                _print_onboard_next(args.name, args.gateway, token_path)
+                raise
             if not 200 <= status < 300:
                 _print_onboard_next(args.name, args.gateway, token_path)
                 raise JoinError("handshake send failed; credential remains saved, ratification pending")
