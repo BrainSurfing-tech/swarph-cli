@@ -237,6 +237,12 @@ for i, v in enumerate(walk(_p)):
 # gives the agreement test in test_546 its resolving power — poison the shared
 # resolver and this one site keeps telling the truth, so they disagree.
 vals["cell_selfcheck.resolver_gateway"] = cell_selfcheck.resolver_gateway(os.environ)
+# onboard's default is None: the flag was not given. The value used is the
+# environment at the point of use, the same strip require_gateway applies.
+_used = (os.environ.get("MESH_GATEWAY_URL") or "").strip()
+for _key, _value in list(vals.items()):
+    if _value is None:
+        vals[_key] = _used
 print(json.dumps(vals))
 """
 

@@ -306,8 +306,12 @@ def test_invalid_new_peer_names_are_refused_before_http(tmp_path, gateway, name)
 @pytest.mark.skipif(os.name == "nt", reason="POSIX credential storage")
 @pytest.mark.parametrize("ambient", [False, True], ids=["no-ambient", "other-ambient"])
 def test_printed_onboard_line_registers_at_joins_gateway_with_joins_token(tmp_path, gateway, ambient):
-    """Card #1700: the line join prints, run verbatim in a shell, finishes onboarding
-    with join's gateway and token, whatever MESH_GATEWAY_URL/TOKEN and SWARPH_SELF say."""
+    """The line join prints, run verbatim, finishes onboarding at join's gateway.
+
+    Card #1701: that line names join's token file, so the sidecar matches and
+    onboard does not register a second time. An ambient gateway or token is
+    not what gets written.
+    """
     url, calls, responses = gateway
     responses["/peers/register"] = {"registered_unratified": True, "token_status": "existing"}
     # A home path that breaks unquoted shell words, and a gateway given with a trailing slash.
@@ -335,8 +339,10 @@ def test_printed_onboard_line_registers_at_joins_gateway_with_joins_token(tmp_pa
     assert onboard.returncode == 0, onboard.stdout + onboard.stderr
     assert not (tmp_path / "PWNED").exists()
     registers = [c for c in calls if c[:2] == ("POST", "/peers/register")]
-    assert len(registers) == 1 and registers[0][2]["name"] == "new-peer"
-    assert {header for _, _, _, header in calls} == {"Bearer " + TOKEN}
+    assert registers == []
+    written = (home / "swarph_state" / "new-peer" / ".env.example").read_text(encoding="utf-8")
+    assert f"MESH_GATEWAY_URL={url}\n" in written
+    assert "127.0.0.1:9" not in written
     assert other not in onboard.stdout + onboard.stderr
 
 
