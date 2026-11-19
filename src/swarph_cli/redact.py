@@ -143,6 +143,8 @@ _AWS_SECRET_RE = re.compile(
     r"(?i)\b(aws_secret_access_key|aws_session_token)\b(\s*[:=]\s*)(['\"]?)(?!\[REDACTED)[A-Za-z0-9/+=]{20,}\3"
 )
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]{4,}\.eyJ[A-Za-z0-9_\-]{4,}(?:\.[A-Za-z0-9_\-]{4,})?\b")
+_JWT_HEAD_RUN_RE = re.compile(r"(?<![A-Za-z0-9_\-])[A-Za-z0-9_\-]{7,}(?=\.eyJ)")
+_JWT_START_RE = re.compile(r"\beyJ")
 _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)(?!\[REDACTED)[A-Za-z0-9\-._~+/]{12,}=*")
 
 # URI & DSN credentials
@@ -232,6 +234,29 @@ def _replace_secret_assignment(m: re.Match) -> str:
     if shannon_entropy(val) >= 3.6:
         return f"{key}{sep}{quote}[REDACTED:HIGH_ENTROPY]{quote}"
     return m.group(0)
+
+
+def _replace_jwts(text: str) -> str:
+    if ".eyJ" not in text:
+        return text
+    if "-" not in text:
+        # Without dashes, each segment already has at most one word-boundary start.
+        return _JWT_RE.sub("[REDACTED:JWT]", text)
+    parts = []
+    copied_until = 0
+    for run in _JWT_HEAD_RUN_RE.finditer(text):
+        start = _JWT_START_RE.search(text, max(copied_until, run.start()), run.end())
+        if start is None:
+            continue
+        # Starts in this run share the first dot and the entire remaining match.
+        match = _JWT_RE.match(text, start.start())
+        if match is not None:
+            parts.extend((text[copied_until:match.start()], "[REDACTED:JWT]"))
+            copied_until = match.end()
+    if not parts:
+        return text
+    parts.append(text[copied_until:])
+    return "".join(parts)
 
 
 def _replace_standalone_tokens(text: str) -> str:
@@ -327,7 +352,7 @@ def redact_text(
     out = _SLACK_RE.sub("[REDACTED:SLACK_TOKEN]", out)
     out = _AWS_KEY_RE.sub("[REDACTED:AWS_KEY]", out)
     out = _AWS_SECRET_RE.sub(r"\1\2[REDACTED:AWS_SECRET]", out)
-    out = _JWT_RE.sub("[REDACTED:JWT]", out)
+    out = _replace_jwts(out)
     out = _BEARER_RE.sub(r"\1[REDACTED:BEARER_TOKEN]", out)
 
     # Layer 4: URI & DSN Credentials
