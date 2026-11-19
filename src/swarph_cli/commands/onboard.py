@@ -812,12 +812,20 @@ def mesh_gateway_url(raw: str) -> str:
     trailing newline therefore stays in the value and is refused. Cleartext
     HTTP is allowed: this checks a value already chosen, not a new join.
     """
-    from swarph_cli.commands.join import JoinError, _gateway
-
+    # Join's gateway test on the raw value (commands.join._gateway with
+    # allow_unsafe). Inlined: importing join would put its prints in the
+    # daemon's import closure.
+    if any(ord(ch) <= 32 for ch in raw):
+        raise ValueError("invalid gateway URL")
     try:
-        _gateway(raw, allow_unsafe=True)
-    except JoinError:
+        url = urllib.parse.urlsplit(raw)
+        url.port
+    except ValueError:
         raise ValueError("invalid gateway URL") from None
+    if (url.scheme not in {"http", "https"} or not url.hostname or url.username
+            or url.password or url.query or url.fragment
+            or url.path not in {"", "/"}):
+        raise ValueError("invalid gateway URL")
     return raw
 
 
