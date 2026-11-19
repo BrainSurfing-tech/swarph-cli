@@ -112,6 +112,11 @@ def _remove_ours(path, info):
         pass
 
 
+def _print_onboard_next(name, gateway, token_path):
+    print("Next, on this machine:")
+    print(f"swarph onboard {shlex.quote(name)} --gateway {shlex.quote(gateway.rstrip('/'))} --token-file {shlex.quote(str(token_path))}")
+
+
 def run_join(argv):
     parser = argparse.ArgumentParser(
         prog="swarph join",
@@ -127,6 +132,13 @@ def run_join(argv):
             raise JoinError("native Windows credential storage is unsupported; use Linux or WSL")
         if not _NEW_PEER.fullmatch(args.name):
             raise JoinError("invalid peer name")
+        # Onboard maps these names onto another peer. Read the live table so a
+        # key added after import is refused, with no hand-kept list.
+        import swarph_shared.peer_registry as peer_registry
+        mapped = peer_registry.KNOWN_ALIASES.get(args.name)
+        if isinstance(mapped, str) and mapped != args.name:
+            raise JoinError(args.name + " is an onboard alias for " + mapped
+                            + "; choose another name")
         url, tailnet = _gateway(args.gateway, args.allow_unsafe_http)
         if tailnet:
             print("Transport: the tailnet's encrypted tunnel, not TLS.")
@@ -197,17 +209,21 @@ def run_join(argv):
             content = "Handshake for " + args.name + "\n" + "\n".join(
                 question + "\n" + answer for question, answer in zip(_QUESTIONS, answers))
             content = redact_text(content.replace(token, "<REDACTED>").replace(device, "<REDACTED>"))
-            status, _, _ = _request(url, "POST", "/messages", {
-                "from_node": args.name, "to_node": witness, "kind": "status", "content": content}, token)
+            try:
+                status, _, _ = _request(url, "POST", "/messages", {
+                    "from_node": args.name, "to_node": witness, "kind": "status", "content": content}, token)
+            except JoinError:
+                _print_onboard_next(args.name, args.gateway, token_path)
+                raise
             if not 200 <= status < 300:
+                _print_onboard_next(args.name, args.gateway, token_path)
                 raise JoinError("handshake send failed; credential remains saved, ratification pending")
             print("Own-words handshake sent to " + witness + "; the witness must ratify separately.")
         else:
             print("No interactive answers were supplied; no handshake was sent. Send your own answers to " + witness + ".")
         print(f"Use explicit identity: swarph mesh peers --as {args.name} --gateway {shlex.quote(args.gateway.rstrip('/'))} --token-file {shlex.quote(str(token_path))}")
         # Card #1700: name the gateway and token file, so the copied line ignores ambient MESH_GATEWAY_URL/TOKEN.
-        print("Next, on this machine:")
-        print(f"swarph onboard {shlex.quote(args.name)} --gateway {shlex.quote(args.gateway.rstrip('/'))} --token-file {shlex.quote(str(token_path))}")
+        _print_onboard_next(args.name, args.gateway, token_path)
         return 0
     except (JoinError, OSError, ValueError, KeyboardInterrupt) as exc:
         print("swarph join: " + (str(exc) if isinstance(exc, JoinError) else "local storage failure or cancellation; do not retry blindly; ask the operator to check any in-flight pickup"), file=sys.stderr)
