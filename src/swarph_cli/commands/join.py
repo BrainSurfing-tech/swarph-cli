@@ -115,7 +115,7 @@ def _remove_ours(path, info):
 def run_join(argv):
     parser = argparse.ArgumentParser(
         prog="swarph join",
-        description=__doc__.rstrip() + " On a new machine, run swarph join first, then swarph onboard.")
+        description=(__doc__ or "").rstrip() + " On a new machine, run swarph join first, then swarph onboard.")
     parser.add_argument("gateway")
     parser.add_argument("--name", required=True)
     parser.add_argument("--allow-unsafe-http", action="store_true", help="UNSAFE: permit non-tailnet cleartext HTTP")
