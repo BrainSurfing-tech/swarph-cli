@@ -126,19 +126,31 @@ _PEM_RE = re.compile(
     re.DOTALL,
 )
 
-# Known secret patterns
-_GITHUB_RE = re.compile(r"\b(?:gh[opusr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
-_ANTHROPIC_RE = re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{8,}\b")
-_OPENAI_RE = re.compile(r"\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9\-_]{16,}\b")
-_XAI_RE = re.compile(r"\bxai-[A-Za-z0-9\-_]{16,}\b")
-_GCP_RE = re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b")
-_GCP_FINAL_RE = re.compile(
-    r"(?:\bAIza[0-9A-Za-z\-_]{34}(?:-|[0-9A-Za-z_](?![0-9A-Za-z_]))"
-    r"|(?<=[0-9A-Za-z_])AIza[0-9A-Za-z\-_]{34}[0-9A-Za-z_](?![0-9A-Za-z_])"
-    r"|(?<=\w)AIza[0-9A-Za-z\-_]{34}-)"
+# Put left-context checks after the fixed prefix so re can skip to it.
+_GITHUB_RE = re.compile(
+    r"g(?:h(?:(?<![A-Za-z]gh)|(?<=\\[nrt]gh))[opusr]_|ithub_pat_)"
+    # If a Unicode word character blocks the end boundary, no later start
+    # in the same ASCII run can end at a boundary either. Leave that run alone.
+    r"(?:([A-Za-z0-9_]{20,}\b)|[A-Za-z0-9_]+(?=[^\W\x00-\x7f]))"
 )
-_SLACK_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{8,}\b")
-_AWS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
+_ANTHROPIC_RE = re.compile(
+    r"sk-ant-(?:(?=api03-)|(?<![A-Za-z]sk-ant-)|(?<=\\[nrt]sk-ant-))[A-Za-z0-9\-_]{8,}\b"
+)
+_OPENAI_RE = re.compile(
+    r"sk-(?:(?:proj-|svcacct-)|(?:(?<![A-Za-z]sk-)|(?<=\\[nrt]sk-))(?!ant-))"
+    r"[A-Za-z0-9\-_]{16,}\b"
+)
+_XAI_RE = re.compile(r"xai-(?:(?<![A-Za-z]xai-)|(?<=\\[nrt]xai-))[A-Za-z0-9\-_]{16,}\b")
+_GCP_RE = re.compile(r"AIza[0-9A-Za-z\-_]{35}\b")
+_GCP_FINAL_RE = re.compile(
+    r"AIza(?:[0-9A-Za-z\-_]{34}(?:-|[0-9A-Za-z_](?![0-9A-Za-z_]))"
+    r"|(?<=[0-9A-Za-z_]AIza)[0-9A-Za-z\-_]{34}[0-9A-Za-z_](?![0-9A-Za-z_])"
+    r"|(?<=\wAIza)[0-9A-Za-z\-_]{34}-)"
+)
+_SLACK_RE = re.compile(
+    r"xox(?:(?<![A-Za-z]xox)|(?<=\\[nrt]xox))[baprs]-[A-Za-z0-9\-]{8,}\b"
+)
+_AWS_KEY_RE = re.compile(r"A[KS]IA(?:(?<![A-Za-z]A[KS]IA)|(?<=\\[nrt]A[KS]IA))[0-9A-Z]{16}\b")
 _AWS_SECRET_RE = re.compile(
     r"(?i)\b(aws_secret_access_key|aws_session_token)\b(\s*[:=]\s*)(['\"]?)(?!\[REDACTED)[A-Za-z0-9/+=]{20,}\3"
 )
@@ -310,8 +322,12 @@ def redact_text(
     # Layer 2: PEM Private Keys
     out = _PEM_RE.sub("[REDACTED:PEM_PRIVATE_KEY]", out)
 
+    # Protect URI passwords before a glued provider key consumes the scheme.
+    if "://" in out and "@" in out:
+        out = _URI_SCHEME_RE.sub(r"\1[REDACTED:URI_CREDENTIAL]\3", out)
+
     # Layer 3: Known Secret Patterns
-    out = _GITHUB_RE.sub("[REDACTED:GITHUB_TOKEN]", out)
+    out = _GITHUB_RE.sub(lambda m: "[REDACTED:GITHUB_TOKEN]" if m[1] else m[0], out)
     out = _ANTHROPIC_RE.sub("[REDACTED:ANTHROPIC_KEY]", out)
     out = _OPENAI_RE.sub("[REDACTED:API_KEY]", out)
     out = _XAI_RE.sub("[REDACTED:API_KEY]", out)
@@ -323,7 +339,6 @@ def redact_text(
     out = _BEARER_RE.sub(r"\1[REDACTED:BEARER_TOKEN]", out)
 
     # Layer 4: URI & DSN Credentials
-    out = _URI_SCHEME_RE.sub(r"\1[REDACTED:URI_CREDENTIAL]\3", out)
     out = _URI_SCHEMELESS_RE.sub(r"\1[REDACTED:URI_CREDENTIAL]\3", out)
     out = _DSN_KEY_VALUE_RE.sub(r"\1\2[REDACTED:DSN_CREDENTIAL]", out)
 
