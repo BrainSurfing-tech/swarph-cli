@@ -1467,10 +1467,17 @@ def _cmd_install_task(args: argparse.Namespace) -> int:
     return subprocess.run(cmd).returncode
 
 
-# ── install-unit (#648 Linux supervision) ────────────────────────────────────
+# ── install-unit (#648 Linux supervision, #1686 macOS) ─────────────────────
 
 _UNIT_TEMPLATE = ("systemd", "swarph-monitor@.service")
 _UNIT_OUT = "swarph-monitor@.service"
+_PLIST_TEMPLATE = ("launchd", "swarph-monitor.plist")
+_PLIST_LABEL = "tech.brainsurfing.swarph.monitor"
+
+
+def _install_platform() -> str:
+    """Platform seam for install-unit: tests pin this to force a branch."""
+    return sys.platform
 
 
 def _read_packaged(rel: tuple) -> str:
@@ -1523,6 +1530,80 @@ def _render_unit(template: str, *, gateway: str, user: str, home: str,
     return out
 
 
+def _render_plist(template: str, *, peer: str, gateway: str, home: str,
+                  swarph_bin: str, log_dir: str) -> str:
+    """Substitute the launchd placeholders. Any __PLACEHOLDER__ left standing
+    means a substitution was missed, and a plist carrying one must not be
+    written - launchd would run it verbatim and fail obscurely. Values go
+    through the launchd renderer's XML escape first: a home with an
+    ampersand or a gateway URL with a query string must still parse."""
+    from swarph_cli.launchd_render import _xml_escape
+
+    out = (template
+           .replace("__PEER__", _xml_escape(peer))
+           .replace("__SWARPH_BIN__", _xml_escape(swarph_bin))
+           .replace("__HOME__", _xml_escape(home))
+           .replace("__GATEWAY__", _xml_escape(gateway))
+           .replace("__LOG_DIR__", _xml_escape(log_dir)))
+    left = sorted(set(re.findall(r"__[A-Z_]+__", out)))
+    if left:
+        raise RuntimeError(
+            f"plist template still carries unsubstituted placeholder(s) "
+            f"{', '.join(left)} - refusing to emit a plist that would fail "
+            f"after installation"
+        )
+    return out
+
+
+def _cmd_install_unit_darwin(args: argparse.Namespace, gateway: str) -> int:
+    """macOS (#1686): render the packaged launchd agent for one peer.
+
+    Distribution only, like the systemd path: this renders and optionally
+    writes the plist. Loading it (launchctl bootstrap) is the operator's
+    act, not this verb's.
+    """
+    peer = getattr(args, "self_name", None)
+    if not peer:
+        print("swarph monitor install-unit: --as <peer> is required on macOS "
+              "- the peer names the launchd Label and the agent file.",
+              file=sys.stderr)
+        return 2
+    # The name reaches a file name, a directory and the plist, so it is
+    # validated against the shared peer-name rule BEFORE anything is
+    # built from it - a traversal or markup name must create nothing.
+    from swarph_shared.cell import PEER_NAME_RE
+
+    if not PEER_NAME_RE.fullmatch(peer):
+        print(f"swarph monitor install-unit: --as {peer!r} is not a valid "
+              f"peer name (must match {PEER_NAME_RE.pattern})",
+              file=sys.stderr)
+        return 2
+    home = args.home or str(Path.home())
+    swarph_bin = args.swarph_bin or f"{home}/.local/bin/swarph"
+    log_dir = f"{home}/Library/Logs/swarph-monitor-{peer}"
+    rendered = _render_plist(
+        _read_packaged(_PLIST_TEMPLATE),
+        peer=peer, gateway=gateway, home=home,
+        swarph_bin=swarph_bin, log_dir=log_dir)
+
+    if not args.write:
+        print(rendered, end="")
+        return 0
+
+    if args.dir and args.dir != "/etc/systemd/system":
+        target_dir = Path(args.dir)
+    else:
+        target_dir = Path(home) / "Library" / "LaunchAgents"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{_PLIST_LABEL}.{peer}.plist"
+    target.write_text(rendered, encoding="utf-8")
+    print(f"wrote {target}")
+    uid = os.getuid() if hasattr(os, "getuid") else 501
+    print(f"next: launchctl bootstrap gui/{uid} {target}")
+    return 0
+
+
 def _cmd_install_unit(args: argparse.Namespace) -> int:
     """Print or install the packaged swarph-monitor@.service template.
 
@@ -1535,7 +1616,9 @@ def _cmd_install_unit(args: argparse.Namespace) -> int:
     from importlib import resources
 
     if args.print_path:
-        print(resources.files("swarph_cli").joinpath(*_UNIT_TEMPLATE))
+        template = _PLIST_TEMPLATE if _install_platform() == "darwin" \
+            else _UNIT_TEMPLATE
+        print(resources.files("swarph_cli").joinpath(*template))
         return 0
 
     gateway = (args.gateway or "").strip()
@@ -1552,6 +1635,9 @@ def _cmd_install_unit(args: argparse.Namespace) -> int:
             f"monitor would refuse it by name on every poll; fix it HERE, "
             f"where the refusal is free"
         )
+    if _install_platform() == "darwin":
+        return _cmd_install_unit_darwin(args, gateway)
+
     user = args.user or getpass.getuser()
     home = args.home or str(Path.home())
     swarph_bin = args.swarph_bin or f"{home}/.local/bin/swarph"

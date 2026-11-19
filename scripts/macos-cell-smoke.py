@@ -151,8 +151,6 @@ def main() -> int:
     os.environ.pop("MESH_GATEWAY_TOKEN", None)
     os.environ.pop("MESH_GATEWAY_URL", None)
 
-    from swarph_cli.launchd_render import render_template, substitute
-
     bin_path = BROKEN_BIN or shutil.which("swarph")
     if not bin_path:
         step("swarph", "FAIL", "swarph is not on PATH and BROKEN_BIN is unset")
@@ -181,18 +179,31 @@ def main() -> int:
     import threading
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
-    plist_text = substitute(render_template("swarph-monitor.plist"), {
-        "SWARPH_BIN": bin_path,
-        "PEER": PEER,
-        "HOME": str(home),
-        "GATEWAY": gateway,
-        "LOG_DIR": str(log_dir),
-    })
-    if "127.0.0.1" not in plist_text or "MESH_GATEWAY_URL" not in plist_text:
-        step("plist", "FAIL", "rendered plist has no loopback gateway")
+    # #1686: the smoke loads the file `swarph monitor install-unit --write`
+    # creates, not a hand-rendered copy - the verb is the install path a
+    # real macOS cell uses, so it is the thing under test here.
+    try:
+        install = subprocess.run(
+            [bin_path, "monitor", "install-unit", "--as", PEER,
+             "--gateway", gateway, "--home", str(home),
+             "--swarph-bin", bin_path, "--write"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        step("plist", "FAIL", f"install-unit could not run: {exc}")
+        httpd.shutdown()
         return 1
-    plist = work / "swarph-monitor.plist"
-    plist.write_text(plist_text, encoding="utf-8")
+    plist = home / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+    if install.returncode != 0 or not plist.is_file():
+        step("plist", "FAIL",
+             f"install-unit rc={install.returncode}: "
+             f"{install.stdout} {install.stderr}")
+        httpd.shutdown()
+        return 1
+    plist_text = plist.read_text(encoding="utf-8")
+    if "127.0.0.1" not in plist_text or "MESH_GATEWAY_URL" not in plist_text:
+        step("plist", "FAIL", "installed plist has no loopback gateway")
+        return 1
     print(f"PLIST {plist}", flush=True)
     print(plist_text, flush=True)
 

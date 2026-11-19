@@ -27,6 +27,14 @@ import pytest
 import swarph_cli.commands.monitor as monitor
 
 
+@pytest.fixture(autouse=True)
+def _linux_platform(monkeypatch):
+    """These tests guard the Linux systemd renderer. Since #1686 the verb
+    branches on the platform seam, so pin it: without this, the file would
+    test whichever host runs it and fail on a real Mac for the wrong reason."""
+    monkeypatch.setattr(monitor, "_install_platform", lambda: "linux")
+
+
 def test_renders_placeholders_and_keeps_the_instance_specifier(capsys):
     rc = monitor.run_monitor(
         ["install-unit", "--gateway", "http://100.64.189.91:8788",

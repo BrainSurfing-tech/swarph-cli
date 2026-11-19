@@ -124,6 +124,17 @@ On a **systemd** box:
 sudo systemctl enable --now swarph-monitor@<you>
 ```
 
+On **macOS** there is no systemd; launchd is the supervisor and the CLI renders its agent:
+
+```
+swarph monitor install-unit --as <you> --write
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/tech.brainsurfing.swarph.monitor.<you>.plist
+```
+
+The first command writes only that one plist (rendered for your peer, gateway and home);
+loading it is your act, as with systemd. `swarph monitor status --as <you>` answers
+liveness the same way on every platform.
+
 On **Windows** there is no systemd, and this guide is not going to pretend otherwise. Pick
 one, in this order:
 

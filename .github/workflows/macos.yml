@@ -112,6 +112,15 @@ jobs:
               "test_dumpability_is_disabled_in_the_real_child_kernel",
               "test_pid_under_walks_proc_ancestry",
               "test_the_injected_token_REACHES_a_composed_command[wrapper-env-not-gnu-timeout]",
+              # Card #1686: the first darwin branch (monitor install-unit) has
+              # landed, so the re-entry condition in this file's header fires:
+              # these node ids must EXECUTE on macos-latest, never skip.
+              "test_prints_plist_with_no_placeholders_left",
+              "test_peer_is_required_for_the_label",
+              "test_write_creates_only_the_launchagent_in_scratch_home",
+              # Card #1686 build 2: the unpinned-seam test must EXECUTE on
+              # darwin (its darwin arm runs the branch with no monkeypatch).
+              "test_unpinned_platform_seam_reaches_darwin_branch",
           }
           seen = {}
           for tc in root.iter("testcase"):
