@@ -805,26 +805,45 @@ def _join_record(canonical: str, token_path: Path) -> Optional[dict]:
     return payload
 
 
-def _usable_sidecar_gateway(value: str) -> Optional[str]:
-    """Join's URL shape check, after outer whitespace is removed.
+def mesh_gateway_url(raw: str) -> str:
+    """The one check for every ``MESH_GATEWAY_URL`` value onboard writes.
 
-    A newline or any other control character is refused, as is a value that
-    is not an http(s) URL. Non-tailnet HTTP stays usable: join already accepted
-    the URL it wrote, and a saved sidecar is not a new cleartext decision.
+    Join's own gateway test, on the raw value, with no strip. A leading or
+    trailing newline therefore stays in the value and is refused. Cleartext
+    HTTP is allowed: this checks a value already chosen, not a new join.
     """
-    text = value.strip()
-    if not text or any(ord(ch) <= 32 for ch in text):
-        return None
+    from swarph_cli.commands.join import JoinError, _gateway
+
     try:
-        url = urllib.parse.urlsplit(text)
-        url.port
-    except ValueError:
-        return None
-    if (url.scheme not in {"http", "https"} or not url.hostname or url.username
-            or url.password or url.query or url.fragment
-            or url.path not in {"", "/"}):
-        return None
-    return text.rstrip("/")
+        _gateway(raw, allow_unsafe=True)
+    except JoinError:
+        raise ValueError("invalid gateway URL") from None
+    return raw
+
+
+def _gateway_came_from_flag(argv: list[str]) -> bool:
+    """Whether argv carried a gateway option, including an abbreviation."""
+    for arg in argv:
+        name = arg.split("=", 1)[0]
+        if name.startswith("--") and "--gateway".startswith(name) and len(name) > 3:
+            return True
+    return False
+
+
+def _raw_gateway(argv: list[str], parsed: str) -> tuple[str, str]:
+    """The raw gateway text and the source it came from.
+
+    A flag's text is what argparse received. The environment is read raw,
+    because the parser default has already stripped it.
+    """
+    if _gateway_came_from_flag(argv):
+        return parsed or "", "flag"
+    return os.environ.get("MESH_GATEWAY_URL") or "", "environment"
+
+
+def _gateway_is_blank(value: str) -> bool:
+    """Empty, or spaces only. A newline is not blank."""
+    return value == "" or all(ch == " " for ch in value)
 
 
 def run_onboard(argv: list[str]) -> int:
@@ -925,22 +944,32 @@ def run_onboard(argv: list[str]) -> int:
     # typo'd name reports the typo, not a missing env var.
     if join_saved:
         print_safe("[4/6] join already registered this peer; not registering a second time")
-        given = (args.gateway or "").strip().rstrip("/")
-        sidecar_gateway = _usable_sidecar_gateway(str(join_record["gateway"]))
-        if not given:
-            if sidecar_gateway is None:
+        raw, source = _raw_gateway(argv, args.gateway or "")
+        if _gateway_is_blank(raw):
+            raw, source = str(join_record["gateway"]), "sidecar"
+        try:
+            args.gateway = mesh_gateway_url(raw)
+        except ValueError:
+            print_safe(
+                f"swarph onboard: the gateway from the {source} is not a usable http(s) URL",
+                file=sys.stderr,
+            )
+            return 1
+        if source != "sidecar" and raw != str(join_record["gateway"]):
+            print_safe("The given gateway differs from the gateway saved by join.")
+    else:
+        raw, source = _raw_gateway(argv, args.gateway or "")
+        if _gateway_is_blank(raw):
+            args.gateway = require_gateway("")
+        else:
+            try:
+                args.gateway = mesh_gateway_url(raw)
+            except ValueError:
                 print_safe(
-                    "swarph onboard: the gateway saved by join is not a usable http(s) URL",
+                    f"swarph onboard: the gateway from the {source} is not a usable http(s) URL",
                     file=sys.stderr,
                 )
                 return 1
-            args.gateway = sidecar_gateway
-        else:
-            args.gateway = given
-            if given != sidecar_gateway:
-                print_safe("The given gateway differs from the gateway saved by join.")
-    else:
-        args.gateway = require_gateway(getattr(args, "gateway", ""))
         print_safe(f"[4/6] POST {args.gateway}/peers/register")
         # >>> #124's GUARD, MET CLIENT-SIDE — #294's PATTERN, THE MISSING HALF. <<<
         # The gateway 409s a re-register whose payload would DROP stored

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -358,7 +359,7 @@ def test_sidecar_gateway_with_a_newline_is_refused(monkeypatch, tmp_path, capsys
     captured = capsys.readouterr()
     text = captured.out + captured.err
     assert rc == 1
-    assert "not a usable http(s) URL" in text
+    assert "the gateway from the sidecar is not a usable http(s) URL" in text
     assert not (tmp_path / "swarph_state" / "new-cell" / ".env.example").exists()
     assert "planted" not in text
     assert _TOKEN not in text
@@ -374,8 +375,91 @@ def test_sidecar_gateway_that_is_not_a_url_is_refused(monkeypatch, tmp_path, cap
     captured = capsys.readouterr()
     text = captured.out + captured.err
     assert rc == 1
-    assert "not a usable http(s) URL" in text
+    assert "the gateway from the sidecar is not a usable http(s) URL" in text
     assert not (tmp_path / "swarph_state" / "new-cell" / ".env.example").exists()
+
+
+def test_trailing_newline_in_the_sidecar_is_refused(monkeypatch, tmp_path, capsys):
+    _home(monkeypatch, tmp_path)
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    _write_join(tmp_path, gateway="http://100.64.0.1:8788\n")
+    _quiet_onboard(monkeypatch)
+    rc = onboard.run_onboard(["new-cell"])
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert rc == 1
+    assert "the gateway from the sidecar is not a usable http(s) URL" in text
+    assert not (tmp_path / "swarph_state" / "new-cell" / ".env.example").exists()
+
+
+def test_spaces_only_gateway_flag_counts_as_not_given(monkeypatch, tmp_path, capsys):
+    _home(monkeypatch, tmp_path)
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    _write_join(tmp_path, gateway="http://100.64.0.1:8788")
+    _quiet_onboard(monkeypatch)
+    rc = onboard.run_onboard(["new-cell", "--gateway", "   "])
+    out = capsys.readouterr().out
+    assert rc == 0
+    env = (tmp_path / "swarph_state" / "new-cell" / ".env.example").read_text()
+    assert "MESH_GATEWAY_URL=http://100.64.0.1:8788\n" in env
+    assert "differs" not in out
+
+
+def test_second_line_in_the_gateway_flag_is_refused(monkeypatch, tmp_path, capsys):
+    _home(monkeypatch, tmp_path)
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    _write_join(tmp_path)
+    _quiet_onboard(monkeypatch)
+    rc = onboard.run_onboard([
+        "new-cell", "--gateway", "http://100.64.0.1:9\nMESH_GATEWAY_TOKEN=planted",
+    ])
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert rc == 1
+    assert "the gateway from the flag is not a usable http(s) URL" in text
+    assert not (tmp_path / "swarph_state" / "new-cell" / ".env.example").exists()
+    assert "planted" not in text
+
+
+def test_second_line_in_the_gateway_environment_is_refused(monkeypatch, tmp_path, capsys):
+    _home(monkeypatch, tmp_path)
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    monkeypatch.setenv("MESH_GATEWAY_URL", "http://100.64.0.1:9\nMESH_GATEWAY_TOKEN=planted")
+    _write_join(tmp_path)
+    _quiet_onboard(monkeypatch)
+    rc = onboard.run_onboard(["new-cell"])
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert rc == 1
+    assert "the gateway from the environment is not a usable http(s) URL" in text
+    assert not (tmp_path / "swarph_state" / "new-cell" / ".env.example").exists()
+    assert "planted" not in text
+
+
+def test_gateway_flag_that_is_not_a_url_is_refused(monkeypatch, tmp_path, capsys):
+    _home(monkeypatch, tmp_path)
+    monkeypatch.delenv("MESH_GATEWAY_TOKEN", raising=False)
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    _write_join(tmp_path)
+    _quiet_onboard(monkeypatch)
+    rc = onboard.run_onboard(["new-cell", "--gateway", "not a url"])
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert rc == 1
+    assert "the gateway from the flag is not a usable http(s) URL" in text
+    assert not (tmp_path / "swarph_state" / "new-cell" / ".env.example").exists()
+
+
+def test_only_one_place_writes_the_gateway_line():
+    source = Path(__file__).resolve().parents[1] / "src" / "swarph_cli" / "commands" / "onboard.py"
+    text = source.read_text()
+    assert text.count("MESH_GATEWAY_URL=") == 1
+    assert text.count("def mesh_gateway_url(") == 1
+    write_at = text.index("MESH_GATEWAY_URL=")
+    assert "mesh_gateway_url(" in text[:write_at]
 
 
 def test_sidecar_name_and_token_file_must_match(monkeypatch, tmp_path, capsys):
