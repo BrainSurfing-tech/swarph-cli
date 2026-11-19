@@ -30,6 +30,11 @@ def test_glued_provider_key_is_redacted_without_eating_the_lead(prefix, body, le
     assert redact_text(lead + prefix + body + " end") == f"{lead}[REDACTED:{label}] end"
 
 
+def test_bare_openai_prefix_inside_a_dashed_identifier_is_unchanged():
+    text = "msg_" + "A" * 20 + "123" + "sk-" + "z" * 30
+    assert redact_text(text) == text
+
+
 # Runtime-generated lines from the seed-6018 regression replay, not live keys.
 @pytest.mark.parametrize(
     "line",

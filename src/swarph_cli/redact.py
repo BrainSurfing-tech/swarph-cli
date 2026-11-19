@@ -134,10 +134,12 @@ _GITHUB_RE = re.compile(
     r"(?:([A-Za-z0-9_]{20,}\b)|[A-Za-z0-9_]+(?=[^\W\x00-\x7f]))"
 )
 _ANTHROPIC_RE = re.compile(
-    r"sk-ant-(?:(?=api03-)|(?<![A-Za-z]sk-ant-)|(?<=\\[nrt]sk-ant-))[A-Za-z0-9\-_]{8,}\b"
+    r"sk-ant-(?:(?=(?:api03|admin01|sid01)-)|(?<![A-Za-z]sk-ant-)|(?<=\\[nrt]sk-ant-))"
+    r"[A-Za-z0-9\-_]{8,}\b"
 )
+# A bare short prefix in a dashed identifier is not a new key start.
 _OPENAI_RE = re.compile(
-    r"sk-(?:(?:proj-|svcacct-)|(?:(?<![A-Za-z]sk-)|(?<=\\[nrt]sk-))(?!ant-))"
+    r"sk-(?:(?:proj-|svcacct-)|(?:(?<![A-Za-z0-9]sk-)|(?<=\\[nrt]sk-))(?!ant-))"
     r"[A-Za-z0-9\-_]{16,}\b"
 )
 _XAI_RE = re.compile(r"xai-(?:(?<![A-Za-z]xai-)|(?<=\\[nrt]xai-))[A-Za-z0-9\-_]{16,}\b")
