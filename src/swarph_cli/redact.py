@@ -235,20 +235,28 @@ def _replace_secret_assignment(m: re.Match) -> str:
 
 
 def _replace_standalone_tokens(text: str) -> str:
-    matches = list(_STANDALONE_CANDIDATE_RE.finditer(text))
-    for m in reversed(matches):
-        tok = m.group(1)
+    parts = []
+    copied_until = 0
+    marker = "[REDACTED:"
+    next_marker = text.find(marker)
+    marker_end = -1
+    for m in _STANDALONE_CANDIDATE_RE.finditer(text):
         start, end = m.start(1), m.end(1)
-        # Verify not already inside [REDACTED:...]
-        preceding = text[:start]
-        last_bracket = preceding.rfind("[REDACTED:")
-        if last_bracket != -1:
-            closing = text.find("]", last_bracket)
-            if closing == -1 or closing >= start:
-                continue
-        if _is_standalone_secret(tok):
-            text = text[:start] + "[REDACTED:HIGH_ENTROPY]" + text[end:]
-    return text
+        # Walk existing markers once, including any nested opens before the same close.
+        while next_marker >= 0 and next_marker + len(marker) <= start:
+            marker_end = text.find("]", next_marker)
+            if marker_end == -1:
+                marker_end = len(text)
+                next_marker = -1
+            else:
+                next_marker = text.find(marker, marker_end + 1)
+        if start > marker_end and _is_standalone_secret(m.group(1)):
+            parts.extend((text[copied_until:start], "[REDACTED:HIGH_ENTROPY]"))
+            copied_until = end
+    if not parts:
+        return text
+    parts.append(text[copied_until:])
+    return "".join(parts)
 
 
 def _handle_opt_out(text: str, caller: str, opt_out_reason: str) -> None:
