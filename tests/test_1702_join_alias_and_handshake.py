@@ -94,6 +94,37 @@ def _handshake_stub(mode):
                 if mode == "close":
                     self.connection.shutdown(socket.SHUT_RDWR)
                     return
+                if mode == "redirect":
+                    self.send_response(302)
+                    self.send_header("Location", "/elsewhere")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if mode == "oversized":
+                    body = b"x" * 16385
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if mode == "nonobject":
+                    body = b"[]"
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if mode in {"json404", "json500"}:
+                    body = b'{"error":"unknown_witness"}'
+                    status = 404 if mode == "json404" else 500
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 body = {"plain": b"nope", "html": b"<html>bad</html>", "empty": b""}[mode]
                 status = {"plain": 500, "html": 502, "empty": 503}[mode]
                 self.send_response(status)
@@ -127,7 +158,10 @@ def _handshake_stub(mode):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX credential storage")
-@pytest.mark.parametrize("mode", ["plain", "html", "empty", "close"])
+@pytest.mark.parametrize("mode", [
+    "plain", "html", "empty", "close",
+    "json404", "json500", "redirect", "oversized", "nonobject",
+])
 def test_handshake_failure_prints_the_onboard_line(mode, monkeypatch, tmp_path, capsys):
     _home(monkeypatch, tmp_path)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
