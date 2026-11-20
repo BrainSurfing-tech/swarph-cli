@@ -154,6 +154,8 @@ _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)(?!\[REDACTED)[A-Za-z0-9\-._~+/]{12,}
 _URI_SCHEME_RE = re.compile(
     r"\b([a-zA-Z][a-zA-Z0-9+.\-]*://[^/\s:@]+:)(?!\[REDACTED)([^@\s/]+)(@[^\s/]+)"
 )
+_URI_SCHEME_RUN_RE = re.compile(r"(?<![a-zA-Z0-9+.\-])[a-zA-Z0-9+.\-]+(?=://)")
+_URI_SCHEME_START_RE = re.compile(r"\b[a-zA-Z]")
 _URI_SCHEMELESS_RE = re.compile(
     r"(?<!\[)(?<![a-zA-Z0-9/._\-:])(?!(?:REDACTED|CUSTOM):)([a-zA-Z0-9._\-]+:)(?!\[REDACTED)([^@\s:/]{2,})(@(?:localhost|(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?)\b"
 )
@@ -314,6 +316,27 @@ def _replace_standalone_tokens(text: str) -> str:
     return "".join(parts)
 
 
+def _replace_scheme_credentials(text: str) -> str:
+    if "://" not in text or "@" not in text:
+        return text
+    parts = []
+    copied_until = 0
+    for run in _URI_SCHEME_RUN_RE.finditer(text):
+        start = _URI_SCHEME_START_RE.search(text, max(copied_until, run.start()), run.end())
+        if start is None:
+            continue
+        # Every eligible start in this run shares the same userinfo and host.
+        match = _URI_SCHEME_RE.match(text, start.start())
+        if match is not None:
+            parts.extend((text[copied_until:match.start()], match[1],
+                          "[REDACTED:URI_CREDENTIAL]", match[3]))
+            copied_until = match.end()
+    if not parts:
+        return text
+    parts.append(text[copied_until:])
+    return "".join(parts)
+
+
 def _handle_opt_out(text: str, caller: str, opt_out_reason: str) -> None:
     ts = datetime.now(timezone.utc).isoformat()
     reason = opt_out_reason or "env_or_flag"
@@ -386,7 +409,7 @@ def redact_text(
     out = _BEARER_RE.sub(r"\1[REDACTED:BEARER_TOKEN]", out)
 
     # Layer 4: URI & DSN Credentials
-    out = _URI_SCHEME_RE.sub(r"\1[REDACTED:URI_CREDENTIAL]\3", out)
+    out = _replace_scheme_credentials(out)
     out = _URI_SCHEMELESS_RE.sub(r"\1[REDACTED:URI_CREDENTIAL]\3", out)
     out = _DSN_KEY_VALUE_RE.sub(r"\1\2[REDACTED:DSN_CREDENTIAL]", out)
 
