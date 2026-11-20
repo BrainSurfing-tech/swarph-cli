@@ -143,6 +143,11 @@ _AWS_SECRET_RE = re.compile(
     r"(?i)\b(aws_secret_access_key|aws_session_token)\b(\s*[:=]\s*)(['\"]?)(?!\[REDACTED)[A-Za-z0-9/+=]{20,}\3"
 )
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]{4,}\.eyJ[A-Za-z0-9_\-]{4,}(?:\.[A-Za-z0-9_\-]{4,})?\b")
+_JWT_LONG_DASH_RE = re.compile(r"-eyJ[A-Za-z0-9_\-]{36,}")
+_JWT_ONCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_\-])(?=([A-Za-z0-9_\-]*?)\beyJ)\1"
+    r"eyJ[A-Za-z0-9_\-]{4,}\.eyJ[A-Za-z0-9_\-]{4,}(?:\.[A-Za-z0-9_\-]{4,})?\b"
+)
 _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)(?!\[REDACTED)[A-Za-z0-9\-._~+/]{12,}=*")
 
 # URI & DSN credentials
@@ -232,6 +237,56 @@ def _replace_secret_assignment(m: re.Match) -> str:
     if shannon_entropy(val) >= 3.6:
         return f"{key}{sep}{quote}[REDACTED:HIGH_ENTROPY]{quote}"
     return m.group(0)
+
+
+def _replace_jwts(text: str) -> str:
+    # Every regex pass receives at most 1 * len(text) characters: either text
+    # directly or `masked`, where each 4-char "-eyJ" -> "-eYJ" substitution is
+    # strictly length-preserving (len(masked) == len(text)). Sparse multi-"-eyJ"
+    # inputs mask 2nd+ "-eyJ" inside [start + 4 : end] and slice output directly
+    # from the original `text` using `_JWT_RE.finditer(masked)` spans, so
+    # pre-existing "eYJ" and Unicode backtracks need no tag search or restore.
+    # Dense multi-"-eyJ" inputs (>50% of text in long multi-"-eyJ" runs)
+    # delegate directly to `_JWT_ONCE_RE` (one attempt per maximal base64url
+    # run, zero full-string copy, exact 1 * len(text) input).
+    if ".eyJ" not in text:
+        return text
+    if "-eyJ" not in text:
+        return _JWT_RE.sub("[REDACTED:JWT]", text)
+    runs: list[tuple[int, int]] = []
+    append_run = runs.append
+    find = text.find
+    masked_chars = 0
+    dense_limit = len(text) >> 1
+    for m in _JWT_LONG_DASH_RE.finditer(text):
+        start = m.start()
+        end = m.end()
+        if find("-eyJ", start + 4, end) == -1:
+            continue
+        masked_chars += end - start
+        if masked_chars > dense_limit:
+            return _JWT_ONCE_RE.sub(lambda match: f"{match[1]}[REDACTED:JWT]", text)
+        append_run((start, end))
+    if not runs:
+        return _JWT_RE.sub("[REDACTED:JWT]", text)
+    parts: list[str] = []
+    append = parts.append
+    copied_until = 0
+    for start, end in runs:
+        append(text[copied_until:start + 4])
+        append(text[start + 4:end].replace("-eyJ", "-eYJ"))
+        copied_until = end
+    append(text[copied_until:])
+    masked = "".join(parts)
+    out_parts: list[str] = []
+    out_append = out_parts.append
+    out_pos = 0
+    for m in _JWT_RE.finditer(masked):
+        out_append(text[out_pos:m.start()])
+        out_append("[REDACTED:JWT]")
+        out_pos = m.end()
+    out_append(text[out_pos:])
+    return "".join(out_parts)
 
 
 def _replace_standalone_tokens(text: str) -> str:
@@ -327,7 +382,7 @@ def redact_text(
     out = _SLACK_RE.sub("[REDACTED:SLACK_TOKEN]", out)
     out = _AWS_KEY_RE.sub("[REDACTED:AWS_KEY]", out)
     out = _AWS_SECRET_RE.sub(r"\1\2[REDACTED:AWS_SECRET]", out)
-    out = _JWT_RE.sub("[REDACTED:JWT]", out)
+    out = _replace_jwts(out)
     out = _BEARER_RE.sub(r"\1[REDACTED:BEARER_TOKEN]", out)
 
     # Layer 4: URI & DSN Credentials
