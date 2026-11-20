@@ -143,6 +143,8 @@ _AWS_SECRET_RE = re.compile(
     r"(?i)\b(aws_secret_access_key|aws_session_token)\b(\s*[:=]\s*)(['\"]?)(?!\[REDACTED)[A-Za-z0-9/+=]{20,}\3"
 )
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]{4,}\.eyJ[A-Za-z0-9_\-]{4,}(?:\.[A-Za-z0-9_\-]{4,})?\b")
+_JWT_LONG_DASH_RE = re.compile(r"-eyJ[A-Za-z0-9_\-]{36,}")
+_JWT_SEG2_OK_RE = re.compile(r"\.eyJ[A-Za-z0-9_\-]{3,}[A-Za-z0-9_]\b")
 _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)(?!\[REDACTED)[A-Za-z0-9\-._~+/]{12,}=*")
 
 # URI & DSN credentials
@@ -232,6 +234,64 @@ def _replace_secret_assignment(m: re.Match) -> str:
     if shannon_entropy(val) >= 3.6:
         return f"{key}{sep}{quote}[REDACTED:HIGH_ENTROPY]{quote}"
     return m.group(0)
+
+
+def _jwt_shadow_tag(text: str) -> str:
+    if "eYJ" not in text:
+        return "eYJ"
+    for a in "QXWKVBPFJ":
+        for b in "QXWKVBPFJ":
+            tag = f"{a}{b}Z"
+            if tag not in text:
+                return tag
+    width = 4
+    while True:
+        tag = "X" * width + "Z"
+        if tag not in text:
+            return tag
+        width *= 2
+
+
+def _replace_jwts(text: str) -> str:
+    # Masking 2nd+ "-eyJ" occurrences inside a long failing base64url run preserves
+    # every _JWT_RE match span identically: inside any maximal [A-Za-z0-9_\-] run,
+    # the first eligible \beyJ start (at <= start + 1, untouched by masking
+    # [start + 4 : end]) strictly dominates all later "-eyJ" starts in that run.
+    # A pure-letter unbordered shadow tag ("eYJ", f"{a}{b}Z", or "X"*w + "Z") is
+    # atomic with respect to \b (so _JWT_RE can never split tag even when
+    # backtracking to the preceding "-" before a trailing Unicode \w), never
+    # overlaps "eyJ", ".eyJ", or "[REDACTED:JWT]", and preserves [A-Za-z0-9_\-],
+    # \w, \b, and {4,} lengths (every segment reaching [start + 4 : end] already
+    # has >= 4 chars before start + 4).
+    if ".eyJ" not in text:
+        return text
+    if "-eyJ" not in text:
+        return _JWT_RE.sub("[REDACTED:JWT]", text)
+    parts: list[str] = []
+    append = parts.append
+    startswith = text.startswith
+    find = text.find
+    seg2_match = _JWT_SEG2_OK_RE.match
+    copied_until = 0
+    tag: str | None = None
+    dash_tag = ""
+    for m in _JWT_LONG_DASH_RE.finditer(text):
+        end = m.end()
+        if startswith(".eyJ", end) and seg2_match(text, end) is not None:
+            continue
+        start = m.start()
+        if find("-eyJ", start + 4, end) == -1:
+            continue
+        if tag is None:
+            tag = _jwt_shadow_tag(text)
+            dash_tag = "-" + tag
+        append(text[copied_until:start + 4])
+        append(text[start + 4:end].replace("-eyJ", dash_tag))
+        copied_until = end
+    if not parts:
+        return _JWT_RE.sub("[REDACTED:JWT]", text)
+    append(text[copied_until:])
+    return _JWT_RE.sub("[REDACTED:JWT]", "".join(parts)).replace(tag, "eyJ")
 
 
 def _replace_standalone_tokens(text: str) -> str:
@@ -327,7 +387,7 @@ def redact_text(
     out = _SLACK_RE.sub("[REDACTED:SLACK_TOKEN]", out)
     out = _AWS_KEY_RE.sub("[REDACTED:AWS_KEY]", out)
     out = _AWS_SECRET_RE.sub(r"\1\2[REDACTED:AWS_SECRET]", out)
-    out = _JWT_RE.sub("[REDACTED:JWT]", out)
+    out = _replace_jwts(out)
     out = _BEARER_RE.sub(r"\1[REDACTED:BEARER_TOKEN]", out)
 
     # Layer 4: URI & DSN Credentials
