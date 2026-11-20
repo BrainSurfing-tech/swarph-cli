@@ -1,8 +1,10 @@
-"""Tests for Card #1714 (Obligation #6095): Linear-time JWT redaction rework.
+"""Tests for Card #1714 (Obligation #6099, Rework 2): Linear-time JWT redaction.
 
 Verifies that ``_replace_jwts`` and ``redact_text`` preserve ``_JWT_RE``
-match spans identically on both the normal path and the shadowed path, while
-avoiding quadratic backtracking on long multi-``-eyJ`` base64url runs.
+match spans identically across the normal path, the sparse shadowed ``-eYJ``
+path (original-text slicing), and the dense ``_JWT_ONCE_RE`` path, while
+bounding regex input length to ``1 * len(text)`` and avoiding quadratic
+backtracking on long multi-``-eyJ`` base64url runs.
 
 All JWT-shaped test tokens are generated programmatically at runtime.
 """
@@ -14,10 +16,10 @@ from pathlib import Path
 
 import pytest
 
+import swarph_cli.redact as redact_mod
 from swarph_cli.redact import (
     _JWT_LONG_DASH_RE,
     _JWT_RE,
-    _jwt_shadow_tag,
     _replace_jwts,
     redact_text,
 )
@@ -38,6 +40,26 @@ def _make_tokens() -> dict[str, str]:
         "mask": MASK,
         "long_run": long_run,
     }
+
+
+def _masked_run_chars(text: str) -> int:
+    total = 0
+    for m in _JWT_LONG_DASH_RE.finditer(text):
+        start = m.start()
+        end = m.end()
+        if text.find("-eyJ", start + 4, end) != -1:
+            total += end - start
+    return total
+
+
+def _assert_sparse_path(text: str) -> None:
+    masked_chars = _masked_run_chars(text)
+    assert 0 < masked_chars <= (len(text) >> 1)
+
+
+def _assert_dense_path(text: str) -> None:
+    masked_chars = _masked_run_chars(text)
+    assert masked_chars > (len(text) >> 1)
 
 
 def _assert_matches_jwt_re_and_expected(src: str, expected: str) -> None:
@@ -76,12 +98,20 @@ def test_jwt_shapes_normal_and_shadowed_paths(
     expected = expected_template.format_map(vals)
     _assert_matches_jwt_re_and_expected(src, expected)
 
-    # Execute the exact same case alongside a long multi--eyJ run so the
-    # shadowed path in _replace_jwts actively runs.
     long_run = vals["long_run"]
-    shadowed_src = f"{src} {long_run} {src} tail"
-    shadowed_expected = f"{expected} {long_run} {expected} tail"
-    _assert_matches_jwt_re_and_expected(shadowed_src, shadowed_expected)
+    pad = "x" * 160
+
+    # Sparse shadowed path (masked_chars <= len(text) >> 1)
+    sparse_src = f"{src} {long_run} {src} {pad} tail"
+    sparse_expected = f"{expected} {long_run} {expected} {pad} tail"
+    _assert_sparse_path(sparse_src)
+    _assert_matches_jwt_re_and_expected(sparse_src, sparse_expected)
+
+    # Dense _JWT_ONCE_RE path (masked_chars > len(text) >> 1)
+    dense_src = f"{src} {long_run} {long_run} {src} tail"
+    dense_expected = f"{expected} {long_run} {long_run} {expected} tail"
+    _assert_dense_path(dense_src)
+    _assert_matches_jwt_re_and_expected(dense_src, dense_expected)
 
 
 def test_tokens_before_inside_and_after_multi_start_runs() -> None:
@@ -89,55 +119,84 @@ def test_tokens_before_inside_and_after_multi_start_runs() -> None:
     e = vals["e"]
     tok3 = vals["tok3"]
     long_run = vals["long_run"]
+    sparse_pad = " " * 250 + "tail"
 
     # Token before, unredacted long run in middle, token after, plus trailing text
     src = f"{tok3} {long_run} {tok3} tail"
     expected = f"{MASK} {long_run} {MASK} tail"
+    _assert_dense_path(src)
     _assert_matches_jwt_re_and_expected(src, expected)
+    sparse_src = f"{src} {sparse_pad}"
+    _assert_sparse_path(sparse_src)
+    _assert_matches_jwt_re_and_expected(sparse_src, f"{expected} {sparse_pad}")
 
-    # Heavy multi--eyJ run inside segment 2
+    # Heavy multi--eyJ run inside segment 2 (dense and sparse)
     seg2_heavy = f"{e}aaaa." + (e + "a" * 14 + "-") * 6 + e + "a"
+    _assert_dense_path(seg2_heavy)
     _assert_matches_jwt_re_and_expected(seg2_heavy, MASK)
+    _assert_sparse_path(f"{seg2_heavy} {sparse_pad}")
+    _assert_matches_jwt_re_and_expected(f"{seg2_heavy} {sparse_pad}", f"{MASK} {sparse_pad}")
 
-    # Heavy multi--eyJ run inside segment 3
+    # Heavy multi--eyJ run inside segment 3 (dense and sparse)
     seg3_heavy = f"{e}aaaa.{e}bbbb." + (e + "a" * 14 + "-") * 6 + e + "a"
+    _assert_dense_path(seg3_heavy)
     _assert_matches_jwt_re_and_expected(seg3_heavy, MASK)
+    _assert_sparse_path(f"{seg3_heavy} {sparse_pad}")
+    _assert_matches_jwt_re_and_expected(f"{seg3_heavy} {sparse_pad}", f"{MASK} {sparse_pad}")
 
-    # Multi-start run whose first eligible start is after "aaaa-" and whose
-    # valid seg2 matches _JWT_SEG2_OK_RE.
+    # Multi-start run whose first eligible start is after "aaaa-" (dense and sparse)
     valid_prefixed_run = "aaaa-" + (e + "a-") * 15 + e + "a." + e + "bbbb"
+    _assert_dense_path(valid_prefixed_run)
     _assert_matches_jwt_re_and_expected(valid_prefixed_run, f"aaaa-{MASK}")
+    _assert_sparse_path(f"{valid_prefixed_run} {sparse_pad}")
+    _assert_matches_jwt_re_and_expected(
+        f"{valid_prefixed_run} {sparse_pad}", f"aaaa-{MASK} {sparse_pad}"
+    )
 
-    # Critical boundary case: ".eyJ----\u00e9" matches _JWT_RE (\b holds between
-    # '-' and '\u00e9'), while _JWT_SEG2_OK_RE does NOT skip it, forcing the
-    # shadowed path to mask 2nd+ -eyJ while keeping the first -eyJ intact.
+    # Critical Unicode boundary case: ".eyJ----\u00e9" matches _JWT_RE (\b holds
+    # between '-' and '\u00e9') on both sparse and dense paths.
     shadowed_boundary_match = "aaaa-" + (e + "a-") * 15 + e + "a." + e + "----\u00e9"
+    _assert_dense_path(shadowed_boundary_match)
+    _assert_matches_jwt_re_and_expected(shadowed_boundary_match, f"aaaa-{MASK}\u00e9")
+    _assert_sparse_path(f"{shadowed_boundary_match} {sparse_pad}")
     _assert_matches_jwt_re_and_expected(
-        shadowed_boundary_match, f"aaaa-{MASK}\u00e9"
+        f"{shadowed_boundary_match} {sparse_pad}", f"aaaa-{MASK}\u00e9 {sparse_pad}"
     )
 
-    # Explicit two-start shadowed run (>= 68 chars, exactly two -eyJ starts) with
-    # tokens before, inside (via .eyJ----\u00e9), and after, plus non-first start.
-    two_start_shadowed = (
-        f"{tok3} aaaa-{e}{'a' * 36}-{e}{'a' * 32}.{e}----\u00e9 {tok3} tail"
-    )
-    _assert_matches_jwt_re_and_expected(
-        two_start_shadowed, f"{MASK} aaaa-{MASK}\u00e9 {MASK} tail"
-    )
+    # Explicit two-start runs with tokens before, inside, and after, plus non-first
+    # start ("aaaa-"), across all 3 boundary suffixes (kills Mutant 3 and Mutant 4
+    # on BOTH sparse and dense paths).
+    two_start_prefix = f"aaaa-{e}{'a' * 40}-{e}{'a' * 36}"
+    for suffix, trail_after_mask in (
+        (f".{e}----\u00e9", "\u00e9"),
+        (f".{e}----.cccc", ""),
+        (f".{e}bbbb", ""),
+    ):
+        dense_two_start = f"{tok3} {two_start_prefix}{suffix} {tok3} tail"
+        dense_two_expected = f"{MASK} aaaa-{MASK}{trail_after_mask} {MASK} tail"
+        _assert_dense_path(dense_two_start)
+        _assert_matches_jwt_re_and_expected(dense_two_start, dense_two_expected)
+
+        sparse_two_start = f"{dense_two_start} {sparse_pad}"
+        sparse_two_expected = f"{dense_two_expected} {sparse_pad}"
+        _assert_sparse_path(sparse_two_start)
+        _assert_matches_jwt_re_and_expected(sparse_two_start, sparse_two_expected)
 
     # Dash, underscore, and digit in the first segment of a shadowed multi-start run
-    mixed_seg1_shadowed = (
-        f"aaaa-{e}a-b_7{'a' * 30}-{e}9_c-d{'a' * 30}.{e}----\u00e9"
-    )
-    _assert_matches_jwt_re_and_expected(mixed_seg1_shadowed, f"aaaa-{MASK}\u00e9")
+    for suffix, trail_after_mask in (
+        (f".{e}bbbb", ""),
+        (f".{e}----\u00e9", "\u00e9"),
+    ):
+        mixed_seg1 = f"aaaa-{e}a-b_7{'a' * 30}-{e}9_c-d{'a' * 30}{suffix}"
+        mixed_expected = f"aaaa-{MASK}{trail_after_mask}"
+        _assert_dense_path(mixed_seg1)
+        _assert_matches_jwt_re_and_expected(mixed_seg1, mixed_expected)
 
-    # Sanity check: verify long_run and two_start_shadowed enter the shadowed path
-    for sample in (long_run, two_start_shadowed):
-        m = _JWT_LONG_DASH_RE.search(sample)
-        assert m is not None
-        assert sample.find("-eyJ", m.start() + 4, m.end()) != -1
+        sparse_mixed = f"{mixed_seg1} {sparse_pad}"
+        _assert_sparse_path(sparse_mixed)
+        _assert_matches_jwt_re_and_expected(sparse_mixed, f"{mixed_expected} {sparse_pad}")
 
-    # Combined failing seg2 run followed by valid multi-start run
+    # Combined failing seg2 run followed by valid multi-start run (dense and sparse)
     combined = (
         "aaaa-"
         + e
@@ -164,7 +223,28 @@ def test_tokens_before_inside_and_after_multi_start_runs() -> None:
         + "---- "
         + f"aaaa-{MASK}"
     )
+    _assert_dense_path(combined)
     _assert_matches_jwt_re_and_expected(combined, expected_combined)
+    _assert_sparse_path(f"{combined} {sparse_pad}")
+    _assert_matches_jwt_re_and_expected(
+        f"{combined} {sparse_pad}", f"{expected_combined} {sparse_pad}"
+    )
+
+    # Pre-existing "eYJ", all 81 "<a-char><b-char>Z" tags, and "X"*128+"Z" alongside
+    # tokens and runs on BOTH sparse and dense paths (lossless preservation of "eYJ").
+    tier2_tags = " ".join(f"{a}{b}Z" for a in "QXWKVBPFJ" for b in "QXWKVBPFJ")
+    pre_existing = f"eYJ {tier2_tags} {'X' * 128}Z"
+
+    sparse_tagged = f"{pre_existing} {long_run} {tok3} eYJ"
+    sparse_tagged_expected = f"{pre_existing} {long_run} {MASK} eYJ"
+    _assert_sparse_path(sparse_tagged)
+    _assert_matches_jwt_re_and_expected(sparse_tagged, sparse_tagged_expected)
+
+    dense_long_run = (e + "a" * 14 + "-") * 40 + e + "a"
+    dense_tagged = f"{pre_existing} {dense_long_run} {tok3} eYJ"
+    dense_tagged_expected = f"{pre_existing} {dense_long_run} {MASK} eYJ"
+    _assert_dense_path(dense_tagged)
+    _assert_matches_jwt_re_and_expected(dense_tagged, dense_tagged_expected)
 
 
 @pytest.mark.parametrize(
@@ -192,84 +272,211 @@ def test_word_and_non_ascii_boundaries_normal_and_shadowed(
     _assert_matches_jwt_re_and_expected(src, expected)
 
     long_run = vals["long_run"]
-    shadowed_src = f"{long_run} {src} {long_run}"
-    shadowed_expected = f"{long_run} {expected} {long_run}"
-    _assert_matches_jwt_re_and_expected(shadowed_src, shadowed_expected)
+    sparse_pad = " " * 250 + "tail"
 
+    sparse_src = f"{long_run} {src} {long_run} {sparse_pad}"
+    sparse_expected = f"{long_run} {expected} {long_run} {sparse_pad}"
+    _assert_sparse_path(sparse_src)
+    _assert_matches_jwt_re_and_expected(sparse_src, sparse_expected)
 
-def test_shadow_tag_collision_fallbacks() -> None:
-    vals = _make_tokens()
-    tok3 = vals["tok3"]
-    long_run = vals["long_run"]
-
-    tier2_list = [f"{a}{b}Z" for a in "QXWKVBPFJ" for b in "QXWKVBPFJ"]
-    assert len(tier2_list) == 81
-    tier2_tags = " ".join(tier2_list)
-
-    # Direct unit checks on pure-word shadow tag tiers (without leading hyphens)
-    assert _jwt_shadow_tag("clean text") == "eYJ"
-    assert _jwt_shadow_tag("eYJ") == "QQZ"
-    assert _jwt_shadow_tag("eYJ QQZ") == "QXZ"
-    assert _jwt_shadow_tag(f"eYJ {tier2_tags}") == "XXXXZ"
-    assert _jwt_shadow_tag(f"eYJ {tier2_tags} XXXXZ") == "XXXXXXXXZ"
-
-    # Tier 1 collision: literal "eYJ" (without leading hyphen) already in text
-    src_tier1 = f"eYJ {long_run} {tok3} eYJ"
-    expected_tier1 = f"eYJ {long_run} {MASK} eYJ"
-    _assert_matches_jwt_re_and_expected(src_tier1, expected_tier1)
-
-    # Tier 2 collision: "eYJ" and "QQZ" (without leading hyphens) already in text
-    src_tier2 = f"eYJ QQZ {long_run} {tok3} QQZ"
-    expected_tier2 = f"eYJ QQZ {long_run} {MASK} QQZ"
-    _assert_matches_jwt_re_and_expected(src_tier2, expected_tier2)
-
-    # Tier 2 exhaustion -> Tier 3 fallback ("XXXXZ"): literal "eYJ" and all
-    # 81 "<a-char><b-char>Z" tags already present in text.
-    src_tier3 = f"eYJ {tier2_tags} {long_run} {tok3}"
-    expected_tier3 = f"eYJ {tier2_tags} {long_run} {MASK}"
-    _assert_matches_jwt_re_and_expected(src_tier3, expected_tier3)
-
-    # Tier 3 width doubling -> "XXXXXXXXZ": "XXXXZ" also present in text
-    src_tier3_wide = f"eYJ {tier2_tags} XXXXZ {long_run} {tok3}"
-    expected_tier3_wide = f"eYJ {tier2_tags} XXXXZ {long_run} {MASK}"
-    _assert_matches_jwt_re_and_expected(src_tier3_wide, expected_tier3_wide)
+    dense_src = f"{long_run} {long_run} {src} {long_run} {long_run}"
+    dense_expected = f"{long_run} {long_run} {expected} {long_run} {long_run}"
+    _assert_dense_path(dense_src)
+    _assert_matches_jwt_re_and_expected(dense_src, dense_expected)
 
 
 def test_shadowed_seg2_seg3_trailing_unicode_backtrack() -> None:
     e = _E
     # Multi--eyJ run (>= 64 chars after first -eyJ) ending in -eyJX8w\u00e9,
-    # forcing _JWT_RE to backtrack trailing \b to between '-' and 'eyJX8w\u00e9'.
+    # forcing trailing \b to backtrack to between '-' and 'eyJX8w\u00e9'.
     tail_run = f"{e}a-" + f"{e}X8w-" * 10 + f"{e}X8w\u00e9"
     seg2_run = f"{e}aaaa.{tail_run}"
     seg3_run = f"{e}aaaa.{e}bbbb.{tail_run}"
+    expected_tail = f"{MASK}{e}X8w\u00e9"
+    sparse_pad = " " * 250 + "tail"
 
     for sample in (seg2_run, seg3_run):
-        m = _JWT_LONG_DASH_RE.search(sample)
-        assert m is not None
-        assert sample.find("-eyJ", m.start() + 4, m.end()) != -1
+        _assert_dense_path(sample)
+        _assert_matches_jwt_re_and_expected(sample, expected_tail)
 
-    expected_tail = f"{MASK}{e}X8w\u00e9"
+        sparse_sample = f"{sample} {sparse_pad}"
+        _assert_sparse_path(sparse_sample)
+        _assert_matches_jwt_re_and_expected(sparse_sample, f"{expected_tail} {sparse_pad}")
 
-    # Tier 1 ("eYJ")
-    _assert_matches_jwt_re_and_expected(seg2_run, expected_tail)
-    _assert_matches_jwt_re_and_expected(seg3_run, expected_tail)
+    # Pre-existing "eYJ", all 81 two-letter tags, and "XXXXZ" on BOTH sparse and dense
+    tier12 = "eYJ " + " ".join(f"{a}{b}Z" for a in "QXWKVBPFJ" for b in "QXWKVBPFJ") + " XXXXZ"
+    long_tail_run = f"{e}a-" + f"{e}X8w-" * 70 + f"{e}X8w\u00e9"
+    dense_seg2 = f"{e}aaaa.{long_tail_run}"
+    dense_seg3 = f"{e}aaaa.{e}bbbb.{long_tail_run}"
 
-    # Tier 1 collision -> Tier 2 tag ("QQZ")
-    _assert_matches_jwt_re_and_expected(f"eYJ {seg2_run} eYJ", f"eYJ {expected_tail} eYJ")
-    _assert_matches_jwt_re_and_expected(f"eYJ {seg3_run} eYJ", f"eYJ {expected_tail} eYJ")
+    for sparse_sample in (seg2_run, seg3_run):
+        s = f"{tier12} {sparse_sample} eYJ"
+        _assert_sparse_path(s)
+        _assert_matches_jwt_re_and_expected(s, f"{tier12} {expected_tail} eYJ")
 
-    # Tier 1 + all 81 Tier 2 tags -> Tier 3 ("XXXXZ")
-    tier12 = "eYJ " + " ".join(f"{a}{b}Z" for a in "QXWKVBPFJ" for b in "QXWKVBPFJ")
-    _assert_matches_jwt_re_and_expected(f"{tier12} {seg2_run}", f"{tier12} {expected_tail}")
-    _assert_matches_jwt_re_and_expected(f"{tier12} {seg3_run}", f"{tier12} {expected_tail}")
+    for dense_sample in (dense_seg2, dense_seg3):
+        s = f"{tier12} {dense_sample} eYJ"
+        _assert_dense_path(s)
+        _assert_matches_jwt_re_and_expected(s, f"{tier12} {expected_tail} eYJ")
 
-    # Tier 3 width doubling ("XXXXXXXXZ")
-    _assert_matches_jwt_re_and_expected(
-        f"{tier12} XXXXZ {seg2_run}", f"{tier12} XXXXZ {expected_tail}"
+
+def test_fast_path_guards_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _RaiseAll:
+        def __getattr__(self, name: str):
+            def _boom(*_args, **_kwargs):
+                raise AssertionError(f"Unexpected regex call: .{name}")
+
+            return _boom
+
+    class _RegexProxy:
+        def __init__(self, real, *, allow_sub: bool, allow_finditer: bool) -> None:
+            self._real = real
+            self._allow_sub = allow_sub
+            self._allow_finditer = allow_finditer
+
+        def sub(self, *args, **kwargs):
+            if not self._allow_sub:
+                raise AssertionError("Unexpected .sub() call")
+            return self._real.sub(*args, **kwargs)
+
+        def finditer(self, *args, **kwargs):
+            if not self._allow_finditer:
+                raise AssertionError("Unexpected .finditer() call")
+            return self._real.finditer(*args, **kwargs)
+
+    # Guard 1: if ".eyJ" not in text: return text
+    with monkeypatch.context() as mp:
+        mp.setattr(redact_mod, "_JWT_RE", _RaiseAll())
+        mp.setattr(redact_mod, "_JWT_LONG_DASH_RE", _RaiseAll())
+        mp.setattr(redact_mod, "_JWT_ONCE_RE", _RaiseAll())
+        no_dot = f"{_E}aaaa-{_E}bbbb" * 5
+        assert _replace_jwts(no_dot) == no_dot
+
+    # Guard 2: if "-eyJ" not in text: return _JWT_RE.sub("[REDACTED:JWT]", text)
+    with monkeypatch.context() as mp:
+        mp.setattr(redact_mod, "_JWT_LONG_DASH_RE", _RaiseAll())
+        mp.setattr(redact_mod, "_JWT_ONCE_RE", _RaiseAll())
+        no_dash = f"{_E}aaaa.{_E}bbbb"
+        assert _replace_jwts(no_dash) == MASK
+
+    # Guard 3: if find("-eyJ", start + 4, end) == -1: continue (single -eyJ >= 40 chars)
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            redact_mod,
+            "_JWT_RE",
+            _RegexProxy(_JWT_RE, allow_sub=True, allow_finditer=False),
+        )
+        mp.setattr(redact_mod, "_JWT_ONCE_RE", _RaiseAll())
+        single_long = f"-{_E}" + "a" * 50 + f" .{_E}bbbb"
+        assert _replace_jwts(single_long) == single_long
+
+    # Guard 4 (dense): if masked_chars > dense_limit: return _JWT_ONCE_RE.sub(...)
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            redact_mod,
+            "_JWT_RE",
+            _RegexProxy(_JWT_RE, allow_sub=False, allow_finditer=False),
+        )
+        dense_input = f"-{_E}-{_E}" + "a" * 40 + f" .{_E} x"
+        _assert_dense_path(dense_input)
+        assert _replace_jwts(dense_input) == dense_input
+
+    # Guard 4 (sparse): masked_chars <= dense_limit enters _JWT_RE.finditer(masked)
+    with monkeypatch.context() as mp:
+        mp.setattr(redact_mod, "_JWT_ONCE_RE", _RaiseAll())
+        mp.setattr(
+            redact_mod,
+            "_JWT_RE",
+            _RegexProxy(_JWT_RE, allow_sub=False, allow_finditer=True),
+        )
+        sparse_input = f"-{_E}-{_E}" + "a" * 40 + " " * 120 + f".{_E} x"
+        _assert_sparse_path(sparse_input)
+        assert _replace_jwts(sparse_input) == sparse_input
+
+    # Guard 5: if not runs: return _JWT_RE.sub(...) (short "-eyJ" < 36 chars)
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            redact_mod,
+            "_JWT_RE",
+            _RegexProxy(_JWT_RE, allow_sub=True, allow_finditer=False),
+        )
+        mp.setattr(redact_mod, "_JWT_ONCE_RE", _RaiseAll())
+        short_dash = f"{_E}aaaa-{_E}bbbb.{_E}cccc"
+        assert _replace_jwts(short_dash) == MASK
+
+
+def test_regex_input_length_bounded_1x(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_lengths: list[tuple[str, str, int]] = []
+
+    class _Recorder:
+        def __init__(self, name: str, real) -> None:
+            self._name = name
+            self._real = real
+
+        def finditer(self, string: str, *args, **kwargs):
+            seen_lengths.append((self._name, "finditer", len(string)))
+            return self._real.finditer(string, *args, **kwargs)
+
+        def sub(self, repl, string: str, *args, **kwargs):
+            seen_lengths.append((self._name, "sub", len(string)))
+            return self._real.sub(repl, string, *args, **kwargs)
+
+    monkeypatch.setattr(redact_mod, "_JWT_LONG_DASH_RE", _Recorder("long_dash", _JWT_LONG_DASH_RE))
+    monkeypatch.setattr(redact_mod, "_JWT_RE", _Recorder("jwt", _JWT_RE))
+    monkeypatch.setattr(redact_mod, "_JWT_ONCE_RE", _Recorder("once", redact_mod._JWT_ONCE_RE))
+
+    e = _E
+    tok3 = f"{e}aaaa.{e}bbbb.{e}cccc"
+    tags = "eYJ " + " ".join(f"{a}{b}Z" for a in "QXWKVBPFJ" for b in "QXWKVBPFJ") + " "
+    long_run = (e + "a" * 14 + "-") * 6 + e + "a"
+
+    # Synthetic T1 (sparse with eYJ, 81 tags, X*4096+Z, and masked runs)
+    t1_sparse = (
+        tags
+        + "X" * 4096
+        + "Z "
+        + (f"-{e}-{e}" + "a" * 32 + " ") * 10
+        + f".{e} {tok3}"
     )
-    _assert_matches_jwt_re_and_expected(
-        f"{tier12} XXXXZ {seg3_run}", f"{tier12} XXXXZ {expected_tail}"
+    _assert_sparse_path(t1_sparse)
+
+    # Synthetic T2 (dense multi-unit with tags)
+    t2_dense = f".{e} " + (f"-{e}-{e}" + "a" * 32 + " ") * 25 + tags + "X" * 128 + "Z"
+    _assert_dense_path(t2_dense)
+
+    # Synthetic T3 (sparse multi-start run with trailing Unicode backtrack)
+    t3_sparse = (
+        f"{tok3} "
+        + (e + "a" * 14 + "-") * 10
+        + e
+        + f"a.{e}----\u00e9 "
+        + " " * 300
+        + tok3
     )
+    _assert_sparse_path(t3_sparse)
+
+    # Additional explicit sparse and dense cases
+    sparse_case = f"{tok3} {long_run} {tok3} " + " " * 200 + "tail"
+    _assert_sparse_path(sparse_case)
+    dense_case = f"{tok3} {long_run} {long_run} {tok3}"
+    _assert_dense_path(dense_case)
+
+    for label, src in (
+        ("T1", t1_sparse),
+        ("T2", t2_dense),
+        ("T3", t3_sparse),
+        ("sparse", sparse_case),
+        ("dense", dense_case),
+    ):
+        seen_lengths.clear()
+        expected = _JWT_RE.sub(MASK, src)
+        actual = _replace_jwts(src)
+        assert actual == expected, f"Mismatch on {label}"
+        assert seen_lengths, f"No regex calls recorded for {label}"
+        max_seen = max(length for _, _, length in seen_lengths)
+        assert max_seen <= len(src), (
+            f"{label} exceeded 1x len(src)={len(src)}: {seen_lengths}"
+        )
 
 
 def _run_deadline_script(body: str) -> None:
@@ -335,4 +542,27 @@ def test_deadline_failing_seg2_boundaries() -> None:
         "assert _replace_jwts(s1) == s1\n"
         "s2 = (e + 'a' * 19 + '-') * 18_000 + 'aaaa.' + e + 'bbbb\\u00e9 '\n"
         "assert _replace_jwts(s2) == s2\n"
+    )
+
+
+def test_deadline_tag_exhaustion_t2_6097() -> None:
+    _run_deadline_script(
+        "from swarph_cli.redact import _replace_jwts\n"
+        "e = 'ey' + 'J'\n"
+        "n = 1_200_000\n"
+        "tags = 'eYJ ' + ' '.join(a + b + 'Z' for a in 'QXWKVBPFJ' for b in 'QXWKVBPFJ') + ' '\n"
+        "unit = f'-{e}-{e}' + 'a' * 32 + ' '\n"
+        "tail = tags + 'X' * (n // 64) + 'Z'\n"
+        "s = f'.{e} ' + unit * ((n - len(tail) - 5) // len(unit)) + tail\n"
+        "assert _replace_jwts(s) == s\n"
+    )
+
+
+def test_deadline_sparse_multi_start_run() -> None:
+    _run_deadline_script(
+        "from swarph_cli.redact import _replace_jwts\n"
+        "e = 'ey' + 'J'\n"
+        "run = (e + 'a' * 19 + '-') * 18_000 + 'aaaa.' + e + ' x'\n"
+        "s = run + ' ' * (len(run) + 10_000)\n"
+        "assert _replace_jwts(s) == s\n"
     )

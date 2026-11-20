@@ -144,7 +144,10 @@ _AWS_SECRET_RE = re.compile(
 )
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]{4,}\.eyJ[A-Za-z0-9_\-]{4,}(?:\.[A-Za-z0-9_\-]{4,})?\b")
 _JWT_LONG_DASH_RE = re.compile(r"-eyJ[A-Za-z0-9_\-]{36,}")
-_JWT_SEG2_OK_RE = re.compile(r"\.eyJ[A-Za-z0-9_\-]{3,}[A-Za-z0-9_]\b")
+_JWT_ONCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_\-])(?=([A-Za-z0-9_\-]*?)\beyJ)\1"
+    r"eyJ[A-Za-z0-9_\-]{4,}\.eyJ[A-Za-z0-9_\-]{4,}(?:\.[A-Za-z0-9_\-]{4,})?\b"
+)
 _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)(?!\[REDACTED)[A-Za-z0-9\-._~+/]{12,}=*")
 
 # URI & DSN credentials
@@ -236,62 +239,54 @@ def _replace_secret_assignment(m: re.Match) -> str:
     return m.group(0)
 
 
-def _jwt_shadow_tag(text: str) -> str:
-    if "eYJ" not in text:
-        return "eYJ"
-    for a in "QXWKVBPFJ":
-        for b in "QXWKVBPFJ":
-            tag = f"{a}{b}Z"
-            if tag not in text:
-                return tag
-    width = 4
-    while True:
-        tag = "X" * width + "Z"
-        if tag not in text:
-            return tag
-        width *= 2
-
-
 def _replace_jwts(text: str) -> str:
-    # Masking 2nd+ "-eyJ" occurrences inside a long failing base64url run preserves
-    # every _JWT_RE match span identically: inside any maximal [A-Za-z0-9_\-] run,
-    # the first eligible \beyJ start (at <= start + 1, untouched by masking
-    # [start + 4 : end]) strictly dominates all later "-eyJ" starts in that run.
-    # A pure-letter unbordered shadow tag ("eYJ", f"{a}{b}Z", or "X"*w + "Z") is
-    # atomic with respect to \b (so _JWT_RE can never split tag even when
-    # backtracking to the preceding "-" before a trailing Unicode \w), never
-    # overlaps "eyJ", ".eyJ", or "[REDACTED:JWT]", and preserves [A-Za-z0-9_\-],
-    # \w, \b, and {4,} lengths (every segment reaching [start + 4 : end] already
-    # has >= 4 chars before start + 4).
+    # Every regex pass receives at most 1 * len(text) characters: either text
+    # directly or `masked`, where each 4-char "-eyJ" -> "-eYJ" substitution is
+    # strictly length-preserving (len(masked) == len(text)). Sparse multi-"-eyJ"
+    # inputs mask 2nd+ "-eyJ" inside [start + 4 : end] and slice output directly
+    # from the original `text` using `_JWT_RE.finditer(masked)` spans, so
+    # pre-existing "eYJ" and Unicode backtracks need no tag search or restore.
+    # Dense multi-"-eyJ" inputs (>50% of text in long multi-"-eyJ" runs)
+    # delegate directly to `_JWT_ONCE_RE` (one attempt per maximal base64url
+    # run, zero full-string copy, exact 1 * len(text) input).
     if ".eyJ" not in text:
         return text
     if "-eyJ" not in text:
         return _JWT_RE.sub("[REDACTED:JWT]", text)
-    parts: list[str] = []
-    append = parts.append
-    startswith = text.startswith
+    runs: list[tuple[int, int]] = []
+    append_run = runs.append
     find = text.find
-    seg2_match = _JWT_SEG2_OK_RE.match
-    copied_until = 0
-    tag: str | None = None
-    dash_tag = ""
+    masked_chars = 0
+    dense_limit = len(text) >> 1
     for m in _JWT_LONG_DASH_RE.finditer(text):
-        end = m.end()
-        if startswith(".eyJ", end) and seg2_match(text, end) is not None:
-            continue
         start = m.start()
+        end = m.end()
         if find("-eyJ", start + 4, end) == -1:
             continue
-        if tag is None:
-            tag = _jwt_shadow_tag(text)
-            dash_tag = "-" + tag
-        append(text[copied_until:start + 4])
-        append(text[start + 4:end].replace("-eyJ", dash_tag))
-        copied_until = end
-    if not parts:
+        masked_chars += end - start
+        if masked_chars > dense_limit:
+            return _JWT_ONCE_RE.sub(lambda match: f"{match[1]}[REDACTED:JWT]", text)
+        append_run((start, end))
+    if not runs:
         return _JWT_RE.sub("[REDACTED:JWT]", text)
+    parts: list[str] = []
+    append = parts.append
+    copied_until = 0
+    for start, end in runs:
+        append(text[copied_until:start + 4])
+        append(text[start + 4:end].replace("-eyJ", "-eYJ"))
+        copied_until = end
     append(text[copied_until:])
-    return _JWT_RE.sub("[REDACTED:JWT]", "".join(parts)).replace(tag, "eyJ")
+    masked = "".join(parts)
+    out_parts: list[str] = []
+    out_append = out_parts.append
+    out_pos = 0
+    for m in _JWT_RE.finditer(masked):
+        out_append(text[out_pos:m.start()])
+        out_append("[REDACTED:JWT]")
+        out_pos = m.end()
+    out_append(text[out_pos:])
+    return "".join(out_parts)
 
 
 def _replace_standalone_tokens(text: str) -> str:
