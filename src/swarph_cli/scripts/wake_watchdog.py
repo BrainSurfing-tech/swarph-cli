@@ -11,6 +11,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -464,6 +465,7 @@ def scan(cells: dict[str, str], cmdlines: Iterable[str], state: dict,
             rec["missing_since"] = None
             rec["outage"] = False
             rec["alerted_at"] = None
+            rec.pop("outage_row", None)
             continue
         since = rec.get("missing_since")
         if since is None:
@@ -559,59 +561,48 @@ def _log_board(label: str, proc: subprocess.CompletedProcess) -> None:
         file=sys.stderr, flush=True)
 
 
-def _note_argv(swarph: str, sender: str, token_file: str, oid, when: str) -> list[str]:
-    note = [swarph, "board", "cards", "say", "729",
-            "--kind", "status", "--to", "commander",
-            "--content",
-            (f"{sender} DM wake recovered at {when}; "
-             f"dead-wake row #{oid} can be dismissed"),
-            "--as", sender]
-    if token_file:
-        note.extend(["--token-file", token_file])
-    return note
+def _list_open_dead_wake_rows(swarph: str, sender: str, token_file: str) -> list[dict] | None:
+    """List open commander-held dead-wake rows created by `sender` on card 729.
 
-
-def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
-                                      now: float, state: dict, state_path: Path) -> None:
-    """Tell the commander this sender's dead-wake row can be dismissed.
-
-    Under commander-for-life the row is taken at mint, so the cell token
-    cannot close, withdraw, or amend it. One status note on card 729 names
-    the row. A successful note is not repeated. A failed note is logged
-    and the pass continues, and the next pass tries again. An untaken row
-    is still withdrawn. A taken row is logged once. Every board call's
-    return code and first output line are logged.
+    Fails closed (logs reason to stderr and returns None) if the command cannot
+    be executed, exits non-zero, or returns empty/invalid/unexpected JSON.
     """
     argv = [swarph, "board", "obligations", "list", "--card", "729",
             "--holder", "commander", "--status", "open", "--json",
             "--as", sender]
     if token_file:
         argv.extend(["--token-file", token_file])
-    listed = subprocess.run(
-        argv, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", check=False)
+    try:
+        listed = subprocess.run(
+            argv, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=False)
+    except OSError as exc:
+        print(f"wake_watchdog: obligations list failed: {exc}",
+              file=sys.stderr, flush=True)
+        return None
     _log_board("obligations list", listed)
     if listed.returncode != 0:
-        return
+        print(f"wake_watchdog: obligations list failed with rc={listed.returncode}",
+              file=sys.stderr, flush=True)
+        return None
+    raw = (listed.stdout or "").strip()
+    if not raw:
+        print("wake_watchdog: obligations list returned empty output",
+              file=sys.stderr, flush=True)
+        return None
     try:
-        data = json.loads(listed.stdout or "{}")
-    except json.JSONDecodeError:
-        return
-    rows = data.get("obligations") if isinstance(data, dict) else None
-    if not isinstance(rows, list):
-        return
-    when = _format_ts(now)
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"wake_watchdog: obligations list returned invalid JSON: {exc}",
+              file=sys.stderr, flush=True)
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("obligations"), list):
+        print("wake_watchdog: obligations list payload missing obligations list",
+              file=sys.stderr, flush=True)
+        return None
     marker = f"WAKE-DEAD {sender}"
-    rec = state.setdefault(sender, {})
-    logged = rec.setdefault("logged_taken", [])
-    if not isinstance(logged, list):
-        logged = []
-        rec["logged_taken"] = logged
-    noted = rec.setdefault("noted", [])
-    if not isinstance(noted, list):
-        noted = []
-        rec["noted"] = noted
-    for row in rows:
+    matched: list[dict] = []
+    for row in data["obligations"]:
         if not isinstance(row, dict):
             continue
         if str(row.get("card_id")) != "729":
@@ -624,24 +615,166 @@ def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
             continue
         if marker not in (row.get("accept") or ""):
             continue
-        oid = row.get("id")
-        if not oid:
+        if not row.get("id"):
             continue
-        if oid not in noted and str(oid) not in noted:
+        matched.append(row)
+    return matched
+
+
+def _parse_minted_row_id(text: str) -> int | None:
+    """Return the minted obligation row id from the first non-empty line, or None."""
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = re.match(r"^(?:minted\s+)?#(\d+)\b", stripped)
+        return int(match.group(1)) if match else None
+    return None
+
+
+def _realert_note_argv(swarph: str, sender: str, token_file: str, oid, since: str) -> list[str]:
+    """Build argv for a re-alert status note referencing an already-open row."""
+    note = [swarph, "board", "cards", "say", "729",
+            "--kind", "status", "--to", "commander",
+            "--content", f"still open (row #{oid}): {commander_alert(sender, since)}",
+            "--as", sender]
+    if token_file:
+        note.extend(["--token-file", token_file])
+    return note
+
+
+def _note_argv(swarph: str, sender: str, token_file: str, oid, when: str) -> list[str]:
+    ids = list(oid) if isinstance(oid, (list, tuple)) else [oid]
+    if len(ids) == 1:
+        row_clause = f"dead-wake row #{ids[0]} can be dismissed"
+    else:
+        rows_text = ", ".join(f"#{i}" for i in ids)
+        row_clause = f"dead-wake rows {rows_text} can be dismissed"
+    note = [swarph, "board", "cards", "say", "729",
+            "--kind", "status", "--to", "commander",
+            "--content", f"{sender} DM wake recovered at {when}; {row_clause}",
+            "--as", sender]
+    if token_file:
+        note.extend(["--token-file", token_file])
+    return note
+
+
+def _handle_self_outage(swarph: str, sender: str, token_file: str,
+                        inbox: str, now: float, state: dict,
+                        state_path: Path) -> bool:
+    """Idempotently record or re-alert a self-outage without minting duplicates."""
+    rec = state.setdefault(sender, {})
+    existing = _list_open_dead_wake_rows(swarph, sender, token_file)
+    if existing is None:
+        print(f"wake_watchdog: not minting dead-wake row for {sender}: open-row listing failed",
+              file=sys.stderr, flush=True)
+        return False
+    if existing:
+        recorded_row = rec.get("outage_row")
+        oid = existing[0]["id"]
+        if recorded_row is not None:
+            for row in existing:
+                if str(row["id"]) == str(recorded_row):
+                    oid = row["id"]
+                    break
+        if rec.get("outage"):
             said = subprocess.run(
-                _note_argv(swarph, sender, token_file, oid, when),
+                _realert_note_argv(swarph, sender, token_file, oid, _dead_since(inbox, rec)),
                 capture_output=True, text=True, encoding="utf-8",
                 errors="replace", check=False)
             _log_board(f"cards say {oid}", said)
             if said.returncode == 0:
-                noted.append(oid)
+                rec["outage_row"] = oid
+                rec["alerted_at"] = now
                 save_state(state_path, state)
+                return True
+            return False
+        print(f"wake_watchdog: dead-wake row #{oid} already open for {sender}; recording without minting",
+              file=sys.stderr, flush=True)
+        rec["outage_row"] = oid
+        rec["outage"] = True
+        rec["alerted_at"] = now
+        save_state(state_path, state)
+        return True
+    content = commander_alert(sender, _dead_since(inbox, rec))
+    ask_argv = [swarph, "board", "cards", "ask", "729",
+                "--holder", "commander",
+                "--accept", f"WAKE-DEAD {sender}",
+                "--as", sender, content]
+    if token_file:
+        ask_argv.extend(["--token-file", token_file])
+    asked = subprocess.run(
+        ask_argv, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", check=False)
+    _log_board("cards ask 729", asked)
+    if asked.returncode == 0:
+        minted_id = _parse_minted_row_id(asked.stdout or "")
+        if minted_id is not None:
+            rec["outage_row"] = minted_id
+        rec["outage"] = True
+        rec["alerted_at"] = now
+        save_state(state_path, state)
+        return True
+    return False
+
+
+def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
+                                      now: float, state: dict, state_path: Path) -> None:
+    """Tell the commander this sender's dead-wake row can be dismissed.
+
+    Under commander-for-life the row is taken at mint, so the cell token
+    cannot close, withdraw, or amend it. One status note on card 729 names
+    every open row. A successful note is not repeated. A failed note is logged
+    and the pass continues, and the next pass tries again. An untaken row
+    is still withdrawn. A taken row is logged once. Every board call's
+    return code and first output line are logged.
+    """
+    matched = _list_open_dead_wake_rows(swarph, sender, token_file)
+    if not matched:
+        return
+    when = _format_ts(now)
+    rec = state.setdefault(sender, {})
+    logged = rec.setdefault("logged_taken", [])
+    if not isinstance(logged, list):
+        logged = []
+        rec["logged_taken"] = logged
+    noted = rec.setdefault("noted", [])
+    if not isinstance(noted, list):
+        noted = []
+        rec["noted"] = noted
+    open_ids = []
+    seen_ids: set[str] = set()
+    for row in matched:
+        oid = row.get("id")
+        key = str(oid)
+        if key not in seen_ids:
+            seen_ids.add(key)
+            open_ids.append(oid)
+    noted_keys = {str(x) for x in noted}
+    unnoted = [oid for oid in open_ids if str(oid) not in noted_keys]
+    if unnoted:
+        said = subprocess.run(
+            _note_argv(swarph, sender, token_file, open_ids, when),
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=False)
+        label = f"cards say {open_ids[0]}" if len(open_ids) == 1 else f"cards say {len(open_ids)} rows"
+        _log_board(label, said)
+        if said.returncode == 0:
+            for oid in open_ids:
+                if str(oid) not in noted_keys:
+                    noted.append(oid)
+                    noted_keys.add(str(oid))
+            save_state(state_path, state)
+    logged_keys = {str(x) for x in logged}
+    for row in matched:
+        oid = row.get("id")
         if row.get("taken_at"):
-            if oid not in logged and str(oid) not in logged:
+            if str(oid) not in logged_keys:
                 print(
                     f"wake_watchdog: taken {oid} left for the commander",
                     file=sys.stderr, flush=True)
                 logged.append(oid)
+                logged_keys.add(str(oid))
                 save_state(state_path, state)
             continue
         withdraw = [swarph, "board", "obligations", "withdraw", str(oid),
@@ -847,19 +980,8 @@ def main(argv: list[str] | None = None) -> int:
         # cannot respawn it all miss the commander. One commander-held row
         # on card 729 shows in the You tab and does not need the cell's wake.
         if name == sender:
-            content = commander_alert(name, _dead_since(cells[name], state.get(name) or {}))
-            ask_argv = [swarph, "board", "cards", "ask", "729",
-                        "--holder", "commander",
-                        "--accept", f"WAKE-DEAD {sender}",
-                        "--as", sender, content]
-            if token_file:
-                ask_argv.extend(["--token-file", token_file])
-            asked = subprocess.run(ask_argv, check=False)
-            if asked.returncode == 0:
-                state[name]["outage"] = True
-                state[name]["alerted_at"] = now
-                save_state(state_path, state)
-            else:
+            if not _handle_self_outage(
+                    swarph, sender, token_file, cells[name], now, state, state_path):
                 rc = 1
             continue
         dm_ok = mesh_send(
