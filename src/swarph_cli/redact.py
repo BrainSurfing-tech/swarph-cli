@@ -154,7 +154,8 @@ _BEARER_RE = re.compile(r"(?i)\b(Bearer\s+)(?!\[REDACTED)[A-Za-z0-9\-._~+/]{12,}
 _URI_SCHEME_RE = re.compile(
     r"\b([a-zA-Z][a-zA-Z0-9+.\-]*://[^/\s:@]+:)(?!\[REDACTED)([^@\s/]+)(@[^\s/]+)"
 )
-_URI_SCHEME_TRIGGER_RE = re.compile(r"[+.\-][a-zA-Z][a-zA-Z0-9+.\-]{18,}")
+_URI_SCHEME_LONG_RUN_RE = re.compile(r"(?<![a-zA-Z0-9+.\-])[a-zA-Z0-9+.\-]{128,}")
+_URI_SCHEME_START_RE = re.compile(r"\b[a-zA-Z]")
 _URI_SCHEME_MASK_TRANS = str.maketrans("+.-", "000")
 _URI_SCHEMELESS_RE = re.compile(
     r"(?<!\[)(?<![a-zA-Z0-9/._\-:])(?!(?:REDACTED|CUSTOM):)([a-zA-Z0-9._\-]+:)(?!\[REDACTED)([^@\s:/]{2,})(@(?:localhost|(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?)\b"
@@ -294,16 +295,15 @@ def _replace_jwts(text: str) -> str:
 def _replace_scheme_credentials(text: str) -> str:
     """Redact URI userinfo passwords in linear time on multi-start scheme runs.
 
-    Every ``\\b[a-zA-Z]`` after the first in a maximal ``[a-zA-Z0-9+.\\-]`` run
-    immediately follows ``+``, ``.``, or ``-`` (the only ``\\W`` chars in the
-    scheme class). Because ``_URI_SCHEME_TRIGGER_RE`` matches left-to-right and
-    greedily, ``m.start()`` is the first ``[+.\\-][a-zA-Z]`` in its maximal
-    run, leaving at most one ``\\b[a-zA-Z]`` before ``m.start()`` and leaving
-    ``m.start() + 1`` intact. Translating ``+.-`` to ``0`` across
-    ``[m.start() + 2 : m.end()]`` when ``[s, e - 1)`` contains ``+``, ``.``, or
-    ``-`` leaves at most two ``\\b[a-zA-Z]`` starts per run (strictly ``O(N)``
-    with identical leftmost-first matches and spans; a separator at ``e - 1``
-    ends the maximal run and cannot precede ``[a-zA-Z]``).
+    Scans maximal ``[a-zA-Z0-9+.\\-]`` runs of length >= 128 anchored by a
+    negative lookbehind so shorter runs never re-scan. Any run with a separator
+    (``+``, ``.``, ``-``) in ``[rstart, rend - 1)`` is checked with a
+    run-bounded ``\\b[a-zA-Z]`` search; when another separator lies in
+    ``[first_start + 1, rend - 1)``, translating ``+.-`` to ``0`` across
+    ``[first_start + 1, rend - 1)`` leaves exactly one ``\\b[a-zA-Z]`` start in
+    the maximal run (strictly ``O(N)`` with identical leftmost-first matches,
+    identical group spans, and ``len(masked) == len(text)``) and slices output
+    segments from the original ``text``.
     """
     if "://" not in text or "@" not in text:
         return text
@@ -312,17 +312,28 @@ def _replace_scheme_credentials(text: str) -> str:
     runs: list[tuple[int, int]] = []
     append_run = runs.append
     find = text.find
-    for m in _URI_SCHEME_TRIGGER_RE.finditer(text):
-        s = m.start() + 2
-        e = m.end()
-        lim = e - 1
+    search_start = _URI_SCHEME_START_RE.search
+    for m in _URI_SCHEME_LONG_RUN_RE.finditer(text):
+        rstart = m.start()
+        rend = m.end()
+        lim = rend - 1
+        if (
+            find("-", rstart, lim) == -1
+            and find(".", rstart, lim) == -1
+            and find("+", rstart, lim) == -1
+        ):
+            continue
+        sm = search_start(text, rstart, rend)
+        if sm is None:
+            continue
+        s = sm.start() + 1
         if (
             find("-", s, lim) == -1
             and find(".", s, lim) == -1
             and find("+", s, lim) == -1
         ):
             continue
-        append_run((s, e))
+        append_run((s, lim))
     if not runs:
         return _URI_SCHEME_RE.sub(r"\1[REDACTED:URI_CREDENTIAL]\3", text)
     parts: list[str] = []
