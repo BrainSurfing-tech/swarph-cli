@@ -59,16 +59,25 @@ def _links(card):
             if isinstance(value, str) for left, right in _CARD_LINK.findall(value)}
 
 
-def _board_entries(card, payload, post_safe):
-    neighbors = _links(card)
-    for row in _rows(payload, "cards"):
-        ident = row.get("id")
-        if type(ident) is not int or ident == card["id"]:
-            continue
-        # The subject's readers need not have the author's other project grants.
-        if post_safe and row.get("project_id") != card.get("project_id"):
-            continue
-        if ident in neighbors or card["id"] in _links(row):
+def _board_section(card, read, as_of, post_safe):
+    withheld = set()
+
+    def entries():
+        links = _links(card)
+        visible = {}
+        for row in _rows(read("/board/cards"), "cards"):
+            ident = row.get("id")
+            if type(ident) is not int or ident == card["id"]:
+                continue
+            if ident not in links and card["id"] not in _links(row):
+                continue
+            other_project = row.get("project_id") != card.get("project_id")
+            # Count before the entry cap; the audience lacks the runner's other grants.
+            if post_safe and other_project:
+                withheld.add(ident)
+            else:
+                visible.setdefault(ident, (row, other_project))
+        for ident, (row, other_project) in visible.items():
             obligations = row.get("open_obligations")
             if obligations is None:
                 opened = "unavailable"
@@ -78,8 +87,14 @@ def _board_entries(card, payload, post_safe):
                 opened = ", ".join(f"#{r['id']}" for r in obligations[:ROW_LIMIT])
                 if len(obligations) > ROW_LIMIT:
                     opened += f" (+{len(obligations) - ROW_LIMIT} more)"
+            access = " (other project; visible under runner grants)" if other_project else ""
             yield (f"card:#{ident}", f"{_clean(row.get('title') or '(untitled)')} "
-                   f"· stage={_clean(row.get('stage') or 'unknown', 24)} · open rows: {opened}")
+                   f"· stage={_clean(row.get('stage') or 'unknown', 24)} · open rows: {opened}{access}")
+
+    section = _section("board", as_of, entries)
+    if withheld and "unavailable" not in section:
+        section["withheld_count"] = len(withheld)
+    return section
 
 
 def _timeline_entries(lifetime):
@@ -181,7 +196,7 @@ def collect(card, read, thread_url, *, post_safe=False):
     return {"version": version, "version_unavailable": reason, "as_of": as_of, "sections": [
         _section("semantic", as_of, lambda: _semantic_entries(card)),
         _section("timeline", as_of, lambda: dated(lambda: _timeline_entries(lifetime))),
-        _section("board", as_of, lambda: _board_entries(card, read("/board/cards"), post_safe)),
+        _board_section(card, read, as_of, post_safe),
         _section("thread", as_of, lambda: dated(lambda: _thread_entries(card, lifetime))),
     ]}
 
@@ -218,4 +233,8 @@ def render(extract, bibliography):
         else:
             for entry in section["entries"]:
                 lines.append(f"- {entry['key']} — {entry['description']}")
+        if count := section.get("withheld_count"):
+            noun = "card" if count == 1 else "cards"
+            lines.append(f"board: {count} linked {noun} in other projects withheld "
+                         "(post visibility is the subject project)")
     return "\n".join(lines) + "\n"

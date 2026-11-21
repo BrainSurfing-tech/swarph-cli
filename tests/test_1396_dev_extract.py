@@ -2268,6 +2268,7 @@ def test_bibliography_keys_version_and_sources(bibliography, capsys, monkeypatch
     assert "code:swarph-cli/src/swarph_cli/gateway/server.py:3950@5e4283274c3638a78dd4736bcd0a8894616b43b1" in body
     assert "card:#8 — linked · stage=build · open rows: #29" in body
     assert "card:#9 — incoming · stage=spec · open rows: floor 0" in body
+    assert "incoming · stage=spec · open rows: floor 0 (other project; visible under runner grants)" in body
     assert "card:#10" not in body
     for section in ("semantic", "timeline", "board", "thread"):
         assert f"## {section} (as of " in body
@@ -2276,10 +2277,37 @@ def test_bibliography_keys_version_and_sources(bibliography, capsys, monkeypatch
     assert secret not in posted["body"]["content"]
     assert "card:#8" in posted["body"]["content"]
     assert "card:#9" not in posted["body"]["content"]
+    assert "incoming" not in posted["body"]["content"]
+    assert ("board: 1 linked card in other projects withheld (post visibility is the subject project)"
+            in posted["body"]["content"])
     assert len(posts) == 2
     posts.append({"content": posted["body"]["content"]})
     assert board.run_board(argv) == 0
     assert "bibliography v3\n" in capsys.readouterr().out
+
+
+def test_bibliography_board_counts_only_linked_cards_even_after_entry_cap(bibliography, capsys, monkeypatch):
+    _, board, argv, posted, _ = bibliography
+    read = board._http_get_json
+    same = [{"id": i, "title": "local neighbor", "project_id": 6,
+             "stage": "build", "links": {"related": "#7"}} for i in range(20, 30)]
+    hidden = {"id": 31, "title": "never publish", "project_id": 8,
+              "stage": "build", "links": {"related": "#7"}}
+
+    def get(url, token, **kwargs):
+        status, data = read(url, token, **kwargs)
+        if url.endswith("/board/cards"):
+            data = {"cards": [*same, *data["cards"], hidden, hidden,
+                              {"id": 32, "title": "not linked", "project_id": 8}]}
+        return status, data
+
+    monkeypatch.setattr(board, "_http_get_json", get)
+    assert board.run_board([arg for arg in argv if arg != "--print-only"]) == 0
+    body = posted["body"]["content"]
+    assert body.count("- card:#") == 8
+    assert body.count("linked cards in other projects withheld") == 1
+    assert "board: 2 linked cards in other projects withheld" in body
+    assert not any(word in body for word in ("card:#9", "card:#31", "never publish"))
 
 
 def test_bibliography_unavailable_source_and_incomplete_history(bibliography, capsys):
