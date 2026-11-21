@@ -23,6 +23,8 @@ from typing import Iterable
 GAP_SECONDS = 60
 WAIT_REARM_GRACE = 600
 REALERT_SECONDS = 6 * 60 * 60
+MAX_CONSECUTIVE_LIST_FAILURES = 15
+SUBPROCESS_TIMEOUT = 30
 
 
 def writer_verdict(*, reader_alive: bool, monitor_rc: int) -> str:
@@ -94,8 +96,9 @@ def systemd_owns_monitor(cell: str, run=None) -> bool:
     ):
         try:
             proc = runner(argv, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", check=False)
-        except FileNotFoundError:
+                          encoding="utf-8", errors="replace", check=False,
+                          timeout=SUBPROCESS_TIMEOUT)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             continue
         if proc.returncode == 0:
             owned = True
@@ -120,7 +123,7 @@ def enforce_writers(cells: dict[str, str], *, status, run=None,
             continue
         rec_owned = systemd_owns_monitor(name, run=run)
         verdict = writer_verdict(reader_alive=True, monitor_rc=rc)
-        rec = state.setdefault(name, {})
+        rec = _cell_rec(state, name)
         rec["systemd_owned"] = rec_owned
         if writer_transition(verdict == "writer-down", rec):
             alert.append(name)
@@ -446,6 +449,14 @@ def _timer_watched(name: str, timers: Iterable[str]) -> bool:
     return any(needle in line for line in timers)
 
 
+def _cell_rec(state: dict, name: str) -> dict:
+    rec = state.get(name)
+    if not isinstance(rec, dict):
+        rec = {}
+        state[name] = rec
+    return rec
+
+
 def scan(cells: dict[str, str], cmdlines: Iterable[str], state: dict,
          now: float, *, gap: float = GAP_SECONDS,
          timers: Iterable[str] = (), crontab: str = "",
@@ -458,7 +469,7 @@ def scan(cells: dict[str, str], cmdlines: Iterable[str], state: dict,
     alert = []
     timers = list(timers)
     for name, inbox in cells.items():
-        rec = state.setdefault(name, {})
+        rec = _cell_rec(state, name)
         if (_watching(inbox, cmdlines, cell=name, proc_root=proc_root)
                 or _timer_watched(name, timers)
                 or _cron_watched(name, crontab)):
@@ -466,6 +477,9 @@ def scan(cells: dict[str, str], cmdlines: Iterable[str], state: dict,
             rec["outage"] = False
             rec["alerted_at"] = None
             rec.pop("outage_row", None)
+            rec.pop("mint_attempted_at", None)
+            rec.pop("list_failures", None)
+            rec.pop("peer_attempts", None)
             continue
         since = rec.get("missing_since")
         if since is None:
@@ -561,6 +575,80 @@ def _log_board(label: str, proc: subprocess.CompletedProcess) -> None:
         file=sys.stderr, flush=True)
 
 
+_MARKER_BOUNDARY = r"[A-Za-z0-9_.-]"
+
+
+def _has_dead_wake_marker(accept: object, sender: str) -> bool:
+    if not isinstance(accept, str) or not sender:
+        return False
+    pattern = rf"(?<!{_MARKER_BOUNDARY})WAKE-DEAD {re.escape(sender)}(?!{_MARKER_BOUNDARY})"
+    return re.search(pattern, accept) is not None
+
+
+def _parse_iso_ts(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
+
+
+def _row_from_this_outage(row: dict, rec: dict) -> bool:
+    raw_missing = rec.get("missing_since")
+    missing_since: float | None = None
+    if isinstance(raw_missing, (int, float)) and not isinstance(raw_missing, bool):
+        missing_since = float(raw_missing)
+    elif isinstance(raw_missing, str):
+        try:
+            missing_since = float(raw_missing)
+        except ValueError:
+            missing_since = None
+    created_ts = _parse_iso_ts(row.get("created_at"))
+    if created_ts is not None and missing_since is not None:
+        return created_ts >= missing_since
+    mint_at = rec.get("mint_attempted_at")
+    if mint_at is not None and not isinstance(mint_at, bool):
+        try:
+            mint_ts = float(mint_at)
+        except (TypeError, ValueError):
+            return False
+        return True if missing_since is None else mint_ts >= missing_since
+    return False
+
+
+def _run_board(argv: list[str], label: str, *, log_ok: bool = True) -> subprocess.CompletedProcess:
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=False, timeout=SUBPROCESS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print(
+            f"wake_watchdog: {label} timed out after {SUBPROCESS_TIMEOUT}s",
+            file=sys.stderr, flush=True)
+        return subprocess.CompletedProcess(argv, 124, stdout="", stderr="timed out")
+    except OSError as exc:
+        print(
+            f"wake_watchdog: {label} failed: {exc}",
+            file=sys.stderr, flush=True)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=str(exc))
+    if log_ok or proc.returncode != 0:
+        _log_board(label, proc)
+    return proc
+
+
 def _list_open_dead_wake_rows(swarph: str, sender: str, token_file: str) -> list[dict] | None:
     """List open commander-held dead-wake rows created by `sender` on card 729.
 
@@ -575,7 +663,12 @@ def _list_open_dead_wake_rows(swarph: str, sender: str, token_file: str) -> list
     try:
         listed = subprocess.run(
             argv, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", check=False)
+            errors="replace", check=False, timeout=SUBPROCESS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print(
+            f"wake_watchdog: obligations list timed out after {SUBPROCESS_TIMEOUT}s",
+            file=sys.stderr, flush=True)
+        return None
     except OSError as exc:
         print(f"wake_watchdog: obligations list failed: {exc}",
               file=sys.stderr, flush=True)
@@ -600,7 +693,6 @@ def _list_open_dead_wake_rows(swarph: str, sender: str, token_file: str) -> list
         print("wake_watchdog: obligations list payload missing obligations list",
               file=sys.stderr, flush=True)
         return None
-    marker = f"WAKE-DEAD {sender}"
     matched: list[dict] = []
     for row in data["obligations"]:
         if not isinstance(row, dict):
@@ -613,7 +705,7 @@ def _list_open_dead_wake_rows(swarph: str, sender: str, token_file: str) -> list
             continue
         if row.get("created_by") != sender:
             continue
-        if marker not in (row.get("accept") or ""):
+        if not _has_dead_wake_marker(row.get("accept"), sender):
             continue
         if not row.get("id"):
             continue
@@ -659,43 +751,95 @@ def _note_argv(swarph: str, sender: str, token_file: str, oid, when: str) -> lis
     return note
 
 
+def _pick_oid(candidates: list[dict], recorded_row: object) -> object:
+    if recorded_row is not None:
+        for row in candidates:
+            if str(row["id"]) == str(recorded_row):
+                return row["id"]
+    return candidates[0]["id"]
+
+
 def _handle_self_outage(swarph: str, sender: str, token_file: str,
                         inbox: str, now: float, state: dict,
                         state_path: Path) -> bool:
     """Idempotently record or re-alert a self-outage without minting duplicates."""
-    rec = state.setdefault(sender, {})
+    rec = _cell_rec(state, sender)
     existing = _list_open_dead_wake_rows(swarph, sender, token_file)
     if existing is None:
-        print(f"wake_watchdog: not minting dead-wake row for {sender}: open-row listing failed",
-              file=sys.stderr, flush=True)
-        return False
-    if existing:
-        recorded_row = rec.get("outage_row")
-        oid = existing[0]["id"]
-        if recorded_row is not None:
-            for row in existing:
-                if str(row["id"]) == str(recorded_row):
-                    oid = row["id"]
-                    break
+        try:
+            failures = int(rec.get("list_failures") or 0) + 1
+        except (TypeError, ValueError):
+            failures = 1
+        rec["list_failures"] = failures
         if rec.get("outage"):
-            said = subprocess.run(
-                _realert_note_argv(swarph, sender, token_file, oid, _dead_since(inbox, rec)),
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", check=False)
-            _log_board(f"cards say {oid}", said)
-            if said.returncode == 0:
-                rec["outage_row"] = oid
-                rec["alerted_at"] = now
-                save_state(state_path, state)
-                return True
+            save_state(state_path, state)
+            print(
+                f"wake_watchdog: not minting dead-wake row for {sender}: "
+                f"outage already active and open-row listing failed ({failures})",
+                file=sys.stderr, flush=True)
             return False
-        print(f"wake_watchdog: dead-wake row #{oid} already open for {sender}; recording without minting",
-              file=sys.stderr, flush=True)
+        if failures <= MAX_CONSECUTIVE_LIST_FAILURES:
+            save_state(state_path, state)
+            print(
+                f"wake_watchdog: not minting dead-wake row for {sender}: "
+                f"open-row listing failed ({failures}/{MAX_CONSECUTIVE_LIST_FAILURES})",
+                file=sys.stderr, flush=True)
+            return False
+        if rec.get("mint_attempted_at") is not None:
+            save_state(state_path, state)
+            print(
+                f"wake_watchdog: open-row listing failed ({failures}) for {sender}; "
+                "fallback mint already attempted, not minting again",
+                file=sys.stderr, flush=True)
+            return False
+        print(
+            f"wake_watchdog: open-row listing failed {failures} consecutive times "
+            f"(cap={MAX_CONSECUTIVE_LIST_FAILURES}) for {sender}; "
+            "minting once despite listing failure",
+            file=sys.stderr, flush=True)
+        existing = []
+    else:
+        rec["list_failures"] = 0
+
+    if existing:
+        if rec.get("outage"):
+            oid = _pick_oid(existing, rec.get("outage_row"))
+            rec["outage_row"] = oid
+            rec["alerted_at"] = now
+            save_state(state_path, state)
+            said = _run_board(
+                _realert_note_argv(swarph, sender, token_file, oid, _dead_since(inbox, rec)),
+                f"cards say {oid}")
+            return said.returncode == 0
+        this_outage = [r for r in existing if _row_from_this_outage(r, rec)]
+        if this_outage:
+            oid = _pick_oid(this_outage, rec.get("outage_row"))
+            print(
+                f"wake_watchdog: dead-wake row #{oid} from this outage already open for {sender}; "
+                "recording without minting",
+                file=sys.stderr, flush=True)
+            rec["outage_row"] = oid
+            rec["outage"] = True
+            rec["alerted_at"] = now
+            save_state(state_path, state)
+            return True
+        oid = _pick_oid(existing, rec.get("outage_row"))
+        open_keys = {str(r["id"]) for r in existing}
+        if isinstance(rec.get("noted"), list):
+            rec["noted"] = [x for x in rec["noted"] if str(x) not in open_keys]
         rec["outage_row"] = oid
         rec["outage"] = True
         rec["alerted_at"] = now
         save_state(state_path, state)
-        return True
+        print(
+            f"wake_watchdog: older open dead-wake row #{oid} found for {sender}; "
+            "sending note and clearing recovery mark",
+            file=sys.stderr, flush=True)
+        said = _run_board(
+            _realert_note_argv(swarph, sender, token_file, oid, _dead_since(inbox, rec)),
+            f"cards say {oid}")
+        return said.returncode == 0
+
     content = commander_alert(sender, _dead_since(inbox, rec))
     ask_argv = [swarph, "board", "cards", "ask", "729",
                 "--holder", "commander",
@@ -703,10 +847,9 @@ def _handle_self_outage(swarph: str, sender: str, token_file: str,
                 "--as", sender, content]
     if token_file:
         ask_argv.extend(["--token-file", token_file])
-    asked = subprocess.run(
-        ask_argv, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", check=False)
-    _log_board("cards ask 729", asked)
+    rec["mint_attempted_at"] = now
+    save_state(state_path, state)
+    asked = _run_board(ask_argv, "cards ask 729")
     if asked.returncode == 0:
         minted_id = _parse_minted_row_id(asked.stdout or "")
         if minted_id is not None:
@@ -724,8 +867,9 @@ def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
 
     Under commander-for-life the row is taken at mint, so the cell token
     cannot close, withdraw, or amend it. One status note on card 729 names
-    every open row. A successful note is not repeated. A failed note is logged
-    and the pass continues, and the next pass tries again. An untaken row
+    every open row. The note attempt is recorded in state before sending so a
+    stored-then-failed note is not repeated on later passes. A failed note is
+    logged and the pass continues. An untaken row
     is still withdrawn. A taken row is logged once. Every board call's
     return code and first output line are logged.
     """
@@ -733,7 +877,7 @@ def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
     if not matched:
         return
     when = _format_ts(now)
-    rec = state.setdefault(sender, {})
+    rec = _cell_rec(state, sender)
     logged = rec.setdefault("logged_taken", [])
     if not isinstance(logged, list):
         logged = []
@@ -753,18 +897,14 @@ def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
     noted_keys = {str(x) for x in noted}
     unnoted = [oid for oid in open_ids if str(oid) not in noted_keys]
     if unnoted:
-        said = subprocess.run(
-            _note_argv(swarph, sender, token_file, open_ids, when),
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", check=False)
-        label = f"cards say {open_ids[0]}" if len(open_ids) == 1 else f"cards say {len(open_ids)} rows"
-        _log_board(label, said)
-        if said.returncode == 0:
-            for oid in open_ids:
-                if str(oid) not in noted_keys:
-                    noted.append(oid)
-                    noted_keys.add(str(oid))
-            save_state(state_path, state)
+        for oid in open_ids:
+            if str(oid) not in noted_keys:
+                noted.append(oid)
+                noted_keys.add(str(oid))
+        save_state(state_path, state)
+        label = (f"cards say {open_ids[0]}" if len(open_ids) == 1
+                 else f"cards say {len(open_ids)} rows")
+        _run_board(_note_argv(swarph, sender, token_file, open_ids, when), label)
     logged_keys = {str(x) for x in logged}
     for row in matched:
         oid = row.get("id")
@@ -781,10 +921,7 @@ def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
                     "--reason", f"recovered {when}", "--as", sender]
         if token_file:
             withdraw.extend(["--token-file", token_file])
-        done = subprocess.run(
-            withdraw, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", check=False)
-        _log_board(f"obligations withdraw {oid}", done)
+        _run_board(withdraw, f"obligations withdraw {oid}")
 
 
 def cells_under(root: Path) -> dict[str, str]:
@@ -800,9 +937,10 @@ def cells_under(root: Path) -> dict[str, str]:
 
 def load_state(path: Path) -> dict:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def save_state(path: Path, state: dict) -> None:
@@ -815,8 +953,9 @@ def _listing(argv: list[str]) -> str:
     try:
         listed = subprocess.run(
             argv, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", check=False)
-    except FileNotFoundError:
+            encoding="utf-8", errors="replace", check=False,
+            timeout=SUBPROCESS_TIMEOUT)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return ""
     return listed.stdout or ""
 
@@ -876,8 +1015,83 @@ def mesh_send(swarph: str, to: str, sender: str, content: str,
             "--content", content]
     if token_file:
         argv.extend(["--token-file", token_file])
-    proc = subprocess.run(argv, check=False)
+    try:
+        proc = subprocess.run(argv, check=False, timeout=SUBPROCESS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print(
+            f"wake_watchdog: mesh send to {to} timed out after {SUBPROCESS_TIMEOUT}s",
+            file=sys.stderr, flush=True)
+        return 1
+    except OSError as exc:
+        print(
+            f"wake_watchdog: mesh send to {to} failed: {exc}",
+            file=sys.stderr, flush=True)
+        return 1
     return proc.returncode
+
+
+def _handle_peer_outage(swarph: str, name: str, sender: str, escalate: str,
+                        token_file: str, now: float, state: dict,
+                        state_path: Path) -> bool:
+    rec = _cell_rec(state, name)
+    attempts = rec.get("peer_attempts")
+    if not isinstance(attempts, dict):
+        attempts = {}
+        rec["peer_attempts"] = attempts
+
+    def _attempted_recently(ch: str) -> bool:
+        ts = attempts.get(ch)
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+            return False
+        return (now - float(ts)) < REALERT_SECONDS
+
+    if _attempted_recently("dm"):
+        dm_ok = True
+    else:
+        attempts["dm"] = now
+        save_state(state_path, state)
+        dm_ok = mesh_send(
+            swarph, name, sender,
+            "IMMUNE (cell watchdog): your DM wake is dead, re-arm",
+            token_file) == 0
+
+    if _attempted_recently("card"):
+        card_ok = True
+    else:
+        attempts["card"] = now
+        save_state(state_path, state)
+        card_argv = [
+            swarph, "board", "cards", "say", "729", "--as", sender,
+            "--to", name,
+            "--content", f"IMMUNE (cell watchdog) — {name}: DM wake is dead, re-arm",
+        ]
+        if token_file:
+            card_argv.extend(["--token-file", token_file])
+        card = _run_board(card_argv, f"cards say 729 ({name})", log_ok=False)
+        card_ok = card.returncode == 0
+
+    if not (escalate and escalate != name):
+        esc_ok = True
+    elif _attempted_recently("escalate"):
+        esc_ok = True
+    else:
+        attempts["escalate"] = now
+        save_state(state_path, state)
+        esc_ok = mesh_send(
+            swarph, escalate, sender,
+            f"IMMUNE (cell watchdog) — {name}: DM wake is dead, re-arm",
+            token_file) == 0
+
+    if dm_ok and card_ok and esc_ok:
+        ts_vals = [
+            float(v) for v in attempts.values()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        ]
+        rec["outage"] = True
+        rec["alerted_at"] = max(ts_vals) if ts_vals else now
+        save_state(state_path, state)
+        return True
+    return False
 
 
 def _swarph_bin() -> str:
@@ -936,10 +1150,13 @@ def main(argv: list[str] | None = None) -> int:
     swarph = _swarph_bin()
 
     def _status(name: str, _sw: str = swarph) -> int:
-        proc = subprocess.run(
-            [_sw, "monitor", "status", "--as", name],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            check=False)
+        try:
+            proc = subprocess.run(
+                [_sw, "monitor", "status", "--as", name],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                check=False, timeout=SUBPROCESS_TIMEOUT)
+        except (subprocess.TimeoutExpired, OSError):
+            return 1
         return proc.returncode
 
     reported = enforce_writers(cells, status=_status, state=state)
@@ -984,24 +1201,8 @@ def main(argv: list[str] | None = None) -> int:
                     swarph, sender, token_file, cells[name], now, state, state_path):
                 rc = 1
             continue
-        dm_ok = mesh_send(
-            swarph, name, sender, "IMMUNE (cell watchdog): your DM wake is dead, re-arm", token_file) == 0
-        card_argv = [swarph, "board", "cards", "say", "729", "--as", sender,
-                     "--to", name, "--content", f"IMMUNE (cell watchdog) — {name}: DM wake is dead, re-arm"]
-        if token_file:
-            card_argv.extend(["--token-file", token_file])
-        card = subprocess.run(card_argv, check=False)
-        esc_ok = True
-        if escalate and escalate != name:
-            esc_rc = mesh_send(
-                swarph, escalate, sender, f"IMMUNE (cell watchdog) — {name}: DM wake is dead, re-arm",
-                token_file)
-            esc_ok = esc_rc == 0
-        if dm_ok and card.returncode == 0 and esc_ok:
-            state[name]["outage"] = True
-            state[name]["alerted_at"] = now
-            save_state(state_path, state)
-        else:
+        if not _handle_peer_outage(
+                swarph, name, sender, escalate, token_file, now, state, state_path):
             rc = 1
     return rc
 

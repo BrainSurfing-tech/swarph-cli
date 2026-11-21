@@ -1,6 +1,7 @@
 """Card #1732: idempotent self-outage minting, fail-closed listing, and single recovery note."""
 from __future__ import annotations
 
+import ast
 import datetime
 import json
 import os
@@ -14,12 +15,19 @@ import pytest
 
 from swarph_cli.scripts import wake_watchdog
 from swarph_cli.scripts.wake_watchdog import (
+    MAX_CONSECUTIVE_LIST_FAILURES,
     REALERT_SECONDS,
+    SUBPROCESS_TIMEOUT,
     _handle_self_outage,
+    _has_dead_wake_marker,
     _list_open_dead_wake_rows,
     _note_argv,
+    _parse_iso_ts,
     _parse_minted_row_id,
     _realert_note_argv,
+    _row_from_this_outage,
+    load_state,
+    scan,
 )
 
 NOW = 1_700_000_000.0
@@ -43,9 +51,9 @@ def _cell(root: Path, name: str = "lab-ovh", *, alive: bool = False,
     inbox = root / name / "mesh-sidecar" / "inbox.log"
     inbox.parent.mkdir(parents=True, exist_ok=True)
     inbox.write_text("", encoding="utf-8")
+    hb = inbox.parent / "channel_heartbeat.json"
     if alive:
-        (inbox.parent / "channel_heartbeat.json").write_text(
-            json.dumps({"pid": 4242, "ts": time.time()}), encoding="utf-8")
+        hb.write_text(json.dumps({"pid": 4242, "ts": time.time()}), encoding="utf-8")
         if proc_root is not None:
             (proc_root / "4242").mkdir(parents=True, exist_ok=True)
             (proc_root / "4242" / "stat").write_text(
@@ -53,6 +61,8 @@ def _cell(root: Path, name: str = "lab-ovh", *, alive: bool = False,
             (proc_root / "111").mkdir(parents=True, exist_ok=True)
             (proc_root / "111" / "cmdline").write_bytes(
                 b"\0".join(a.encode() for a in ["claude", "--name", "lab"]) + b"\0")
+    elif hb.exists():
+        hb.unlink()
     return inbox
 
 
@@ -61,6 +71,7 @@ def _fake_swarph(tmp_path: Path, gateway_path: Path) -> Path:
     stub = tmp_path / "swarph"
     stub.write_text(textwrap.dedent(f"""\
         #!{sys.executable}
+        import datetime
         import json
         import os
         import sys
@@ -106,6 +117,10 @@ def _fake_swarph(tmp_path: Path, gateway_path: Path) -> Path:
                 "accept": flag_val("--accept"),
                 "taken_at": "2026-11-21T00:00:00Z",
             }}
+            if gw.get("stamp_created_at"):
+                now_val = float(os.environ.get("WAKE_WATCHDOG_NOW", "0") or 0)
+                row["created_at"] = datetime.datetime.fromtimestamp(
+                    now_val, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             gw.setdefault("obligations", []).append(row)
             save()
             print(f"minted #{{next_id}}")
@@ -121,6 +136,17 @@ def _fake_swarph(tmp_path: Path, gateway_path: Path) -> Path:
             save()
             print("posted")
             raise SystemExit(int(gw.get("say_rc", 0)))
+
+        if args[:2] == ["mesh", "send"]:
+            gw.setdefault("dms", []).append({{
+                "to": args[2] if len(args) > 2 else "",
+                "as": flag_val("--as"),
+                "kind": flag_val("--kind"),
+                "content": flag_val("--content"),
+            }})
+            save()
+            print("sent")
+            raise SystemExit(int(gw.get("dm_rc", 0)))
 
         if args[:3] == ["board", "obligations", "withdraw"]:
             oid = args[3]
@@ -492,8 +518,9 @@ def test_handle_self_outage_adopt_realert_and_fail_closed(tmp_path, monkeypatch,
     assert state["cell-a"].get("outage") is not True
     assert "open-row listing failed" in capsys.readouterr().err
 
-    # 2. Adoption when an existing open row is already present and outage is False
+    # 2a. Silent adoption when an open row is from this outage and outage is False
     calls: list[list[str]] = []
+    state = {"cell-a": {"missing_since": 150.0, "mint_attempted_at": 180.0}}
     monkeypatch.setattr(
         wake_watchdog, "_list_open_dead_wake_rows",
         lambda *_a: [{"id": 77, "card_id": 729, "holder": "commander",
@@ -508,9 +535,28 @@ def test_handle_self_outage_adopt_realert_and_fail_closed(tmp_path, monkeypatch,
     assert state["cell-a"]["outage"] is True
     assert state["cell-a"]["outage_row"] == 77
     assert state["cell-a"]["alerted_at"] == 200.0
-    assert "already open" in capsys.readouterr().err
+    assert "from this outage already open" in capsys.readouterr().err
+
+    # 2b. Older open row (created before missing_since) sends one note and clears noted mark
+    state = {"cell-a": {"missing_since": 1_700_000_000.0, "noted": [77, 999]}}
+    monkeypatch.setattr(
+        wake_watchdog, "_list_open_dead_wake_rows",
+        lambda *_a: [{"id": 77, "card_id": 729, "holder": "commander",
+                      "status": "open", "created_by": "cell-a", "accept": "WAKE-DEAD cell-a",
+                      "created_at": "2023-11-14T00:00:00Z"}],
+    )
+    assert _handle_self_outage("swarph", "cell-a", "", inbox, 250.0, state, state_path) is True
+    assert len(calls) == 1
+    assert calls[0][:4] == ["swarph", "board", "cards", "say"]
+    assert "#77" in calls[0][calls[0].index("--content") + 1]
+    assert state["cell-a"]["outage"] is True
+    assert state["cell-a"]["outage_row"] == 77
+    assert state["cell-a"]["alerted_at"] == 250.0
+    assert state["cell-a"]["noted"] == [999]
+    assert "older open dead-wake row #77" in capsys.readouterr().err
 
     # 3. Re-alert when outage is already True sends a note referencing outage_row
+    calls.clear()
     monkeypatch.setattr(
         wake_watchdog, "_list_open_dead_wake_rows",
         lambda *_a: [
@@ -525,3 +571,431 @@ def test_handle_self_outage_adopt_realert_and_fail_closed(tmp_path, monkeypatch,
     assert calls[0][:4] == ["swarph", "board", "cards", "say"]
     assert "#77" in calls[0][calls[0].index("--content") + 1]
     assert state["cell-a"]["alerted_at"] == 300.0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
+@pytest.mark.parametrize("stamp_created_at", [False, True])
+def test_second_outage_with_older_open_row_notifies_and_announces_second_recovery(
+    tmp_path, monkeypatch, stamp_created_at
+):
+    root = tmp_path / "state"
+    proc_root = tmp_path / "proc"
+    _yaml(tmp_path / "config")
+    state_path = tmp_path / "wake.json"
+    gw_path = tmp_path / "gateway.json"
+    gw_path.write_text(json.dumps({
+        "obligations": [],
+        "next_id": 1,
+        "stamp_created_at": stamp_created_at,
+    }), encoding="utf-8")
+    stub = _fake_swarph(tmp_path, gw_path)
+
+    monkeypatch.setenv("SWARPH_STATE_ROOT", str(root))
+    monkeypatch.setenv("WAKE_WATCHDOG_STATE", str(state_path))
+    monkeypatch.setenv("WAKE_WATCHDOG_PROC", str(proc_root))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("SWARPH_BIN", str(stub))
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    monkeypatch.setattr(wake_watchdog, "_listing", lambda _argv: "")
+
+    argv = ["--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
+
+    def run_pass(ts: float) -> int:
+        monkeypatch.setenv("WAKE_WATCHDOG_NOW", str(ts))
+        return wake_watchdog.main(argv)
+
+    # Phase 1: dead 4 passes -> 1 row minted, 0 notes
+    _cell(root, "lab-ovh", alive=False)
+    for i in range(4):
+        assert run_pass(NOW + i * 120.0) == 0
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert len(gw["obligations"]) == 1
+    assert gw.get("notes", []) == []
+
+    # Phase 2: alive 3 passes -> 1 recovery note naming #1, row #1 stays open
+    _cell(root, "lab-ovh", alive=True, proc_root=proc_root)
+    for i in range(4, 7):
+        assert run_pass(NOW + i * 120.0) == 0
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert len(gw["obligations"]) == 1
+    assert len(gw["notes"]) == 1
+    assert "recovered" in gw["notes"][0]["content"]
+    assert "#1" in gw["notes"][0]["content"]
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["lab-ovh"]["noted"] == [1]
+
+    # Phase 3: dead again 4 passes with row #1 still open -> 0 new rows, 1 note, noted cleared
+    _cell(root, "lab-ovh", alive=False)
+    for i in range(7, 11):
+        assert run_pass(NOW + i * 120.0) == 0
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert len(gw["obligations"]) == 1
+    assert len(gw["notes"]) == 2
+    assert "#1" in gw["notes"][1]["content"]
+    assert "still open" in gw["notes"][1]["content"]
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["lab-ovh"]["noted"] == []
+
+    # Phase 4: alive again 3 passes -> 1 second recovery note naming #1, no repeat
+    _cell(root, "lab-ovh", alive=True, proc_root=proc_root)
+    for i in range(11, 14):
+        assert run_pass(NOW + i * 120.0) == 0
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert len(gw["notes"]) == 3
+    assert "recovered" in gw["notes"][2]["content"]
+    assert "#1" in gw["notes"][2]["content"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
+def test_stored_then_failed_recovery_and_realert_notes_are_not_resent(tmp_path, monkeypatch):
+    # (a) 67 open rows, say_rc=1 after storing, 6 recovery passes -> 1 recovery note
+    root_a = tmp_path / "state_a"
+    proc_a = tmp_path / "proc_a"
+    _cell(root_a, "lab-ovh", alive=True, proc_root=proc_a)
+    _yaml(tmp_path / "config_a")
+    state_a = tmp_path / "wake_a.json"
+    state_a.write_text(json.dumps({
+        "lab-ovh": {"outage": True, "alerted_at": NOW - 100.0, "missing_since": NOW - 200.0},
+    }), encoding="utf-8")
+    obligations_a = [
+        {
+            "id": row_id,
+            "card_id": 729,
+            "holder": "commander",
+            "status": "open",
+            "created_by": "lab-ovh",
+            "accept": "WAKE-DEAD lab-ovh",
+            "taken_at": "2026-11-21T00:00:00Z",
+        }
+        for row_id in range(6221, 6288)
+    ]
+    gw_a = tmp_path / "gw_a.json"
+    gw_a.write_text(json.dumps({"obligations": obligations_a, "say_rc": 1}), encoding="utf-8")
+    stub_a = _fake_swarph(tmp_path, gw_a)
+    env_a = _base_env(tmp_path, root_a, state_a, stub_a, NOW)
+    env_a["WAKE_WATCHDOG_PROC"] = str(proc_a)
+    env_a["XDG_CONFIG_HOME"] = str(tmp_path / "config_a")
+    cmd = [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
+           "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
+    for i in range(6):
+        env_a["WAKE_WATCHDOG_NOW"] = str(NOW + i * 120.0)
+        proc = subprocess.run(cmd, env=env_a, capture_output=True, text=True, check=False)
+        assert proc.returncode == 0
+    gw_a_after = json.loads(gw_a.read_text(encoding="utf-8"))
+    assert len(gw_a_after["notes"]) == 1
+
+    # (b) 1 open row, past 6h re-alert, say_rc=1 after storing, 10 dead passes -> 1 re-alert, 0 new rows
+    root_b = tmp_path / "state_b"
+    _cell(root_b, "lab-ovh", alive=False)
+    _yaml(tmp_path / "config_b")
+    state_b = tmp_path / "wake_b.json"
+    alerted_at = 1000.0
+    state_b.write_text(json.dumps({
+        "lab-ovh": {
+            "missing_since": 0.0,
+            "outage": True,
+            "alerted_at": alerted_at,
+            "outage_row": 42,
+        },
+    }), encoding="utf-8")
+    gw_b = tmp_path / "gw_b.json"
+    gw_b.write_text(json.dumps({
+        "obligations": [{
+            "id": 42,
+            "card_id": 729,
+            "holder": "commander",
+            "status": "open",
+            "created_by": "lab-ovh",
+            "accept": "WAKE-DEAD lab-ovh",
+            "taken_at": "2026-11-21T00:00:00Z",
+        }],
+        "say_rc": 1,
+    }), encoding="utf-8")
+    stub_b = _fake_swarph(tmp_path, gw_b)
+    t1 = alerted_at + REALERT_SECONDS + 1.0
+    monkeypatch.setenv("SWARPH_STATE_ROOT", str(root_b))
+    monkeypatch.setenv("WAKE_WATCHDOG_STATE", str(state_b))
+    monkeypatch.setenv("WAKE_WATCHDOG_PROC", str(tmp_path / "proc_b"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config_b"))
+    monkeypatch.setenv("SWARPH_BIN", str(stub_b))
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    monkeypatch.setattr(wake_watchdog, "_listing", lambda _argv: "")
+
+    argv = ["--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
+    rcs: list[int] = []
+    for i in range(10):
+        monkeypatch.setenv("WAKE_WATCHDOG_NOW", str(t1 + i * 120.0))
+        rcs.append(wake_watchdog.main(argv))
+    assert rcs[0] == 1
+    assert all(rc == 0 for rc in rcs[1:])
+    gw_b_after = json.loads(gw_b.read_text(encoding="utf-8"))
+    assert len(gw_b_after["notes"]) == 1
+    assert len(gw_b_after["obligations"]) == 1
+    assert [c for c in gw_b_after["calls"] if c[:4] == ["board", "cards", "ask", "729"]] == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
+def test_n_consecutive_failed_listings_then_one_mint(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "state"
+    _cell(root, "lab-ovh", alive=False)
+    _yaml(tmp_path / "config")
+    state_path = tmp_path / "wake.json"
+    state_path.write_text(json.dumps({
+        "lab-ovh": {"missing_since": NOW - 120.0},
+    }), encoding="utf-8")
+    gw_path = tmp_path / "gateway.json"
+    gw_path.write_text(json.dumps({
+        "obligations": [],
+        "next_id": 1,
+        "ask_rc": 1,
+        "list_override": {"rc": 1, "stdout": "", "stderr": "gateway error"},
+    }), encoding="utf-8")
+    stub = _fake_swarph(tmp_path, gw_path)
+
+    monkeypatch.setenv("SWARPH_STATE_ROOT", str(root))
+    monkeypatch.setenv("WAKE_WATCHDOG_STATE", str(state_path))
+    monkeypatch.setenv("WAKE_WATCHDOG_PROC", str(tmp_path / "proc"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("SWARPH_BIN", str(stub))
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    monkeypatch.setattr(wake_watchdog, "_listing", lambda _argv: "")
+
+    argv = ["--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
+
+    for i in range(MAX_CONSECUTIVE_LIST_FAILURES):
+        monkeypatch.setenv("WAKE_WATCHDOG_NOW", str(NOW + i * 120.0))
+        rc = wake_watchdog.main(argv)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert f"({i + 1}/{MAX_CONSECUTIVE_LIST_FAILURES})" in err
+
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert gw["obligations"] == []
+
+    # Pass MAX_CONSECUTIVE_LIST_FAILURES + 1: cap exceeded -> mints once (even with ask_rc=1)
+    monkeypatch.setenv("WAKE_WATCHDOG_NOW", str(NOW + MAX_CONSECUTIVE_LIST_FAILURES * 120.0))
+    rc_cap = wake_watchdog.main(argv)
+    assert rc_cap == 1
+    err_cap = capsys.readouterr().err
+    assert f"cap={MAX_CONSECUTIVE_LIST_FAILURES}" in err_cap
+    assert "minting once despite listing failure" in err_cap
+
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert len(gw["obligations"]) == 1
+
+    # 10 more failing-listing passes -> still exactly 1 row minted
+    for i in range(10):
+        monkeypatch.setenv(
+            "WAKE_WATCHDOG_NOW",
+            str(NOW + (MAX_CONSECUTIVE_LIST_FAILURES + 1 + i) * 120.0),
+        )
+        assert wake_watchdog.main(argv) == 1
+        assert "fallback mint already attempted" in capsys.readouterr().err
+
+    gw_final = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert len(gw_final["obligations"]) == 1
+    ask_calls = [c for c in gw_final["calls"] if c[:4] == ["board", "cards", "ask", "729"]]
+    assert len(ask_calls) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
+def test_longer_cell_name_row_is_not_adopted(tmp_path):
+    root = tmp_path / "state"
+    _cell(root, "lab-ovh", alive=False)
+    _yaml(tmp_path / "config")
+    state_path = tmp_path / "wake.json"
+    state_path.write_text(json.dumps({
+        "lab-ovh": {"missing_since": NOW - 120.0},
+    }), encoding="utf-8")
+    recent_iso = datetime.datetime.fromtimestamp(
+        NOW - 60.0, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    gw_path = tmp_path / "gateway.json"
+    gw_path.write_text(json.dumps({
+        "next_id": 100,
+        "obligations": [
+            {
+                "id": 11,
+                "card_id": 729,
+                "holder": "commander",
+                "status": "open",
+                "created_by": "lab-ovh",
+                "accept": "WAKE-DEAD lab-ovh-2",
+                "created_at": recent_iso,
+            },
+            {
+                "id": 12,
+                "card_id": 729,
+                "holder": "commander",
+                "status": "open",
+                "created_by": "lab-ovh",
+                "accept": "WAKE-DEAD lab-ovh2",
+                "created_at": recent_iso,
+            },
+        ],
+    }), encoding="utf-8")
+    stub = _fake_swarph(tmp_path, gw_path)
+    env = _base_env(tmp_path, root, state_path, stub, NOW)
+    proc = subprocess.run(
+        [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog",
+         "--as", "lab-ovh", "--escalate", "drop-on-meta-edge"],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    ask_calls = [c for c in gw["calls"] if c[:4] == ["board", "cards", "ask", "729"]]
+    assert len(ask_calls) == 1
+    assert len(gw["obligations"]) == 3
+    assert gw["obligations"][-1]["id"] == 100
+    assert gw["obligations"][-1]["accept"] == "WAKE-DEAD lab-ovh"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
+@pytest.mark.parametrize("dm_rc", [1, 0], ids=["dm-and-say-fail", "dm-ok-say-fail"])
+def test_10_passes_stored_then_failed_peer_sends_send_each_channel_once(
+    tmp_path, monkeypatch, dm_rc
+):
+    root = tmp_path / "state"
+    _cell(root, "peer-cell", alive=False)
+    state_path = tmp_path / "wake.json"
+    state_path.write_text(json.dumps({
+        "peer-cell": {"missing_since": NOW - 120.0},
+    }), encoding="utf-8")
+    gw_path = tmp_path / "gateway.json"
+    gw_path.write_text(json.dumps({
+        "obligations": [],
+        "dm_rc": dm_rc,
+        "say_rc": 1,
+    }), encoding="utf-8")
+    stub = _fake_swarph(tmp_path, gw_path)
+
+    monkeypatch.setenv("SWARPH_STATE_ROOT", str(root))
+    monkeypatch.setenv("WAKE_WATCHDOG_STATE", str(state_path))
+    monkeypatch.setenv("WAKE_WATCHDOG_PROC", str(tmp_path / "proc"))
+    monkeypatch.setenv("SWARPH_BIN", str(stub))
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    monkeypatch.setattr(wake_watchdog, "_listing", lambda _argv: "")
+
+    argv = ["--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
+    rcs: list[int] = []
+    for i in range(10):
+        monkeypatch.setenv("WAKE_WATCHDOG_NOW", str(NOW + i * 120.0))
+        rcs.append(wake_watchdog.main(argv))
+
+    assert rcs[0] == 1
+    assert all(rc == 0 for rc in rcs[1:])
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    peer_dms = [d for d in gw["dms"] if d["to"] == "peer-cell"]
+    esc_dms = [d for d in gw["dms"] if d["to"] == "drop-on-meta-edge"]
+    card_notes = [n for n in gw["notes"] if n["to"] == "peer-cell"]
+    assert len(peer_dms) == 1
+    assert len(card_notes) == 1
+    assert len(esc_dms) == 1
+
+
+# ── Additional cross-platform unit tests ────────────────────────────────────
+
+
+def test_has_dead_wake_marker_exact_whole_token():
+    assert _has_dead_wake_marker("WAKE-DEAD cell-a", "cell-a") is True
+    assert _has_dead_wake_marker("prefix WAKE-DEAD cell-a (old)", "cell-a") is True
+    assert _has_dead_wake_marker("WAKE-DEAD cell-a-2", "cell-a") is False
+    assert _has_dead_wake_marker("WAKE-DEAD cell-a2", "cell-a") is False
+    assert _has_dead_wake_marker("WAKE-DEAD cell-a_2", "cell-a") is False
+    assert _has_dead_wake_marker("WAKE-DEAD cell-a.2", "cell-a") is False
+    assert _has_dead_wake_marker("XWAKE-DEAD cell-a", "cell-a") is False
+    assert _has_dead_wake_marker(None, "cell-a") is False
+    assert _has_dead_wake_marker("WAKE-DEAD cell-a", "") is False
+
+
+def test_parse_iso_ts_variants():
+    z_ts = _parse_iso_ts("2026-11-21T00:00:00Z")
+    plus_ts = _parse_iso_ts("2026-11-21T00:00:00+00:00")
+    naive_ts = _parse_iso_ts("2026-11-21T00:00:00")
+    assert z_ts is not None
+    assert z_ts == plus_ts == naive_ts
+    assert _parse_iso_ts(1234) == 1234.0
+    assert _parse_iso_ts(1234.5) == 1234.5
+    assert _parse_iso_ts(True) is None
+    assert _parse_iso_ts("") is None
+    assert _parse_iso_ts("not-a-timestamp") is None
+    assert _parse_iso_ts(None) is None
+
+
+def test_row_from_this_outage_variants():
+    t0 = 1_700_000_000.0
+    iso_before = datetime.datetime.fromtimestamp(
+        t0 - 60.0, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    iso_equal = datetime.datetime.fromtimestamp(
+        t0, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    iso_after = datetime.datetime.fromtimestamp(
+        t0 + 60.0, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    assert _row_from_this_outage({"created_at": iso_after}, {"missing_since": t0}) is True
+    assert _row_from_this_outage({"created_at": iso_equal}, {"missing_since": t0}) is True
+    assert _row_from_this_outage({"created_at": iso_before}, {"missing_since": t0}) is False
+    assert _row_from_this_outage({}, {"missing_since": t0, "mint_attempted_at": t0 + 10.0}) is True
+    assert _row_from_this_outage({}, {"missing_since": t0, "mint_attempted_at": t0 - 10.0}) is False
+    assert _row_from_this_outage({}, {"mint_attempted_at": t0}) is True
+    assert _row_from_this_outage({}, {"missing_since": t0}) is False
+    assert _row_from_this_outage({}, {}) is False
+
+
+def test_list_open_dead_wake_rows_token_file_and_timeout(monkeypatch, capsys):
+    seen_argv: list[list[str]] = []
+
+    def ok_run(argv, **_kwargs):
+        seen_argv.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout='{"obligations": []}', stderr="")
+
+    monkeypatch.setattr(wake_watchdog.subprocess, "run", ok_run)
+    assert _list_open_dead_wake_rows("swarph", "cell-a", "/tmp/tok") == []
+    assert seen_argv[0][-2:] == ["--token-file", "/tmp/tok"]
+
+    def timeout_run(argv, **_kwargs):
+        raise subprocess.TimeoutExpired(argv, SUBPROCESS_TIMEOUT)
+
+    monkeypatch.setattr(wake_watchdog.subprocess, "run", timeout_run)
+    assert _list_open_dead_wake_rows("swarph", "cell-a", "") is None
+    assert "timed out" in capsys.readouterr().err
+
+
+def test_load_state_and_scan_handle_non_dict_state(tmp_path):
+    state_path = tmp_path / "wake.json"
+    state_path.write_text("[]", encoding="utf-8")
+    assert load_state(state_path) == {}
+    state_path.write_text('"str"', encoding="utf-8")
+    assert load_state(state_path) == {}
+
+    inbox = tmp_path / "cell-a" / "mesh-sidecar" / "inbox.log"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text("", encoding="utf-8")
+    state = {"cell-a": ["bad"]}
+    assert scan({"cell-a": str(inbox)}, [], state, now=100.0) == []
+    assert isinstance(state["cell-a"], dict)
+    assert state["cell-a"]["missing_since"] == 100.0
+
+
+def test_every_subprocess_run_passes_timeout():
+    src_path = Path("src/swarph_cli/scripts/wake_watchdog.py")
+    tree = ast.parse(src_path.read_text(encoding="utf-8"), filename=str(src_path))
+    calls = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        is_subproc_run = (
+            isinstance(func, ast.Attribute)
+            and func.attr == "run"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "subprocess"
+        )
+        is_runner = isinstance(func, ast.Name) and func.id == "runner"
+        if is_subproc_run or is_runner:
+            calls.append(node)
+            kw_names = {kw.arg for kw in node.keywords if kw.arg is not None}
+            assert "timeout" in kw_names, f"missing timeout= at line {node.lineno}"
+    assert len(calls) >= 5
