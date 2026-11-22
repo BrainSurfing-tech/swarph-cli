@@ -2250,6 +2250,61 @@ def test_bibliography_lifetime_and_card_match(bibliography, capsys):
     assert "/prior" not in body and "/future" not in body
 
 
+def test_bibliography_missing_indexed_sha_uses_unpinned_keys_and_count(
+    bibliography, tmp_path, fed, capsys,
+):
+    _, board, argv, posted, _ = bibliography
+    (tmp_path / "cli" / ".codegraph" / "indexed_origin_main").unlink()
+    report, _ = fed
+    guessed = "1a2b3c4d" * 5
+    with report.open("a", encoding="utf-8") as stream:
+        stream.write(f"# repo swarph-cli {guessed} indexed\n")
+    argv += ["--symbol", "POST /api/chat-sync"]
+    assert board.run_board(argv) == 0
+    printed = capsys.readouterr().out
+    assert board.run_board([arg for arg in argv if arg != "--print-only"]) == 0
+    for body in (printed, posted["body"]["content"]):
+        for line in (3950, 3949):
+            coordinate = f"code:swarph-cli/src/swarph_cli/gateway/server.py:{line}"
+            assert f"{coordinate}@unpinned" in body
+            assert f"{coordinate}@{guessed}" not in body
+        # The exact route symbol occurs in both the symbol and route lists.
+        assert body.count("@unpinned") == 3
+        assert "unpinned code entries: 3 (no indexed SHA" in body
+
+
+def test_bibliography_reports_same_key_merges_after_the_cap(
+    bibliography, capsys, monkeypatch,
+):
+    bib, board, argv, posted, _ = bibliography
+    with open(bib.timeline._timeline_path(), "w", encoding="utf-8") as stream:
+        stream.write(
+            "- 2026-11-03T13:00Z · **worker** · older linked · → [[repeated]]\n"
+            "- 2026-11-03T13:01Z · **worker** · older unlinked\n"
+            + "".join(f"- 2026-11-03T13:{i:02d}Z · **worker** · unique {i}\n"
+                      for i in range(2, 9))
+            + "- 2026-11-03T13:10Z · **worker** · newer linked · → [[repeated]]\n"
+            "- 2026-11-03T13:01Z · **worker** · newer unlinked\n"
+        )
+    monkeypatch.setattr(bib, "_memory_results", lambda query: [
+        {"slug": "topic", "description": "first result"},
+        {"slug": "topic", "description": "later result"},
+    ])
+    assert board.run_board(argv) == 0
+    printed = capsys.readouterr().out
+    assert board.run_board([arg for arg in argv if arg != "--print-only"]) == 0
+    for body in (printed, posted["body"]["content"]):
+        timeline = body.split("## timeline", 1)[1].split("## board", 1)[0]
+        assert timeline.count("- tl:") == 8
+        assert "tl:2026-11-03/repeated — newer linked" in timeline
+        assert "tl:2026-11-03T13:01Z/worker — newer unlinked" in timeline
+        assert "merged 2 additional records with the same citation keys" in timeline
+        assert "entry cap: 1 additional unique key omitted" in timeline
+        semantic = body.split("## semantic", 1)[1].split("## timeline", 1)[0]
+        assert "mem:topic — first result" in semantic
+        assert "merged 1 additional record with the same citation key" in semantic
+
+
 def test_bibliography_keys_version_and_sources(bibliography, capsys, monkeypatch):
     bib, board, argv, posted, posts = bibliography
     secret = "ghp_" + "aB37" * 9

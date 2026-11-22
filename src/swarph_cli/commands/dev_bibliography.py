@@ -64,7 +64,6 @@ def _board_section(card, read, as_of, post_safe):
 
     def entries():
         links = _links(card)
-        visible = {}
         for row in _rows(read("/board/cards"), "cards"):
             ident = row.get("id")
             if type(ident) is not int or ident == card["id"]:
@@ -75,9 +74,7 @@ def _board_section(card, read, as_of, post_safe):
             # Count before the entry cap; the audience lacks the runner's other grants.
             if post_safe and other_project:
                 withheld.add(ident)
-            else:
-                visible.setdefault(ident, (row, other_project))
-        for ident, (row, other_project) in visible.items():
+                continue
             obligations = row.get("open_obligations")
             if obligations is None:
                 opened = "unavailable"
@@ -165,18 +162,24 @@ def _semantic_entries(card):
 
 
 def _section(name, as_of, find):
-    entries = {}
+    entries = []
+    seen = set()
+    merged = 0
     try:
         for key, description in find():
-            entries.setdefault(_clean(key), description)
-            if len(entries) == ROW_LIMIT:
-                break
+            key = _clean(key)
+            if key in seen:
+                merged += 1
+                continue
+            seen.add(key)
+            if len(entries) < ROW_LIMIT:
+                entries.append({"key": key, "description": description})
     except Unavailable as exc:
         return {"name": name, "as_of": as_of, "unavailable": _clean(exc), "entries": []}
     except (OSError, ValueError, TypeError, AttributeError, KeyError):
         return {"name": name, "as_of": as_of, "unavailable": "source unreadable or invalid", "entries": []}
-    return {"name": name, "as_of": as_of,
-            "entries": [{"key": key, "description": val} for key, val in entries.items()]}
+    return {"name": name, "as_of": as_of, "entries": entries,
+            "merged_count": merged, "omitted_count": len(seen) - len(entries)}
 
 
 def collect(card, read, thread_url, *, post_safe=False):
@@ -233,6 +236,12 @@ def render(extract, bibliography):
         else:
             for entry in section["entries"]:
                 lines.append(f"- {entry['key']} — {entry['description']}")
+        if merged := section.get("merged_count"):
+            records, keys = ("record", "key") if merged == 1 else ("records", "keys")
+            lines.append(f"merged {merged} additional {records} with the same citation {keys}")
+        if omitted := section.get("omitted_count"):
+            keys = "key" if omitted == 1 else "keys"
+            lines.append(f"entry cap: {omitted} additional unique {keys} omitted")
         if count := section.get("withheld_count"):
             noun = "card" if count == 1 else "cards"
             lines.append(f"board: {count} linked {noun} in other projects withheld "

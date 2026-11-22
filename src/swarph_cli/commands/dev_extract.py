@@ -994,9 +994,7 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
         if not citations:
             return loc
         sha = (pins.get(row["repo"]) or {}).get("sha")
-        if not sha:
-            return f"{loc} (citation unavailable: no indexed SHA)"
-        return f"code:{row['repo']}/{loc}@{sha}"
+        return f"code:{row['repo']}/{loc}@{sha or 'unpinned'}"
 
     head = ["# dev extract (card #1410, #559 phase 2) — pinned, small, dry-run-safe"]
     if ex.get("card"):
@@ -1038,6 +1036,14 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
         routes = ex.get("routes", [])
         symbols = ex.get("symbols", [])
         shown_symbols = symbols[:ROW_LIMIT - int(bool(citations and routes))]
+        route_room = ROW_LIMIT - len(shown_symbols) if citations else ROW_LIMIT
+        shown_routes = routes[:route_room]
+        if citations:
+            unpinned = sum(not (pins.get(row["repo"]) or {}).get("sha")
+                           for row in [*shown_symbols, *shown_routes])
+            if unpinned:
+                head.append(f"unpinned code entries: {unpinned} "
+                            "(no indexed SHA; before output clipping)")
         for s in shown_symbols:
             loc = location(s)
             n = s.get("callers")
@@ -1072,8 +1078,7 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
         head.append("")
         if routes:
             head.append("routes + params:")
-            route_room = ROW_LIMIT - len(shown_symbols) if citations else ROW_LIMIT
-            for r in routes[:route_room]:
+            for r in shown_routes:
                 head.append(f"- {r['name']} {r['repo']} "
                              f"{location(r)}"
                              + (f" params: {r['signature'][:100]}" if r.get("signature") else ""))
