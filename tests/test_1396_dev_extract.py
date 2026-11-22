@@ -1371,6 +1371,10 @@ def test_board_dev_extract_uses_card_project_allowlist(idx, fed, monkeypatch,
     def _fake_get(url, tok, **k):
         if url.endswith("/board/cards/7"):
             return 200, card
+        if url.endswith("/board/cards"):
+            return 200, {"cards": []}
+        if url.endswith("/board/cards/7/thread?limit=1000"):
+            return 409, {"detail": "thread absent"}
         if url.endswith("/board/projects"):
             return 200, projs
         if url.endswith("/peers/lab-ovh/grants"):
@@ -1541,6 +1545,10 @@ def _fake_board_env(monkeypatch, *, grants, grants_status=200,
             if card_status != 200:
                 return card_status, {"detail": "down"}
             return 200, _card
+        if url.endswith("/board/cards"):
+            return 200, {"cards": []}
+        if url.endswith("/board/cards/7/thread?limit=1000"):
+            return 200, {"messages": []}
         if url.endswith("/board/projects"):
             return 200, _projs
         if url.endswith("/peers/lab-ovh/grants"):
@@ -2156,7 +2164,15 @@ def test_unentitled_posts_hide_missing_repos(fed, tmp_path):
 
 def test_unentitled_post_bodies_match_live(idx, fed, monkeypatch, capsys):
     """Acceptance 4 end to end: the two posted bodies are identical."""
+    from datetime import datetime
+    from types import SimpleNamespace
+
     from swarph_cli.commands import board as board_mod
+    from swarph_cli.commands import dev_bibliography as bib
+
+    # Only the card text should vary; a second rollover is not a visibility signal.
+    monkeypatch.setattr(bib, "datetime", SimpleNamespace(
+        now=lambda tz: datetime(2026, 11, 22, tzinfo=tz)))
     rep, wsp = fed
     bodies = []
     for body in ("fix chat_sync in swarph-ghost-zzz",
@@ -2173,3 +2189,221 @@ def test_unentitled_post_bodies_match_live(idx, fed, monkeypatch, capsys):
         assert "is not in the index" not in posted["body"]["content"]
         bodies.append(posted["body"]["content"])
     assert bodies[0] == bodies[1]
+
+
+# ── #1726: versioned card bibliography ──
+
+@pytest.fixture()
+def bibliography(idx, fed, tmp_path, monkeypatch):
+    from swarph_cli.commands import board, dev_bibliography as bib
+
+    timeline_file = tmp_path / "timeline.md"
+    monkeypatch.setenv("SWARPH_TIMELINE", str(timeline_file))
+    monkeypatch.setattr(bib, "DESKS", tmp_path / "daily")
+    timeline_file.write_text(
+        "- 2026-11-02T10:00Z · **worker** · prior · → [[prior]]\n"
+        "- 2026-11-03T13:00Z · **worker** · decision · → [[choice]]\n"
+        "- 2026-11-04T00:00Z · **worker** · future · → [[future]]\n", encoding="utf-8")
+    run = bib.DESKS / "2026-11-04"
+    run.mkdir(parents=True)
+    (run / "annotated.jsonl").write_text("\n".join(json.dumps(row) for row in (
+        {"record": "manifest", "generated_at": "2026-11-04T00:15:00Z"},
+        *({"id": ident, "from": "desk", "kind": "fyi", "created_at": at,
+           "thread_id": thread, "content": "DO NOT PUBLISH THIS DESK TEXT",
+           "annotations": {"cards": [{"token": f"#{card}", "status": "resolved"}]}}
+          for ident, at, thread, card in [
+              (11, "2026-11-03T11:59:59Z", "target", 7),
+              (12, "2026-11-03T12:00:00Z", "unrelated", 7),
+              (13, "2026-11-03T13:00:00Z", "target", 701),
+              (14, "2026-11-03T13:00:00Z", "unrelated", 701),
+              (15, "2026-11-03T15:00:01Z", "target", 7),
+          ]),
+    )), encoding="utf-8")
+    argv = _print_only_argv(idx, fed)
+    card = {"id": 7, "project_id": 6, "title": "sample subject",
+            "body": "fix chat_sync", "created_at": "2026-11-03T12:00:00Z",
+            "stage": "done", "stage_history": [{"stage": "done", "at": "2026-11-03T15:00:00Z"}],
+            "links": {"related": "card:#8"}}
+    posted = _fake_board_env(monkeypatch, card=card, thread_uuid="target", grants=[])
+    old = board._http_get_json
+    posts = [{"content": "bibliography v1\nEarlier edition"},
+             {"content": "comment that mentions bibliography v5"}]
+
+    def get(url, token, **kwargs):
+        if url.endswith("/board/cards/7/thread?limit=1000"):
+            return 200, {"messages": posts}
+        if url.endswith("/board/cards"):
+            return 200, {"cards": [
+                {"id": 8, "project_id": 6, "title": "linked", "stage": "build",
+                 "open_obligations": [{"id": 29}]},
+                {"id": 9, "project_id": 7, "title": "incoming", "stage": "spec", "links": {"parent": "#7"},
+                 "open_obligations": []},
+                {"id": 10, "title": "unrelated card", "stage": "build"},
+            ]}
+        return old(url, token, **kwargs)
+
+    monkeypatch.setattr(board, "_http_get_json", get)
+    return bib, board, argv, posted, posts
+
+
+def test_bibliography_lifetime_and_card_match(bibliography, capsys):
+    bib, board, argv, _, _ = bibliography
+    assert board.run_board(argv) == 0
+    body = capsys.readouterr().out
+    assert "dm:12 — desk fyi 2026-11-03T12:00:00Z" in body
+    assert "dm:13 — desk fyi 2026-11-03T13:00:00Z" in body
+    for absent in ("dm:11", "dm:14", "dm:15", "DO NOT PUBLISH"):
+        assert absent not in body
+    assert "tl:2026-11-03/choice" in body
+    assert "/prior" not in body and "/future" not in body
+
+
+def test_bibliography_missing_indexed_sha_uses_unpinned_keys_and_count(
+    bibliography, tmp_path, fed, capsys,
+):
+    _, board, argv, posted, _ = bibliography
+    (tmp_path / "cli" / ".codegraph" / "indexed_origin_main").unlink()
+    report, _ = fed
+    guessed = "1a2b3c4d" * 5
+    with report.open("a", encoding="utf-8") as stream:
+        stream.write(f"# repo swarph-cli {guessed} indexed\n")
+    argv += ["--symbol", "POST /api/chat-sync"]
+    assert board.run_board(argv) == 0
+    printed = capsys.readouterr().out
+    assert board.run_board([arg for arg in argv if arg != "--print-only"]) == 0
+    for body in (printed, posted["body"]["content"]):
+        for line in (3950, 3949):
+            coordinate = f"code:swarph-cli/src/swarph_cli/gateway/server.py:{line}"
+            assert f"{coordinate}@unpinned" in body
+            assert f"{coordinate}@{guessed}" not in body
+        # The exact route symbol occurs in both the symbol and route lists.
+        assert body.count("@unpinned") == 3
+        assert "unpinned code entries: 3 (no indexed SHA" in body
+
+
+def test_bibliography_reports_same_key_merges_after_the_cap(
+    bibliography, capsys, monkeypatch,
+):
+    bib, board, argv, posted, _ = bibliography
+    with open(bib.timeline._timeline_path(), "w", encoding="utf-8") as stream:
+        stream.write(
+            "- 2026-11-03T13:00Z · **worker** · older linked · → [[repeated]]\n"
+            "- 2026-11-03T13:01Z · **worker** · older unlinked\n"
+            + "".join(f"- 2026-11-03T13:{i:02d}Z · **worker** · unique {i}\n"
+                      for i in range(2, 9))
+            + "- 2026-11-03T13:10Z · **worker** · newer linked · → [[repeated]]\n"
+            "- 2026-11-03T13:01Z · **worker** · newer unlinked\n"
+        )
+    monkeypatch.setattr(bib, "_memory_results", lambda query: [
+        {"slug": "topic", "description": "first result"},
+        {"slug": "topic", "description": "later result"},
+    ])
+    assert board.run_board(argv) == 0
+    printed = capsys.readouterr().out
+    assert board.run_board([arg for arg in argv if arg != "--print-only"]) == 0
+    for body in (printed, posted["body"]["content"]):
+        timeline = body.split("## timeline", 1)[1].split("## board", 1)[0]
+        assert timeline.count("- tl:") == 8
+        assert "tl:2026-11-03/repeated — newer linked" in timeline
+        assert "tl:2026-11-03T13:01Z/worker — newer unlinked" in timeline
+        assert "merged 2 additional records with the same citation keys" in timeline
+        assert "entry cap: 1 additional unique key omitted" in timeline
+        semantic = body.split("## semantic", 1)[1].split("## timeline", 1)[0]
+        assert "mem:topic — first result" in semantic
+        assert "merged 1 additional record with the same citation key" in semantic
+
+
+def test_bibliography_keys_version_and_sources(bibliography, capsys, monkeypatch):
+    bib, board, argv, posted, posts = bibliography
+    secret = "ghp_" + "aB37" * 9
+
+    def fake_gbrain(query):
+        assert query == "sample subject\nfix chat_sync"
+        return [{"slug": "result", "title": f"description {secret}"},
+                *({"slug": f"sample-{i}", "title": "example"} for i in range(8))]
+
+    monkeypatch.setattr(bib, "_memory_results", fake_gbrain)
+    assert board.run_board(argv) == 0
+    body = capsys.readouterr().out
+    assert "bibliography v2\n" in body
+    assert "mem:result — description " in body and secret not in body
+    assert body.count("mem:") == 8
+    assert "code:swarph-cli/src/swarph_cli/gateway/server.py:3950@5e4283274c3638a78dd4736bcd0a8894616b43b1" in body
+    assert "card:#8 — linked · stage=build · open rows: #29" in body
+    assert "card:#9 — incoming · stage=spec · open rows: floor 0" in body
+    assert "incoming · stage=spec · open rows: floor 0 (other project; visible under runner grants)" in body
+    assert "card:#10" not in body
+    for section in ("semantic", "timeline", "board", "thread"):
+        assert f"## {section} (as of " in body
+    assert board.run_board([arg for arg in argv if arg != "--print-only"]) == 0
+    assert posted["body"]["content"].startswith("bibliography v2\n")
+    assert secret not in posted["body"]["content"]
+    assert "card:#8" in posted["body"]["content"]
+    assert "card:#9" not in posted["body"]["content"]
+    assert "incoming" not in posted["body"]["content"]
+    assert ("board: 1 linked card in other projects withheld (post visibility is the subject project)"
+            in posted["body"]["content"])
+    assert len(posts) == 2
+    posts.append({"content": posted["body"]["content"]})
+    assert board.run_board(argv) == 0
+    assert "bibliography v3\n" in capsys.readouterr().out
+
+
+def test_bibliography_board_counts_only_linked_cards_even_after_entry_cap(bibliography, capsys, monkeypatch):
+    _, board, argv, posted, _ = bibliography
+    read = board._http_get_json
+    same = [{"id": i, "title": "local neighbor", "project_id": 6,
+             "stage": "build", "links": {"related": "#7"}} for i in range(20, 30)]
+    hidden = {"id": 31, "title": "never publish", "project_id": 8,
+              "stage": "build", "links": {"related": "#7"}}
+
+    def get(url, token, **kwargs):
+        status, data = read(url, token, **kwargs)
+        if url.endswith("/board/cards"):
+            data = {"cards": [*same, *data["cards"], hidden, hidden,
+                              {"id": 32, "title": "not linked", "project_id": 8}]}
+        return status, data
+
+    monkeypatch.setattr(board, "_http_get_json", get)
+    assert board.run_board([arg for arg in argv if arg != "--print-only"]) == 0
+    body = posted["body"]["content"]
+    assert body.count("- card:#") == 8
+    assert body.count("linked cards in other projects withheld") == 1
+    assert "board: 2 linked cards in other projects withheld" in body
+    assert not any(word in body for word in ("card:#9", "card:#31", "never publish"))
+
+
+def test_bibliography_unavailable_source_and_incomplete_history(bibliography, capsys):
+    bib, board, argv, posted, posts = bibliography
+    os.remove(bib.timeline._timeline_path())
+    posts.extend({"content": ""} for _ in range(998))
+    assert board.run_board(argv) == 0
+    body = capsys.readouterr().out
+    assert "version unavailable" in body
+    assert "unavailable: timeline file is missing" in body
+    assert "keyword-only not assured on the deployed gbrain" in body
+    assert board.run_board([arg for arg in argv if arg != "--print-only"]) == 1
+    assert not posted
+
+
+def test_bibliography_large_post_keeps_sources_and_fits_gateway():
+    from swarph_cli.commands import dev_bibliography as bib
+
+    text = bib.render("line with emojis 😀" * 40_000, {
+        "version": 2,
+        "sections": [{"name": "thread", "as_of": "now", "entries": []}],
+    })
+    assert len(text) <= 200_000
+    assert len(json.dumps(text, ensure_ascii=False).encode("utf-8")) <= 240 * 1024
+    assert "cut: legacy extract exceeded the post budget" in text
+    assert "## thread (as of now)\nfloor: 0 entries" in text
+
+
+def test_bibliography_code_entry_budget_is_shared():
+    rows = [{"name": "sample", "file_path": "sample.py", "repo": "sample",
+             "start_line": i, "kind": "function"} for i in range(1, 13)]
+    extract = {"index": {"status": "ok"}, "symbols": rows[:10],
+               "routes": rows[10:], "pins": {"sample": {"sha": "1" * 40}}}
+    body = de.render(extract, citations=True)
+    assert body.count("code:sample/sample.py:") == 8
+    assert "code:sample/sample.py:11@" in body

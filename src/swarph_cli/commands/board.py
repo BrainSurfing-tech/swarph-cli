@@ -1389,8 +1389,7 @@ def _build_parser() -> argparse.ArgumentParser:
     from swarph_cli.commands.dev_extract import build_parser as _de_build_parser
     _de = _de_build_parser()
     de = cards.add_parser(
-        "dev-extract", help="build (+ post) a pinned codegraph+federation "
-        "dev extract for a card (#1396)",
+        "dev-extract", help="build (+ post) a versioned bibliography for a card (#1726)",
         parents=[_de], add_help=False,
         description=_de.description)
     de.add_argument("--to", dest="to_node", default=None,
@@ -2113,6 +2112,24 @@ def run_board(argv: list[str]) -> int:
                 fed_report=args.fed_report, structurizr_ws=args.structurizr_ws,
                 card=card, paths=paths, project_slug=proj_slug,
                 entitled=(entitled and not post_safe))
+            bibliography = None
+            if card is not None:
+                from swarph_cli.commands import dev_bibliography as bib
+
+                def read_source(path):
+                    try:
+                        status, data = _http_get_json(f"{gw.rstrip('/')}{path}", token)
+                    except (OSError, ValueError):
+                        raise bib.Unavailable("gateway reply unreadable") from None
+                    if status != 200:
+                        raise bib.Unavailable(f"gateway HTTP {status}" if status
+                                              else "gateway unreachable")
+                    return data
+
+                bibliography = bib.collect(
+                    card, read_source, _thread_url("", args.card, limit=bib.HISTORY_LIMIT),
+                    post_safe=post_safe)
+                ex["bibliography"] = bibliography
             if getattr(args, "json", False):
                 # card #1396: redact WITHHELD registry entries (no private
                 # paths/index times in machine-readable output). The
@@ -2123,11 +2140,22 @@ def run_board(argv: list[str]) -> int:
                 if no_tokens_note:
                     print(no_tokens_note, file=sys.stderr)
                 print(privacy_line, file=sys.stderr)
-                print(json.dumps(_de_mod.redact_for_json(ex, post_safe=post_safe),
-                                 indent=2, default=str))
+                payload = _de_mod.redact_for_json(ex, post_safe=post_safe)
+                if bibliography is not None:
+                    payload = bib.redact_json(payload)
+                print(json.dumps(payload, indent=2, default=str))
                 return 0
+            if posting and not (bibliography and bibliography["version"] is not None):
+                reason = (bibliography["version_unavailable"] if bibliography
+                          else "card unavailable")
+                print(f"dev-extract: cannot verify bibliography version: {reason}; "
+                      "nothing posted", file=sys.stderr)
+                return 1
             body = _de_mod.render(ex, max_lines=args.max_lines,
-                                  post_safe=post_safe)
+                                  post_safe=post_safe, citations=bibliography is not None,
+                                  as_of=bibliography["as_of"] if bibliography else None)
+            if bibliography is not None:
+                body = bib.render(body, bibliography)
             if args.print_only or args.card is None:
                 if no_tokens_note:
                     print(no_tokens_note)

@@ -897,7 +897,7 @@ def build_extract(*, tokens: list, index_path: str = DEFAULT_INDEX,
         for parg in (paths or [])[:MAX_AUTO_TOKENS]:
             for s in find_symbols_by_path(con, parg, visible):
                 _add_sym(s)
-        repos_hit = sorted({s["repo"] for s in syms})
+        repos_hit = sorted({row["repo"] for row in [*syms, *routes]})
     finally:
         try:
             con.close()
@@ -983,9 +983,19 @@ def _ref_names(pin: dict) -> str:
 
 
 def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
-           post_safe: bool = False) -> str:
+           post_safe: bool = False, citations: bool = False,
+           as_of: str | None = None) -> str:
     """Render the extract text; post-safe mode names no withheld/missing repo."""
     cut_notes: list = []
+    pins = ex.get("pins", {})
+
+    def location(row):
+        loc = f"{row['file_path']}:{row['start_line']}"
+        if not citations:
+            return loc
+        sha = (pins.get(row["repo"]) or {}).get("sha")
+        return f"code:{row['repo']}/{loc}@{sha or 'unpinned'}"
+
     head = ["# dev extract (card #1410, #559 phase 2) — pinned, small, dry-run-safe"]
     if ex.get("card"):
         head.append(f"subject: card #{ex['card'].get('id')}: "
@@ -998,8 +1008,12 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
         _detail = (idx.get("status") or "unavailable").partition(
             "unavailable:")[2].strip() or idx.get("status", "unavailable")
         head.append(f"index unavailable: {_detail}")
+        if as_of:
+            head.append(f"codegraph as of {as_of} (check time)")
     else:
         head.append("## codegraph half (index.db, READ-ONLY)")
+        if as_of:
+            head.append(f"as of {as_of}; indexed times below")
         # One coverage line always (index ok); post-safe uses the generic
         # wording (no withheld names in posts).
         _cov_names = (", ".join(ex.get("withheld", []) or [])
@@ -1019,8 +1033,19 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
         # repo (no existence oracle).
         for repo in ([] if post_safe else ex.get("missing_repos", [])):
             head.append(f"repo {repo} is not in the index")
-        for s in ex.get("symbols", [])[:ROW_LIMIT]:
-            loc = f"{s['file_path']}:{s['start_line']}"
+        routes = ex.get("routes", [])
+        symbols = ex.get("symbols", [])
+        shown_symbols = symbols[:ROW_LIMIT - int(bool(citations and routes))]
+        route_room = ROW_LIMIT - len(shown_symbols) if citations else ROW_LIMIT
+        shown_routes = routes[:route_room]
+        if citations:
+            unpinned = sum(not (pins.get(row["repo"]) or {}).get("sha")
+                           for row in [*shown_symbols, *shown_routes])
+            if unpinned:
+                head.append(f"unpinned code entries: {unpinned} "
+                            "(no indexed SHA; before output clipping)")
+        for s in shown_symbols:
+            loc = location(s)
             n = s.get("callers")
             callers = (FLOOR_CALLERS if n == 0 else
                        f"{n} callers" if isinstance(n, int) else
@@ -1036,9 +1061,9 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
                 head.append("  swarph-cli gateway copy; "
                              "the deployed gateway is a withheld repo")
         if not ex.get("symbols"):
-            head.append("no symbol resolved")
-        if len(ex.get("symbols", [])) > ROW_LIMIT:
-            cut_notes.append(f"symbols cut after {ROW_LIMIT}")
+            head.append("no symbol resolved" + (" (floor: 0 index matches)" if citations else ""))
+        if len(symbols) > len(shown_symbols):
+            cut_notes.append(f"symbols cut after {len(shown_symbols)}")
         for tok in ex.get("tokens", []):
             # Post-safe: dropped entirely (each names a withheld repo).
             _hits = {} if post_safe else (ex.get("withheld_hits") or {}).get(tok, {})
@@ -1051,13 +1076,14 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
                     head.append(f"- {tok}: also defined in withheld {repo}; "
                                  "the deployed copy may differ")
         head.append("")
-        routes = ex.get("routes", [])
         if routes:
             head.append("routes + params:")
-            for r in routes[:ROW_LIMIT]:
+            for r in shown_routes:
                 head.append(f"- {r['name']} {r['repo']} "
-                             f"{r['file_path']}:{r['start_line']}"
+                             f"{location(r)}"
                              + (f" params: {r['signature'][:100]}" if r.get("signature") else ""))
+            if citations and len(routes) > route_room:
+                cut_notes.append(f"routes cut after {route_room}")
         else:
             head.append(f"routes: {FLOOR_ROUTES}")
         head.append("")
@@ -1067,6 +1093,8 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
             head.append(f"- {repo}: {sha} @ {p.get('indexed_at') or 'index time unavailable'}")
     head.append("")
     head.append("## federation half (READ-ONLY)")
+    if as_of:
+        head.append(f"as of {as_of}; federation build time below")
     fed = ex.get("federation_report", {})
     st = ex.get("structurizr", {})
     # The federation half prints the report stamp + `Layer N:` lines, or
@@ -1076,8 +1104,11 @@ def render(ex: dict, max_lines: int = DEFAULT_MAX_LINES,
     else:
         head.append(f"build: {ex.get('fed_build') or 'unavailable: no header stamp'} "
                     "(federation-report.txt header stamp = nightly 04:45 build)")
-        for layer in fed.get("layers", []):
+        layers = fed.get("layers", [])
+        for layer in (layers[:ROW_LIMIT] if citations else layers):
             head.append(layer)
+        if citations and len(layers) > ROW_LIMIT:
+            cut_notes.append(f"federation layers cut after {ROW_LIMIT}")
         if not fed.get("layers"):
             head.append("federation layers: unavailable "
                         "(floor: report has no Layer lines)")
