@@ -301,6 +301,7 @@ def test_dead_sender_mints_a_wake_dead_accept_marker(tmp_path):
     }), encoding="utf-8")
     log = tmp_path / "stub.log"
     log.write_text("", encoding="utf-8")
+    (tmp_path / "closed").write_text("1", encoding="utf-8")
     env = {
         **os.environ,
         "PYTHONPATH": os.path.abspath("src"),

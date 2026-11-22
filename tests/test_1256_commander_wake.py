@@ -22,6 +22,9 @@ def _stub(tmp_path: Path) -> Path:
     stub.write_text(textwrap.dedent("""\
         #!/bin/sh
         echo "$@" >> "$STUB_LOG"
+        if [ "$STUB_RC" = "0" ] && [ "$1 $2 $3" = "board obligations list" ]; then
+          echo '{"obligations": []}'
+        fi
         exit "$STUB_RC"
     """))
     stub.chmod(0o755)
@@ -95,7 +98,7 @@ def test_ten_minute_stale_heartbeat_for_the_sender_mints_one_commander_row(tmp_p
     since = datetime.datetime.fromtimestamp(
         ts, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     assert "mesh send lab-ovh" not in text
-    assert text.count("--holder commander") == 1
+    assert text.count("cards ask 729 --holder commander") == 1
     assert f"lab-ovh DM wake dead since {since}" in text
     assert "fix: /mcp reconnect in the lab pane, or swarph spawn lab" in text
     assert "board cards ask 729" in text
@@ -125,7 +128,7 @@ def test_clock_moved_six_hours_sends_exactly_one_more_alert(tmp_path):
     env["WAKE_WATCHDOG_NOW"] = str(alerted_at + 6 * 60 * 60 + 1)
     _run(env)
     text = log.read_text()
-    assert text.count("--holder commander") == 1
+    assert text.count("cards ask 729 --holder commander") == 1
     assert "mesh send lab-ovh" not in text
     log.write_text("")
     _run(env)

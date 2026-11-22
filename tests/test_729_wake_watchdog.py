@@ -94,6 +94,9 @@ def _stub(tmp_path: Path):
     stub.write_text(textwrap.dedent("""\
         #!/bin/sh
         echo "$@" >> "$STUB_LOG"
+        if [ "$STUB_RC" = "0" ] && [ "$1 $2 $3" = "board obligations list" ]; then
+          echo '{"obligations": []}'
+        fi
         exit "$STUB_RC"
     """))
     stub.chmod(0o755)
@@ -187,7 +190,7 @@ def test_outage_of_the_sender_itself_marks_once_and_does_not_realert(tmp_path):
     subprocess.run(run, env=env, check=True)
     text = log.read_text()
     assert "mesh send lab-ovh" not in text, "no self DM was attempted"
-    assert text.count("--holder commander") == 1
+    assert text.count("cards ask 729 --holder commander") == 1
     assert "cards say 729" not in text
     assert "mesh send drop-on-meta-edge" not in text
     assert json.loads(state_path.read_text())["lab-ovh"]["outage"] is True
