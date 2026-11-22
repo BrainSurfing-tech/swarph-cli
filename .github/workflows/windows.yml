@@ -77,7 +77,7 @@ jobs:
       # under bash `pipefail` on windows-latest (empty COUNT -> test -ge errored).
       - name: Full suite + junit verdict re-derivation
         run: |
-          pytest -q --junit-xml=junit.xml
+          pytest -q --junit-xml=junit.xml --durations=25
           python - <<'PY'
           import xml.etree.ElementTree as ET
           root = ET.parse("junit.xml").getroot()
@@ -138,3 +138,68 @@ jobs:
           test -f "$RUNNER_TEMP/swmux/tmux.exe" || { echo "FAIL: tmux.exe was not extracted"; exit 1; }
           echo "psmux landed:"; ls -la "$RUNNER_TEMP/swmux"
           "$RUNNER_TEMP/swmux/tmux.exe" -V
+
+      # Card #1712 diagnosis capture, not a gate: test_join_help_survives_optimized_python
+      # hit its 10 s deadline on three Windows jobs. -OO loads *.opt-2.pyc, which only
+      # that test's spawn writes, so its start compiles from source. This runs after
+      # the suite (a warm start before it would hide the flake) and on failure too; it
+      # deletes the opt-2 files written during this job so the first start below is as
+      # cold as the test's, then runs the test's exact command again under importtime.
+      # A slow start, a locked .pyc or a failed scan is recorded in summary.txt, not
+      # raised, so this step does not turn a passing job red. The upload step below
+      # still can (an artifact-service error), since this file allows no continue-on-error.
+      - name: "Card #1712 capture: importtime of the -OO join --help start"
+        if: always()
+        timeout-minutes: 5
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess, sys, tempfile, time
+          out = pathlib.Path("capture-1712")
+          out.mkdir(exist_ok=True)
+          lines = []
+          try:
+              since = os.path.getmtime("pyproject.toml")  # checkout time
+              roots = {sys.prefix, sys.base_prefix, "src"}
+              found = [p for r in roots for p in pathlib.Path(r).rglob("*.opt-2.pyc")]
+              new = [p for p in found if p.stat().st_mtime > since]
+              lines.append(f"opt-2.pyc found={len(found)} written_this_job={len(new)}")
+              locked = 0
+              for p in new:
+                  try:
+                      p.unlink()
+                  except OSError:  # held open, e.g. by a scanner: that module starts warm below
+                      locked += 1
+              lines.append(f"opt-2.pyc not_deleted={locked}")
+          except OSError as e:
+              lines.append(f"opt-2.pyc scan failed, cold start below is not cold: {e!r}")
+          cmd = [sys.executable, "-X", "importtime", "-OO", "-m", "swarph_cli.main", "join", "--help"]
+          env = {**os.environ, "HOME": tempfile.mkdtemp()}
+          for name in ("cold", "warm"):
+              start = time.perf_counter()
+              try:
+                  r = subprocess.run(cmd, env=env, text=True, errors="replace",
+                                     capture_output=True, timeout=120)
+                  rc, err = r.returncode, r.stderr
+              except subprocess.TimeoutExpired as e:  # the stall under study: keep its partial importtime
+                  rc, err = "timeout", e.stderr or ""
+                  if isinstance(err, bytes):  # POSIX hands back undecoded bytes
+                      err = err.decode(errors="replace")
+              lines.append(f"{name} returncode={rc} wall_s={time.perf_counter() - start:.3f}")
+              (out / f"importtime-{name}.txt").write_text(err, encoding="utf-8")
+          (out / "summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          print("\n".join(lines))
+          PY
+
+      - name: "Card #1712: keep the capture and the suite's JUnit"
+        # failure() only: when the suite failed the job is already red, so an
+        # artifact-service error cannot change the outcome; on a green job
+        # nothing is uploaded and the --durations list plus the printed
+        # summary.txt stay in the log. This keeps the header's no
+        # continue-on-error rule without adding a red path (card #1712).
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: card-1712-py${{ matrix.python-version }}-attempt${{ github.run_attempt }}
+          path: |
+            junit.xml
+            capture-1712/
