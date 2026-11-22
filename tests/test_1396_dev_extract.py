@@ -2164,7 +2164,15 @@ def test_unentitled_posts_hide_missing_repos(fed, tmp_path):
 
 def test_unentitled_post_bodies_match_live(idx, fed, monkeypatch, capsys):
     """Acceptance 4 end to end: the two posted bodies are identical."""
+    from datetime import datetime
+    from types import SimpleNamespace
+
     from swarph_cli.commands import board as board_mod
+    from swarph_cli.commands import dev_bibliography as bib
+
+    # Only the card text should vary; a second rollover is not a visibility signal.
+    monkeypatch.setattr(bib, "datetime", SimpleNamespace(
+        now=lambda tz: datetime(2026, 11, 22, tzinfo=tz)))
     rep, wsp = fed
     bodies = []
     for body in ("fix chat_sync in swarph-ghost-zzz",
