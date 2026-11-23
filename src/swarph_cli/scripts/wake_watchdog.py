@@ -487,6 +487,13 @@ def _state_float(rec: dict, key: str, who: str) -> float | None:
         return None
 
 
+def _read_clock(rec: dict, key: str, who: str) -> tuple[float | None, bool]:
+    """The clock value, and whether a non-numeric value was just reset."""
+    raw = rec.get(key)
+    value = _state_float(rec, key, who)
+    return value, raw is not None and value is None
+
+
 def _reset_list_failures(rec: dict, who: str) -> None:
     raw = rec.get("list_failures")
     if raw is None:
@@ -645,18 +652,27 @@ def scan(cells: dict[str, str], cmdlines: Iterable[str], state: dict,
             rec.pop("send_attempts", None)
             continue
         _state_float(rec, "mint_attempted_at", name)
-        _state_float(rec, "alerted_at", name)
+        alerted_at, alerted_repaired = _read_clock(rec, "alerted_at", name)
         _reset_list_failures(rec, name)
-        since = _state_float(rec, "missing_since", name)
+        since, since_repaired = _read_clock(rec, "missing_since", name)
         if since is None:
+            if rec.get("outage") and since_repaired:
+                # The bad clock was cleared. Do not start a fresh gap; the
+                # open outage is already due. Anchor missing_since just past
+                # the gap so a later pass can still measure a realert.
+                rec["missing_since"] = now - gap - 1.0
+                alert.append(name)
+                continue
             rec["missing_since"] = now
+            continue
+        if rec.get("outage") and alerted_repaired:
+            alert.append(name)
             continue
         if now - since <= gap:
             continue
         if not rec.get("outage"):
             alert.append(name)
             continue
-        alerted_at = _state_float(rec, "alerted_at", name)
         if alerted_at is None:
             continue
         if now - alerted_at >= REALERT_SECONDS:
@@ -939,10 +955,21 @@ def _settle_self_mark(rec: dict, now: float, result: str,
 def _handle_self_outage(swarph: str, sender: str, token_file: str,
                         inbox: str, now: float, state: dict,
                         state_path: Path) -> bool:
-    """Idempotently record or re-alert a self-outage without minting duplicates."""
-    with _mint_lock(state_path):
-        return _handle_self_outage_locked(
-            swarph, sender, token_file, inbox, now, state, state_path)
+    """Idempotently record or re-alert a self-outage without minting duplicates.
+
+    A lock file or state directory that cannot be opened is one skipped mint,
+    not a dead pass. Peer alerts still run.
+    """
+    try:
+        with _mint_lock(state_path):
+            return _handle_self_outage_locked(
+                swarph, sender, token_file, inbox, now, state, state_path)
+    except PermissionError as exc:
+        print(
+            f"wake_watchdog: cannot take mint lock ({exc}); "
+            "skipping self-outage mint this pass",
+            file=sys.stderr, flush=True)
+        return False
 
 
 def _handle_self_outage_locked(swarph: str, sender: str, token_file: str,
@@ -951,6 +978,7 @@ def _handle_self_outage_locked(swarph: str, sender: str, token_file: str,
     """The self-outage body. Callers hold the mint lock."""
     rec = _cell_rec(state, sender)
     existing = _list_open_dead_wake_rows(swarph, sender, token_file)
+    listing_failed = existing is None
     if existing is None:
         try:
             failures = int(rec.get("list_failures") or 0) + 1
@@ -1065,6 +1093,24 @@ def _handle_self_outage_locked(swarph: str, sender: str, token_file: str,
         save_state(state_path, state)
         return True
     if result == "retry":
+        # A non-zero exit can still have stored the row. Hold the mint slot
+        # across the listing cap so that ask does not mint a second row.
+        # An ask that failed without a row id stays a plain failure: the
+        # listing-cap fallback is still allowed to mint once. A mint that
+        # itself happened because the listing was already down is not held
+        # here; that path keeps the three-attempt cap.
+        if not listing_failed:
+            proc = asked.get("proc")
+            minted_id = _parse_minted_row_id(
+                (proc.stdout if proc is not None else "") or "")
+            if minted_id is not None:
+                rec["outage_row"] = minted_id
+                slot["ok"] = True
+                save_state(state_path, state)
+                print(
+                    f"wake_watchdog: ask for {sender} stored row #{minted_id} "
+                    "despite a non-zero exit; holding the mint slot",
+                    file=sys.stderr, flush=True)
         return False
     rec["outage"] = True
     rec["alerted_at"] = now
