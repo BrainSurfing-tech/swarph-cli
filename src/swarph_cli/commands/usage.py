@@ -1,0 +1,106 @@
+"""Card #1445 phase 1b — ``swarph usage``: one pools table + Codex sync.
+
+``swarph usage`` reads ``<state-root>/usage/*.json`` (state root honours
+``SWARPH_STATE_ROOT``, else ``~/swarph_state``) and prints one row per
+pool+window: pool, used %, resets (UTC and in-hours), read age, burn per
+hour when a previous distinct reading exists. ``--json`` emits the same
+rows as JSON.
+
+``swarph usage sync`` runs the Codex rollout reader, writing
+``usage/openai.json`` (atomic; nothing written when no event exists).
+
+Burn has no history store today: the table keeps a last-seen snapshot in
+the ``.usage-last-seen.json`` dotfile in the usage dir (excluded from the
+pool glob by name) and reports burn/hr = (used_now - used_prev) /
+read_at-delta-hours for the same pool+window when a previous DISTINCT
+reading exists, else blank. A single reading never shows a fabricated
+burn.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from swarph_cli.usage import (
+    collect_rows,
+    default_usage_dir,
+    load_pool_map,
+    load_snapshot,
+    render_table,
+    rows_to_json,
+    save_snapshot,
+)
+from swarph_cli.usage.codex import codex_sessions_dir, write_openai_json
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="swarph usage",
+        description="Usage pools table (card #1445): pool, used %, resets, "
+                    "read age, burn/hr. A reading older than 6h is STALE.",
+    )
+    parser.add_argument("action", nargs="?", default="show",
+                        choices=("show", "sync"),
+                        help="'show' prints the table (default); 'sync' runs "
+                             "the Codex rollout reader into openai.json.")
+    parser.add_argument("--json", action="store_true",
+                        help="emit the same rows as JSON.")
+    parser.add_argument("--state-root", default=None,
+                        help="state root holding usage/ "
+                             "(default: $SWARPH_STATE_ROOT or ~/swarph_state).")
+    parser.add_argument("--codex-sessions", default=None,
+                        help="Codex sessions dir for 'sync' "
+                             "(default: ~/.codex/sessions).")
+    return parser
+
+
+def _usage_dir(state_root) -> Path:
+    if state_root:
+        return Path(state_root).expanduser() / "usage"
+    return default_usage_dir()
+
+
+def _run_show(args) -> int:
+    usage_dir = _usage_dir(args.state_root)
+    try:
+        pool_map = load_pool_map(usage_dir)
+    except (OSError, ValueError) as exc:
+        print(f"swarph usage: pool map unreadable: {exc}", file=sys.stderr)
+        return 2
+    now = datetime.now(timezone.utc)
+    snapshot = load_snapshot(usage_dir)
+    rows = collect_rows(usage_dir=usage_dir, pool_map=pool_map,
+                        now=now, snapshot=snapshot)
+    save_snapshot(usage_dir, rows, snapshot)
+    if args.json:
+        print(json.dumps(rows_to_json(rows), indent=2))
+    else:
+        print(render_table(rows), end="")
+    return 0
+
+
+def _run_sync(args) -> int:
+    usage_dir = _usage_dir(args.state_root)
+    sessions = codex_sessions_dir(args.codex_sessions)
+    result = write_openai_json(sessions_dir=sessions, usage_dir=usage_dir)
+    if result is None:
+        print("swarph usage sync: no rate_limits event in the newest "
+              f"rollout under {sessions}; wrote nothing.")
+        return 0
+    windows = ", ".join(f"{name} {entry['used_percentage']:.1f}%"
+                        for name, entry in sorted(result["windows"].items()))
+    print(f"swarph usage sync: wrote {result['path']} ({windows}).")
+    return 0
+
+
+def run_usage(argv) -> int:
+    """Entry point registered as the ``usage`` verb in main._VERB_HANDLERS."""
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.action == "sync":
+        return _run_sync(args)
+    return _run_show(args)

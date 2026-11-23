@@ -164,7 +164,8 @@ swarph_cli = ["systemd/*.service", "systemd/*.timer", "systemd/*.default",
               "payloads/postcompact/*.sh", "payloads/postcompact/*.cmd",
               "payloads/opencode/*.js",
     "skills/*/SKILL.md", "skills/*/LICENSE",
-    "triage/*.json"]
+    "triage/*.json",
+    "usage/*.json"]
 # v0.15: ship the bundled mesh-gateway schema so `swarph gateway serve`
 # can apply it at startup via MESH_SCHEMA_PATH (defaults next to server.py).
 "swarph_cli.gateway" = ["*.sql"]

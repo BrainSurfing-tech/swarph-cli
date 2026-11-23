@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "comment": "Cell-to-pool map (card #1445 phase 1b; posts 103194-103202). DATA, not code: `swarph usage` loads this file, and editing the map (cells, files, providers, thresholds) must never require a code change. Pools confirmed by the commander 2026-11-22: the Claude account covers droplet too (post 103196); the Cursor reading covers grok-researcher, cursor-lin, friendly-coder and grok-bot (post 103198). opencode has no reader yet so its pool shows missing. A usage-dir dotfile override (.pools.local.json, same shape) replaces this default when present.",
+  "stale_after_hours": 6,
+  "pools": [
+    {
+      "pool": "Claude",
+      "cells": ["lab-ovh", "science-claude", "drop-on-meta-edge", "gridiron", "droplet"],
+      "files": ["claude.json"],
+      "providers": ["anthropic-claude"]
+    },
+    {
+      "pool": "Antigravity",
+      "cells": ["gemini-researcher"],
+      "files": ["google.json"],
+      "providers": ["google-antigravity"]
+    },
+    {
+      "pool": "Muse",
+      "cells": ["meta-muse"],
+      "files": ["muse.json"],
+      "providers": ["muse"]
+    },
+    {
+      "pool": "Cursor+SuperGrok",
+      "cells": ["grok-researcher", "cursor-lin", "friendly-coder", "grok-bot"],
+      "files": ["cursor.json"],
+      "providers": ["cursor+xai-supergrok"]
+    },
+    {
+      "pool": "OpenAI",
+      "cells": ["gpt-ops"],
+      "files": ["openai.json"],
+      "providers": ["openai"]
+    },
+    {
+      "pool": "opencode",
+      "cells": ["opencode"],
+      "files": [],
+      "providers": []
+    }
+  ]
+}
