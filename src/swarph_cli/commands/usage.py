@@ -16,9 +16,13 @@ read_at-delta-hours for the same pool+window when a previous DISTINCT
 reading exists, else blank. A single reading never shows a fabricated
 burn. Burn is never negative: a used% drop, a moved window resets_at, or
 a changed reading source between snapshot and now blanks the burn and
-marks the row RESET (text note, JSON ``reset`` flag). The snapshot only
-advances on a strictly newer reading, so re-showing the same reading
-carries the last burn forward instead of blanking it.
+marks the row RESET (text note, JSON ``reset`` flag). A source change
+from null to a value counts as a reset. A used rise with an unchanged or
+null resets_at keeps the burn and is not marked RESET. Limit that remains:
+a rise right after a reset, with no resets_at to compare, cannot be told
+apart from ordinary burn. The snapshot only advances on a strictly newer
+reading, so re-showing the same reading carries the last burn forward
+instead of blanking it.
 """
 
 from __future__ import annotations
@@ -45,7 +49,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="swarph usage",
         description="Usage pools table (card #1445): pool, used %, resets, "
-                    "read age, burn/hr. A reading older than 6h is STALE.",
+                    "read age, burn/hr. A reading older than 6h is STALE. "
+                    "A source change from null to a value counts as a reset. "
+                    "A used rise with an unchanged or null resets_at keeps "
+                    "the burn. Limit that remains: a rise right after a "
+                    "reset, with no resets_at to compare, cannot be told "
+                    "apart from ordinary burn.",
     )
     parser.add_argument("action", nargs="?", default="show",
                         choices=("show", "sync"),

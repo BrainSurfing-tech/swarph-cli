@@ -6,6 +6,7 @@ event shapes follow design post 103202, pool-file shapes follow the live
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -253,9 +254,12 @@ def test_burn_needs_two_distinct_readings(tmp_path):
     usage_dir = _full_usage_dir(tmp_path)
     pool_map = load_pool_map(usage_dir)
     prev_read = _iso(NOW - timedelta(hours=4))
+    # source matches the file. A snapshot with no source is a null -> value
+    # reset (see test_null_source_to_value_is_a_reset), not a burn.
     snapshot = {"readings": {
         "Claude\x00seven_day": {"used_percentage": 77.0,
-                                "read_at": prev_read}}}
+                                "read_at": prev_read,
+                                "source": "test"}}}
     rows = collect_rows(usage_dir=usage_dir, pool_map=pool_map, now=NOW,
                         snapshot=snapshot)
     claude = [r for r in rows if r["pool"] == "Claude"][0]
@@ -565,3 +569,282 @@ def test_rollout_credentials_never_reach_openai_json(tmp_path):
     for secret in secrets:
         assert secret not in text
     assert "api_key" not in text and "session_token" not in text
+
+
+# ── FOLLOW-UP (card #1445 / plan-review #6379): event age, unmappable ──────
+# ── fallthrough, null-source reset, pool-map NaN and duplicate names ───────
+# Synthetic fixtures only. Never the real ~/.codex directory.
+
+_RESET_BLIND_SPOT = (
+    "a rise right after a reset, with no resets_at to compare, "
+    "cannot be told apart from ordinary burn"
+)
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _solo_pool(*cells: str, filename: str = "solo.json",
+               provider: str = "solo", name: str = "Solo") -> dict:
+    return {"pool": name, "cells": list(cells) or ["me"],
+            "files": [filename], "providers": [provider]}
+
+
+def _write_pool_override(usage_dir: Path, *, stale, pools: list) -> None:
+    usage_dir.mkdir(parents=True, exist_ok=True)
+    (usage_dir / ".pools.local.json").write_text(
+        json.dumps({"stale_after_hours": stale, "pools": pools}),
+        encoding="utf-8")
+
+
+def test_fallback_read_at_is_event_timestamp_not_sync_clock(tmp_path):
+    """Event time ages the reading. The plan-review probe wrote read_at from
+    the sync clock, so a 2026-11-01 event (file mtime epoch 1000) showed
+    age_h ~0 and stale False. At the table clock that age is 534h, STALE.
+    """
+    sessions = tmp_path / "sessions"
+    _write_rollout(sessions / "rollout-new-empty.jsonl",
+                   [json.dumps({"timestamp": "2026-11-23T05:59:00Z",
+                                "payload": {"type": "token_count",
+                                            "info": {}}})],
+                   mtime=3000.0)
+    event = json.loads(_rate_limits_event(used_weekly=40.0,
+                                          resets_epoch=1795618145))
+    event["timestamp"] = "2026-11-01"
+    _write_rollout(sessions / "rollout-old.jsonl",
+                   [json.dumps(event)], mtime=1000.0)
+    usage_dir = tmp_path / "usage"
+    result = codex_reader.write_openai_json(
+        sessions_dir=sessions, usage_dir=usage_dir)
+    assert result is not None
+    assert "rollout-old" in result["rollout"]
+    written = json.loads((usage_dir / "openai.json").read_text(encoding="utf-8"))
+    assert written["read_at"] == "2026-11-01T00:00:00Z"
+    # Epoch 1000 is 1970-01-01T00:16:40Z. The event time wins over mtime.
+    assert written["read_at"] != "1970-01-01T00:16:40Z"
+    assert written["source"] == codex_reader.SOURCE
+    assert "mtime" not in written["source"]
+    rows = collect_rows(usage_dir=usage_dir, pool_map=load_pool_map(usage_dir),
+                        now=NOW, snapshot={"readings": {}})
+    openai = [r for r in rows if r["pool"] == "OpenAI" and r["window"] == "week"][0]
+    assert openai["age_h"] == 534.0
+    assert openai["stale"] is True
+    assert openai["status"] == "stale"
+    assert "STALE" in render_table(rows)
+
+
+def test_event_without_timestamp_uses_file_mtime_and_says_so(tmp_path):
+    """No event timestamp -> rollout mtime, and source records that."""
+    base = json.loads(_rate_limits_event(used_weekly=11.0,
+                                         resets_epoch=1795618145))
+    missing = dict(base)
+    missing.pop("timestamp")
+    explicit_null = dict(base)
+    explicit_null["timestamp"] = None
+    blank = dict(base)
+    blank["timestamp"] = "  "
+    unparseable = dict(base)
+    unparseable["timestamp"] = "not-a-timestamp"
+    for index, event in enumerate((missing, explicit_null, blank, unparseable)):
+        isolated = tmp_path / f"sessions-{index}"
+        _write_rollout(isolated / "rollout-notime.jsonl",
+                       [json.dumps(event)], mtime=1000.0)
+        usage_dir = tmp_path / f"usage-{index}"
+        result = codex_reader.write_openai_json(
+            sessions_dir=isolated, usage_dir=usage_dir)
+        assert result is not None, index
+        written = json.loads(
+            (usage_dir / "openai.json").read_text(encoding="utf-8"))
+        assert written["read_at"] == "1970-01-01T00:16:40Z", index
+        assert written["source"] == codex_reader.SOURCE_FROM_FILE_MTIME, index
+        assert "mtime" in written["source"]
+        assert "no timestamp" in written["source"]
+
+
+def test_unmappable_newest_rollout_falls_through(tmp_path):
+    """used_percent without resets_at yields no windows; the older file maps."""
+    sessions = tmp_path / "sessions"
+    unmappable = {
+        "timestamp": "2026-11-23T01:00:00Z",
+        "type": "event_msg",
+        "payload": {"rate_limits": {
+            "primary": {"used_percent": 88.0, "window_minutes": 10080},
+            "secondary": None,
+        }},
+    }
+    _write_rollout(sessions / "rollout-new-unmappable.jsonl",
+                   [json.dumps(unmappable)], mtime=5000.0)
+    _write_rollout(sessions / "rollout-mid-empty.jsonl",
+                   [json.dumps({"payload": {"type": "token_count",
+                                            "info": {}}})],
+                   mtime=3000.0)
+    _write_rollout(sessions / "rollout-old-mappable.jsonl",
+                   [_rate_limits_event(used_weekly=42.0,
+                                       resets_epoch=1795618145)],
+                   mtime=1000.0)
+    usage_dir = tmp_path / "usage"
+    result = codex_reader.write_openai_json(
+        sessions_dir=sessions, usage_dir=usage_dir)
+    assert result is not None
+    assert "rollout-old-mappable" in result["rollout"]
+    assert result["windows"]["week"]["used_percentage"] == 42.0
+    written = json.loads((usage_dir / "openai.json").read_text(encoding="utf-8"))
+    assert written["windows"]["week"]["used_percentage"] == 42.0
+    assert written["read_at"] == "2026-11-22T09:43:41Z"
+
+
+def test_all_unmappable_rollouts_write_nothing(tmp_path):
+    sessions = tmp_path / "sessions"
+    unmappable = {
+        "timestamp": "2026-11-23T01:00:00Z",
+        "payload": {"rate_limits": {
+            "primary": {"used_percent": 88.0, "window_minutes": 10080},
+        }},
+    }
+    _write_rollout(sessions / "rollout-a.jsonl", [json.dumps(unmappable)],
+                   mtime=2000.0)
+    _write_rollout(sessions / "rollout-b.jsonl",
+                   [json.dumps({"payload": {"rate_limits": {"primary": {
+                       "used_percent": 1.0, "window_minutes": 300}}}})],
+                   mtime=1000.0)
+    assert codex_reader.write_openai_json(
+        sessions_dir=sessions, usage_dir=tmp_path / "usage") is None
+    assert not (tmp_path / "usage" / "openai.json").exists()
+
+
+def test_null_source_to_value_is_a_reset(tmp_path):
+    """None -> "cell-b" is a reset. The old guard required both sources
+    non-null, so this rise still computed a burn."""
+    usage_dir = _claude_dir(tmp_path, used=20.0,
+                            read_at=_iso(NOW - timedelta(minutes=30)),
+                            resets=RESETS_A, source="cell-b")
+    snapshot = {"readings": {"Claude\x00seven_day": _snapshot_entry(
+        used=10.0, read_at=_iso(NOW - timedelta(hours=1, minutes=30)),
+        source=None)}}
+    rows = collect_rows(usage_dir=usage_dir, pool_map=load_pool_map(usage_dir),
+                        now=NOW, snapshot=snapshot)
+    claude = [r for r in rows if r["pool"] == "Claude"][0]
+    assert claude["reset"] is True
+    assert claude["burn_per_h"] is None
+    assert "RESET" in render_table(rows)
+
+
+def test_used_rise_with_unchanged_resets_at_keeps_burn(tmp_path):
+    """A used rise with the same resets_at is burn, not a reset."""
+    usage_dir = _claude_dir(tmp_path, used=20.0,
+                            read_at=_iso(NOW - timedelta(minutes=30)),
+                            resets=RESETS_A, source="cell-a")
+    snapshot = {"readings": {"Claude\x00seven_day": _snapshot_entry(
+        used=10.0, read_at=_iso(NOW - timedelta(hours=1, minutes=30)),
+        source="cell-a", resets=RESETS_A)}}
+    rows = collect_rows(usage_dir=usage_dir, pool_map=load_pool_map(usage_dir),
+                        now=NOW, snapshot=snapshot)
+    claude = [r for r in rows if r["pool"] == "Claude"][0]
+    assert claude["reset"] is False
+    assert claude["burn_per_h"] == 10.0
+
+
+def test_used_rise_with_null_resets_at_keeps_burn_not_reset(tmp_path):
+    """Limit that remains: a rise right after a reset, with no resets_at
+    to compare, cannot be told apart from ordinary burn."""
+    usage_dir = _claude_dir(tmp_path, used=20.0,
+                            read_at=_iso(NOW - timedelta(minutes=30)),
+                            resets=None, source="cell-a")
+    snapshot = {"readings": {"Claude\x00seven_day": _snapshot_entry(
+        used=10.0, read_at=_iso(NOW - timedelta(hours=1, minutes=30)),
+        source="cell-a", resets=None)}}
+    rows = collect_rows(usage_dir=usage_dir, pool_map=load_pool_map(usage_dir),
+                        now=NOW, snapshot=snapshot)
+    claude = [r for r in rows if r["pool"] == "Claude"][0]
+    assert claude["resets_at"] is None
+    assert claude["reset"] is False
+    assert claude["burn_per_h"] == 10.0
+    assert _RESET_BLIND_SPOT in _flat(usage_cmd.__doc__)
+    assert _RESET_BLIND_SPOT in _flat(usage_cmd._build_parser().description)
+
+
+def test_used_rise_when_source_cleared_is_not_labelled_reset(tmp_path):
+    """Value -> null is not the null-to-value reset. A rise with the same
+    resets_at stays burn."""
+    usage_dir = _claude_dir(tmp_path, used=20.0,
+                            read_at=_iso(NOW - timedelta(minutes=30)),
+                            resets=RESETS_A, source=None)
+    snapshot = {"readings": {"Claude\x00seven_day": _snapshot_entry(
+        used=10.0, read_at=_iso(NOW - timedelta(hours=1, minutes=30)),
+        source="cell-a", resets=RESETS_A)}}
+    rows = collect_rows(usage_dir=usage_dir, pool_map=load_pool_map(usage_dir),
+                        now=NOW, snapshot=snapshot)
+    claude = [r for r in rows if r["pool"] == "Claude"][0]
+    assert claude["source"] is None
+    assert claude["reset"] is False
+    assert claude["burn_per_h"] == 10.0
+
+
+def test_usage_help_documents_unresolved_reset_rise(capsys):
+    assert _RESET_BLIND_SPOT in _flat(usage_cmd.__doc__)
+    assert _RESET_BLIND_SPOT in _flat(usage_cmd._build_parser().description)
+    # The code comment at the reset check carries the same sentence.
+    assert _RESET_BLIND_SPOT in _flat(inspect.getsource(collect_rows))
+    try:
+        usage_cmd.run_usage(["--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    else:
+        raise AssertionError("swarph usage --help did not exit")
+    assert _RESET_BLIND_SPOT in _flat(capsys.readouterr().out)
+
+
+def test_pool_map_refuses_nan_stale_after_hours(tmp_path, capsys):
+    """NaN used to be accepted, and a 534h-old reading stayed status ok
+    because `age_h > nan` is false."""
+    usage_dir = tmp_path / "usage"
+    _write_pool_override(usage_dir, stale=float("nan"), pools=[_solo_pool()])
+    try:
+        load_pool_map(usage_dir)
+    except ValueError as exc:
+        assert "stale_after_hours" in str(exc)
+        assert "finite" in str(exc)
+    else:
+        raise AssertionError("NaN stale_after_hours was accepted")
+    rc = usage_cmd.run_usage(["--state-root", str(tmp_path), "--json"])
+    assert rc == 2
+    assert "pool map unreadable" in capsys.readouterr().err
+
+
+def test_pool_map_refuses_infinite_and_nonpositive_stale_after_hours(tmp_path):
+    for stale in (float("inf"), float("-inf"), 0, 0.0, -1, -0.5):
+        usage_dir = tmp_path / f"usage-{stale}"
+        _write_pool_override(usage_dir, stale=stale, pools=[_solo_pool()])
+        try:
+            load_pool_map(usage_dir)
+        except ValueError as exc:
+            assert "stale_after_hours" in str(exc), stale
+        else:
+            raise AssertionError(f"stale_after_hours {stale!r} was accepted")
+    # A positive finite threshold still loads.
+    ok = tmp_path / "ok" / "usage"
+    _write_pool_override(ok, stale=6, pools=[_solo_pool()])
+    assert load_pool_map(ok)["stale_after_hours"] == 6
+
+
+def test_pool_map_refuses_duplicate_pool_names(tmp_path, capsys):
+    """Duplicate names used to be accepted and the second entry's cells dropped."""
+    usage_dir = tmp_path / "usage"
+    pools = [
+        _solo_pool("first-cell", filename="a.json", provider="a"),
+        _solo_pool("second-cell", filename="b.json", provider="b"),
+    ]
+    _write_pool_override(usage_dir, stale=6, pools=pools)
+    try:
+        load_pool_map(usage_dir)
+    except ValueError as exc:
+        text = str(exc)
+        assert "duplicate" in text
+        assert "Solo" in text
+        assert "second entry's cells" in text
+    else:
+        raise AssertionError("duplicate pool names were accepted")
+    rc = usage_cmd.run_usage(["--state-root", str(tmp_path)])
+    assert rc == 2
+    assert "pool map unreadable" in capsys.readouterr().err

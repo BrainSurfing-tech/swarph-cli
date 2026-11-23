@@ -7,9 +7,13 @@ marked STALE in its row, never presented as current. A pool with no file
 still appears as missing, visibly not current. Burn is never negative:
 when used% drops or the window resets_at moves between the snapshot and
 the current reading — or the snapshot's source differs from the current
-source — the burn stays blank and the row carries a RESET marker (text
-note and JSON ``reset`` flag). Re-showing the same reading carries the
-last burn forward; the snapshot only advances on a strictly newer read.
+source, including a change from null to a value — the burn stays blank
+and the row carries a RESET marker (text note and JSON ``reset`` flag).
+A used rise with an unchanged or null resets_at keeps the burn. Limit
+that remains: a rise right after a reset, with no resets_at to compare,
+cannot be told apart from ordinary burn. Re-showing the same reading
+carries the last burn forward; the snapshot only advances on a strictly
+newer read.
 
 The cell-to-pool map lives in the packaged ``pools.json`` DATA file (an
 optional ``.pools.local.json`` dotfile in the usage dir replaces it), so
@@ -19,6 +23,7 @@ editing the map never requires a code change.
 from __future__ import annotations
 
 import json
+import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,6 +79,17 @@ def _validate_pool_map(data, *, where: str) -> dict:
     stale = data.get("stale_after_hours", 6)
     if isinstance(stale, bool) or not isinstance(stale, (int, float)):
         raise ValueError(f"pool map {where}: stale_after_hours is not a number")
+    # NaN and ±inf pass the isinstance check (they are floats) but
+    # `age_h > nan` is never true, so a days-old reading stayed status ok.
+    # Non-positive thresholds are not a duration.
+    if not math.isfinite(stale):
+        raise ValueError(
+            f"pool map {where}: stale_after_hours must be finite "
+            f"(not NaN or infinite)")
+    if stale <= 0:
+        raise ValueError(
+            f"pool map {where}: stale_after_hours must be positive")
+    seen_names = set()
     for index, entry in enumerate(data["pools"]):
         label = f"pool map {where} entry #{index}"
         if not isinstance(entry, dict):
@@ -81,6 +97,11 @@ def _validate_pool_map(data, *, where: str) -> dict:
         name = entry.get("pool")
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"{label} has no 'pool' name")
+        if name in seen_names:
+            raise ValueError(
+                f"{label} duplicates pool name {name!r} "
+                f"(the second entry's cells would be dropped)")
+        seen_names.add(name)
         for key in ("files", "providers", "cells"):
             if key in entry and not isinstance(entry[key], list):
                 raise ValueError(
@@ -282,9 +303,14 @@ def collect_rows(*, usage_dir, pool_map, now: "datetime | None" = None,
                         if delta_h > 0:
                             prev_source = prev.get("source")
                             prev_resets = prev.get("resets_at")
-                            if (prev_source is not None
-                                    and source is not None
-                                    and prev_source != source):
+                            # A source change onto a value is a reset,
+                            # including null -> value (the snapshot named
+                            # no source). A value -> null change is not
+                            # itself a reset. A used rise with an unchanged
+                            # resets_at, or with resets_at null on the
+                            # readings being compared, keeps the burn.
+                            # Limit that remains: a rise right after a reset, with no resets_at to compare, cannot be told apart from ordinary burn.
+                            if source is not None and prev_source != source:
                                 # Different cells/sources feed this pool now:
                                 # mixing them into one rate would mislead.
                                 row["reset"] = True
