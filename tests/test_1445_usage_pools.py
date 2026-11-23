@@ -357,3 +357,211 @@ def test_state_root_override_is_honoured(monkeypatch, tmp_path):
 
 def test_usage_verb_is_registered():
     assert "usage" in registered_verbs()
+
+
+# ── FOLLOW-UP (card #6375): burn honesty, snapshot lifecycle, ──────────────
+# ── override validation, rollout fallback, credential hygiene ──────────────
+# All fixtures synthetic; no real ~/.codex content, no real credentials.
+
+RESETS_A = _iso(NOW + timedelta(days=1))
+RESETS_B = _iso(NOW + timedelta(days=8))
+
+
+def _claude_dir(tmp_path: Path, *, used: float, read_at: str,
+                resets: str, source: str = "test") -> Path:
+    usage_dir = tmp_path / "usage"
+    usage_dir.mkdir(exist_ok=True)
+    (usage_dir / "claude.json").write_text(json.dumps({
+        "provider": "anthropic-claude", "source": source,
+        "read_at": read_at,
+        "windows": {"seven_day": {"used_percentage": used,
+                                  "resets_at": resets}}}),
+        encoding="utf-8")
+    return usage_dir
+
+
+def _snapshot_entry(*, used: float, read_at: str, source: str = "test",
+                    resets: str = RESETS_A, burn=None, reset: bool = False):
+    entry: dict = {"used_percentage": used, "read_at": read_at,
+                   "source": source, "resets_at": resets}
+    if burn is not None:
+        entry["burn_per_h"] = burn
+    if reset:
+        entry["reset"] = True
+    return entry
+
+
+def test_burn_blank_and_reset_marked_on_used_drop(tmp_path, capsys):
+    """98% -> 2% in 1h must not print -96.0%/h (the #6374 finding)."""
+    usage_dir = _claude_dir(tmp_path, used=2.0,
+                            read_at=_iso(NOW - timedelta(minutes=30)),
+                            resets=RESETS_A)
+    snapshot = {"readings": {"Claude\x00seven_day": _snapshot_entry(
+        used=98.0, read_at=_iso(NOW - timedelta(hours=1, minutes=30)))}}
+    rows = collect_rows(usage_dir=usage_dir, pool_map=load_pool_map(usage_dir),
+                        now=NOW, snapshot=snapshot)
+    claude = [r for r in rows if r["pool"] == "Claude"][0]
+    assert claude["burn_per_h"] is None
+    assert claude["reset"] is True
+    text = render_table(rows)
+    assert "RESET" in text
+    assert "-96" not in text
+    marked = [r for r in rows_to_json(rows)["rows"]
+              if r["pool"] == "Claude"][0]
+    assert marked["reset"] is True and marked["burn_per_h"] is None
+    save_snapshot(usage_dir, rows, snapshot)  # CLI show reads this dotfile
+    rc = usage_cmd.run_usage(["--state-root", str(tmp_path)])
+    assert rc == 0
+    assert "RESET" in capsys.readouterr().out
+
+
+def test_burn_blank_and_reset_marked_on_resets_change(tmp_path):
+    """Same window name, new resets_at: a fresh period, not a rate."""
+    usage_dir = _claude_dir(tmp_path, used=20.0,
+                            read_at=_iso(NOW - timedelta(minutes=30)),
+                            resets=RESETS_B)
+    snapshot = {"readings": {"Claude\x00seven_day": _snapshot_entry(
+        used=10.0, read_at=_iso(NOW - timedelta(hours=1, minutes=30)),
+        resets=RESETS_A)}}
+    rows = collect_rows(usage_dir=usage_dir, pool_map=load_pool_map(usage_dir),
+                        now=NOW, snapshot=snapshot)
+    claude = [r for r in rows if r["pool"] == "Claude"][0]
+    assert claude["burn_per_h"] is None
+    assert claude["reset"] is True
+
+
+def test_burn_blank_and_reset_marked_on_source_change(tmp_path):
+    """Snapshot source differs from current source: no silent mixed rate."""
+    usage_dir = _claude_dir(tmp_path, used=20.0,
+                            read_at=_iso(NOW - timedelta(minutes=30)),
+                            resets=RESETS_A, source="cell-b")
+    snapshot = {"readings": {"Claude\x00seven_day": _snapshot_entry(
+        used=10.0, read_at=_iso(NOW - timedelta(hours=1, minutes=30)),
+        source="cell-a")}}
+    rows = collect_rows(usage_dir=usage_dir, pool_map=load_pool_map(usage_dir),
+                        now=NOW, snapshot=snapshot)
+    claude = [r for r in rows if r["pool"] == "Claude"][0]
+    assert claude["burn_per_h"] is None
+    assert claude["reset"] is True
+
+
+def test_reread_carries_last_burn_forward(tmp_path, capsys):
+    """Showing the table twice on the SAME reading keeps the last burn."""
+    read_at = _iso(NOW - timedelta(minutes=30))
+    usage_dir = _claude_dir(tmp_path, used=87.0, read_at=read_at,
+                            resets=RESETS_A)
+    pool_map = load_pool_map(usage_dir)
+    prev = {"readings": {"Claude\x00seven_day": _snapshot_entry(
+        used=77.0, read_at=_iso(NOW - timedelta(hours=4)))}}
+    first = collect_rows(usage_dir=usage_dir, pool_map=pool_map, now=NOW,
+                         snapshot=prev)
+    burn = [r for r in first if r["pool"] == "Claude"][0]["burn_per_h"]
+    assert burn == abs((87.0 - 77.0) / 3.5)
+    save_snapshot(usage_dir, first, prev)
+    stored = load_snapshot(usage_dir)["readings"]["Claude\x00seven_day"]
+    assert stored["burn_per_h"] == burn  # the burn itself is persisted
+    second = collect_rows(usage_dir=usage_dir, pool_map=pool_map, now=NOW,
+                          snapshot=load_snapshot(usage_dir))
+    again = [r for r in second if r["pool"] == "Claude"][0]
+    assert again["burn_per_h"] == burn
+    assert again["reset"] is False
+    assert "+2.86%/h" in render_table(second)
+    # Saving the identical re-read does not advance (or blank) the snapshot.
+    before = (usage_dir / ".usage-last-seen.json").read_text()
+    save_snapshot(usage_dir, second, load_snapshot(usage_dir))
+    assert (usage_dir / ".usage-last-seen.json").read_text() == before
+    rc = usage_cmd.run_usage(["--state-root", str(tmp_path)])
+    assert rc == 0
+    assert "+2.86%/h" in capsys.readouterr().out
+
+
+def test_bad_pool_map_override_is_refused(tmp_path, capsys):
+    """Malformed .pools.local.json -> ValueError / exit 2, never KeyError."""
+    good = load_pool_map()
+    variants = {
+        "missing-pool-name": [{"files": ["claude.json"],
+                               "providers": ["anthropic-claude"]}],
+        "files-not-a-list": [{"pool": "Solo", "cells": ["me"],
+                              "files": "solo.json", "providers": ["solo"]}],
+        "entry-not-an-object": ["Solo"],
+        "providers-not-a-list": [{"pool": "Solo", "cells": ["me"],
+                                  "files": ["solo.json"],
+                                  "providers": "solo"}],
+        "empty-pool-name": [{"pool": "  ", "cells": ["me"],
+                             "files": ["solo.json"], "providers": ["solo"]}],
+        "non-string-cell": [{"pool": "Solo", "cells": [7],
+                             "files": ["solo.json"], "providers": ["solo"]}],
+    }
+    for name, pools in variants.items():
+        usage_dir = tmp_path / name / "usage"
+        usage_dir.mkdir(parents=True)
+        (usage_dir / ".pools.local.json").write_text(
+            json.dumps({"stale_after_hours": 6, "pools": pools}))
+        try:
+            load_pool_map(usage_dir)
+        except ValueError as exc:
+            assert "pool map" in str(exc), name
+        else:
+            raise AssertionError(f"override {name} was accepted")
+        rc = usage_cmd.run_usage(["--state-root", str(tmp_path / name),
+                                  "--json"])
+        assert rc == 2, name
+        err = capsys.readouterr().err
+        assert "pool map unreadable" in err, name
+    assert good["pools"]  # the packaged default still loads
+
+
+def test_sync_falls_back_to_older_rollout_with_event(tmp_path):
+    """Newest rollout has no rate_limits yet -> newest older one with one."""
+    sessions = tmp_path / "sessions"
+    _write_rollout(sessions / "rollout-new-empty.jsonl",
+                   [json.dumps({"payload": {"type": "token_count",
+                                            "info": {}}})],
+                   mtime=2000.0)
+    _write_rollout(sessions / "rollout-old-full.jsonl",
+                   [_rate_limits_event(used_weekly=42.0,
+                                       resets_epoch=1795618145)],
+                   mtime=1000.0)
+    result = codex_reader.write_openai_json(
+        sessions_dir=sessions, usage_dir=tmp_path / "usage")
+    assert result is not None
+    assert "rollout-old-full" in result["rollout"]
+    assert result["windows"]["week"]["used_percentage"] == 42.0
+    written = json.loads((tmp_path / "usage" / "openai.json").read_text())
+    assert written["windows"]["week"]["used_percentage"] == 42.0
+
+
+def test_sync_writes_nothing_when_no_rollout_has_event(tmp_path):
+    sessions = tmp_path / "sessions"
+    _write_rollout(sessions / "rollout-a.jsonl",
+                   [json.dumps({"payload": {"type": "token_count",
+                                            "info": {}}})],
+                   mtime=2000.0)
+    _write_rollout(sessions / "rollout-b.jsonl",
+                   ["not json at all",
+                    json.dumps({"payload": {"rate_limits": None}})],
+                   mtime=1000.0)
+    assert codex_reader.write_openai_json(
+        sessions_dir=sessions, usage_dir=tmp_path / "usage") is None
+    assert not (tmp_path / "usage" / "openai.json").exists()
+
+
+def test_rollout_credentials_never_reach_openai_json(tmp_path):
+    """Credential-shaped payload keys are never copied into openai.json."""
+    secrets = ("sk-PROBE-SYNTHETIC-abc123", "tok-probe-synthetic-xyz789",
+               "sekret-probe-synthetic-456def")
+    sessions = tmp_path / "sessions"
+    event = json.loads(_rate_limits_event(used_weekly=11.0,
+                                          resets_epoch=1795618145))
+    event["payload"]["api_key"] = secrets[0]
+    event["payload"]["session_token"] = secrets[1]
+    event["payload"]["auth"] = {"secret": secrets[2]}
+    _write_rollout(sessions / "rollout-creds.jsonl", [json.dumps(event)],
+                   mtime=1000.0)
+    result = codex_reader.write_openai_json(
+        sessions_dir=sessions, usage_dir=tmp_path / "usage")
+    assert result is not None
+    text = (tmp_path / "usage" / "openai.json").read_text(encoding="utf-8")
+    for secret in secrets:
+        assert secret not in text
+    assert "api_key" not in text and "session_token" not in text
