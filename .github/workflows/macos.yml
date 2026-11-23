@@ -48,17 +48,24 @@
 # accumulated behind it. No permanent expected-red without an expiry.
 
 name: macos
+run-name: macOS pytest — ${{ github.event_name }} on ${{ github.ref_name }}
 
 # Re-enabled 2026-09-19 (#515). The two reds were fixed at the platform level,
 # not skipped: the gh-route wrapper is `env` (GNU `timeout` does not exist on
 # macOS) and `_pid_under` reads PPID via `ps` on darwin. The junit floor below
 # asserts those two node ids EXECUTED. A skipif(darwin) fails this file.
+#
+# Card #1738. macOS minutes bill at 10x, so this file does not run on a push to
+# main or on an unlabeled pull request. It runs on the daily schedule (GitHub
+# runs that only on the default branch), on workflow_dispatch, and when a pull
+# request carries the full-ci label. The job if skips before a runner otherwise.
 on:
-  push:
-    branches: [main]
+  schedule:
+    - cron: '41 6 * * *'
+  workflow_dispatch:
   pull_request:
     branches: [main]
-  workflow_dispatch:
+    types: [labeled, synchronize, reopened]
 
 permissions:
   contents: read
@@ -69,6 +76,7 @@ defaults:
 
 jobs:
   macos-tests:
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
     name: pytest on macos-latest (py${{ matrix.python-version }})
     runs-on: macos-latest
     strategy:

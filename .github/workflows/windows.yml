@@ -33,13 +33,18 @@
 # NOT a hostile-code containment claim — that bar binds only at Trigger 2.
 
 name: windows
+run-name: Windows pytest — ${{ github.event_name }} on ${{ github.ref_name }}
 
+# Card #1738. Windows minutes bill at 2x. Same gate as macos.yml: daily schedule
+# on main, workflow_dispatch, or a pull request labeled full-ci. No runner
+# otherwise.
 on:
-  push:
-    branches: [main]
+  schedule:
+    - cron: '41 6 * * *'
+  workflow_dispatch:
   pull_request:
     branches: [main]
-  workflow_dispatch:
+    types: [labeled, synchronize, reopened]
 
 permissions:
   contents: read
@@ -50,6 +55,7 @@ defaults:
 
 jobs:
   windows-tests:
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
     name: pytest on windows-latest (py${{ matrix.python-version }})
     runs-on: windows-latest
     strategy:
