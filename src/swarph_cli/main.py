@@ -120,6 +120,8 @@ _VERB_HANDLERS: dict[str, str] = {
     "roster": "swarph_cli.commands.roster.run_roster",
     "sweep": "swarph_cli.commands.sweep.run_sweep_cmd",
     "triage": "swarph_cli.commands.triage.run_triage_cmd",
+    # card #1445 phase 1b: usage pools table + Codex rollout reader.
+    "usage": "swarph_cli.commands.usage.run_usage",
     "mcp-server": "swarph_cli.commands.mcp_server.run_mcp_server",
     "compress": "swarph_cli.commands.compress.run_compress",
     "committee": "swarph_cli.commands.committee.run_committee",

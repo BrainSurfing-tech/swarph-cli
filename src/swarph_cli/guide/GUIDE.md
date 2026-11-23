@@ -589,6 +589,7 @@ answers `--help`; hook-plumbing verbs are the callbacks hooks invoke, not comman
 - `swarph sweep` -- the card-#1064 stuck-work sweep: blocked rows and unreviewed PRs, DMs the blocker, `swarph sweep --dry-run` reads only.
 - `swarph triage` -- the card-#1073 organ triage router: sensor findings onto owner triage rows (cap 10, carried), `swarph triage --dry-run` reads only.
 - `swarph timeline` -- deterministic temporal lookup over the timeline: around, since, range (see [Code and history](#code-and-history)).
+- `swarph usage` -- usage pools table (card #1445): one row per pool+window with used %, resets, read age and burn/hr; readings older than 6h show STALE, pools with no file show missing. `swarph usage sync` runs the Codex rollout reader into `usage/openai.json`.
 - `swarph version` -- per-module versions and install origin (PEP 610).
 - `swarph wake-hook-output` -- hook plumbing: the silent-wake SessionStart callback.
 - `swarph watchdog` -- stranded-session detection and recovery.
