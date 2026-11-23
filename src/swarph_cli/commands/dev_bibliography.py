@@ -32,14 +32,21 @@ def _rows(payload, key):
     return payload[key]
 
 
-def _next_version(read, thread_url):
+def next_version(read, thread_url, *, expected=None):
     posts = _rows(read(thread_url), "messages")
     if len(posts) >= HISTORY_LIMIT:
         raise Unavailable("card thread reached the gateway history limit")
     if any(not isinstance(post.get("content"), str) for post in posts):
         raise Unavailable("card thread has unreadable message content")
-    return 1 + sum(bool(_HEADING.fullmatch(post["content"].partition("\n")[0].strip()))
-                   for post in posts)
+    headings = [post["content"].partition("\n")[0].strip() for post in posts]
+    version = 1 + sum(bool(_HEADING.fullmatch(line)) for line in headings)
+    if expected is not None:
+        heading = f"bibliography v{expected}"
+        if heading in headings or f"# {heading}" in headings:
+            raise Unavailable(f"{heading} is already posted")
+        if version != expected:
+            raise Unavailable(f"bibliography version changed from v{expected} to v{version}")
+    return version
 
 
 def _lifetime(card, now):
@@ -193,7 +200,7 @@ def collect(card, read, thread_url, *, post_safe=False):
         return find()
 
     try:
-        version, reason = _next_version(read, thread_url), None
+        version, reason = next_version(read, thread_url), None
     except Unavailable as exc:
         version, reason = None, str(exc)
     return {"version": version, "version_unavailable": reason, "as_of": as_of, "sections": [
