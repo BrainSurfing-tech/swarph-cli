@@ -93,7 +93,34 @@ def _fake_swarph(tmp_path: Path, gateway_path: Path) -> Path:
                     return a.split("=", 1)[1]
             return default
 
+        if args[:2] == ["monitor", "status"]:
+            raise SystemExit(0)
+
         if args[:3] == ["board", "obligations", "list"]:
+            barrier = int(gw.get("list_barrier") or 0)
+            if barrier:
+                import time as _time
+                waiter = gw_path.parent / f"list-waiter-{{os.getpid()}}"
+                waiter.write_text("1", encoding="utf-8")
+                deadline = _time.time() + float(gw.get("list_barrier_timeout") or 2)
+                while _time.time() < deadline:
+                    try:
+                        fresh = json.loads(gw_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        fresh = {{}}
+                    rows = fresh.get("obligations") or []
+                    if rows:
+                        gw["obligations"] = rows
+                        break
+                    if len(list(gw_path.parent.glob("list-waiter-*"))) >= barrier:
+                        _time.sleep(0.05)
+                        try:
+                            fresh = json.loads(gw_path.read_text(encoding="utf-8"))
+                        except (OSError, json.JSONDecodeError):
+                            fresh = {{}}
+                        gw["obligations"] = fresh.get("obligations") or []
+                        break
+                    _time.sleep(0.02)
             save()
             override = gw.get("list_override")
             if override is not None:
@@ -106,6 +133,12 @@ def _fake_swarph(tmp_path: Path, gateway_path: Path) -> Path:
             raise SystemExit(0)
 
         if args[:4] == ["board", "cards", "ask", "729"]:
+            if gw.get("ask_markers"):
+                (gw_path.parent / f"ask-marker-{{os.getpid()}}").write_text(
+                    "1", encoding="utf-8")
+            if gw.get("ask_store", True) is False:
+                save()
+                raise SystemExit(int(gw.get("ask_rc", 0)))
             next_id = int(gw.get("next_id", 1))
             gw["next_id"] = next_id + 1
             row = {{
@@ -649,7 +682,7 @@ def test_second_outage_with_older_open_row_notifies_and_announces_second_recover
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
 def test_stored_then_failed_recovery_and_realert_notes_are_not_resent(tmp_path, monkeypatch):
-    # (a) 67 open rows, say_rc=1 after storing, 6 recovery passes -> 1 recovery note
+    # (a) 67 open rows, say_rc=1 after storing, 6 recovery passes -> 3 recovery notes
     root_a = tmp_path / "state_a"
     proc_a = tmp_path / "proc_a"
     _cell(root_a, "lab-ovh", alive=True, proc_root=proc_a)
@@ -683,9 +716,9 @@ def test_stored_then_failed_recovery_and_realert_notes_are_not_resent(tmp_path, 
         proc = subprocess.run(cmd, env=env_a, capture_output=True, text=True, check=False)
         assert proc.returncode == 0
     gw_a_after = json.loads(gw_a.read_text(encoding="utf-8"))
-    assert len(gw_a_after["notes"]) == 1
+    assert len(gw_a_after["notes"]) == 3
 
-    # (b) 1 open row, past 6h re-alert, say_rc=1 after storing, 10 dead passes -> 1 re-alert, 0 new rows
+    # (b) 1 open row, past 6h re-alert, say_rc=1 after storing, 10 dead passes -> 3 re-alerts, 0 new rows
     root_b = tmp_path / "state_b"
     _cell(root_b, "lab-ovh", alive=False)
     _yaml(tmp_path / "config_b")
@@ -728,10 +761,10 @@ def test_stored_then_failed_recovery_and_realert_notes_are_not_resent(tmp_path, 
     for i in range(10):
         monkeypatch.setenv("WAKE_WATCHDOG_NOW", str(t1 + i * 120.0))
         rcs.append(wake_watchdog.main(argv))
-    assert rcs[0] == 1
-    assert all(rc == 0 for rc in rcs[1:])
+    assert rcs[:3] == [1, 1, 1]
+    assert all(rc == 0 for rc in rcs[3:])
     gw_b_after = json.loads(gw_b.read_text(encoding="utf-8"))
-    assert len(gw_b_after["notes"]) == 1
+    assert len(gw_b_after["notes"]) == 3
     assert len(gw_b_after["obligations"]) == 1
     assert [c for c in gw_b_after["calls"] if c[:4] == ["board", "cards", "ask", "729"]] == []
 
@@ -786,19 +819,29 @@ def test_n_consecutive_failed_listings_then_one_mint(tmp_path, monkeypatch, caps
     gw = json.loads(gw_path.read_text(encoding="utf-8"))
     assert len(gw["obligations"]) == 1
 
-    # 10 more failing-listing passes -> still exactly 1 row minted
+    # Two more stored-then-failed asks, then the 3-attempt cap holds.
+    for extra in range(2):
+        monkeypatch.setenv(
+            "WAKE_WATCHDOG_NOW",
+            str(NOW + (MAX_CONSECUTIVE_LIST_FAILURES + 1 + extra) * 120.0),
+        )
+        assert wake_watchdog.main(argv) == 1
+
+    gw_capped = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert len(gw_capped["obligations"]) == 3
+
     for i in range(10):
         monkeypatch.setenv(
             "WAKE_WATCHDOG_NOW",
-            str(NOW + (MAX_CONSECUTIVE_LIST_FAILURES + 1 + i) * 120.0),
+            str(NOW + (MAX_CONSECUTIVE_LIST_FAILURES + 4 + i) * 120.0),
         )
-        assert wake_watchdog.main(argv) == 1
-        assert "fallback mint already attempted" in capsys.readouterr().err
+        assert wake_watchdog.main(argv) == 0
+        assert "fallback mint already attempted" not in capsys.readouterr().err
 
     gw_final = json.loads(gw_path.read_text(encoding="utf-8"))
-    assert len(gw_final["obligations"]) == 1
+    assert len(gw_final["obligations"]) == 3
     ask_calls = [c for c in gw_final["calls"] if c[:4] == ["board", "cards", "ask", "729"]]
-    assert len(ask_calls) == 1
+    assert len(ask_calls) == 3
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
@@ -885,15 +928,19 @@ def test_10_passes_stored_then_failed_peer_sends_send_each_channel_once(
         monkeypatch.setenv("WAKE_WATCHDOG_NOW", str(NOW + i * 120.0))
         rcs.append(wake_watchdog.main(argv))
 
-    assert rcs[0] == 1
-    assert all(rc == 0 for rc in rcs[1:])
+    assert rcs[:3] == [1, 1, 1]
+    assert all(rc == 0 for rc in rcs[3:])
     gw = json.loads(gw_path.read_text(encoding="utf-8"))
     peer_dms = [d for d in gw["dms"] if d["to"] == "peer-cell"]
     esc_dms = [d for d in gw["dms"] if d["to"] == "drop-on-meta-edge"]
     card_notes = [n for n in gw["notes"] if n["to"] == "peer-cell"]
-    assert len(peer_dms) == 1
-    assert len(card_notes) == 1
-    assert len(esc_dms) == 1
+    assert len(card_notes) == 3
+    if dm_rc == 1:
+        assert len(peer_dms) == 3
+        assert len(esc_dms) == 3
+    else:
+        assert len(peer_dms) == 1
+        assert len(esc_dms) == 1
 
 
 # ── Additional cross-platform unit tests ────────────────────────────────────
@@ -999,3 +1046,308 @@ def test_every_subprocess_run_passes_timeout():
             kw_names = {kw.arg for kw in node.keywords if kw.arg is not None}
             assert "timeout" in kw_names, f"missing timeout= at line {node.lineno}"
     assert len(calls) >= 5
+
+
+def _watch_env(monkeypatch, tmp_path, root, state_path, stub):
+    monkeypatch.setenv("SWARPH_STATE_ROOT", str(root))
+    monkeypatch.setenv("WAKE_WATCHDOG_STATE", str(state_path))
+    monkeypatch.setenv("WAKE_WATCHDOG_PROC", str(tmp_path / "proc"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("SWARPH_BIN", str(stub))
+    monkeypatch.delenv("SWARPH_SELF", raising=False)
+    monkeypatch.delenv("MESH_GATEWAY_URL", raising=False)
+    monkeypatch.setattr(wake_watchdog, "_listing", lambda _argv: "")
+
+
+_ARGV = ["--as", "lab-ovh", "--escalate", "drop-on-meta-edge"]
+
+
+def _pass(monkeypatch, when: float) -> int:
+    monkeypatch.setenv("WAKE_WATCHDOG_NOW", str(when))
+    return wake_watchdog.main(_ARGV)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
+def test_failed_send_is_retried_on_the_next_passes_up_to_three_times(tmp_path, monkeypatch):
+    """A non-zero exit is retried on the next passes, and stops at 3."""
+    root = tmp_path / "peer-state"
+    _cell(root, "peer-cell", alive=False)
+    state_path = tmp_path / "peer-wake.json"
+    state_path.write_text(json.dumps({
+        "peer-cell": {"missing_since": NOW - 120.0},
+    }), encoding="utf-8")
+    gw_path = tmp_path / "peer-gw.json"
+    gw_path.write_text(json.dumps({
+        "obligations": [], "dm_rc": 1, "say_rc": 1,
+    }), encoding="utf-8")
+    stub = _fake_swarph(tmp_path, gw_path)
+    _watch_env(monkeypatch, tmp_path, root, state_path, stub)
+    for i in range(4):
+        _pass(monkeypatch, NOW + i * 120.0)
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert len([d for d in gw["dms"] if d["to"] == "peer-cell"]) == 3
+    assert len([d for d in gw["dms"] if d["to"] == "drop-on-meta-edge"]) == 3
+    assert len([n for n in gw["notes"] if n["to"] == "peer-cell"]) == 3
+
+    root_r = tmp_path / "recovery-state"
+    proc_r = tmp_path / "recovery-proc"
+    _cell(root_r, "lab-ovh", alive=True, proc_root=proc_r)
+    _yaml(tmp_path / "recovery-config")
+    state_r = tmp_path / "recovery-wake.json"
+    state_r.write_text(json.dumps({
+        "lab-ovh": {"outage": True, "alerted_at": NOW - 100.0, "missing_since": NOW - 200.0},
+    }), encoding="utf-8")
+    gw_r = tmp_path / "recovery-gw.json"
+    gw_r.write_text(json.dumps({
+        "obligations": [{
+            "id": 42, "card_id": 729, "holder": "commander", "status": "open",
+            "created_by": "lab-ovh", "accept": "WAKE-DEAD lab-ovh",
+            "taken_at": "2026-11-21T00:00:00Z",
+        }],
+        "say_rc": 1,
+    }), encoding="utf-8")
+    stub_r = _fake_swarph(tmp_path, gw_r)
+    _watch_env(monkeypatch, tmp_path, root_r, state_r, stub_r)
+    monkeypatch.setenv("WAKE_WATCHDOG_PROC", str(proc_r))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "recovery-config"))
+    for i in range(4):
+        assert _pass(monkeypatch, NOW + i * 120.0) == 0
+    notes_r = json.loads(gw_r.read_text(encoding="utf-8"))["notes"]
+    assert len(notes_r) == 3
+
+    root_a = tmp_path / "realert-state"
+    _cell(root_a, "lab-ovh", alive=False)
+    _yaml(tmp_path / "realert-config")
+    state_a = tmp_path / "realert-wake.json"
+    alerted_at = 1000.0
+    state_a.write_text(json.dumps({
+        "lab-ovh": {
+            "missing_since": 0.0, "outage": True,
+            "alerted_at": alerted_at, "outage_row": 42,
+        },
+    }), encoding="utf-8")
+    gw_a = tmp_path / "realert-gw.json"
+    gw_a.write_text(json.dumps({
+        "obligations": [{
+            "id": 42, "card_id": 729, "holder": "commander", "status": "open",
+            "created_by": "lab-ovh", "accept": "WAKE-DEAD lab-ovh",
+            "taken_at": "2026-11-21T00:00:00Z",
+        }],
+        "say_rc": 1,
+    }), encoding="utf-8")
+    stub_a = _fake_swarph(tmp_path, gw_a)
+    _watch_env(monkeypatch, tmp_path, root_a, state_a, stub_a)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "realert-config"))
+    t1 = alerted_at + REALERT_SECONDS + 1.0
+    for i in range(4):
+        _pass(monkeypatch, t1 + i * 120.0)
+    gw_after = json.loads(gw_a.read_text(encoding="utf-8"))
+    assert len(gw_after["notes"]) == 3
+    assert [c for c in gw_after["calls"] if c[:4] == ["board", "cards", "ask", "729"]] == []
+
+    root_ok = tmp_path / "ok-state"
+    _cell(root_ok, "peer-cell", alive=False)
+    state_ok = tmp_path / "ok-wake.json"
+    state_ok.write_text(json.dumps({
+        "peer-cell": {"missing_since": NOW - 120.0},
+    }), encoding="utf-8")
+    gw_ok = tmp_path / "ok-gw.json"
+    gw_ok.write_text(json.dumps({"obligations": [], "dm_rc": 0, "say_rc": 0}), encoding="utf-8")
+    stub_ok = _fake_swarph(tmp_path, gw_ok)
+    _watch_env(monkeypatch, tmp_path, root_ok, state_ok, stub_ok)
+    assert _pass(monkeypatch, NOW) == 0
+    assert _pass(monkeypatch, NOW + 120.0) == 0
+    done = json.loads(gw_ok.read_text(encoding="utf-8"))
+    assert len([d for d in done["dms"] if d["to"] == "peer-cell"]) == 1
+    assert len([d for d in done["dms"] if d["to"] == "drop-on-meta-edge"]) == 1
+    assert len([n for n in done["notes"] if n["to"] == "peer-cell"]) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
+def test_unstored_failed_ask_does_not_block_fallback_mint(tmp_path, monkeypatch):
+    root = tmp_path / "state"
+    _cell(root, "lab-ovh", alive=False)
+    _yaml(tmp_path / "config")
+    state_path = tmp_path / "wake.json"
+    state_path.write_text(json.dumps({
+        "lab-ovh": {"missing_since": NOW - 120.0},
+    }), encoding="utf-8")
+    gw_path = tmp_path / "gateway.json"
+    gw_path.write_text(json.dumps({
+        "obligations": [], "next_id": 1, "ask_rc": 1, "ask_store": False,
+    }), encoding="utf-8")
+    stub = _fake_swarph(tmp_path, gw_path)
+    _watch_env(monkeypatch, tmp_path, root, state_path, stub)
+    assert _pass(monkeypatch, NOW) == 1
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert gw["obligations"] == []
+    assert len([c for c in gw["calls"] if c[:4] == ["board", "cards", "ask", "729"]]) == 1
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["lab-ovh"].get("mint_attempted_at") is not None
+
+    gw["ask_store"] = True
+    gw["ask_rc"] = 0
+    gw["list_override"] = {"rc": 1, "stdout": "", "stderr": "listing down"}
+    gw_path.write_text(json.dumps(gw), encoding="utf-8")
+    for i in range(MAX_CONSECUTIVE_LIST_FAILURES):
+        assert _pass(monkeypatch, NOW + (i + 1) * 120.0) == 1
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert gw["obligations"] == []
+
+    assert _pass(monkeypatch, NOW + (MAX_CONSECUTIVE_LIST_FAILURES + 1) * 120.0) == 0
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert len(gw["obligations"]) == 1
+    assert len([c for c in gw["calls"] if c[:4] == ["board", "cards", "ask", "729"]]) == 2
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
+def test_overlapping_passes_mint_one_row(tmp_path):
+    root = tmp_path / "state"
+    _cell(root, "lab-ovh", alive=False)
+    _yaml(tmp_path / "config")
+    state_path = tmp_path / "wake.json"
+    state_path.write_text(json.dumps({
+        "lab-ovh": {"missing_since": NOW - 120.0},
+    }), encoding="utf-8")
+    gw_path = tmp_path / "gateway.json"
+    gw_path.write_text(json.dumps({
+        "obligations": [],
+        "next_id": 1,
+        "ask_markers": True,
+        "list_barrier": 2,
+        "list_barrier_timeout": 2,
+        "stamp_created_at": True,
+    }), encoding="utf-8")
+    stub = _fake_swarph(tmp_path, gw_path)
+    env = _base_env(tmp_path, root, state_path, stub, NOW)
+    cmd = [sys.executable, "-m", "swarph_cli.scripts.wake_watchdog", *_ARGV]
+    procs = [
+        subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(2)
+    ]
+    for proc in procs:
+        _out, err = proc.communicate(timeout=30)
+        assert proc.returncode == 0, err
+    assert len(list(tmp_path.glob("ask-marker-*"))) == 1
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert len(gw["obligations"]) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
+def test_non_numeric_state_field_is_reset_and_the_pass_continues(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "state"
+    _cell(root, "lab-ovh", alive=False)
+    _cell(root, "peer-cell", alive=False)
+    state_path = tmp_path / "wake.json"
+    state_path.write_text(json.dumps({
+        "lab-ovh": {
+            "missing_since": "not-a-time",
+            "alerted_at": "yesterday",
+            "mint_attempted_at": ["bad"],
+            "list_failures": "nope",
+        },
+        "peer-cell": {"missing_since": NOW - 120.0},
+    }), encoding="utf-8")
+    gw_path = tmp_path / "gateway.json"
+    gw_path.write_text(json.dumps({"obligations": [], "dm_rc": 0, "say_rc": 0}), encoding="utf-8")
+    stub = _fake_swarph(tmp_path, gw_path)
+    _watch_env(monkeypatch, tmp_path, root, state_path, stub)
+    assert _pass(monkeypatch, NOW) == 0
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "resetting non-numeric missing_since" in err
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert isinstance(saved["lab-ovh"]["missing_since"], (int, float))
+    assert saved["lab-ovh"]["alerted_at"] is None
+    assert saved["lab-ovh"]["mint_attempted_at"] is None
+    assert saved["lab-ovh"]["list_failures"] == 0
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert any(d["to"] == "peer-cell" for d in gw["dms"])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
+def test_peer_attempts_reset_after_recovery(tmp_path, monkeypatch):
+    root = tmp_path / "state"
+    _cell(root, "peer-cell", alive=False)
+    state_path = tmp_path / "wake.json"
+    state_path.write_text(json.dumps({
+        "peer-cell": {"missing_since": NOW - 120.0},
+    }), encoding="utf-8")
+    gw_path = tmp_path / "gateway.json"
+    gw_path.write_text(json.dumps({"obligations": [], "dm_rc": 0, "say_rc": 0}), encoding="utf-8")
+    stub = _fake_swarph(tmp_path, gw_path)
+    _watch_env(monkeypatch, tmp_path, root, state_path, stub)
+    assert _pass(monkeypatch, NOW) == 0
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "peer_attempts" in saved["peer-cell"]
+    cursor = root / "peer-cell" / "mesh-sidecar" / "wait_cursor.json"
+    cursor.write_text("{}", encoding="utf-8")
+    assert _pass(monkeypatch, NOW + 10.0) == 0
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "peer_attempts" not in saved["peer-cell"]
+    assert saved["peer-cell"]["outage"] is False
+    cursor.unlink()
+    assert _pass(monkeypatch, NOW + 20.0) == 0
+    assert _pass(monkeypatch, NOW + 20.0 + wake_watchdog.GAP_SECONDS + 1.0) == 0
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert len([d for d in gw["dms"] if d["to"] == "peer-cell"]) == 2
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
+def test_peer_attempts_expire_after_realert_seconds(tmp_path, monkeypatch):
+    root = tmp_path / "state"
+    _cell(root, "peer-cell", alive=False)
+    state_path = tmp_path / "wake.json"
+    state_path.write_text(json.dumps({
+        "peer-cell": {"missing_since": NOW - 120.0},
+    }), encoding="utf-8")
+    gw_path = tmp_path / "gateway.json"
+    gw_path.write_text(json.dumps({"obligations": [], "dm_rc": 0, "say_rc": 0}), encoding="utf-8")
+    stub = _fake_swarph(tmp_path, gw_path)
+    _watch_env(monkeypatch, tmp_path, root, state_path, stub)
+    assert _pass(monkeypatch, NOW) == 0
+    assert _pass(monkeypatch, NOW + 120.0) == 0
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert len([d for d in gw["dms"] if d["to"] == "peer-cell"]) == 1
+    assert _pass(monkeypatch, NOW + REALERT_SECONDS + 5.0) == 0
+    gw = json.loads(gw_path.read_text(encoding="utf-8"))
+    assert len([d for d in gw["dms"] if d["to"] == "peer-cell"]) == 2
+    assert len([d for d in gw["dms"] if d["to"] == "drop-on-meta-edge"]) == 2
+    assert len([n for n in gw["notes"] if n["to"] == "peer-cell"]) == 2
+
+    root_f = tmp_path / "fail-state"
+    _cell(root_f, "peer-cell", alive=False)
+    state_f = tmp_path / "fail-wake.json"
+    state_f.write_text(json.dumps({
+        "peer-cell": {"missing_since": NOW - 120.0},
+    }), encoding="utf-8")
+    gw_f = tmp_path / "fail-gw.json"
+    gw_f.write_text(json.dumps({"obligations": [], "dm_rc": 1, "say_rc": 1}), encoding="utf-8")
+    stub_f = _fake_swarph(tmp_path, gw_f)
+    _watch_env(monkeypatch, tmp_path, root_f, state_f, stub_f)
+    for i in range(3):
+        assert _pass(monkeypatch, NOW + i * 120.0) == 1
+    assert _pass(monkeypatch, NOW + 3 * 120.0) == 0
+    mid = json.loads(gw_f.read_text(encoding="utf-8"))
+    assert len([d for d in mid["dms"] if d["to"] == "peer-cell"]) == 3
+    _pass(monkeypatch, NOW + 2 * 120.0 + REALERT_SECONDS + 1.0)
+    later = json.loads(gw_f.read_text(encoding="utf-8"))
+    assert len([d for d in later["dms"] if d["to"] == "peer-cell"]) == 4
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX swarph stub")
+def test_list_failures_resets_on_a_successful_listing(tmp_path, monkeypatch):
+    root = tmp_path / "state"
+    _cell(root, "lab-ovh", alive=False)
+    _yaml(tmp_path / "config")
+    state_path = tmp_path / "wake.json"
+    state_path.write_text(json.dumps({
+        "lab-ovh": {"missing_since": NOW - 120.0, "list_failures": 11},
+    }), encoding="utf-8")
+    gw_path = tmp_path / "gateway.json"
+    gw_path.write_text(json.dumps({"obligations": [], "next_id": 1}), encoding="utf-8")
+    stub = _fake_swarph(tmp_path, gw_path)
+    _watch_env(monkeypatch, tmp_path, root, state_path, stub)
+    assert _pass(monkeypatch, NOW) == 0
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["lab-ovh"]["list_failures"] == 0
