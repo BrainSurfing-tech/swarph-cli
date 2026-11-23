@@ -8,6 +8,7 @@ commander-held row, not a DM to the cell (card #1256).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import json
 import os
@@ -18,12 +19,18 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
+
+try:
+    import fcntl
+except ImportError:  # Windows has no flock; the mint lock is a no-op there.
+    fcntl = None
 
 GAP_SECONDS = 60
 WAIT_REARM_GRACE = 600
 REALERT_SECONDS = 6 * 60 * 60
 MAX_CONSECUTIVE_LIST_FAILURES = 15
+MAX_SEND_ATTEMPTS = 3
 SUBPROCESS_TIMEOUT = 30
 
 
@@ -457,6 +464,168 @@ def _cell_rec(state: dict, name: str) -> dict:
     return rec
 
 
+def _log_reset(who: str, key: str, raw: object) -> None:
+    print(
+        f"wake_watchdog: resetting non-numeric {key} for {who}: {raw!r}",
+        file=sys.stderr, flush=True)
+
+
+def _state_float(rec: dict, key: str, who: str) -> float | None:
+    """A numeric state field, or None. A non-numeric value is reset and logged."""
+    raw = rec.get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        _log_reset(who, key, raw)
+        rec[key] = None
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        _log_reset(who, key, raw)
+        rec[key] = None
+        return None
+
+
+def _read_clock(rec: dict, key: str, who: str) -> tuple[float | None, bool]:
+    """The clock value, and whether a non-numeric value was just reset."""
+    raw = rec.get(key)
+    value = _state_float(rec, key, who)
+    return value, raw is not None and value is None
+
+
+def _reset_list_failures(rec: dict, who: str) -> None:
+    raw = rec.get("list_failures")
+    if raw is None:
+        return
+    if isinstance(raw, bool):
+        _log_reset(who, "list_failures", raw)
+        rec["list_failures"] = 0
+        return
+    try:
+        int(raw)
+    except (TypeError, ValueError):
+        _log_reset(who, "list_failures", raw)
+        rec["list_failures"] = 0
+
+
+def _attempt_slot(rec: dict, bucket: str, channel: str) -> dict:
+    attempts = rec.get(bucket)
+    if not isinstance(attempts, dict):
+        attempts = {}
+        rec[bucket] = attempts
+    slot = attempts.get(channel)
+    if not isinstance(slot, dict):
+        slot = {}
+        attempts[channel] = slot
+    return slot
+
+
+def _slot_count(slot: dict) -> int:
+    raw = slot.get("count")
+    if isinstance(raw, bool) or raw is None:
+        return 0
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        _log_reset("send", "count", raw)
+        slot["count"] = 0
+        return 0
+
+
+def _slot_at(slot: dict) -> float | None:
+    raw = slot.get("at")
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        _log_reset("send", "at", raw)
+        slot["at"] = None
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        _log_reset("send", "at", raw)
+        slot["at"] = None
+        return None
+
+
+def _attempt_fresh(slot: dict, now: float) -> bool:
+    at = _slot_at(slot)
+    if at is None:
+        return False
+    return (now - at) < REALERT_SECONDS
+
+
+def _success_holds(slot: dict, now: float) -> bool:
+    """A successful send is not retried until REALERT_SECONDS has passed."""
+    return slot.get("ok") is True and _attempt_fresh(slot, now)
+
+
+def _failure_capped(slot: dict, now: float) -> bool:
+    """Three failures inside the window wait out REALERT_SECONDS."""
+    return (_slot_count(slot) >= MAX_SEND_ATTEMPTS
+            and slot.get("ok") is not True
+            and _attempt_fresh(slot, now))
+
+
+def _begin_attempt(slot: dict, now: float) -> None:
+    count = _slot_count(slot)
+    if not _attempt_fresh(slot, now):
+        count = 0
+    slot["count"] = count + 1
+    slot["at"] = now
+    slot["ok"] = False
+
+
+def _finish_attempt(slot: dict, ok: bool) -> None:
+    slot["ok"] = bool(ok)
+    if ok:
+        slot["count"] = 0
+
+
+def _dispatch_attempt(slot: dict, now: float, send: Callable[[], bool],
+                      state_path: Path, state: dict, *,
+                      hold_success: bool) -> str:
+    """Send once. Returns ok, held, capped, or retry.
+
+    A non-zero exit is retried on the next pass until MAX_SEND_ATTEMPTS,
+    then the caller waits REALERT_SECONDS. A successful send is not retried
+    inside that window when hold_success is set. The attempt is recorded
+    before the send so a stored-then-failed call still counts toward the cap.
+    """
+    if hold_success and _success_holds(slot, now):
+        return "held"
+    if _failure_capped(slot, now):
+        return "capped"
+    _begin_attempt(slot, now)
+    save_state(state_path, state)
+    ok = bool(send())
+    _finish_attempt(slot, ok)
+    save_state(state_path, state)
+    if ok:
+        return "ok"
+    if _failure_capped(slot, now):
+        return "capped"
+    return "retry"
+
+
+@contextlib.contextmanager
+def _mint_lock(state_path: Path):
+    """One self-outage mint at a time across overlapping passes."""
+    if fcntl is None:
+        yield
+        return
+    lock_path = Path(str(state_path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = lock_path.open("a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+
+
 def scan(cells: dict[str, str], cmdlines: Iterable[str], state: dict,
          now: float, *, gap: float = GAP_SECONDS,
          timers: Iterable[str] = (), crontab: str = "",
@@ -480,19 +649,31 @@ def scan(cells: dict[str, str], cmdlines: Iterable[str], state: dict,
             rec.pop("mint_attempted_at", None)
             rec.pop("list_failures", None)
             rec.pop("peer_attempts", None)
+            rec.pop("send_attempts", None)
             continue
-        since = rec.get("missing_since")
+        _state_float(rec, "mint_attempted_at", name)
+        alerted_at, alerted_repaired = _read_clock(rec, "alerted_at", name)
+        _reset_list_failures(rec, name)
+        since, since_repaired = _read_clock(rec, "missing_since", name)
         if since is None:
+            if rec.get("outage") and since_repaired:
+                # The bad clock was cleared. Do not start a fresh gap; the
+                # open outage is already due. Anchor missing_since just past
+                # the gap so a later pass can still measure a realert.
+                rec["missing_since"] = now - gap - 1.0
+                alert.append(name)
+                continue
             rec["missing_since"] = now
+            continue
+        if rec.get("outage") and alerted_repaired:
+            alert.append(name)
             continue
         if now - since <= gap:
             continue
         if not rec.get("outage"):
             alert.append(name)
             continue
-        try:
-            alerted_at = float(rec.get("alerted_at"))
-        except (TypeError, ValueError):
+        if alerted_at is None:
             continue
         if now - alerted_at >= REALERT_SECONDS:
             alert.append(name)
@@ -759,12 +940,45 @@ def _pick_oid(candidates: list[dict], recorded_row: object) -> object:
     return candidates[0]["id"]
 
 
+def _settle_self_mark(rec: dict, now: float, result: str,
+                      state_path: Path, state: dict) -> bool:
+    """Commit the realert clock unless this failure still has retries left."""
+    if result == "retry":
+        save_state(state_path, state)
+        return False
+    rec["outage"] = True
+    rec["alerted_at"] = now
+    save_state(state_path, state)
+    return result in ("ok", "held")
+
+
 def _handle_self_outage(swarph: str, sender: str, token_file: str,
                         inbox: str, now: float, state: dict,
                         state_path: Path) -> bool:
-    """Idempotently record or re-alert a self-outage without minting duplicates."""
+    """Idempotently record or re-alert a self-outage without minting duplicates.
+
+    A lock file or state directory that cannot be opened is one skipped mint,
+    not a dead pass. Peer alerts still run.
+    """
+    try:
+        with _mint_lock(state_path):
+            return _handle_self_outage_locked(
+                swarph, sender, token_file, inbox, now, state, state_path)
+    except PermissionError as exc:
+        print(
+            f"wake_watchdog: cannot take mint lock ({exc}); "
+            "skipping self-outage mint this pass",
+            file=sys.stderr, flush=True)
+        return False
+
+
+def _handle_self_outage_locked(swarph: str, sender: str, token_file: str,
+                               inbox: str, now: float, state: dict,
+                               state_path: Path) -> bool:
+    """The self-outage body. Callers hold the mint lock."""
     rec = _cell_rec(state, sender)
     existing = _list_open_dead_wake_rows(swarph, sender, token_file)
+    listing_failed = existing is None
     if existing is None:
         try:
             failures = int(rec.get("list_failures") or 0) + 1
@@ -785,13 +999,17 @@ def _handle_self_outage(swarph: str, sender: str, token_file: str,
                 f"open-row listing failed ({failures}/{MAX_CONSECUTIVE_LIST_FAILURES})",
                 file=sys.stderr, flush=True)
             return False
-        if rec.get("mint_attempted_at") is not None:
+        slot = _attempt_slot(rec, "send_attempts", "mint")
+        if _success_holds(slot, now) or _failure_capped(slot, now):
+            held = _success_holds(slot, now)
+            rec["outage"] = True
+            rec["alerted_at"] = now
             save_state(state_path, state)
             print(
                 f"wake_watchdog: open-row listing failed ({failures}) for {sender}; "
                 "fallback mint already attempted, not minting again",
                 file=sys.stderr, flush=True)
-            return False
+            return held
         print(
             f"wake_watchdog: open-row listing failed {failures} consecutive times "
             f"(cap={MAX_CONSECUTIVE_LIST_FAILURES}) for {sender}; "
@@ -805,12 +1023,19 @@ def _handle_self_outage(swarph: str, sender: str, token_file: str,
         if rec.get("outage"):
             oid = _pick_oid(existing, rec.get("outage_row"))
             rec["outage_row"] = oid
+            slot = _attempt_slot(rec, "send_attempts", "realert")
+            result = _dispatch_attempt(
+                slot, now,
+                lambda: _run_board(
+                    _realert_note_argv(
+                        swarph, sender, token_file, oid, _dead_since(inbox, rec)),
+                    f"cards say {oid}").returncode == 0,
+                state_path, state, hold_success=False)
+            if result == "retry":
+                return False
             rec["alerted_at"] = now
             save_state(state_path, state)
-            said = _run_board(
-                _realert_note_argv(swarph, sender, token_file, oid, _dead_since(inbox, rec)),
-                f"cards say {oid}")
-            return said.returncode == 0
+            return result in ("ok", "held")
         this_outage = [r for r in existing if _row_from_this_outage(r, rec)]
         if this_outage:
             oid = _pick_oid(this_outage, rec.get("outage_row"))
@@ -828,17 +1053,19 @@ def _handle_self_outage(swarph: str, sender: str, token_file: str,
         if isinstance(rec.get("noted"), list):
             rec["noted"] = [x for x in rec["noted"] if str(x) not in open_keys]
         rec["outage_row"] = oid
-        rec["outage"] = True
-        rec["alerted_at"] = now
-        save_state(state_path, state)
         print(
             f"wake_watchdog: older open dead-wake row #{oid} found for {sender}; "
             "sending note and clearing recovery mark",
             file=sys.stderr, flush=True)
-        said = _run_board(
-            _realert_note_argv(swarph, sender, token_file, oid, _dead_since(inbox, rec)),
-            f"cards say {oid}")
-        return said.returncode == 0
+        slot = _attempt_slot(rec, "send_attempts", "realert")
+        result = _dispatch_attempt(
+            slot, now,
+            lambda: _run_board(
+                _realert_note_argv(
+                    swarph, sender, token_file, oid, _dead_since(inbox, rec)),
+                f"cards say {oid}").returncode == 0,
+            state_path, state, hold_success=False)
+        return _settle_self_mark(rec, now, result, state_path, state)
 
     content = commander_alert(sender, _dead_since(inbox, rec))
     ask_argv = [swarph, "board", "cards", "ask", "729",
@@ -848,17 +1075,47 @@ def _handle_self_outage(swarph: str, sender: str, token_file: str,
     if token_file:
         ask_argv.extend(["--token-file", token_file])
     rec["mint_attempted_at"] = now
-    save_state(state_path, state)
-    asked = _run_board(ask_argv, "cards ask 729")
-    if asked.returncode == 0:
-        minted_id = _parse_minted_row_id(asked.stdout or "")
+    slot = _attempt_slot(rec, "send_attempts", "mint")
+    asked: dict[str, subprocess.CompletedProcess] = {}
+
+    def _ask() -> bool:
+        asked["proc"] = _run_board(ask_argv, "cards ask 729")
+        return asked["proc"].returncode == 0
+
+    result = _dispatch_attempt(
+        slot, now, _ask, state_path, state, hold_success=True)
+    if result == "ok":
+        minted_id = _parse_minted_row_id(asked["proc"].stdout or "")
         if minted_id is not None:
             rec["outage_row"] = minted_id
         rec["outage"] = True
         rec["alerted_at"] = now
         save_state(state_path, state)
         return True
-    return False
+    if result == "retry":
+        # A non-zero exit can still have stored the row. Hold the mint slot
+        # across the listing cap so that ask does not mint a second row.
+        # An ask that failed without a row id stays a plain failure: the
+        # listing-cap fallback is still allowed to mint once. A mint that
+        # itself happened because the listing was already down is not held
+        # here; that path keeps the three-attempt cap.
+        if not listing_failed:
+            proc = asked.get("proc")
+            minted_id = _parse_minted_row_id(
+                (proc.stdout if proc is not None else "") or "")
+            if minted_id is not None:
+                rec["outage_row"] = minted_id
+                slot["ok"] = True
+                save_state(state_path, state)
+                print(
+                    f"wake_watchdog: ask for {sender} stored row #{minted_id} "
+                    "despite a non-zero exit; holding the mint slot",
+                    file=sys.stderr, flush=True)
+        return False
+    rec["outage"] = True
+    rec["alerted_at"] = now
+    save_state(state_path, state)
+    return result == "held"
 
 
 def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
@@ -867,11 +1124,11 @@ def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
 
     Under commander-for-life the row is taken at mint, so the cell token
     cannot close, withdraw, or amend it. One status note on card 729 names
-    every open row. The note attempt is recorded in state before sending so a
-    stored-then-failed note is not repeated on later passes. A failed note is
-    logged and the pass continues. An untaken row
-    is still withdrawn. A taken row is logged once. Every board call's
-    return code and first output line are logged.
+    every open row. A non-zero exit is retried on later passes, up to
+    MAX_SEND_ATTEMPTS, and then waits REALERT_SECONDS. A successful note is
+    recorded in ``noted`` and is not sent again. A failed note is logged and
+    the pass continues. An untaken row is still withdrawn. A taken row is
+    logged once. Every board call's return code and first output line are logged.
     """
     matched = _list_open_dead_wake_rows(swarph, sender, token_file)
     if not matched:
@@ -897,14 +1154,21 @@ def _release_recovered_commander_rows(swarph: str, sender: str, token_file: str,
     noted_keys = {str(x) for x in noted}
     unnoted = [oid for oid in open_ids if str(oid) not in noted_keys]
     if unnoted:
-        for oid in open_ids:
-            if str(oid) not in noted_keys:
-                noted.append(oid)
-                noted_keys.add(str(oid))
-        save_state(state_path, state)
+        slot = _attempt_slot(rec, "recovery_attempts", "note")
         label = (f"cards say {open_ids[0]}" if len(open_ids) == 1
                  else f"cards say {len(open_ids)} rows")
-        _run_board(_note_argv(swarph, sender, token_file, open_ids, when), label)
+        result = _dispatch_attempt(
+            slot, now,
+            lambda: _run_board(
+                _note_argv(swarph, sender, token_file, open_ids, when),
+                label).returncode == 0,
+            state_path, state, hold_success=False)
+        if result == "ok":
+            for oid in open_ids:
+                if str(oid) not in noted_keys:
+                    noted.append(oid)
+                    noted_keys.add(str(oid))
+            save_state(state_path, state)
     logged_keys = {str(x) for x in logged}
     for row in matched:
         oid = row.get("id")
@@ -1030,68 +1294,69 @@ def mesh_send(swarph: str, to: str, sender: str, content: str,
     return proc.returncode
 
 
+def _legacy_peer_holds(val: object, now: float) -> bool:
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return False
+    return (now - float(val)) < REALERT_SECONDS
+
+
 def _handle_peer_outage(swarph: str, name: str, sender: str, escalate: str,
                         token_file: str, now: float, state: dict,
                         state_path: Path) -> bool:
     rec = _cell_rec(state, name)
     attempts = rec.get("peer_attempts")
     if not isinstance(attempts, dict):
+        if attempts is not None:
+            _log_reset(name, "peer_attempts", attempts)
         attempts = {}
         rec["peer_attempts"] = attempts
 
-    def _attempted_recently(ch: str) -> bool:
-        ts = attempts.get(ch)
-        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
-            return False
-        return (now - float(ts)) < REALERT_SECONDS
+    def run_channel(ch: str, send: Callable[[], bool]) -> str:
+        val = attempts.get(ch)
+        if isinstance(val, dict):
+            return _dispatch_attempt(
+                val, now, send, state_path, state, hold_success=True)
+        if _legacy_peer_holds(val, now):
+            return "held"
+        slot: dict = {}
+        attempts[ch] = slot
+        return _dispatch_attempt(
+            slot, now, send, state_path, state, hold_success=True)
 
-    if _attempted_recently("dm"):
-        dm_ok = True
-    else:
-        attempts["dm"] = now
-        save_state(state_path, state)
-        dm_ok = mesh_send(
+    dm = run_channel(
+        "dm",
+        lambda: mesh_send(
             swarph, name, sender,
             "IMMUNE (cell watchdog): your DM wake is dead, re-arm",
-            token_file) == 0
-
-    if _attempted_recently("card"):
-        card_ok = True
-    else:
-        attempts["card"] = now
-        save_state(state_path, state)
-        card_argv = [
-            swarph, "board", "cards", "say", "729", "--as", sender,
-            "--to", name,
-            "--content", f"IMMUNE (cell watchdog) — {name}: DM wake is dead, re-arm",
-        ]
-        if token_file:
-            card_argv.extend(["--token-file", token_file])
-        card = _run_board(card_argv, f"cards say 729 ({name})", log_ok=False)
-        card_ok = card.returncode == 0
-
+            token_file) == 0)
+    card_argv = [
+        swarph, "board", "cards", "say", "729", "--as", sender,
+        "--to", name,
+        "--content", f"IMMUNE (cell watchdog) — {name}: DM wake is dead, re-arm",
+    ]
+    if token_file:
+        card_argv.extend(["--token-file", token_file])
+    card = run_channel(
+        "card",
+        lambda: _run_board(
+            card_argv, f"cards say 729 ({name})", log_ok=False).returncode == 0)
     if not (escalate and escalate != name):
-        esc_ok = True
-    elif _attempted_recently("escalate"):
-        esc_ok = True
+        esc = "ok"
     else:
-        attempts["escalate"] = now
-        save_state(state_path, state)
-        esc_ok = mesh_send(
-            swarph, escalate, sender,
-            f"IMMUNE (cell watchdog) — {name}: DM wake is dead, re-arm",
-            token_file) == 0
+        esc = run_channel(
+            "escalate",
+            lambda: mesh_send(
+                swarph, escalate, sender,
+                f"IMMUNE (cell watchdog) — {name}: DM wake is dead, re-arm",
+                token_file) == 0)
 
-    if dm_ok and card_ok and esc_ok:
-        ts_vals = [
-            float(v) for v in attempts.values()
-            if isinstance(v, (int, float)) and not isinstance(v, bool)
-        ]
-        rec["outage"] = True
-        rec["alerted_at"] = max(ts_vals) if ts_vals else now
-        save_state(state_path, state)
-        return True
-    return False
+    outcomes = (dm, card, esc)
+    if any(item == "retry" for item in outcomes):
+        return False
+    rec["outage"] = True
+    rec["alerted_at"] = now
+    save_state(state_path, state)
+    return all(item in ("ok", "held") for item in outcomes)
 
 
 def _swarph_bin() -> str:

@@ -8,6 +8,7 @@ federation report + structurizr workspace. The live sources are never touched.
 import json
 import os
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -2279,6 +2280,73 @@ def test_bibliography_missing_indexed_sha_uses_unpinned_keys_and_count(
         # The exact route symbol occurs in both the symbol and route lists.
         assert body.count("@unpinned") == 3
         assert "unpinned code entries: 3 (no indexed SHA" in body
+
+
+def test_bibliography_uses_the_indexed_sha_of_each_repo(bibliography, idx, tmp_path):
+    _, board, argv, posted, _ = bibliography
+    other_sha = "0123456789abcdef" * 2 + "01234567"
+    pin = tmp_path / "other" / ".codegraph" / "indexed_origin_main"
+    pin.parent.mkdir(parents=True)
+    pin.write_text(other_sha + "\n", encoding="utf-8")
+    with closing(sqlite3.connect(idx)) as con, con:
+        for row_id, repo, line in ((8, "other", 21), (9, "no-pin", 34)):
+            con.execute(
+                "INSERT INTO repos VALUES (?,?,?,?,?,?)",
+                (repo, f"example/{repo}", str(tmp_path / repo),
+                 "public", "2026-11-03T00:31:24+00:00", "full"),
+            )
+            con.execute(
+                "INSERT INTO symbols VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (row_id, repo, "chat_sync", "function", "worker.py", line,
+                 "chat_sync", "", "", ""),
+            )
+
+    assert board.run_board([arg for arg in argv if arg != "--print-only"]) == 0
+    body = posted["body"]["content"]
+    assert ("code:swarph-cli/src/swarph_cli/gateway/server.py:3950"
+            "@5e4283274c3638a78dd4736bcd0a8894616b43b1") in body
+    assert f"code:other/worker.py:21@{other_sha}" in body
+    assert "code:no-pin/worker.py:34@unpinned" in body
+    assert body.count("@unpinned") == 1
+    assert "unpinned code entries: 1 (no indexed SHA" in body
+
+
+@pytest.mark.parametrize(("competing_heading", "error"), [
+    ("# bibliography v2", "bibliography v2 is already posted"),
+    ("bibliography v5", "bibliography version changed from v2 to v3"),
+    (None, "cannot verify bibliography version: gateway HTTP 403"),
+], ids=["duplicate", "changed-count", "history-unavailable"])
+def test_bibliography_refuses_stale_edition_after_recipient_lookup(
+    bibliography, monkeypatch, capsys, competing_heading, error,
+):
+    _, board, argv, posted, posts = bibliography
+    read = board._http_get_json
+    project_reads = 0
+    competing_edition = {"content": f"{competing_heading}\nOther run's edition"}
+
+    def get(url, token, **kwargs):
+        nonlocal project_reads
+        if (url.endswith("/board/cards/7/thread?limit=1000")
+                and project_reads == 2 and competing_heading is None):
+            return 403, {"detail": "denied"}
+        status, data = read(url, token, **kwargs)
+        if url.endswith("/board/cards/7"):
+            data = dict(data, assignee=None)
+        if url.endswith("/board/projects"):
+            project_reads += 1
+            if project_reads == 2 and competing_heading is not None:
+                posts.append(competing_edition)
+            data = {"projects": [{"id": 6, "slug": "board",
+                                  "owner_orchestrator": "lab-ovh"}]}
+        return status, data
+
+    monkeypatch.setattr(board, "_http_get_json", get)
+    assert board.run_board([arg for arg in argv if arg != "--print-only"]) == 1
+    assert error in capsys.readouterr().err
+    assert not posted
+    assert posts == [{"content": "bibliography v1\nEarlier edition"},
+                     {"content": "comment that mentions bibliography v5"},
+                     *([competing_edition] if competing_heading is not None else [])]
 
 
 def test_bibliography_reports_same_key_merges_after_the_cap(

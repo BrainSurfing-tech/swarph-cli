@@ -203,49 +203,53 @@ def test_long_run_threshold_boundary_equivalence(run_len: int) -> None:
         _assert_matches_uri_re_and_expected(src, expected)
 
 
+class _RaiseAll:
+    def __getattr__(self, name: str):
+        def _boom(*_args, **_kwargs):
+            raise AssertionError(f"Unexpected regex call: .{name}")
+
+        return _boom
+
+
+class _Proxy:
+    def __init__(
+        self,
+        name: str,
+        real,
+        seen_lengths: list[tuple[str, str, int]],
+        *,
+        allow_sub: bool = False,
+        allow_finditer: bool = False,
+        allow_search: bool = False,
+    ):
+        self._name = name
+        self._real = real
+        self._seen_lengths = seen_lengths
+        self._allow_sub = allow_sub
+        self._allow_finditer = allow_finditer
+        self._allow_search = allow_search
+
+    def sub(self, repl, string: str, *args, **kwargs):
+        if not self._allow_sub:
+            raise AssertionError(f"Unexpected {self._name}.sub()")
+        self._seen_lengths.append((self._name, "sub", len(string)))
+        return self._real.sub(repl, string, *args, **kwargs)
+
+    def finditer(self, string: str, *args, **kwargs):
+        if not self._allow_finditer:
+            raise AssertionError(f"Unexpected {self._name}.finditer()")
+        self._seen_lengths.append((self._name, "finditer", len(string)))
+        return self._real.finditer(string, *args, **kwargs)
+
+    def search(self, string: str, *args, **kwargs):
+        if not self._allow_search:
+            raise AssertionError(f"Unexpected {self._name}.search()")
+        self._seen_lengths.append((self._name, "search", len(string)))
+        return self._real.search(string, *args, **kwargs)
+
+
 def test_fast_path_guards_and_1x_length(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _RaiseAll:
-        def __getattr__(self, name: str):
-            def _boom(*_args, **_kwargs):
-                raise AssertionError(f"Unexpected regex call: .{name}")
-
-            return _boom
-
     seen_lengths: list[tuple[str, str, int]] = []
-
-    class _Proxy:
-        def __init__(
-            self,
-            name: str,
-            real,
-            *,
-            allow_sub: bool = False,
-            allow_finditer: bool = False,
-            allow_search: bool = False,
-        ):
-            self._name = name
-            self._real = real
-            self._allow_sub = allow_sub
-            self._allow_finditer = allow_finditer
-            self._allow_search = allow_search
-
-        def sub(self, repl, string: str, *args, **kwargs):
-            if not self._allow_sub:
-                raise AssertionError(f"Unexpected {self._name}.sub()")
-            seen_lengths.append((self._name, "sub", len(string)))
-            return self._real.sub(repl, string, *args, **kwargs)
-
-        def finditer(self, string: str, *args, **kwargs):
-            if not self._allow_finditer:
-                raise AssertionError(f"Unexpected {self._name}.finditer()")
-            seen_lengths.append((self._name, "finditer", len(string)))
-            return self._real.finditer(string, *args, **kwargs)
-
-        def search(self, string: str, *args, **kwargs):
-            if not self._allow_search:
-                raise AssertionError(f"Unexpected {self._name}.search()")
-            seen_lengths.append((self._name, "search", len(string)))
-            return self._real.search(string, *args, **kwargs)
 
     # Guard 1: missing '://' or '@' skips all regexes
     with monkeypatch.context() as mp:
@@ -262,7 +266,7 @@ def test_fast_path_guards_and_1x_length(monkeypatch: pytest.MonkeyPatch) -> None
         mp.setattr(
             redact_mod,
             "_URI_SCHEME_RE",
-            _Proxy("uri", _URI_SCHEME_RE, allow_sub=True),
+            _Proxy("uri", _URI_SCHEME_RE, seen_lengths, allow_sub=True),
         )
         seen_lengths.clear()
         s = "a" * 140 + "://u:p@h"
@@ -274,13 +278,13 @@ def test_fast_path_guards_and_1x_length(monkeypatch: pytest.MonkeyPatch) -> None
         mp.setattr(
             redact_mod,
             "_URI_SCHEME_LONG_RUN_RE",
-            _Proxy("long", _URI_SCHEME_LONG_RUN_RE, allow_finditer=True),
+            _Proxy("long", _URI_SCHEME_LONG_RUN_RE, seen_lengths, allow_finditer=True),
         )
         mp.setattr(redact_mod, "_URI_SCHEME_START_RE", _RaiseAll())
         mp.setattr(
             redact_mod,
             "_URI_SCHEME_RE",
-            _Proxy("uri", _URI_SCHEME_RE, allow_sub=True),
+            _Proxy("uri", _URI_SCHEME_RE, seen_lengths, allow_sub=True),
         )
         for s in (
             "a" * 130 + "://u:p@h-",
@@ -298,17 +302,17 @@ def test_fast_path_guards_and_1x_length(monkeypatch: pytest.MonkeyPatch) -> None
         mp.setattr(
             redact_mod,
             "_URI_SCHEME_LONG_RUN_RE",
-            _Proxy("long", _URI_SCHEME_LONG_RUN_RE, allow_finditer=True),
+            _Proxy("long", _URI_SCHEME_LONG_RUN_RE, seen_lengths, allow_finditer=True),
         )
         mp.setattr(
             redact_mod,
             "_URI_SCHEME_START_RE",
-            _Proxy("start", _URI_SCHEME_START_RE, allow_search=True),
+            _Proxy("start", _URI_SCHEME_START_RE, seen_lengths, allow_search=True),
         )
         mp.setattr(
             redact_mod,
             "_URI_SCHEME_RE",
-            _Proxy("uri", _URI_SCHEME_RE, allow_sub=True),
+            _Proxy("uri", _URI_SCHEME_RE, seen_lengths, allow_sub=True),
         )
         for s in (
             "-" * 130 + " x://u:p@h",
@@ -330,17 +334,17 @@ def test_fast_path_guards_and_1x_length(monkeypatch: pytest.MonkeyPatch) -> None
         mp.setattr(
             redact_mod,
             "_URI_SCHEME_LONG_RUN_RE",
-            _Proxy("long", _URI_SCHEME_LONG_RUN_RE, allow_finditer=True),
+            _Proxy("long", _URI_SCHEME_LONG_RUN_RE, seen_lengths, allow_finditer=True),
         )
         mp.setattr(
             redact_mod,
             "_URI_SCHEME_START_RE",
-            _Proxy("start", _URI_SCHEME_START_RE, allow_search=True),
+            _Proxy("start", _URI_SCHEME_START_RE, seen_lengths, allow_search=True),
         )
         mp.setattr(
             redact_mod,
             "_URI_SCHEME_RE",
-            _Proxy("uri", _URI_SCHEME_RE, allow_finditer=True),
+            _Proxy("uri", _URI_SCHEME_RE, seen_lengths, allow_finditer=True),
         )
         seen_lengths.clear()
         s = "a-" * 70 + "://u:p@h"
@@ -462,3 +466,118 @@ def test_deadline_copy_does_not_restart_from_zero() -> None:
         "s = prefix + 'x://u:p@h'\n"
         "assert _replace_scheme_credentials(s) == prefix + 'x://u:[REDACTED:URI_CREDENTIAL]@h'\n"
     )
+
+
+def test_deadline_uppercase_flood() -> None:
+    """Kills dropping A-Z from _URI_SCHEME_LONG_RUN_RE or _URI_SCHEME_START_RE."""
+    _run_deadline_script(
+        "from swarph_cli.redact import _replace_scheme_credentials, redact_text\n"
+        "s1 = 'A-' * 120_000 + ' x://u:p@h'\n"
+        "exp1 = 'A-' * 120_000 + ' x://u:[REDACTED:URI_CREDENTIAL]@h'\n"
+        "assert _replace_scheme_credentials(s1) == exp1\n"
+        "assert redact_text(s1) == exp1\n"
+        "s2 = 'A-' * 120_000 + '://x u:p@h'\n"
+        "assert _replace_scheme_credentials(s2) == s2\n"
+        "assert redact_text(s2) == s2\n"
+    )
+
+
+def test_deadline_not_only_last_run_masked() -> None:
+    """Kills masking only the last qualifying run (e.g. runs[-1:] or overwriting runs)."""
+    _run_deadline_script(
+        "from swarph_cli.redact import _replace_scheme_credentials, redact_text\n"
+        "s = 'a-' * 120_000 + ' ' + 'a-' * 65 + ' x://u:p@h'\n"
+        "exp = 'a-' * 120_000 + ' ' + 'a-' * 65 + ' x://u:[REDACTED:URI_CREDENTIAL]@h'\n"
+        "assert _replace_scheme_credentials(s) == exp\n"
+        "assert redact_text(s) == exp\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "_b-c",
+        "_-c",
+        "_b.c",
+        "_.c",
+        "_b+c",
+        "_+c",
+        "_b-c.d+e",
+    ],
+)
+def test_underscore_breaks_long_run_and_preserves_scheme_start(suffix: str) -> None:
+    """Kills adding '_' to _URI_SCHEME_LONG_RUN_RE."""
+    lead = "a-" * 70
+    src = f"{lead}{suffix}://user1:pw_secret@host.example.com/path"
+    expected = f"{lead}{suffix}://user1:{MASK}@host.example.com/path"
+    _assert_matches_uri_re_and_expected(src, expected)
+
+
+def test_long_run_lookbehind_blocks_all_run_chars_and_allows_delimiters() -> None:
+    """Kills removing or narrowing (?<![a-zA-Z0-9+.\\-]) on _URI_SCHEME_LONG_RUN_RE."""
+    for ch in ("a", "m", "z", "A", "M", "Z", "0", "5", "9", "+", ".", "-"):
+        sample = ch + "a" * 128
+        assert _URI_SCHEME_LONG_RUN_RE.match(sample, 1) is None
+        assert _URI_SCHEME_LONG_RUN_RE.search(sample, 1) is None
+    for delim in (" ", "_", ":", "\u00e9"):
+        sample = delim + "a" * 128
+        m_match = _URI_SCHEME_LONG_RUN_RE.match(sample, 1)
+        assert m_match is not None and m_match.span() == (1, 129)
+        m_search = _URI_SCHEME_LONG_RUN_RE.search(sample, 1)
+        assert m_search is not None and m_search.span() == (1, 129)
+
+
+def test_long_run_threshold_128_pinned_direct_and_behavioral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins the exact {128,} threshold directly and via _replace_scheme_credentials."""
+    for run_127 in ("a" * 127, "a-" * 63 + "a", "a." * 63 + "a", "a+" * 63 + "a"):
+        assert _URI_SCHEME_LONG_RUN_RE.match(run_127) is None
+        assert _URI_SCHEME_LONG_RUN_RE.search(run_127) is None
+    for run_128 in ("a" * 128, "a-" * 64, "a." * 64, "a+" * 64):
+        m = _URI_SCHEME_LONG_RUN_RE.match(run_128)
+        assert m is not None and m.span() == (0, 128)
+
+    seen_lengths: list[tuple[str, str, int]] = []
+    # 127-char multi-separator run takes direct _URI_SCHEME_RE.sub with zero _URI_SCHEME_START_RE.search calls
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            redact_mod,
+            "_URI_SCHEME_LONG_RUN_RE",
+            _Proxy("long", _URI_SCHEME_LONG_RUN_RE, seen_lengths, allow_finditer=True),
+        )
+        mp.setattr(redact_mod, "_URI_SCHEME_START_RE", _RaiseAll())
+        mp.setattr(
+            redact_mod,
+            "_URI_SCHEME_RE",
+            _Proxy("uri", _URI_SCHEME_RE, seen_lengths, allow_sub=True),
+        )
+        s127 = "a-" * 63 + "a://u:p@h"
+        assert _replace_scheme_credentials(s127) == "a-" * 63 + f"a://u:{MASK}@h"
+        assert seen_lengths == [("long", "finditer", len(s127)), ("uri", "sub", len(s127))]
+
+    # 128-char multi-separator run takes _URI_SCHEME_START_RE.search + _URI_SCHEME_RE.finditer
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            redact_mod,
+            "_URI_SCHEME_LONG_RUN_RE",
+            _Proxy("long", _URI_SCHEME_LONG_RUN_RE, seen_lengths, allow_finditer=True),
+        )
+        mp.setattr(
+            redact_mod,
+            "_URI_SCHEME_START_RE",
+            _Proxy("start", _URI_SCHEME_START_RE, seen_lengths, allow_search=True),
+        )
+        mp.setattr(
+            redact_mod,
+            "_URI_SCHEME_RE",
+            _Proxy("uri", _URI_SCHEME_RE, seen_lengths, allow_finditer=True),
+        )
+        seen_lengths.clear()
+        s128 = "a-" * 64 + "://u:p@h"
+        assert _replace_scheme_credentials(s128) == "a-" * 64 + f"://u:{MASK}@h"
+        assert seen_lengths == [
+            ("long", "finditer", len(s128)),
+            ("start", "search", len(s128)),
+            ("uri", "finditer", len(s128)),
+        ]
