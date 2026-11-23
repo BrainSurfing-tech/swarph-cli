@@ -4,7 +4,12 @@ One table over ``~/swarph_state/usage/*.json``: pool, used %, resets (UTC
 and in-hours from now), read age, burn per hour when two readings exist.
 A reading older than ``stale_after_hours`` (6h, from the data file) is
 marked STALE in its row, never presented as current. A pool with no file
-still appears as missing, visibly not current.
+still appears as missing, visibly not current. Burn is never negative:
+when used% drops or the window resets_at moves between the snapshot and
+the current reading — or the snapshot's source differs from the current
+source — the burn stays blank and the row carries a RESET marker (text
+note and JSON ``reset`` flag). Re-showing the same reading carries the
+last burn forward; the snapshot only advances on a strictly newer read.
 
 The cell-to-pool map lives in the packaged ``pools.json`` DATA file (an
 optional ``.pools.local.json`` dotfile in the usage dir replaces it), so
@@ -58,19 +63,47 @@ def _packaged_pools_text() -> str:
     return here.read_text(encoding="utf-8")
 
 
+def _validate_pool_map(data, *, where: str) -> dict:
+    """Shape-check a pool map; ValueError names the bad entry, never KeyError.
+
+    ``where`` names the map under check (packaged default or override path)
+    so the message says which file to fix.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get("pools"), list):
+        raise ValueError(f"pool map {where} has no pools list")
+    stale = data.get("stale_after_hours", 6)
+    if isinstance(stale, bool) or not isinstance(stale, (int, float)):
+        raise ValueError(f"pool map {where}: stale_after_hours is not a number")
+    for index, entry in enumerate(data["pools"]):
+        label = f"pool map {where} entry #{index}"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{label} is not an object")
+        name = entry.get("pool")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{label} has no 'pool' name")
+        for key in ("files", "providers", "cells"):
+            if key in entry and not isinstance(entry[key], list):
+                raise ValueError(
+                    f"{label} ({name}): {key!r} is not a list")
+            if isinstance(entry.get(key), list):
+                for item in entry[key]:
+                    if not isinstance(item, str):
+                        raise ValueError(
+                            f"{label} ({name}): {key!r} holds "
+                            f"a non-string entry")
+    return data
+
+
 def load_pool_map(usage_dir: "str | Path | None" = None) -> dict:
     """The cell-to-pool map: packaged default, dotfile override replaces it."""
-    data = json.loads(_packaged_pools_text())
+    data = _validate_pool_map(json.loads(_packaged_pools_text()),
+                              where="packaged")
     if usage_dir is not None:
         override = Path(usage_dir) / _LOCAL_OVERRIDE
         if override.is_file():
             with open(override, encoding="utf-8") as handle:
-                data = json.load(handle)
-    if not isinstance(data, dict) or not isinstance(data.get("pools"), list):
-        raise ValueError("pool map has no pools list")
-    stale = data.get("stale_after_hours", 6)
-    if isinstance(stale, bool) or not isinstance(stale, (int, float)):
-        raise ValueError("stale_after_hours is not a number")
+                data = _validate_pool_map(json.load(handle),
+                                          where=str(override))
     return data
 
 
@@ -217,6 +250,9 @@ def collect_rows(*, usage_dir, pool_map, now: "datetime | None" = None,
                 "stale": stale,
                 "status": STATUS_STALE if stale else STATUS_OK,
                 "burn_per_h": None,
+                # Burn withheld: the window apparently reset (or the two
+                # readings are incomparable). Blank burn, never negative.
+                "reset": False,
             }
             if snapshot is not None:
                 prev_map = snapshot.get("readings")
@@ -227,14 +263,42 @@ def collect_rows(*, usage_dir, pool_map, now: "datetime | None" = None,
                     prev_read = parse_time(prev.get("read_at"))
                     prev_used = prev.get("used_percentage")
                     if (prev_read is not None and read_at is not None
+                            and read_at == prev_read):
+                        # Identical re-read: carry the last burn (and reset
+                        # marker) forward instead of recomputing against
+                        # ourselves. save_snapshot keeps this same reading,
+                        # so the figure is stable across re-shows.
+                        carried = prev.get("burn_per_h")
+                        if (isinstance(carried, (int, float))
+                                and not isinstance(carried, bool)):
+                            row["burn_per_h"] = float(carried)
+                        row["reset"] = bool(prev.get("reset"))
+                    elif (prev_read is not None and read_at is not None
                             and read_at > prev_read
                             and isinstance(prev_used, (int, float))
                             and not isinstance(prev_used, bool)):
                         delta_h = ((read_at - prev_read).total_seconds()
                                    / 3600.0)
                         if delta_h > 0:
-                            row["burn_per_h"] = (
-                                (used - float(prev_used)) / delta_h)
+                            prev_source = prev.get("source")
+                            prev_resets = prev.get("resets_at")
+                            if (prev_source is not None
+                                    and source is not None
+                                    and prev_source != source):
+                                # Different cells/sources feed this pool now:
+                                # mixing them into one rate would mislead.
+                                row["reset"] = True
+                            elif (prev_resets is not None
+                                    and resets_iso is not None
+                                    and prev_resets != resets_iso):
+                                # The window boundary moved: fresh period.
+                                row["reset"] = True
+                            elif used < float(prev_used):
+                                # Usage only falls when the window reset.
+                                row["reset"] = True
+                            else:
+                                row["burn_per_h"] = (
+                                    (used - float(prev_used)) / delta_h)
             seen[key] = row
     rows = [seen[k] for k in sorted(seen)]
     matched_pools = {pool for pool, _window in seen}
@@ -253,6 +317,7 @@ def collect_rows(*, usage_dir, pool_map, now: "datetime | None" = None,
                 "stale": False,
                 "status": STATUS_MISSING,
                 "burn_per_h": None,
+                "reset": False,
             })
     order = [p["pool"] for p in pool_map["pools"]]
     rows.sort(key=lambda r: (order.index(r["pool"])
@@ -274,16 +339,34 @@ def load_snapshot(usage_dir: Path) -> dict:
 
 
 def save_snapshot(usage_dir: Path, rows: list, snapshot: dict) -> None:
-    """Merge the current readings in. Never raises: burn is advisory."""
+    """Merge the current readings in. Never raises: burn is advisory.
+
+    The snapshot only advances on a strictly NEWER reading (different,
+    later ``read_at``): an identical re-read keeps the older distinct
+    entry — with its source, resets_at and last computed burn — so a
+    second show carries the same burn instead of blanking it. A
+    regressed (older) file never moves the snapshot backwards either.
+    """
     try:
         prior = snapshot.get("readings")
         readings = dict(prior) if isinstance(prior, dict) else {}
         for row in rows:
             if row["status"] == STATUS_MISSING or row["read_at"] is None:
                 continue
-            readings[f"{row['pool']}\x00{row['window']}"] = {
+            key = f"{row['pool']}\x00{row['window']}"
+            old = readings.get(key)
+            current_read = parse_time(row["read_at"])
+            if isinstance(old, dict) and current_read is not None:
+                old_read = parse_time(old.get("read_at"))
+                if old_read is not None and current_read <= old_read:
+                    continue
+            readings[key] = {
                 "used_percentage": row["used_pct"],
                 "read_at": row["read_at"],
+                "source": row["source"],
+                "resets_at": row["resets_at"],
+                "burn_per_h": row["burn_per_h"],
+                "reset": bool(row.get("reset")),
             }
         target_dir = Path(usage_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -339,8 +422,13 @@ def render_table(rows: list) -> str:
         note = ""
         if row["status"] == STATUS_MISSING:
             note = "missing"
-        elif row["stale"]:
-            note = "STALE"
+        else:
+            parts = []
+            if row.get("reset"):
+                parts.append("RESET")
+            if row["stale"]:
+                parts.append("STALE")
+            note = "+".join(parts)
         cells = {
             "pool": row["pool"],
             "window": row["window"] or "—",
@@ -392,5 +480,6 @@ def rows_to_json(rows: list) -> dict:
             "status": row["status"],
             "burn_per_h": (None if row["burn_per_h"] is None
                            else round(row["burn_per_h"], 4)),
+            "reset": bool(row.get("reset")),
         })
     return {"rows": out}

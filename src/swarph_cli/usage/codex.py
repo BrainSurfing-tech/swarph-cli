@@ -6,9 +6,10 @@ reads a stale file. From that file take the LAST event carrying rate limits
 (``payload.rate_limits`` or ``payload.info.rate_limits``) and map each window
 by its ``window_minutes`` (10080 -> ``week``, 300 -> ``5h``).
 
-Writes NOTHING (no file, no partial) when no event carries rate_limits.
-The write is atomic (temp file + rename). No credential is read or printed
-anywhere: the rollout log carries usage figures only.
+Writes NOTHING (no file, no partial) when no rollout anywhere carries a
+rate_limits event. The write is atomic (temp file + rename). Only the
+rate_limits figures are copied into openai.json: any other payload keys
+(session text, credentials, tool I/O) are never read or written.
 """
 
 from __future__ import annotations
@@ -54,15 +55,20 @@ def codex_sessions_dir(explicit: "str | Path | None" = None) -> Path:
     return Path.home() / ".codex" / "sessions"
 
 
-def newest_rollout(sessions_dir: "str | Path") -> "Path | None":
-    """Newest rollout-*.jsonl BY MTIME, or None. Never by name."""
+def rollouts_newest_first(sessions_dir: "str | Path") -> list:
+    """All rollout-*.jsonl, newest BY MTIME first (name breaks ties)."""
     root = Path(sessions_dir)
     if not root.is_dir():
-        return None
+        return []
     candidates = [p for p in root.rglob("rollout-*.jsonl") if p.is_file()]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: (p.stat().st_mtime, str(p)))
+    candidates.sort(key=lambda p: (p.stat().st_mtime, str(p)), reverse=True)
+    return candidates
+
+
+def newest_rollout(sessions_dir: "str | Path") -> "Path | None":
+    """Newest rollout-*.jsonl BY MTIME, or None. Never by name."""
+    ordered = rollouts_newest_first(sessions_dir)
+    return ordered[0] if ordered else None
 
 
 def _rate_limits_of(record) -> "dict | None":
@@ -140,18 +146,25 @@ def write_openai_json(*, sessions_dir=None, usage_dir=None,
                        read_at=None) -> "dict | None":
     """Read the newest rollout and atomically write openai.json.
 
-    Returns {"path", "windows", "rollout"} on a write, None when nothing
-    was written (no file, or no event carrying rate_limits — and then no
-    file or partial is created). Never raises on I/O: a reader that
-    crashes the table is worse than a missing pool.
+    Candidates are walked newest-first by mtime: when the newest rollout
+    has NO rate_limits event yet, the sync falls back to the newest older
+    rollout that HAS one (a resumed session keeps its old dated name, and
+    a fresh session's first events carry no usage figures). Returns
+    {"path", "windows", "rollout"} on a write, None when nothing was
+    written (no file anywhere, or no event carrying rate_limits in any
+    rollout — and then no file or partial is created). Never raises on
+    I/O: a reader that crashes the table is worse than a missing pool.
     """
     from swarph_cli.usage import default_usage_dir
 
-    rollout = newest_rollout(codex_sessions_dir(sessions_dir))
-    if rollout is None:
-        return None
-    limits = last_rate_limits(rollout)
-    if limits is None:
+    rollout = None
+    limits = None
+    for candidate in rollouts_newest_first(codex_sessions_dir(sessions_dir)):
+        found = last_rate_limits(candidate)
+        if found is not None:
+            rollout, limits = candidate, found
+            break
+    if rollout is None or limits is None:
         return None
     document = build_document(limits, read_at=read_at)
     if not document["windows"]:

@@ -14,7 +14,11 @@ the ``.usage-last-seen.json`` dotfile in the usage dir (excluded from the
 pool glob by name) and reports burn/hr = (used_now - used_prev) /
 read_at-delta-hours for the same pool+window when a previous DISTINCT
 reading exists, else blank. A single reading never shows a fabricated
-burn.
+burn. Burn is never negative: a used% drop, a moved window resets_at, or
+a changed reading source between snapshot and now blanks the burn and
+marks the row RESET (text note, JSON ``reset`` flag). The snapshot only
+advances on a strictly newer reading, so re-showing the same reading
+carries the last burn forward instead of blanking it.
 """
 
 from __future__ import annotations
@@ -88,7 +92,7 @@ def _run_sync(args) -> int:
     sessions = codex_sessions_dir(args.codex_sessions)
     result = write_openai_json(sessions_dir=sessions, usage_dir=usage_dir)
     if result is None:
-        print("swarph usage sync: no rate_limits event in the newest "
+        print("swarph usage sync: no rate_limits event in any "
               f"rollout under {sessions}; wrote nothing.")
         return 0
     windows = ", ".join(f"{name} {entry['used_percentage']:.1f}%"
