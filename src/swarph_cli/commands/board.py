@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 # #532 — negative-branch marker detection. THREE COPIES exist and no single
 # suite pins all three: here, mesh-gateway server.py (_accept_state), and
@@ -687,7 +687,8 @@ def _card_say_payload(from_node: str, to_node: str, kind: str, content: str,
 
 def _run_cards_say(gw: str, token: str, self_name: str, card_id: int,
                    content: str, kind: str, to_node: Optional[str], aj: bool, *,
-                   opt_out: bool = False, verb: str = "say") -> int:
+                   opt_out: bool = False, verb: str = "say",
+                   pre_post_check: Callable[[], str | None] | None = None) -> int:
     """Post `content` onto a card's thread (shared by `say` + `dev-extract`).
 
     Factored out of the `say` block without behavior change: fetch the card,
@@ -695,6 +696,7 @@ def _run_cards_say(gw: str, token: str, self_name: str, card_id: int,
     (--to > assignee > project owner_orchestrator), POST /messages, render the
     confirmation (including any discharged obligation, #562). `dev-extract`
     posts through this so both verbs keep ONE recipient/redaction path.
+    Its pre-post check runs only after the recipient is resolved.
     """
     st, card = _http_get_json(f"{gw}/board/cards/{card_id}", token)
     if st != 200:
@@ -720,12 +722,15 @@ def _run_cards_say(gw: str, token: str, self_name: str, card_id: int,
     except RuntimeError as exc:
         print(f"swarph board cards {verb}: {exc}", file=sys.stderr)
         return 1
-    st, d = _post_json(
-        f"{gw}/messages",
-        _card_say_payload(self_name, to_node, kind, content, thread_uuid,
-                          opt_out=opt_out),
-        token,
-    )
+    payload = _card_say_payload(self_name, to_node, kind, content, thread_uuid,
+                                opt_out=opt_out)
+    if pre_post_check is not None:
+        refusal = pre_post_check()
+        if refusal is not None:
+            print(f"swarph board cards {verb}: {refusal}; nothing posted",
+                  file=sys.stderr)
+            return 1
+    st, d = _post_json(f"{gw}/messages", payload, token)
     # A 403 here carries the gateway's explanation that attaching PUBLISHES
     # to everyone who can read the card, now and in future, so it needs an
     # explicit `propose` grant. `_out` passes `detail` through whole; it does
@@ -2126,9 +2131,8 @@ def run_board(argv: list[str]) -> int:
                                               else "gateway unreachable")
                     return data
 
-                bibliography = bib.collect(
-                    card, read_source, _thread_url("", args.card, limit=bib.HISTORY_LIMIT),
-                    post_safe=post_safe)
+                thread_url = _thread_url("", args.card, limit=bib.HISTORY_LIMIT)
+                bibliography = bib.collect(card, read_source, thread_url, post_safe=post_safe)
                 ex["bibliography"] = bibliography
             if getattr(args, "json", False):
                 # card #1396: redact WITHHELD registry entries (no private
@@ -2162,11 +2166,22 @@ def run_board(argv: list[str]) -> int:
                 print(privacy_line)
                 print(body, end="")
                 return 0
+
+            def check_version():
+                # shortcut: if both final reads finish before either POST, both
+                # can insert: POST has no expected-version check. Upgrade when
+                # the gateway can enforce that precondition atomically.
+                try:
+                    bib.next_version(read_source, thread_url, expected=bibliography["version"])
+                except bib.Unavailable as exc:
+                    return f"cannot verify bibliography version: {exc}"
+                return None
+
             print(privacy_line)
             return _run_cards_say(
                 gw, token, self_name, args.card, body, "fyi",
                 args.to_node, aj, opt_out=getattr(args, "no_redact", False),
-                verb="dev-extract")
+                verb="dev-extract", pre_post_check=check_version)
         if args.command == "ready":
             st, d = _patch_json(f"{gw}/board/cards/{args.id}", {"actor": self_name, "move_ready": not args.clear, **expected}, token)
             return _out(st, d, lambda x: f"card #{x.get('id')} move_ready -> {x.get('move_ready')}", aj)
