@@ -6,10 +6,18 @@ reads a stale file. From that file take the LAST event carrying rate limits
 (``payload.rate_limits`` or ``payload.info.rate_limits``) and map each window
 by its ``window_minutes`` (10080 -> ``week``, 300 -> ``5h``).
 
+``read_at`` is that event's own timestamp, so a fallback to an older
+rollout is shown at its real age (STALE past the threshold) rather than
+stamped with the sync clock. When the event has no timestamp, ``read_at``
+is the rollout file's mtime and the document's ``source`` says so.
+
 Writes NOTHING (no file, no partial) when no rollout anywhere carries a
-rate_limits event. The write is atomic (temp file + rename). Only the
-rate_limits figures are copied into openai.json: any other payload keys
-(session text, credentials, tool I/O) are never read or written.
+mappable rate_limits event. A newest file whose rate_limits cannot be
+mapped (used_percent present but resets_at absent, so the windows dict is
+empty) falls through to the next older rollout that CAN be mapped, the
+same way an empty file does. The write is atomic (temp file + rename).
+Only the rate_limits figures are copied into openai.json: any other
+payload keys (session text, credentials, tool I/O) are never read or written.
 """
 
 from __future__ import annotations
@@ -22,6 +30,12 @@ from pathlib import Path
 
 PROVIDER = "openai"
 SOURCE = "codex rollout JSONL token_count.rate_limits"
+# Used only when the rate_limits event itself has no timestamp. The table
+# then ages the reading by the file mtime, and source records that fact.
+SOURCE_FROM_FILE_MTIME = (
+    SOURCE
+    + " (read_at is the rollout file mtime; the rate_limits event had no timestamp)"
+)
 FILENAME = "openai.json"
 
 #: window_minutes -> window name in openai.json (same names as muse.json).
@@ -89,8 +103,13 @@ def _rate_limits_of(record) -> "dict | None":
     return None
 
 
-def last_rate_limits(rollout_path: "str | Path") -> "dict | None":
-    """The LAST event in the file carrying rate_limits, or None."""
+def last_rate_limits(rollout_path: "str | Path") -> "tuple | None":
+    """The LAST event carrying rate_limits, as ``(limits, timestamp)``.
+
+    ``timestamp`` is the event's own top-level ``timestamp`` field (or
+    None when that field is absent). It is kept so openai.json can age
+    the reading by the event, not by the moment the sync happened to run.
+    """
     found = None
     try:
         with open(rollout_path, encoding="utf-8") as handle:
@@ -104,10 +123,31 @@ def last_rate_limits(rollout_path: "str | Path") -> "dict | None":
                     continue
                 limits = _rate_limits_of(record)
                 if limits is not None:
-                    found = limits
+                    stamp = record.get("timestamp") if isinstance(record, dict) else None
+                    found = (limits, stamp)
     except OSError:
         return None
     return found
+
+
+def _read_moment(rollout_path, event_timestamp):
+    """``(datetime, source)`` for one rollout, or None if mtime is unreadable.
+
+    The event timestamp wins. When the event has no timestamp (missing,
+    blank, or unparseable), the rollout file's mtime is the reading time
+    and ``source`` says so. Never the sync clock.
+    """
+    from swarph_cli.usage import parse_time
+
+    parsed = parse_time(event_timestamp)
+    if parsed is not None:
+        return parsed, SOURCE
+    try:
+        mtime = Path(rollout_path).stat().st_mtime
+        moment = datetime.fromtimestamp(mtime, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
+    return moment, SOURCE_FROM_FILE_MTIME
 
 
 def windows_from_rate_limits(rate_limits: dict) -> dict:
@@ -131,43 +171,67 @@ def windows_from_rate_limits(rate_limits: dict) -> dict:
     return windows
 
 
-def build_document(rate_limits: dict, *, read_at: "datetime | None" = None) -> dict:
-    """The openai.json body. Empty windows dict when nothing mappable."""
-    moment = read_at or datetime.now(timezone.utc)
+def build_document(rate_limits: dict, *, read_at: datetime,
+                   source: "str | None" = None) -> dict:
+    """The openai.json body. Empty windows dict when nothing mappable.
+
+    ``read_at`` is the rate_limits event's own timestamp, or the rollout
+    file's mtime when that event has none. It is not the sync clock: a
+    fallback to an older rollout must show that reading's real age.
+    """
     return {
         "provider": PROVIDER,
-        "source": SOURCE,
-        "read_at": _iso_z(moment),
+        "source": source or SOURCE,
+        "read_at": _iso_z(read_at),
         "windows": windows_from_rate_limits(rate_limits),
     }
 
 
 def write_openai_json(*, sessions_dir=None, usage_dir=None,
                        read_at=None) -> "dict | None":
-    """Read the newest rollout and atomically write openai.json.
+    """Read the newest mappable rollout and atomically write openai.json.
 
-    Candidates are walked newest-first by mtime: when the newest rollout
-    has NO rate_limits event yet, the sync falls back to the newest older
-    rollout that HAS one (a resumed session keeps its old dated name, and
-    a fresh session's first events carry no usage figures). Returns
-    {"path", "windows", "rollout"} on a write, None when nothing was
-    written (no file anywhere, or no event carrying rate_limits in any
-    rollout — and then no file or partial is created). Never raises on
-    I/O: a reader that crashes the table is worse than a missing pool.
+    Candidates are walked newest-first by mtime. A rollout with no
+    rate_limits event, and a rollout whose rate_limits cannot be mapped
+    (windows empty — for example used_percent present but resets_at
+    absent), both fall through to the next older rollout that CAN be
+    mapped. A resumed session keeps its old dated name, and a fresh
+    session's first events carry no usage figures.
+
+    ``read_at`` in the written file is the chosen event's own timestamp.
+    When that event has no timestamp it is the rollout file's mtime, and
+    ``source`` says so. The optional ``read_at`` argument overrides that
+    clock for a caller that already resolved one; the default is never
+    ``datetime.now``.
+
+    Returns {"path", "windows", "rollout"} on a write, None when nothing
+    was written (no file anywhere, or no mappable rate_limits event in
+    any rollout — and then no file or partial is created). Never raises
+    on I/O: a reader that crashes the table is worse than a missing pool.
     """
     from swarph_cli.usage import default_usage_dir
 
     rollout = None
-    limits = None
+    document = None
     for candidate in rollouts_newest_first(codex_sessions_dir(sessions_dir)):
         found = last_rate_limits(candidate)
-        if found is not None:
-            rollout, limits = candidate, found
-            break
-    if rollout is None or limits is None:
-        return None
-    document = build_document(limits, read_at=read_at)
-    if not document["windows"]:
+        if found is None:
+            continue
+        limits, event_ts = found
+        if read_at is not None:
+            moment, source = read_at, SOURCE
+        else:
+            resolved = _read_moment(candidate, event_ts)
+            if resolved is None:
+                continue
+            moment, source = resolved
+        draft = build_document(limits, read_at=moment, source=source)
+        if not draft["windows"]:
+            # Present but unmappable. Same as an empty file: keep walking.
+            continue
+        rollout, document = candidate, draft
+        break
+    if rollout is None or document is None:
         return None
     target_dir = Path(usage_dir) if usage_dir is not None else default_usage_dir()
     try:
