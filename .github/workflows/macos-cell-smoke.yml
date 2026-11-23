@@ -6,19 +6,24 @@
 # Actions secret, no tailnet, no real mesh.
 
 name: macos-cell-smoke
+run-name: launchd cell smoke — ${{ github.event_name }} on ${{ github.ref_name }}
 
+# Card #1738. This is a macOS runner, billed at 10x, so it follows macos.yml:
+# daily schedule on main, workflow_dispatch, or a pull request labeled full-ci.
 on:
-  push:
-    branches: [main]
+  schedule:
+    - cron: '41 6 * * *'
+  workflow_dispatch:
   pull_request:
     branches: [main]
-  workflow_dispatch:
+    types: [labeled, synchronize, reopened]
 
 permissions:
   contents: read
 
 jobs:
   cell-smoke:
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
     name: launchd cell smoke
     runs-on: macos-latest
     timeout-minutes: 15

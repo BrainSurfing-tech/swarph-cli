@@ -38,6 +38,7 @@ pre-commit install
 It scans staged text for blocked organization/customer identifiers and uses
 Gitleaks to detect hardcoded secrets. GitHub Actions repeats both checks for every
 pull request and merge, so a skipped local hook cannot publish sensitive content.
+macOS and Windows Actions legs, including the launchd smoke, run daily on main and on pull requests labeled `full-ci`, not on every push.
 Run `pre-commit run --all-files` to check the complete working tree.
 
 > **System requirement — a terminal multiplexer.** The session verbs (`spawn`, `cell`, `watchdog`) drive a `tmux`-compatible multiplexer. On **Linux/macOS** install `tmux` (`apt install tmux` / `brew install tmux`). On **Windows** there is no native tmux — install [**psmux**](https://github.com/psmux/psmux) (a Rust tmux-for-Windows, MIT) with `swarph install-multiplexer` (fetches the pinned, checksum-verified binary into `~/.swarph/bin`) or `winget install marlocarlo.psmux`.
