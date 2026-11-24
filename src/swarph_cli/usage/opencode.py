@@ -12,9 +12,10 @@ percent,resetsAt}}``, so the windows live at ``response.usage`` when
 
 ``read_at`` in ``opencode.json`` is the file body's own ``read_at``.
 It is not the file mtime, not a nested ``response.read_at``, and not
-the sync clock. A window with no numeric ``percent`` is omitted, never
-stored as a fresh zero. Nothing is written when ``read_at`` is missing
-or no window maps. The write is atomic. Only percent and resetsAt are
+the sync clock. A window whose ``percent`` is missing, non-numeric,
+NaN, or Infinity is omitted, never stored as a fresh zero. Nothing is
+written when ``read_at`` is missing or no window maps. The write is
+atomic. Only percent and resetsAt are
 copied: other keys (status text, credentials, source strings) are not
 written.
 """
@@ -22,6 +23,7 @@ written.
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -87,10 +89,17 @@ def _usage_object(document: dict) -> "dict | None":
 
 
 def _percent(value):
-    """A real used-percent, or None. Bool and missing are not a zero."""
+    """A real finite used-percent, or None.
+
+    Bool, missing, non-numeric, NaN, and Infinity are not a number and
+    not a zero. The window that carried them is omitted.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    number = float(value)
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _resets_to_iso(value):
@@ -106,9 +115,9 @@ def _resets_to_iso(value):
 def windows_from_usage(usage: dict) -> dict:
     """``{name: {used_percentage, resets_at}}`` for windows that have percent.
 
-    A missing or non-numeric ``percent`` drops that window. It is not
-    written as 0. A missing ``resetsAt`` keeps the window with
-    ``resets_at`` null. Unknown keys are ignored.
+    A missing, non-numeric, NaN, or Infinity ``percent`` drops that
+    window. It is not written as 0. A missing ``resetsAt`` keeps the
+    window with ``resets_at`` null. Unknown keys are ignored.
     """
     windows = {}
     for name in WINDOW_NAMES:
@@ -157,7 +166,7 @@ def write_opencode_json(*, usage_file=None, usage_dir=None) -> "dict | None":
 
     Returns {"path", "windows", "usage_file"} on a write, None when
     nothing was written (missing file, unreadable JSON, no body
-    ``read_at``, or no window with a numeric percent). A missing file
+    ``read_at``, or no window with a finite numeric percent). A missing file
     is not an error: sync still refreshes openai.json. Never raises
     on I/O. Never copies keys other than percent and resetsAt.
     """

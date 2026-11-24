@@ -8,6 +8,7 @@ at response.usage.{rolling,weekly,monthly}.{status,percent,resetsAt}
 from __future__ import annotations
 
 import json
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 from swarph_cli.commands import usage as usage_cmd
 from swarph_cli.usage import (
     SYNC_CRON_LINE,
+    SYNC_TIMER_EXECSTART,
     collect_rows,
     load_pool_map,
     render_table,
@@ -146,6 +148,71 @@ def test_bool_percent_is_not_a_number(tmp_path):
         usage_file=timer, usage_dir=tmp_path / "usage")
     assert set(result["windows"]) == {"monthly"}
     assert result["windows"]["monthly"]["used_percentage"] == 68.0
+
+
+def test_nonfinite_percent_is_not_written(tmp_path):
+    """NaN and Infinity are omitted: not stored, not a fresh zero, not fresher."""
+    body_read = _iso(NOW - timedelta(hours=10))
+    body = _timer_body(read_at=body_read)
+    body["response"]["usage"]["rolling"]["percent"] = float("nan")
+    body["response"]["usage"]["weekly"]["percent"] = float("inf")
+    body["response"]["usage"]["monthly"]["percent"] = float("-inf")
+    timer = _write_timer(tmp_path / "opencode-go.json", body,
+                         mtime=NOW.timestamp())
+    usage_dir = tmp_path / "usage"
+    assert opencode_reader.write_opencode_json(
+        usage_file=timer, usage_dir=usage_dir) is None
+    assert not (usage_dir / "opencode.json").exists()
+    rows = collect_rows(usage_dir=usage_dir, pool_map=load_pool_map(usage_dir),
+                        now=NOW, snapshot={"readings": {}})
+    opencode = [r for r in rows if r["pool"] == "opencode"]
+    assert len(opencode) == 1
+    assert opencode[0]["status"] == "missing"
+    assert opencode[0]["used_pct"] is None
+    assert opencode[0]["age_h"] is None
+    assert opencode[0]["read_at"] is None
+    # A fresh file mtime must not surface as a current row.
+    assert "0m" not in render_table(rows).split("opencode")[-1]
+
+    # One finite window beside NaN and Infinity. The non-finite windows
+    # stay out; the finite one keeps the stale body read_at.
+    body["response"]["usage"]["weekly"]["percent"] = 12.5
+    _write_timer(timer, body, mtime=NOW.timestamp())
+    result = opencode_reader.write_opencode_json(
+        usage_file=timer, usage_dir=usage_dir)
+    assert result is not None
+    assert set(result["windows"]) == {"weekly"}
+    assert result["windows"]["weekly"]["used_percentage"] == 12.5
+    assert math.isfinite(result["windows"]["weekly"]["used_percentage"])
+    text = (usage_dir / "opencode.json").read_text(encoding="utf-8")
+    assert "NaN" not in text
+    assert "Infinity" not in text
+    assert "rolling" not in text
+    assert "monthly" not in text
+    assert '"used_percentage": 0' not in text
+    written = json.loads(text)
+    assert written["read_at"] == body_read
+    assert written["read_at"] != _iso(NOW)
+    assert set(written["windows"]) == {"weekly"}
+    stored = written["windows"]["weekly"]["used_percentage"]
+    assert stored == 12.5
+    assert math.isfinite(stored)
+    rows = collect_rows(usage_dir=usage_dir, pool_map=load_pool_map(usage_dir),
+                        now=NOW, snapshot={"readings": {}})
+    opencode = [r for r in rows if r["pool"] == "opencode"]
+    assert [r["window"] for r in opencode] == ["weekly"]
+    assert opencode[0]["used_pct"] == 12.5
+    assert math.isfinite(opencode[0]["used_pct"])
+    assert opencode[0]["used_pct"] != 0
+    assert opencode[0]["read_at"] == body_read
+    assert opencode[0]["age_h"] == 10.0
+    assert opencode[0]["status"] == "stale"
+    table = render_table(rows)
+    opencode_lines = [line for line in table.splitlines() if "opencode" in line]
+    assert opencode_lines
+    assert all("0m" not in line for line in opencode_lines)
+    assert all("STALE" in line for line in opencode_lines)
+    assert "10.0h" in table
 
 
 def test_explicit_zero_percent_is_kept(tmp_path):
@@ -330,10 +397,31 @@ def test_flag_overrides_env_and_default(tmp_path, monkeypatch):
     assert env_written["windows"]["rolling"]["used_percentage"] == 99.0
 
 
+def _assert_absolute_schedule(text):
+    """Cron and ExecStart name swarph by an absolute path."""
+    assert "command -v swarph" in text
+    assert SYNC_CRON_LINE in text
+    assert SYNC_TIMER_EXECSTART in text
+    for raw in text.splitlines():
+        body = raw.strip()
+        if body.startswith("#"):
+            body = body[1:].strip()
+        if body.startswith("0 ") and "usage sync" in body:
+            command = body.split()[5]
+            assert command.startswith("/"), body
+        if "ExecStart=" in body:
+            value = body.split("ExecStart=", 1)[1].lstrip()
+            assert value.startswith("/"), body
+
+
 def test_sync_help_documents_the_cron_line(capsys):
-    assert SYNC_CRON_LINE in usage_cmd.__doc__
+    assert SYNC_CRON_LINE == (
+        "0 */4 * * * /home/ubuntu/.local/bin/swarph usage sync")
+    assert SYNC_TIMER_EXECSTART == (
+        "ExecStart=/home/ubuntu/.local/bin/swarph usage sync")
     import swarph_cli.usage as usage_mod
-    assert SYNC_CRON_LINE in usage_mod.__doc__
+    for text in (usage_cmd.__doc__, usage_mod.__doc__):
+        _assert_absolute_schedule(text)
     assert "6h" in usage_mod.__doc__
     assert "OnCalendar=*-*-* 00/4:00:00" in usage_mod.__doc__
     try:
@@ -343,9 +431,8 @@ def test_sync_help_documents_the_cron_line(capsys):
     else:
         raise AssertionError("swarph usage --help did not exit")
     help_text = capsys.readouterr().out
-    assert SYNC_CRON_LINE in help_text
+    _assert_absolute_schedule(help_text)
     assert "6h STALE" in help_text
-    assert "swarph usage sync" in help_text
 
 
 def test_table_shows_opencode_rows_from_cli(tmp_path, capsys):

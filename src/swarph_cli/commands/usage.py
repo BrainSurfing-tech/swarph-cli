@@ -12,18 +12,22 @@ and the opencode Go reader, writing ``usage/opencode.json`` from
 ``/var/lib/swarph-usage/opencode-go.json`` (override with
 ``--opencode-file`` or ``SWARPH_OPENCODE_USAGE_FILE``). The opencode
 document's ``read_at`` is that file body's ``read_at``, not the file
-mtime and not the sync clock. A window with no numeric percent is
-omitted, never written as a fresh zero.
+mtime and not the sync clock. A window with no finite numeric percent
+(missing, non-numeric, NaN, or Infinity) is omitted, never written as
+a fresh zero.
 
 Keep ``openai.json`` under the 6h STALE mark by running sync on a user
-crontab or a user systemd timer. This package installs neither. A
-reading is STALE only when its age is greater than 6h, so a 4h cadence
-stays inside the mark:
+crontab or a user systemd timer. This package installs neither. Cron's
+PATH is ``/usr/bin:/bin``, so both schedule forms call swarph by the
+absolute path from ``command -v swarph``. On Lab-ovh that path is
+``/home/ubuntu/.local/bin/swarph``. A reading is STALE only when its age
+is greater than 6h, so a 4h cadence stays inside the mark:
 
-    0 */4 * * * swarph usage sync
+    0 */4 * * * /home/ubuntu/.local/bin/swarph usage sync
 
-The user timer equivalent is OnCalendar=*-*-* 00/4:00:00 with
-ExecStart=swarph usage sync.
+The user timer equivalent is OnCalendar=*-*-* 00/4:00:00 with:
+
+    ExecStart=/home/ubuntu/.local/bin/swarph usage sync
 
 Burn has no history store today: the table keeps a last-seen snapshot in
 the ``.usage-last-seen.json`` dotfile in the usage dir (excluded from the
@@ -51,6 +55,7 @@ from pathlib import Path
 
 from swarph_cli.usage import (
     SYNC_CRON_LINE,
+    SYNC_TIMER_EXECSTART,
     collect_rows,
     default_usage_dir,
     load_pool_map,
@@ -70,11 +75,13 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Keep openai.json under the 6h STALE mark with a user crontab\n"
             "or a user systemd timer. This package installs neither.\n"
+            "Cron's PATH is /usr/bin:/bin, so use the absolute path from\n"
+            "`command -v swarph` (on Lab-ovh, /home/ubuntu/.local/bin/swarph).\n"
             "A reading is STALE only when its age is greater than 6h, so\n"
             "a 4h cadence stays inside the mark:\n"
             f"    {SYNC_CRON_LINE}\n"
             "    # user timer: OnCalendar=*-*-* 00/4:00:00\n"
-            "    # ExecStart=swarph usage sync\n"
+            f"    # {SYNC_TIMER_EXECSTART}\n"
         ),
         description="Usage pools table (card #1445): pool, used %, resets, "
                     "read age, burn/hr. A reading older than 6h is STALE. "
@@ -85,8 +92,9 @@ def _build_parser() -> argparse.ArgumentParser:
                     "apart from ordinary burn. "
                     "Keep openai.json under the 6h STALE mark with a user "
                     f"crontab line `{SYNC_CRON_LINE}` or a user systemd "
-                    "timer OnCalendar=*-*-* 00/4:00:00 whose ExecStart is "
-                    "`swarph usage sync`. This package installs neither.",
+                    "timer OnCalendar=*-*-* 00/4:00:00 whose "
+                    f"`{SYNC_TIMER_EXECSTART}` uses the absolute path from "
+                    "`command -v swarph`. This package installs neither.",
     )
     parser.add_argument("action", nargs="?", default="show",
                         choices=("show", "sync"),
