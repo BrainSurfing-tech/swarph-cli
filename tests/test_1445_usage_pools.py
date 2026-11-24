@@ -339,7 +339,8 @@ def test_pool_map_is_data_not_code(tmp_path):
                                        "drop-on-meta-edge", "gridiron",
                                        "droplet"]
     assert pools["OpenAI"]["cells"] == ["gpt-ops"]
-    assert pools["opencode"]["files"] == []
+    assert pools["opencode"]["files"] == ["opencode.json"]
+    assert pools["opencode"]["providers"] == ["opencode"]
     # A usage-dir dotfile override replaces the default: no code change.
     usage_dir = tmp_path / "usage"
     usage_dir.mkdir()

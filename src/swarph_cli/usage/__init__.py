@@ -18,6 +18,28 @@ newer read.
 The cell-to-pool map lives in the packaged ``pools.json`` DATA file (an
 optional ``.pools.local.json`` dotfile in the usage dir replaces it), so
 editing the map never requires a code change.
+
+``swarph usage sync`` also reads the opencode Go usage file (default
+``/var/lib/swarph-usage/opencode-go.json``, override with
+``--opencode-file`` or ``SWARPH_OPENCODE_USAGE_FILE``) and writes
+``opencode.json`` in this same pool shape. ``read_at`` is that file
+body's ``read_at``, not the file mtime and not the sync clock. A
+missing, NaN, or Infinity percent is omitted, never stored as a fresh
+zero.
+
+Keep ``openai.json`` under the 6h STALE mark by running sync on a user
+crontab or a user systemd timer. This package installs neither. Cron's
+PATH is ``/usr/bin:/bin``, so both schedule forms call swarph by the
+absolute path from ``command -v swarph``. On Lab-ovh that path is
+``/home/ubuntu/.local/bin/swarph``. A reading is STALE only when its age
+is greater than ``stale_after_hours`` (6), so a 4h cadence stays inside
+the mark:
+
+    0 */4 * * * /home/ubuntu/.local/bin/swarph usage sync
+
+The user timer equivalent is OnCalendar=*-*-* 00/4:00:00 with:
+
+    ExecStart=/home/ubuntu/.local/bin/swarph usage sync
 """
 
 from __future__ import annotations
@@ -37,6 +59,15 @@ _PACKAGE = "swarph_cli.usage"
 _POOLS_FILENAME = "pools.json"
 _LOCAL_OVERRIDE = ".pools.local.json"
 SNAPSHOT_NAME = ".usage-last-seen.json"
+
+#: User crontab. Every 4h stays inside the 6h STALE mark (age > 6h).
+#: Cron PATH is /usr/bin:/bin, so the command is the absolute path from
+#: `command -v swarph` (Lab-ovh: /home/ubuntu/.local/bin/swarph).
+SYNC_CRON_LINE = "0 */4 * * * /home/ubuntu/.local/bin/swarph usage sync"
+#: User systemd timer ExecStart. Same absolute path as SYNC_CRON_LINE.
+SYNC_TIMER_EXECSTART = (
+    "ExecStart=/home/ubuntu/.local/bin/swarph usage sync"
+)
 
 STATUS_OK = "ok"
 STATUS_STALE = "stale"

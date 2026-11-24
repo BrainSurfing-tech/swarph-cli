@@ -7,7 +7,27 @@ hour when a previous distinct reading exists. ``--json`` emits the same
 rows as JSON.
 
 ``swarph usage sync`` runs the Codex rollout reader, writing
-``usage/openai.json`` (atomic; nothing written when no event exists).
+``usage/openai.json`` (atomic; nothing written when no event exists),
+and the opencode Go reader, writing ``usage/opencode.json`` from
+``/var/lib/swarph-usage/opencode-go.json`` (override with
+``--opencode-file`` or ``SWARPH_OPENCODE_USAGE_FILE``). The opencode
+document's ``read_at`` is that file body's ``read_at``, not the file
+mtime and not the sync clock. A window with no finite numeric percent
+(missing, non-numeric, NaN, or Infinity) is omitted, never written as
+a fresh zero.
+
+Keep ``openai.json`` under the 6h STALE mark by running sync on a user
+crontab or a user systemd timer. This package installs neither. Cron's
+PATH is ``/usr/bin:/bin``, so both schedule forms call swarph by the
+absolute path from ``command -v swarph``. On Lab-ovh that path is
+``/home/ubuntu/.local/bin/swarph``. A reading is STALE only when its age
+is greater than 6h, so a 4h cadence stays inside the mark:
+
+    0 */4 * * * /home/ubuntu/.local/bin/swarph usage sync
+
+The user timer equivalent is OnCalendar=*-*-* 00/4:00:00 with:
+
+    ExecStart=/home/ubuntu/.local/bin/swarph usage sync
 
 Burn has no history store today: the table keeps a last-seen snapshot in
 the ``.usage-last-seen.json`` dotfile in the usage dir (excluded from the
@@ -34,6 +54,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from swarph_cli.usage import (
+    SYNC_CRON_LINE,
+    SYNC_TIMER_EXECSTART,
     collect_rows,
     default_usage_dir,
     load_pool_map,
@@ -43,23 +65,42 @@ from swarph_cli.usage import (
     save_snapshot,
 )
 from swarph_cli.usage.codex import codex_sessions_dir, write_openai_json
+from swarph_cli.usage.opencode import opencode_usage_path, write_opencode_json
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="swarph usage",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Keep openai.json under the 6h STALE mark with a user crontab\n"
+            "or a user systemd timer. This package installs neither.\n"
+            "Cron's PATH is /usr/bin:/bin, so use the absolute path from\n"
+            "`command -v swarph` (on Lab-ovh, /home/ubuntu/.local/bin/swarph).\n"
+            "A reading is STALE only when its age is greater than 6h, so\n"
+            "a 4h cadence stays inside the mark:\n"
+            f"    {SYNC_CRON_LINE}\n"
+            "    # user timer: OnCalendar=*-*-* 00/4:00:00\n"
+            f"    # {SYNC_TIMER_EXECSTART}\n"
+        ),
         description="Usage pools table (card #1445): pool, used %, resets, "
                     "read age, burn/hr. A reading older than 6h is STALE. "
                     "A source change from null to a value counts as a reset. "
                     "A used rise with an unchanged or null resets_at keeps "
                     "the burn. Limit that remains: a rise right after a "
                     "reset, with no resets_at to compare, cannot be told "
-                    "apart from ordinary burn.",
+                    "apart from ordinary burn. "
+                    "Keep openai.json under the 6h STALE mark with a user "
+                    f"crontab line `{SYNC_CRON_LINE}` or a user systemd "
+                    "timer OnCalendar=*-*-* 00/4:00:00 whose "
+                    f"`{SYNC_TIMER_EXECSTART}` uses the absolute path from "
+                    "`command -v swarph`. This package installs neither.",
     )
     parser.add_argument("action", nargs="?", default="show",
                         choices=("show", "sync"),
                         help="'show' prints the table (default); 'sync' runs "
-                             "the Codex rollout reader into openai.json.")
+                             "the Codex rollout reader into openai.json and "
+                             "the opencode Go reader into opencode.json.")
     parser.add_argument("--json", action="store_true",
                         help="emit the same rows as JSON.")
     parser.add_argument("--state-root", default=None,
@@ -68,6 +109,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codex-sessions", default=None,
                         help="Codex sessions dir for 'sync' "
                              "(default: ~/.codex/sessions).")
+    parser.add_argument("--opencode-file", default=None,
+                        help="opencode Go usage file for 'sync' "
+                             "(default: $SWARPH_OPENCODE_USAGE_FILE or "
+                             "/var/lib/swarph-usage/opencode-go.json).")
     return parser
 
 
@@ -103,10 +148,22 @@ def _run_sync(args) -> int:
     if result is None:
         print("swarph usage sync: no rate_limits event in any "
               f"rollout under {sessions}; wrote nothing.")
-        return 0
-    windows = ", ".join(f"{name} {entry['used_percentage']:.1f}%"
-                        for name, entry in sorted(result["windows"].items()))
-    print(f"swarph usage sync: wrote {result['path']} ({windows}).")
+    else:
+        windows = ", ".join(
+            f"{name} {entry['used_percentage']:.1f}%"
+            for name, entry in sorted(result["windows"].items()))
+        print(f"swarph usage sync: wrote {result['path']} ({windows}).")
+    opencode_path = opencode_usage_path(args.opencode_file)
+    opencode = write_opencode_json(usage_file=opencode_path,
+                                   usage_dir=usage_dir)
+    if opencode is None:
+        print("swarph usage sync: no mappable opencode usage in "
+              f"{opencode_path}; wrote nothing for opencode.")
+    else:
+        windows = ", ".join(
+            f"{name} {entry['used_percentage']:.1f}%"
+            for name, entry in sorted(opencode["windows"].items()))
+        print(f"swarph usage sync: wrote {opencode['path']} ({windows}).")
     return 0
 
 
