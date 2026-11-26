@@ -183,6 +183,51 @@ _STANDALONE_CANDIDATE_RE = re.compile(
     r"(?<![A-Za-z0-9/+\-_/.])([A-Za-z0-9/+\-_]{24,}=*)(?![A-Za-z0-9/+\-_/.])"
 )
 
+# A new start follows a word character. Check the left context after the
+# literal prefix so the regex can skip to a possible prefix first.
+_GLUED_PROVIDER_RE = re.compile(
+    # An unterminated marker cannot rescan past another open or whitespace.
+    r"\[REDACTED:[^\[\]\s]*\]"
+    r"|g(?:(?<=\wg)ithub_pat_|h(?:(?<=\wgh)(?<![a-zA-Z]gh)|(?<=\\[nrt]gh))[opusr]_)"
+    r"(?P<GITHUB_TOKEN>[A-Za-z0-9_]{20,})"
+    r"|sk-(?<=\wsk-)(?:"
+    r"ant-(?:(?=(?:api03|admin01|sid01)-)|(?<![a-zA-Z]sk-ant-)|(?<=\\[nrt]sk-ant-))"
+    r"(?P<ANTHROPIC_KEY>[A-Za-z0-9_-]{8,})"
+    r"|(?:(?:proj-|svcacct-)|(?<![a-zA-Z0-9]sk-)|(?<=\\[nrt]sk-))(?!ant-)(?P<API_KEY>[A-Za-z0-9_-]{16,}))"
+    r"|xai-(?:(?<=\wxai-)(?<![a-zA-Z]xai-)|(?<=\\[nrt]xai-))(?P<XAI_KEY>[A-Za-z0-9_-]{16,})"
+    r"|AIza(?<=\wAIza)(?P<GCP_API_KEY>[A-Za-z0-9_-]{35})"
+    r"|xox(?:(?<=\wxox)(?<![a-zA-Z]xox)|(?<=\\[nrt]xox))[baprs]-(?P<SLACK_TOKEN>[A-Za-z0-9-]{8,})"
+    r"|A[KS]IA(?:(?<=\wA[KS]IA)(?<![a-zA-Z]A[KS]IA)|(?<=\\[nrt]A[KS]IA))(?P<AWS_KEY>[A-Z0-9]{16})"
+)
+_GLUED_PROVIDER_PREFIXES = (
+    "sk-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "xai-", "AIza", "xox", "AKIA", "ASIA",
+)
+
+
+def _replace_glued_provider_keys(text: str) -> str:
+    if not any(prefix in text for prefix in _GLUED_PROVIDER_PREFIXES):
+        return text
+
+    parts: list[str] = []
+    copied_until = 0
+    for match in _GLUED_PROVIDER_RE.finditer(text):
+        label = match.lastgroup
+        if label is None:  # An existing marker, not a key.
+            continue
+        start, end = match.span()
+        # Consume a variable-length body once even if the right edge disqualifies
+        # it. A boundary inside the regex can retry every start in a long run.
+        if end < len(text) and (text[end].isalnum() or text[end] == "_"):
+            continue
+        if label == "XAI_KEY":
+            label = "API_KEY"
+        parts.extend((text[copied_until:start], f"[REDACTED:{label}]"))
+        copied_until = end
+    if not parts:
+        return text
+    parts.append(text[copied_until:])
+    return "".join(parts)
+
 
 def _normalize_custom_rules(custom_rules) -> list[tuple[str, re.Pattern]]:
     rules: list[tuple[str, re.Pattern]] = []
@@ -471,7 +516,9 @@ def redact_text(
     out = _replace_standalone_tokens(out)
     out = _GCP_FINAL_RE.sub("[REDACTED:GCP_API_KEY]", out)
 
-    return out
+    # The extra pass only replaces literal text between main's redaction
+    # markers. It cannot preempt, overlap or relabel an earlier replacement.
+    return _replace_glued_provider_keys(out)
 
 
 def redact_value(
