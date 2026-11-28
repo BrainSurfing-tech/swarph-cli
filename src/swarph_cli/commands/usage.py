@@ -53,6 +53,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from swarph_cli.commands.mesh import (
+    _add_common,
+    _http_get_json,
+    _resolve_self_name,
+    _resolve_token,
+)
 from swarph_cli.usage import (
     SYNC_CRON_LINE,
     SYNC_TIMER_EXECSTART,
@@ -64,6 +70,7 @@ from swarph_cli.usage import (
     rows_to_json,
     save_snapshot,
 )
+from swarph_cli.usage import timeline as _timeline
 from swarph_cli.usage.codex import codex_sessions_dir, write_openai_json
 from swarph_cli.usage.opencode import opencode_usage_path, write_opencode_json
 
@@ -94,15 +101,39 @@ def _build_parser() -> argparse.ArgumentParser:
                     f"crontab line `{SYNC_CRON_LINE}` or a user systemd "
                     "timer OnCalendar=*-*-* 00/4:00:00 whose "
                     f"`{SYNC_TIMER_EXECSTART}` uses the absolute path from "
-                    "`command -v swarph`. This package installs neither.",
+                    "`command -v swarph`. This package installs neither. "
+                    "Timeline definitions: rows sort by (created_at, id); "
+                    "rework rk#N groups by (step, task) in creation order "
+                    "(1 is the original); held is taken->closed where both "
+                    "timestamps exist, open-held/open-age are measured to "
+                    "--as-of (default now) and marked *; commander-held "
+                    "means holder == 'commander'; a peer-day row counts "
+                    "when taken_at OR closed_at falls in that UTC day; "
+                    "missing timestamps render '-' and never crash.",
     )
     parser.add_argument("action", nargs="?", default="show",
-                        choices=("show", "sync"),
+                        choices=("show", "sync", "timeline"),
                         help="'show' prints the table (default); 'sync' runs "
                              "the Codex rollout reader into openai.json and "
-                             "the opencode Go reader into opencode.json.")
+                             "the opencode Go reader into opencode.json; "
+                             "'timeline' reads board-obligation history "
+                             "(--card N, or --peer P --day YYYY-MM-DD).")
     parser.add_argument("--json", action="store_true",
                         help="emit the same rows as JSON.")
+    parser.add_argument("--card", type=int, default=None, metavar="N",
+                        help="timeline: every obligation row on card N, oldest "
+                             "first. Mutually exclusive with --peer/--day.")
+    parser.add_argument("--peer", default=None, metavar="PEER",
+                        help="timeline: rows PEER took or closed on --day "
+                             "(UTC). Requires --day.")
+    parser.add_argument("--day", default=None, metavar="YYYY-MM-DD",
+                        help="timeline: the UTC calendar day for --peer. "
+                             "A row counts when taken_at OR closed_at falls "
+                             "in [day 00:00Z, next 00:00Z).")
+    parser.add_argument("--as-of", default=None, metavar="TIMESTAMP",
+                        help="timeline: the instant open-row ages are measured "
+                             "to (default: now, UTC). ISO timestamps only.")
+    _add_common(parser)
     parser.add_argument("--state-root", default=None,
                         help="state root holding usage/ "
                              "(default: $SWARPH_STATE_ROOT or ~/swarph_state).")
@@ -167,10 +198,94 @@ def _run_sync(args) -> int:
     return 0
 
 
+def _gateway_error(status, data):
+    detail = data.get("detail", data) if isinstance(data, dict) else data
+    print(f"swarph usage timeline: gateway {status or 'unreachable'}: "
+          f"{detail}", file=sys.stderr)
+    return 1
+
+
+def _run_timeline(args) -> int:
+    """Read-only board-obligation history. GETs only — no write helper is
+    imported or called on this path (pinned by the no-write test)."""
+    from swarph_cli.commands.board import _obligations_list_url
+
+    if args.card is not None and (args.peer is not None or args.day is not None):
+        print("swarph usage timeline: --card is mutually exclusive with "
+              "--peer/--day", file=sys.stderr)
+        return 2
+    if args.card is None and (args.peer is None or args.day is None):
+        print("swarph usage timeline: pass --card N or --peer P "
+              "--day YYYY-MM-DD", file=sys.stderr)
+        return 2
+    if args.day is not None:
+        try:
+            day_start = _timeline.parse_day(args.day)
+        except ValueError as exc:
+            print(f"swarph usage timeline: {exc}", file=sys.stderr)
+            return 2
+    else:
+        day_start = None
+    if args.as_of is not None:
+        as_of = _timeline.parse_ts(args.as_of)
+        if as_of is None:
+            print(f"swarph usage timeline: bad --as-of {args.as_of!r} "
+                  f"(ISO timestamps only)", file=sys.stderr)
+            return 2
+    else:
+        as_of = datetime.now(timezone.utc)
+    try:
+        self_name = _resolve_self_name(args.self_name)
+        token = _resolve_token(self_name, args.token_file)
+    except RuntimeError as exc:
+        print(f"swarph usage timeline: {exc}", file=sys.stderr)
+        return 1
+    gw = args.gateway.rstrip("/")
+
+    if args.card is not None:
+        st, data = _http_get_json(
+            _obligations_list_url(gw, card_id=args.card), token)
+        if not (st and 200 <= st < 300) or not isinstance(data, dict):
+            return _gateway_error(st, data)
+        rows = [r for r in (data.get("obligations") or [])
+                if isinstance(r, dict) and r.get("card_id") == args.card]
+        cst, card = _http_get_json(f"{gw}/board/cards/{args.card}", token)
+        if cst == 404:
+            print(f"swarph usage timeline: no such card #{args.card}",
+                  file=sys.stderr)
+            return 1
+        if not (cst and 200 <= cst < 300) or not isinstance(card, dict):
+            return _gateway_error(cst, card)
+        summary = _timeline.summarize(rows, as_of)
+        if args.json:
+            print(json.dumps(
+                _timeline.card_to_json(args.card, rows, as_of, summary),
+                indent=2))
+        else:
+            print(_timeline.render_card(
+                args.card, card, rows, as_of, summary))
+        return 0
+    st, data = _http_get_json(
+        _obligations_list_url(gw, holder=args.peer), token)
+    if not (st and 200 <= st < 300) or not isinstance(data, dict):
+        return _gateway_error(st, data)
+    rows = [r for r in (data.get("obligations") or []) if isinstance(r, dict)]
+    entries = _timeline.peer_day_entries(rows, day_start)
+    if args.json:
+        print(json.dumps(
+            _timeline.peer_to_json(args.peer, day_start, entries, as_of),
+            indent=2))
+    else:
+        print(_timeline.render_peer(args.peer, day_start, entries, as_of))
+    return 0
+
+
 def run_usage(argv) -> int:
     """Entry point registered as the ``usage`` verb in main._VERB_HANDLERS."""
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.action == "sync":
         return _run_sync(args)
+    if args.action == "timeline":
+        return _run_timeline(args)
     return _run_show(args)
