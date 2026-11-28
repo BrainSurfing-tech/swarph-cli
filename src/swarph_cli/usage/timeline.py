@@ -46,9 +46,11 @@ DEFINITIONS (repeated in --help and the PR body):
   that day is exit 0 with an empty listing.
 - totals count closed and withdrawn SEPARATELY (status == 'withdrawn'
   counts as withdrawn, never as closed); nothing is double-counted.
-- every printed field (title, step, task, holder, status, outcome) passes
-  through the board readout's sanitize_terminal, then CR/LF are escaped
-  to visible \r / \n so every row stays exactly one physical line.
+- every printed field (title, step, task, holder, status, outcome) has
+  CR/LF escaped to visible \r / \n FIRST and then passes through the
+  board readout's sanitize_terminal (escape-first: sanitize would strip
+  a raw CR and keep a raw LF, splitting the row), so every row stays
+  exactly one physical line.
 - missing/unparseable timestamps render '-' and exclude that duration
   from totals (counted as unmeasured). Nothing here crashes on them.
 """
