@@ -3826,6 +3826,14 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         print(f"swarph spawn: {exc}", file=sys.stderr)
         return 1
 
+    if cell.provider != "codex" and {"approvals_reviewer", "codex_profile"} & cell.extra.keys():
+        print(
+            "swarph spawn: cell.yaml: approvals_reviewer and codex_profile "
+            "apply only to provider codex.",
+            file=sys.stderr,
+        )
+        return 1
+
     # Phase 1B v0 (2026-05-19): validate cell.yaml routing field.
     # In v0 only `routing.native: anthropic` (or absent) is accepted.
     # Future non-Anthropic dispatch is Phase 1B v1+ scope.

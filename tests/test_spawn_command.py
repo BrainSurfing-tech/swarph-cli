@@ -265,6 +265,35 @@ def test_spawn_refuses_invalid_codex_cell_flags(key, invalid, allowed, codex_cel
     assert not captured.out
 
 
+@pytest.mark.parametrize("mode", ["dry-run", "launch"])
+@pytest.mark.parametrize("settings", [
+    {"approvals_reviewer": "auto_review"},
+    {"codex_profile": "gpt-lc"},
+    {"approvals_reviewer": "auto_review", "codex_profile": "gpt-lc"},
+])
+def test_spawn_refuses_codex_keys_on_claude(
+    mode, settings, fake_cell_yaml, isolated_xdg, monkeypatch, capsys,
+):
+    from swarph_cli.commands import spawn
+
+    payload = yaml.safe_load(fake_cell_yaml.read_text(encoding="utf-8"))
+    payload.update(settings)
+    fake_cell_yaml.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    monkeypatch.setattr(spawn.shutil, "which", lambda name: f"/fake/{name}")
+    monkeypatch.setattr(
+        spawn, "_launch_via_tmux",
+        lambda *args: pytest.fail("Reached tmux with Codex keys on a Claude cell"),
+    )
+    argv = [str(fake_cell_yaml), "--no-banner"]
+    if mode == "dry-run":
+        argv.append("--dry-run")
+    assert run_spawn(argv) == 1
+    captured = capsys.readouterr()
+    assert "apply only to provider codex" in captured.err
+    assert all(key in captured.err for key in settings)
+    assert not captured.out
+
+
 @pytest.mark.parametrize("sid", [None, "uuid-x"], ids=["fresh", "resume"])
 def test_windows_codex_launch_keeps_cell_flag_boundaries(
     sid, codex_cell_yaml, monkeypatch, tmp_path,
