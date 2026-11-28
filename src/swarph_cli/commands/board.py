@@ -846,7 +846,10 @@ def _format_ask(d) -> str:
     """
     when = d.get("timeout_at")
     clock = _clock_line(d)
-    head = (f"obligation #{d.get('id')} on card #{d.get('card_id')}: "
+    # #1795: gateway dedup returns an existing open row with already_open=true.
+    prefix = (f"already open: #{d.get('id')}"
+              if d.get("already_open") else f"obligation #{d.get('id')}")
+    head = (f"{prefix} on card #{d.get('card_id')}: "
             f"{d.get('holder')} owes it, status={d.get('status')}")
     if clock:
         extra = f"\n  {clock}"
@@ -974,23 +977,26 @@ def _ask_line(d) -> str:
         step = f"{step} {_s(d.get('task'))}"
     holder = _s(d.get("holder")); take = _s(d.get("take_with"))
     missing = ", ".join(_s(m) for m in d.get("still_missing") or [])  # the gateway's field (mesh-gateway #157)
+    already_open = bool(d.get("already_open"))
+    lead = f"already open: #{n}" if already_open else f"minted #{n}"
     if state == "requested":
         elig = ", ".join(_s(e) for e in d.get("eligible") or []) or "(nobody)"
         menu = (f"menu {_s(d['menu_source'])} " if d.get("menu_source") else "menu ") + \
             f"v{d.get('menu_version') or '-'}"
-        line = (f"minted #{n} requested ({step} on #{card}) · offered to: {elig} · {menu}"
+        line = (f"{lead} requested ({step} on #{card}) · offered to: {elig} · {menu}"
                 + (f" · still missing on #{card}: {missing}" if missing else "")
                 + f" — take with: {take}")
     elif state == "offered":
         ack = f", ack by {_s(d['ack_by'])}" if d.get("ack_by") else ""
-        line = (f"minted #{n} offered to {holder} ({step} on #{card}{ack}) — "
+        line = (f"{lead} offered to {holder} ({step} on #{card}{ack}) — "
                 f"{holder} takes with: {take}")
     elif state == "open":
         due = f", due {_s(d['due'])}" if d.get("due") else ""
-        line = (f"#{n} open ({holder}, {step} on #{card}{due}) — close with: swarph board "
+        open_head = f"already open: #{n}" if already_open else f"#{n} open"
+        line = (f"{open_head} ({holder}, {step} on #{card}{due}) — close with: swarph board "
                 f"obligations close {n} --outcome pass --evidence \"<container>\"")
     else:
-        line = f"minted #{n} {step} on #{card} · {_s(state)}"
+        line = f"{lead} {step} on #{card} · {_s(state)}"
         if d.get("evidence"):
             line += f" (evidence: {_s(d['evidence'])})"
         if d.get("unblocked"):
