@@ -25,9 +25,11 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import shlex
 import subprocess
 
 import pytest
+import yaml
 
 from swarph_cli.commands import spawn
 
@@ -176,6 +178,72 @@ def test_tmux_reentry_uses_active_windows_venv_entrypoint(monkeypatch, tmp_path)
     monkeypatch.setattr(spawn.sys, "executable", str(python))
 
     assert spawn._swarph_reentry_binary() == str(reentry)
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+@pytest.mark.parametrize("sid", [None, "uuid-x"], ids=["fresh", "resume"])
+def test_codex_cell_flags_survive_new_tmux_pane(platform, sid, monkeypatch, tmp_path):
+    role = "gpt-lc"
+    cwd = tmp_path / "workspace with spaces"
+    cwd.mkdir()
+    cells = tmp_path / "swarph" / "cells"
+    cells.mkdir(parents=True)
+    (cells / f"{role}.yaml").write_text(yaml.safe_dump({
+        "schema_version": "v1", "name": role, "role": role, "cwd": str(cwd),
+        "provider": "codex", "approvals_reviewer": "auto_review", "codex_profile": role,
+    }), encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    for key in ("TMUX", "SWARPH_SPAWN", "SWARPH_CHANNEL", "SWARPH_CHANNEL_CELL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("SWARPH_WIN_ACK", "1")
+    monkeypatch.setattr(spawn.sys, "platform", platform)
+    monkeypatch.setattr(spawn.sys.stdout, "isatty", lambda: False)
+    monkeypatch.setattr(spawn, "_swarph_reentry_binary", lambda: "swarph")
+    monkeypatch.setattr(spawn, "_newest_codex_session_for_cwd", lambda _cwd: sid)
+    binary = "C:/Program Files/Codex/codex.exe" if platform == "win32" else "/usr/bin/codex"
+    monkeypatch.setattr(spawn.shutil, "which", {"tmux": TMUX, "codex": binary}.get)
+
+    created, launched = [], []
+
+    def run(cmd, **_kwargs):
+        if cmd[0] == binary:
+            launched.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+        assert cmd[0] == TMUX
+        if cmd[1] == "has-session":
+            return subprocess.CompletedProcess(cmd, 0 if created else 1)
+        if cmd[1] == "kill-session":
+            return subprocess.CompletedProcess(cmd, 0)
+        assert cmd[:5] == [TMUX, "new-session", "-d", "-s", role] and not created
+        created.append(cmd)
+        if platform == "win32":
+            assert cmd[5:11] == [
+                "--", "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+            ]
+            script = cmd[11]
+            quoted_cwd = str(cwd).replace("'", "''")
+            setup = f"$env:SWARPH_SPAWN='1'; Set-Location -LiteralPath '{quoted_cwd}'; & "
+            assert script.startswith(setup)
+            reentry = shlex.split(script[len(setup):])
+        else:
+            assert cmd[5:9] == ["-c", str(cwd), "-e", "SWARPH_SPAWN=1"]
+            reentry = cmd[9:]
+        assert reentry[:2] == ["swarph", "spawn"]
+        with monkeypatch.context() as pane:
+            pane.setenv("TMUX", "fixture")
+            pane.setenv("SWARPH_SPAWN", "1")
+            pane.chdir(cwd)
+            assert spawn.run_spawn(reentry[2:]) == 0
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(spawn.subprocess, "run", run)
+    monkeypatch.setattr(spawn.os, "execve", lambda exe, argv, env: launched.append([exe, *argv[1:]]))
+    assert spawn.run_spawn([role, "--no-banner"]) == 0
+    assert len(created) == 1
+    assert launched == [[
+        binary, *(["resume", sid] if sid else []), "-C", ".", "-s", "workspace-write",
+        "-a", "on-request", "-c", 'approvals_reviewer="auto_review"', "--profile", role,
+    ]]
 
 
 # --- gates that skip tmux entirely (OS-agnostic) -------------------------

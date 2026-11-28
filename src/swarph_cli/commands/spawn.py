@@ -845,6 +845,19 @@ def _build_codex_argv(cell: Cell, passthrough: list[str]) -> list[str]:
         "-a",
         _CODEX_APPROVAL,
     ])
+    if "approvals_reviewer" in cell.extra:
+        reviewer = cell.extra["approvals_reviewer"]
+        if reviewer not in ("auto_review", "user"):
+            raise CellError("cell.yaml: approvals_reviewer must be auto_review or user.")
+        argv.extend(["-c", f'approvals_reviewer="{reviewer}"'])
+    if "codex_profile" in cell.extra:
+        profile = cell.extra["codex_profile"]
+        if not isinstance(profile, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*", profile):
+            raise CellError(
+                "cell.yaml: codex_profile must be a plain identifier "
+                "(ASCII letters, digits, underscores and hyphens; no leading hyphen)."
+            )
+        argv.extend(["--profile", profile])
     argv.extend(passthrough)
     return argv
 
@@ -3811,6 +3824,14 @@ def run_spawn(argv: Optional[list[str]] = None) -> int:
         cell, requested_role = _resolve_cell(args)
     except (CellError, NotImplementedError) as exc:
         print(f"swarph spawn: {exc}", file=sys.stderr)
+        return 1
+
+    if cell.provider != "codex" and {"approvals_reviewer", "codex_profile"} & cell.extra.keys():
+        print(
+            "swarph spawn: cell.yaml: approvals_reviewer and codex_profile "
+            "apply only to provider codex.",
+            file=sys.stderr,
+        )
         return 1
 
     # Phase 1B v0 (2026-05-19): validate cell.yaml routing field.

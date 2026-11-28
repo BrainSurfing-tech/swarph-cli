@@ -532,6 +532,13 @@ Useful flags:
 
 **A cell that runs as its own Linux user (#1573).** Set `os_user: <user>` in its cell.yaml. When you are a different user, `swarph spawn <role>` attaches with `sudo -iu <user> tmux attach -t <session>`, starting the cell as that user first if it is not running; it never starts it as you, and sudo may ask for your password. Releases before 0.78 ignore `os_user`, so install 0.78 or later first. Not available on Windows.
 
+For `provider: codex`, set `approvals_reviewer: auto_review` for Approve for me,
+or `approvals_reviewer: user` for manual approvals. Optionally set
+`codex_profile: gpt-lc` (ASCII letters, digits, underscores and hyphens; no
+leading hyphen). Both settings apply to fresh and resumed launches. Omitting
+them leaves the launch arguments unchanged. The sandbox and approval policy
+are unchanged.
+
 cell.yaml schema is **frozen at `schema_version: "v1"`**. v0.7 migrates the parser to `swarph-shared` as a symbol-relocation only — v0.6 cell.yaml files keep working unchanged. Breaking changes require a `schema_version: "v2"` bump and parallel-supported-version window per `swarph-mesh` DEPRECATIONS discipline.
 
 **Known limitations (v0.6).** Single-instance-per-role only. Re-running `swarph spawn <role>` reuses the persisted UUID (R5 fix), so sibling-spawn (alpha + beta co-existing on the same peer-id) requires v0.7's `--new-instance` flag. Manual sibling spawning via `tmux` + explicit `--session-id` pinning still works unchanged; v0.6 does not regress that path, it just doesn't yet expose a CLI shape for it.

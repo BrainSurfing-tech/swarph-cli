@@ -215,6 +215,111 @@ def test_build_codex_argv_rejects_unknown_sandbox(tmp_path):
         _build_codex_argv(cell, passthrough=[])
 
 
+@pytest.fixture
+def codex_cell_yaml(fake_cell_yaml):
+    def write(**options):
+        payload = yaml.safe_load(fake_cell_yaml.read_text(encoding="utf-8"))
+        payload.update(provider="codex", **options)
+        fake_cell_yaml.write_text(yaml.safe_dump(payload), encoding="utf-8")
+        return fake_cell_yaml
+    return write
+
+
+@pytest.mark.parametrize("sid", [None, "uuid-x"], ids=["fresh", "resume"])
+@pytest.mark.parametrize(("settings", "flags"), [
+    ({}, []),
+    ({"approvals_reviewer": "auto_review"}, ["-c", 'approvals_reviewer="auto_review"']),
+    ({"approvals_reviewer": "user"}, ["-c", 'approvals_reviewer="user"']),
+    ({"codex_profile": "gpt-lc"}, ["--profile", "gpt-lc"]),
+])
+def test_codex_cell_flags(sid, settings, flags, codex_cell_yaml, monkeypatch):
+    from swarph_cli.commands import spawn
+
+    monkeypatch.setattr(spawn, "_newest_codex_session_for_cwd", lambda cwd: sid)
+    cell = load_cell(codex_cell_yaml(**settings))
+    prefix = ["codex", "resume", sid] if sid else ["codex"]
+    assert _build_codex_argv(cell, ["--model", "gpt-5"]) == [
+        *prefix, "-C", ".", "-s", "workspace-write", "-a", "on-request",
+        *flags, "--model", "gpt-5",
+    ]
+
+
+@pytest.mark.parametrize(("key", "invalid", "allowed"), [
+    ("approvals_reviewer", "never", "auto_review or user"),
+    ("approvals_reviewer", None, "auto_review or user"),
+    ("approvals_reviewer", ["auto_review"], "auto_review or user"),
+    ("codex_profile", None, "plain identifier"),
+    ("codex_profile", 7, "plain identifier"),
+    ("codex_profile", "", "plain identifier"),
+    ("codex_profile", "--help", "plain identifier"),
+    ("codex_profile", "../other", "plain identifier"),
+    ("codex_profile", "two words", "plain identifier"),
+    ("codex_profile", r"some\profile", "plain identifier"),
+    ("codex_profile", 'a"b', "plain identifier"),
+])
+def test_spawn_refuses_invalid_codex_cell_flags(key, invalid, allowed, codex_cell_yaml, capsys):
+    result = run_spawn([str(codex_cell_yaml(**{key: invalid})), "--dry-run"])
+    captured = capsys.readouterr()
+    assert result == 1
+    assert key in captured.err and allowed in captured.err
+    assert not captured.out
+
+
+@pytest.mark.parametrize("mode", ["dry-run", "launch"])
+@pytest.mark.parametrize("settings", [
+    {"approvals_reviewer": "auto_review"},
+    {"codex_profile": "gpt-lc"},
+    {"approvals_reviewer": "auto_review", "codex_profile": "gpt-lc"},
+])
+def test_spawn_refuses_codex_keys_on_claude(
+    mode, settings, fake_cell_yaml, isolated_xdg, monkeypatch, capsys,
+):
+    from swarph_cli.commands import spawn
+
+    payload = yaml.safe_load(fake_cell_yaml.read_text(encoding="utf-8"))
+    payload.update(settings)
+    fake_cell_yaml.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    monkeypatch.setattr(spawn.shutil, "which", lambda name: f"/fake/{name}")
+    monkeypatch.setattr(
+        spawn, "_launch_via_tmux",
+        lambda *args: pytest.fail("Reached tmux with Codex keys on a Claude cell"),
+    )
+    argv = [str(fake_cell_yaml), "--no-banner"]
+    if mode == "dry-run":
+        argv.append("--dry-run")
+    assert run_spawn(argv) == 1
+    captured = capsys.readouterr()
+    assert "apply only to provider codex" in captured.err
+    assert all(key in captured.err for key in settings)
+    assert not captured.out
+
+
+@pytest.mark.parametrize("sid", [None, "uuid-x"], ids=["fresh", "resume"])
+def test_windows_codex_launch_keeps_cell_flag_boundaries(
+    sid, codex_cell_yaml, monkeypatch, tmp_path,
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from swarph_cli.commands import spawn
+
+    monkeypatch.setattr(spawn, "_newest_codex_session_for_cwd", lambda cwd: sid)
+    cell = load_cell(codex_cell_yaml(approvals_reviewer="auto_review", codex_profile="gpt-lc"))
+    argv = spawn._build_codex_argv(cell, [])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(spawn.sys, "platform", "win32")
+    run = Mock(return_value=SimpleNamespace(returncode=0))
+    monkeypatch.setattr(spawn.subprocess, "run", run)
+    binary = "C:/Program Files/Codex/codex.exe"
+
+    assert spawn.MEMBRANES["codex"].launch(cell, binary, argv) == 0
+    run.assert_called_once()
+    prefix = [binary, "resume", sid] if sid else [binary]
+    assert run.call_args.args[0] == [
+        *prefix, "-C", ".", "-s", "workspace-write", "-a", "on-request",
+        "-c", 'approvals_reviewer="auto_review"', "--profile", "gpt-lc",
+    ]
+
+
 def test_scrubbed_codex_env_drops_openai_billing_keys(monkeypatch):
     for key in (
         "OPENAI_API_KEY",
