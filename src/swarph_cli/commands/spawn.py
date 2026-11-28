@@ -845,6 +845,19 @@ def _build_codex_argv(cell: Cell, passthrough: list[str]) -> list[str]:
         "-a",
         _CODEX_APPROVAL,
     ])
+    if "approvals_reviewer" in cell.extra:
+        reviewer = cell.extra["approvals_reviewer"]
+        if reviewer not in ("auto_review", "user"):
+            raise CellError("cell.yaml: approvals_reviewer must be auto_review or user.")
+        argv.extend(["-c", f'approvals_reviewer="{reviewer}"'])
+    if "codex_profile" in cell.extra:
+        profile = cell.extra["codex_profile"]
+        if not isinstance(profile, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*", profile):
+            raise CellError(
+                "cell.yaml: codex_profile must be a plain identifier "
+                "(ASCII letters, digits, underscores and hyphens; no leading hyphen)."
+            )
+        argv.extend(["--profile", profile])
     argv.extend(passthrough)
     return argv
 
