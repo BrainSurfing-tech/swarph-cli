@@ -103,13 +103,17 @@ def _build_parser() -> argparse.ArgumentParser:
                     f"`{SYNC_TIMER_EXECSTART}` uses the absolute path from "
                     "`command -v swarph`. This package installs neither. "
                     "Timeline definitions: rows sort by (created_at, id); "
-                    "rework rk#N groups by (step, task) in creation order "
-                    "(1 is the original); held is taken->closed where both "
-                    "timestamps exist, open-held/open-age are measured to "
-                    "--as-of (default now) and marked *; commander-held "
-                    "means holder == 'commander'; a peer-day row counts "
-                    "when taken_at OR closed_at falls in that UTC day; "
-                    "missing timestamps render '-' and never crash.",
+                    "rework rk#N groups by (step, task) and counts taken "
+                    "rows only (rk#- while untaken); held is taken->closed "
+                    "where both timestamps exist (BAD-ORDER when reversed), "
+                    "open-held/open-age apply to status open only and are "
+                    "measured to --as-of (default now) and marked *; "
+                    "commander-held means holder == 'commander'; a peer-day "
+                    "row counts when the peer took it or closed it "
+                    "(closed_by) that UTC day; an unknown peer is an error, "
+                    "a quiet day is an empty success; --day is strict "
+                    "YYYY-MM-DD; missing timestamps render '-' and never "
+                    "crash.",
     )
     parser.add_argument("action", nargs="?", default="show",
                         choices=("show", "sync", "timeline"),
@@ -265,12 +269,20 @@ def _run_timeline(args) -> int:
             print(_timeline.render_card(
                 args.card, card, rows, as_of, summary))
         return 0
-    st, data = _http_get_json(
-        _obligations_list_url(gw, holder=args.peer), token)
+    # Peer-day is ONE unfiltered GET of the same obligations list URL:
+    # the endpoint has no closed_by filter (only status/holder/card_id/
+    # overdue), and a row the peer closed may be held by someone else, so
+    # a holder-filtered fetch would hide exactly the rows (D) adds. The
+    # peer filter below is client-side.
+    st, data = _http_get_json(_obligations_list_url(gw), token)
     if not (st and 200 <= st < 300) or not isinstance(data, dict):
         return _gateway_error(st, data)
     rows = [r for r in (data.get("obligations") or []) if isinstance(r, dict)]
-    entries = _timeline.peer_day_entries(rows, day_start)
+    if not _timeline.peer_known(rows, args.peer):
+        print(f"swarph usage timeline: unknown peer {args.peer!r} "
+              f"(no rows held or closed by them)", file=sys.stderr)
+        return 1
+    entries = _timeline.peer_day_entries(rows, day_start, args.peer)
     if args.json:
         print(json.dumps(
             _timeline.peer_to_json(args.peer, day_start, entries, as_of),
